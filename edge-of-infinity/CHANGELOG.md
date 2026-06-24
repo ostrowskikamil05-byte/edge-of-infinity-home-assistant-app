@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Expose port `8088` by default so the Home Assistant custom component can connect to the add-on through `http://HOME_ASSISTANT_IP:8088`.
+
 ## 0.3.0
 
 - Add `ffprobe` based RTSP reachability checks for enabled cameras.

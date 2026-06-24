@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.3.0"
+version: "0.3.1"
 slug: edge_of_infinity
 description: Private low-latency live NVR core for Hikvision and ONVIF cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -20,7 +20,7 @@ panel_admin: true
 watchdog: http://[HOST]:[PORT:8088]/health
 webui: http://[HOST]:[PORT:8088]/
 ports:
-  8088/tcp: null
+  8088/tcp: 8088
 ports_description:
   8088/tcp: Edge Core API and web interface
 map:
