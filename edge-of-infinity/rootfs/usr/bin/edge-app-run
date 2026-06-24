@@ -30,6 +30,7 @@ RETENTION_DAYS="${RETENTION_DAYS:-14}"
 
 mkdir -p "${RECORDINGS_DIR}"
 mkdir -p "$(dirname "${DATABASE_PATH}")"
+mkdir -p /config
 
 bashio::log.info "Starting Edge of Infinity"
 bashio::log.info "Log level: ${LOG_LEVEL}"
@@ -49,53 +50,297 @@ if command -v edge-core >/dev/null 2>&1; then
 fi
 
 bashio::log.warning "edge-core binary is not bundled yet."
-bashio::log.warning "Running placeholder HTTP health server for packaging tests."
+bashio::log.warning "Running multi-camera shell until the video engine is bundled."
+
+if [[ ! -f /config/edge.json ]]; then
+  bashio::log.info "Creating example multi-camera config at /config/edge.json"
+  cat > /config/edge.json <<'EOF'
+{
+  "server": {
+    "listen": "0.0.0.0:8088",
+    "public_url": ""
+  },
+  "storage": {
+    "recordings_dir": "/media/edge-of-infinity/recordings",
+    "database_path": "/config/edge.db",
+    "retention_days": 14
+  },
+  "cameras": [
+    {
+      "id": "hikvision_1",
+      "name": "Hikvision 1",
+      "vendor": "hikvision",
+      "host": "192.168.1.64",
+      "username": "admin",
+      "password": "change-me",
+      "rtsp_main": "rtsp://admin:change-me@192.168.1.64:554/Streaming/Channels/101",
+      "rtsp_sub": "rtsp://admin:change-me@192.168.1.64:554/Streaming/Channels/102",
+      "onvif_url": "http://192.168.1.64:80/onvif/device_service",
+      "isapi_base_url": "http://192.168.1.64",
+      "enabled": false,
+      "record": true,
+      "low_latency": true
+    },
+    {
+      "id": "hikvision_2",
+      "name": "Hikvision 2",
+      "vendor": "hikvision",
+      "host": "192.168.1.65",
+      "username": "admin",
+      "password": "change-me",
+      "rtsp_main": "rtsp://admin:change-me@192.168.1.65:554/Streaming/Channels/101",
+      "rtsp_sub": "rtsp://admin:change-me@192.168.1.65:554/Streaming/Channels/102",
+      "onvif_url": "http://192.168.1.65:80/onvif/device_service",
+      "isapi_base_url": "http://192.168.1.65",
+      "enabled": false,
+      "record": true,
+      "low_latency": true
+    }
+  ],
+  "future_vendors": [
+    "dahua",
+    "onvif",
+    "rtsp"
+  ]
+}
+EOF
+fi
 
 mkdir -p /tmp/edge-placeholder
+
+cat > /tmp/edge-placeholder/health <<'EOF'
+{"status":"ok","product":"Edge of Infinity App placeholder","mode":"multi-camera-shell"}
+EOF
+
+if jq -e '.cameras' /config/edge.json >/dev/null 2>&1; then
+  jq '{cameras: [.cameras[] | {id, name, vendor, host, enabled, record, low_latency}], generated_at: now | todate}' /config/edge.json > /tmp/edge-placeholder/cameras.json
+else
+  printf '{"cameras":[],"generated_at":"unknown"}\n' > /tmp/edge-placeholder/cameras.json
+fi
+
 cat > /tmp/edge-placeholder/index.html <<'EOF'
 <!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Edge of Infinity</title>
     <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b1014;
+        --panel: #121a20;
+        --panel-2: #17222a;
+        --line: #273844;
+        --text: #edf5f7;
+        --muted: #9fb0ba;
+        --accent: #56d6b5;
+        --warn: #e4b45d;
+      }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-        background: #101418;
-        color: #eaf2f8;
+        background:
+          linear-gradient(180deg, rgba(86, 214, 181, 0.08), transparent 280px),
+          var(--bg);
+        color: var(--text);
         font-family: system-ui, sans-serif;
       }
       main {
-        width: min(720px, calc(100vw - 32px));
+        width: min(1180px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 28px 0 40px;
+      }
+      header {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 22px;
       }
       h1 {
-        margin: 0 0 12px;
-        font-size: 32px;
+        margin: 0 0 8px;
+        font-size: clamp(28px, 6vw, 48px);
+        line-height: 1;
       }
       p {
-        color: #9fb3c3;
+        margin: 0;
+        color: var(--muted);
         font-size: 16px;
         line-height: 1.5;
       }
+      .status {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+      .pill {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 7px 10px;
+        background: rgba(18, 26, 32, 0.84);
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .pill strong {
+        color: var(--text);
+        font-weight: 650;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 14px;
+      }
+      .camera {
+        min-height: 210px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: linear-gradient(180deg, var(--panel-2), var(--panel));
+        overflow: hidden;
+      }
+      .preview {
+        aspect-ratio: 16 / 9;
+        display: grid;
+        place-items: center;
+        background:
+          linear-gradient(135deg, rgba(86, 214, 181, 0.12), transparent 45%),
+          repeating-linear-gradient(90deg, rgba(255,255,255,0.035), rgba(255,255,255,0.035) 1px, transparent 1px, transparent 22px),
+          #080d10;
+        border-bottom: 1px solid var(--line);
+      }
+      .preview span {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .body { padding: 14px; }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .name {
+        font-size: 17px;
+        font-weight: 700;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .vendor {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px 8px;
+        color: var(--accent);
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+      .meta {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .metric {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 9px;
+        background: rgba(0,0,0,0.14);
+      }
+      .metric b {
+        display: block;
+        margin-bottom: 3px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+      .metric span { font-size: 14px; }
+      .state-enabled { color: var(--accent); }
+      .state-disabled { color: var(--warn); }
+      .notice {
+        margin-top: 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+        background: rgba(18, 26, 32, 0.7);
+      }
       code {
-        color: #8ad7ff;
+        color: var(--accent);
+        overflow-wrap: anywhere;
+      }
+      @media (max-width: 720px) {
+        header {
+          align-items: start;
+          flex-direction: column;
+        }
+        .status { justify-content: flex-start; }
       }
     </style>
   </head>
   <body>
     <main>
-      <h1>Edge of Infinity</h1>
-      <p>Home Assistant app shell is running. The real <code>edge-core</code> video engine is not bundled yet.</p>
+      <header>
+        <div>
+          <h1>Edge of Infinity</h1>
+          <p>Private low-latency NVR shell. Hikvision-first, ready for multi-camera expansion.</p>
+        </div>
+        <div class="status">
+          <div class="pill">Mode <strong>Shell</strong></div>
+          <div class="pill">Live <strong>WebRTC next</strong></div>
+          <div class="pill">Vendors <strong>Hikvision, Dahua later</strong></div>
+        </div>
+      </header>
+
+      <section class="grid" id="camera-grid"></section>
+
+      <section class="notice">
+        <p>Edit <code>/config/edge.json</code> in the add-on config folder to set your real Hikvision IPs, usernames, passwords, and RTSP URLs. The video engine is not bundled yet; this panel confirms the Home Assistant app, sidebar, storage, and multi-camera model.</p>
+      </section>
     </main>
+    <script>
+      const grid = document.getElementById('camera-grid');
+
+      function text(value, fallback = 'unknown') {
+        return value === undefined || value === null || value === '' ? fallback : value;
+      }
+
+      function cameraCard(camera) {
+        const enabled = camera.enabled === true;
+        const stateClass = enabled ? 'state-enabled' : 'state-disabled';
+        const stateLabel = enabled ? 'enabled' : 'disabled';
+        return `
+          <article class="camera">
+            <div class="preview"><span>Waiting for edge-core video pipeline</span></div>
+            <div class="body">
+              <div class="row">
+                <div class="name">${text(camera.name, camera.id)}</div>
+                <div class="vendor">${text(camera.vendor)}</div>
+              </div>
+              <div class="meta">
+                <div class="metric"><b>Host</b><span>${text(camera.host)}</span></div>
+                <div class="metric"><b>Status</b><span class="${stateClass}">${stateLabel}</span></div>
+                <div class="metric"><b>Record</b><span>${camera.record ? 'on' : 'off'}</span></div>
+                <div class="metric"><b>Latency</b><span>${camera.low_latency ? 'low-latency' : 'standard'}</span></div>
+              </div>
+            </div>
+          </article>
+        `;
+      }
+
+      fetch('cameras.json', { cache: 'no-store' })
+        .then((response) => response.json())
+        .then((data) => {
+          const cameras = Array.isArray(data.cameras) ? data.cameras : [];
+          grid.innerHTML = cameras.length
+            ? cameras.map(cameraCard).join('')
+            : '<p>No cameras configured yet.</p>';
+        })
+        .catch(() => {
+          grid.innerHTML = '<p>Could not load camera configuration.</p>';
+        });
+    </script>
   </body>
 </html>
-EOF
-
-cat > /tmp/edge-placeholder/health <<'EOF'
-{"status":"ok","product":"Edge of Infinity App placeholder"}
 EOF
 
 exec darkhttpd /tmp/edge-placeholder --addr 0.0.0.0 --port "${API_PORT}"

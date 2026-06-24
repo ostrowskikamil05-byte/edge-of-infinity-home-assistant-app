@@ -39,3 +39,26 @@ Recordings:
 ```
 
 Recordings are excluded from normal app backup by default.
+
+## Camera Configuration
+
+On first start, the app creates:
+
+```text
+/config/edge.json
+```
+
+The initial file contains two Hikvision camera slots:
+
+```text
+hikvision_1
+hikvision_2
+```
+
+Edit the IP address, username, password, RTSP URLs, ONVIF URL, and ISAPI base URL for your real cameras. After editing, set:
+
+```json
+"enabled": true
+```
+
+Restart the app to refresh the current shell panel. The real video engine will use the same file once `edge-core` is bundled.

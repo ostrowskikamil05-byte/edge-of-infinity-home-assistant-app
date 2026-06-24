@@ -11,6 +11,7 @@ This app runs Edge Core and exposes the Edge web UI through Home Assistant Ingre
 - Watchdog health endpoint.
 - Persistent config and media mounts.
 - Optional public API port.
+- Multi-camera shell with two Hikvision slots.
 
 ## First Configuration
 
@@ -35,3 +36,5 @@ Recordings default to:
 ## Notes
 
 This package currently contains the Home Assistant app shell. The actual Edge Core binary will be bundled once the RTSP/WebRTC MVP is implemented.
+
+The shell creates `/config/edge.json` with two Hikvision camera slots so the app can be configured for multiple cameras before the real engine is bundled.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- Add multi-camera shell UI for the Home Assistant sidebar.
+- Create an example `/config/edge.json` with two Hikvision camera slots.
+- Generate static camera metadata for the app shell while the real `edge-core` engine is not bundled yet.
+
 ## 0.1.4
 
 - Use `darkhttpd` for the placeholder web server because the Home Assistant base image does not include `httpd`.
