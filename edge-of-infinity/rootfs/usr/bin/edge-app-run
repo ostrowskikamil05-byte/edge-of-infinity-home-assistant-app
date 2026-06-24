@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export CONFIG_PATH=/data/options.json
 source /usr/lib/bashio/bashio.sh
 
-LOG_LEVEL="$(bashio::config 'log_level')"
-API_PORT="$(bashio::config 'api_port')"
-RECORDINGS_DIR="$(bashio::config 'recordings_dir')"
-DATABASE_PATH="$(bashio::config 'database_path')"
-RETENTION_DAYS="$(bashio::config 'retention_days')"
+LOG_LEVEL="$(bashio::config 'log_level' || echo 'info')"
+API_PORT="$(bashio::config 'api_port' || echo '8088')"
+RECORDINGS_DIR="$(bashio::config 'recordings_dir' || echo '/media/edge-of-infinity/recordings')"
+DATABASE_PATH="$(bashio::config 'database_path' || echo '/config/edge.db')"
+RETENTION_DAYS="$(bashio::config 'retention_days' || echo '14')"
+
+LOG_LEVEL="${LOG_LEVEL:-info}"
+API_PORT="${API_PORT:-8088}"
+RECORDINGS_DIR="${RECORDINGS_DIR:-/media/edge-of-infinity/recordings}"
+DATABASE_PATH="${DATABASE_PATH:-/config/edge.db}"
+RETENTION_DAYS="${RETENTION_DAYS:-14}"
 
 mkdir -p "${RECORDINGS_DIR}"
 mkdir -p "$(dirname "${DATABASE_PATH}")"
