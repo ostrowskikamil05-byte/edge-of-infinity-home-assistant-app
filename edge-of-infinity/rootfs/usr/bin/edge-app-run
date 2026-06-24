@@ -33,6 +33,7 @@ INSTALL_CUSTOM_COMPONENT="${INSTALL_CUSTOM_COMPONENT:-true}"
 mkdir -p "${RECORDINGS_DIR}"
 mkdir -p "$(dirname "${DATABASE_PATH}")"
 mkdir -p /config
+mkdir -p /homeassistant/edge
 
 install_custom_component() {
   local source_dir="/usr/share/edge-of-infinity/custom_components/edge"
@@ -141,6 +142,7 @@ mkdir -p /tmp/edge-placeholder
 cat > /tmp/edge-placeholder/health <<'EOF'
 {"status":"ok","product":"Edge of Infinity App placeholder","mode":"rtsp-probe-shell"}
 EOF
+cp /tmp/edge-placeholder/health /homeassistant/edge/health.json
 
 generate_camera_status() {
   local output=/tmp/edge-placeholder/cameras.json.tmp
@@ -232,6 +234,7 @@ generate_camera_status() {
 
   printf ']}\n' >> "${output}"
   mv "${output}" /tmp/edge-placeholder/cameras.json
+  cp /tmp/edge-placeholder/cameras.json /homeassistant/edge/cameras.json
 }
 
 generate_camera_status

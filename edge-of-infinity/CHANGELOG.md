@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3
+
+- Mirror health and camera probe status to `/homeassistant/edge/*.json`.
+- Prepare the bundled custom component for local file mode, avoiding add-on hostname and port issues.
+
 ## 0.3.2
 
 - Bundle the `edge` Home Assistant custom component inside the add-on image.

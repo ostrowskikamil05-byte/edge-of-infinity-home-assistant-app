@@ -20,7 +20,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Optional(
             CONF_URL,
-            default="http://4e5f32ea-edge-of-infinity:8088",
+            default="local",
         ): str,
         vol.Optional(CONF_API_KEY): str,
     }
@@ -61,6 +61,7 @@ def _candidate_urls(url: str) -> list[str]:
 
     candidates.extend(
         [
+            "local",
             "http://4e5f32ea-edge-of-infinity:8088",
             "http://4e5f32ea_edge_of_infinity:8088",
             "http://addon_4e5f32ea_edge_of_infinity:8088",
@@ -92,7 +93,9 @@ class EdgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             user_input[CONF_URL] = url
 
             parsed = urlparse(url)
-            if url and (parsed.scheme not in ("http", "https") or not parsed.netloc):
+            if url not in ("", "local", "file", "filesystem") and (
+                parsed.scheme not in ("http", "https") or not parsed.netloc
+            ):
                 errors["base"] = "invalid_url"
             else:
                 try:
@@ -104,8 +107,12 @@ class EdgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 except Exception:
                     errors["base"] = "unknown"
                 else:
-                    parsed = urlparse(user_input[CONF_URL])
-                    await self.async_set_unique_id(parsed.netloc)
+                    if user_input[CONF_URL] in ("", "local", "file", "filesystem"):
+                        unique_id = "local"
+                    else:
+                        parsed = urlparse(user_input[CONF_URL])
+                        unique_id = parsed.netloc
+                    await self.async_set_unique_id(unique_id)
                     self._abort_if_unique_id_configured(updates={CONF_URL: url})
                     return self.async_create_entry(
                         title=info["title"],

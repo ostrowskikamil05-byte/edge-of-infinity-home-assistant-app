@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json as json_lib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from aiohttp import ClientError, ClientResponseError, ClientSession
@@ -30,6 +32,24 @@ class EdgeClient:
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
+
+    @property
+    def is_local(self) -> bool:
+        """Return true when reading mirrored files from Home Assistant config."""
+        return self.base_url.lower() in ("", "local", "file", "filesystem")
+
+    def _read_local_json(self, filename: str) -> Any:
+        """Read a JSON file mirrored by the Edge add-on."""
+        paths = (
+            Path("/config/edge") / filename,
+            Path("/homeassistant/edge") / filename,
+        )
+        for path in paths:
+            if path.exists():
+                return json_lib.loads(path.read_text(encoding="utf-8"))
+        raise EdgeConnectionError(
+            "Local Edge files were not found. Start the Edge of Infinity add-on first."
+        )
 
     async def _request(
         self,
@@ -62,10 +82,17 @@ class EdgeClient:
 
     async def health(self) -> dict[str, Any]:
         """Return Edge health."""
+        if self.is_local:
+            return self._read_local_json("health.json")
         return await self._request("GET", "/health")
 
     async def cameras(self) -> list[dict[str, Any]]:
         """Return cameras from core API or the current add-on shell."""
+        if self.is_local:
+            payload = self._read_local_json("cameras.json")
+            cameras = payload.get("cameras") if isinstance(payload, dict) else payload
+            return cameras if isinstance(cameras, list) else []
+
         try:
             payload = await self._request("GET", "/cameras")
         except EdgeConnectionError:
