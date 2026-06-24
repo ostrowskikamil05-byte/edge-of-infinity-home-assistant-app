@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
 CONFIG_PATH = Path(os.environ.get("EDGE_HOME_CONFIG", "/homeassistant/edge/edge.json"))
+CONFIG_BACKUP_PATH = HOME_DIR / "edge.backup.json"
 PORT = int(os.environ.get("API_PORT", "8088"))
 SNAPSHOT_DIR = HOME_DIR / "snapshots"
 DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
@@ -39,6 +40,11 @@ def write_json(path: Path, payload) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def backup_config() -> None:
+    if CONFIG_PATH.exists():
+        shutil.copyfile(CONFIG_PATH, CONFIG_BACKUP_PATH)
 
 
 def build_rtsp(explicit: str, host: str, username: str, password: str, channel: str) -> str:
@@ -99,8 +105,27 @@ def normalize_config(payload: dict) -> dict:
     }
 
 
+def validate_config_for_save(payload: dict) -> None:
+    cameras = payload.get("cameras") if isinstance(payload, dict) else None
+    if not isinstance(cameras, list) or not cameras:
+        raise ValueError("Refusing to save empty camera configuration.")
+    meaningful = [
+        camera
+        for camera in cameras
+        if isinstance(camera, dict) and (camera.get("host") or camera.get("rtsp_main"))
+    ]
+    if not meaningful:
+        raise ValueError("Refusing to save cameras without host or RTSP.")
+
+
 def load_config() -> dict:
-    return normalize_config(read_json(CONFIG_PATH, {"cameras": []}))
+    config = normalize_config(read_json(CONFIG_PATH, {"cameras": []}))
+    if not config.get("cameras") and CONFIG_BACKUP_PATH.exists():
+        backup = normalize_config(read_json(CONFIG_BACKUP_PATH, {"cameras": []}))
+        if backup.get("cameras"):
+            write_json(CONFIG_PATH, backup)
+            return backup
+    return config
 
 
 def run_json(command: list[str], timeout: int) -> dict | None:
@@ -165,7 +190,10 @@ def refresh_status() -> dict:
         camera_id = safe_id(camera.get("id", "camera"))
         status = "disabled"
         detail = "Camera is configured but disabled."
-        codec = ""
+        video_codec = ""
+        audio_codec = ""
+        audio_sample_rate = ""
+        audio_channels = ""
         width = ""
         height = ""
         fps = ""
@@ -185,10 +213,8 @@ def refresh_status() -> dict:
                         "tcp",
                         "-v",
                         "error",
-                        "-select_streams",
-                        "v:0",
                         "-show_entries",
-                        "stream=codec_name,width,height,r_frame_rate",
+                        "stream=index,codec_type,codec_name,width,height,r_frame_rate,sample_rate,channels",
                         "-of",
                         "json",
                         rtsp_main,
@@ -196,14 +222,18 @@ def refresh_status() -> dict:
                     timeout=8,
                 )
                 streams = (probe or {}).get("streams", []) if probe else []
-                stream = streams[0] if streams else {}
-                if stream:
+                video_stream = next((item for item in streams if item.get("codec_type") == "video"), {})
+                audio_stream = next((item for item in streams if item.get("codec_type") == "audio"), {})
+                if video_stream:
                     status = "online"
                     detail = "RTSP main stream is reachable."
-                    codec = str(stream.get("codec_name") or "")
-                    width = str(stream.get("width") or "")
-                    height = str(stream.get("height") or "")
-                    fps = str(stream.get("r_frame_rate") or "")
+                    video_codec = str(video_stream.get("codec_name") or "")
+                    width = str(video_stream.get("width") or "")
+                    height = str(video_stream.get("height") or "")
+                    fps = str(video_stream.get("r_frame_rate") or "")
+                    audio_codec = str(audio_stream.get("codec_name") or "")
+                    audio_sample_rate = str(audio_stream.get("sample_rate") or "")
+                    audio_channels = str(audio_stream.get("channels") or "")
                     snapshot_url, snapshot_path = capture_snapshot(camera, camera_id)
                 else:
                     status = "offline"
@@ -220,7 +250,11 @@ def refresh_status() -> dict:
             "snapshot_stream": camera.get("snapshot_stream") or "sub",
             "status": status,
             "detail": detail,
-            "codec": codec,
+            "codec": video_codec,
+            "video_codec": video_codec,
+            "audio_codec": audio_codec,
+            "audio_sample_rate": audio_sample_rate,
+            "audio_channels": audio_channels,
             "width": width,
             "height": height,
             "fps": fps,
@@ -496,6 +530,10 @@ INDEX_HTML = r"""<!doctype html>
         const online = camera.status === 'online';
         const stateClass = online ? 'state-online' : `state-${text(camera.status)}`;
         const resolution = camera.width && camera.height ? `${camera.width}x${camera.height}` : 'unknown';
+        const videoCodec = camera.video_codec || camera.codec;
+        const audioCodec = camera.audio_codec
+          ? `${camera.audio_codec}${camera.audio_sample_rate ? ` ${camera.audio_sample_rate}Hz` : ''}${camera.audio_channels ? ` ${camera.audio_channels}ch` : ''}`
+          : 'none';
         const liveUrl = panelPath(`live/${encodeURIComponent(camera.id)}.mjpg?stream=${encodeURIComponent(camera.snapshot_stream || 'sub')}&t=${Date.now()}`);
         const preview = live[camera.id]
           ? `<img src="${liveUrl}" alt="${escapeHtml(text(camera.name, camera.id))} live">`
@@ -513,7 +551,8 @@ INDEX_HTML = r"""<!doctype html>
               <div class="meta">
                 <div class="metric"><b>Host</b><span>${escapeHtml(text(camera.host))}</span></div>
                 <div class="metric"><b>Status</b><span class="${stateClass}">${escapeHtml(text(camera.status))}</span></div>
-                <div class="metric"><b>Video</b><span>${escapeHtml(text(camera.codec))} ${escapeHtml(resolution)}</span></div>
+                <div class="metric"><b>Video</b><span>${escapeHtml(text(videoCodec))} ${escapeHtml(resolution)}</span></div>
+                <div class="metric"><b>Audio</b><span>${escapeHtml(audioCodec)}</span></div>
                 <div class="metric"><b>FPS</b><span>${escapeHtml(text(camera.fps))}</span></div>
                 <div class="metric"><b>Snapshot</b><span>${escapeHtml(text(camera.snapshot_stream))}</span></div>
               </div>
@@ -606,6 +645,12 @@ INDEX_HTML = r"""<!doctype html>
         return { ...config, cameras };
       }
 
+      function hasMeaningfulCameras(payload) {
+        return Array.isArray(payload.cameras) && payload.cameras.some((camera) =>
+          camera && (camera.host || camera.rtsp_main)
+        );
+      }
+
       async function loadConfig() {
         const response = await fetch(panelPath('api/config'), { cache: 'no-store' });
         config = await response.json();
@@ -638,16 +683,26 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       document.getElementById('save-config').addEventListener('click', async () => {
+        const payload = collectConfig();
+        if (!hasMeaningfulCameras(payload)) {
+          saveState.textContent = 'Save blocked: at least one camera needs host/IP or RTSP, so existing configuration was not overwritten.';
+          return;
+        }
         saveState.textContent = 'Saving cameras...';
         const response = await fetch(panelPath('api/config'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(collectConfig())
+          body: JSON.stringify(payload)
         });
-        config = await response.json();
+        const data = await response.json();
+        if (!response.ok) {
+          saveState.textContent = data.error || 'Could not save configuration.';
+          return;
+        }
+        config = data;
         renderConfig();
         await loadCameras();
-        saveState.textContent = response.ok ? 'Saved. Status refreshed.' : 'Could not save configuration.';
+        saveState.textContent = 'Saved. Backup created and status refreshed.';
       });
 
       grid.addEventListener('click', async (event) => {
@@ -743,7 +798,11 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def save_config(self) -> None:
         try:
-            payload = normalize_config(self.read_body_json())
+            raw_payload = self.read_body_json()
+            validate_config_for_save(raw_payload)
+            payload = normalize_config(raw_payload)
+            validate_config_for_save(payload)
+            backup_config()
             write_json(CONFIG_PATH, payload)
             refresh_status()
             self.send_json(payload)
@@ -781,6 +840,10 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "-hide_banner",
             "-loglevel",
             "error",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
             "-rtsp_transport",
             "tcp",
             "-i",
@@ -788,8 +851,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "-an",
             "-vf",
             "fps=10",
+            "-c:v",
+            "mjpeg",
             "-q:v",
             "5",
+            "-flush_packets",
+            "1",
             "-f",
             "mpjpeg",
             "-",

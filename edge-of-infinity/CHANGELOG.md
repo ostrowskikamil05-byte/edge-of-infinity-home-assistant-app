@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.4
+
+- Prevent empty UI saves from wiping camera configuration.
+- Create `/homeassistant/edge/edge.backup.json` before saving camera changes.
+- Improve UI save error handling.
+- Add audio/video codec probing through `ffprobe`.
+- Improve experimental MJPEG live preview FFmpeg flags for live camera viewing.
+
 ## 0.4.3
 
 - Fix Home Assistant Ingress JSON loading by using relative panel API paths.
