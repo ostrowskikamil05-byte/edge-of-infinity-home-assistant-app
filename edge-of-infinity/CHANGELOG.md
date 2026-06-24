@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.4
+
+- Never overwrite an existing `/config/edge.json`.
+- Always write the default template to `/config/edge.example.json` instead.
+- Log whether the app created a first-run config or kept the existing camera config.
+
 ## 0.3.3
 
 - Mirror health and camera probe status to `/homeassistant/edge/*.json`.

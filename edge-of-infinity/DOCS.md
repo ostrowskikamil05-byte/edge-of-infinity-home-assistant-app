@@ -48,6 +48,16 @@ On first start, the app creates:
 /config/edge.json
 ```
 
+The app also writes a template:
+
+```text
+/config/edge.example.json
+```
+
+`edge.example.json` may be refreshed by the app. Your real camera settings belong in `edge.json`.
+
+The app must not overwrite an existing `edge.json`.
+
 The initial file contains two Hikvision camera slots:
 
 ```text
