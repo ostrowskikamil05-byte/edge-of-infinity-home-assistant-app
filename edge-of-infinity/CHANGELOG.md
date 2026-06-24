@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.15
+
+- Turn Edge Settings into an editable panel form.
+- Save server, storage, retention, and live preview settings through the UI.
+- Use the configured live frame interval for active previews.
+
 ## 0.4.14
 
 - Auto-select the newest NVR segment for playback.

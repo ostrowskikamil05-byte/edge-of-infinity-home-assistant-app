@@ -31,6 +31,13 @@ def safe_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value or "camera")
 
 
+def safe_int(value, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def read_json(path: Path, fallback):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -95,13 +102,22 @@ def normalize_config(payload: dict) -> dict:
         cameras = []
 
     normalized = [normalize_camera(camera, index + 1) for index, camera in enumerate(cameras[:8])]
+    server = payload.get("server") if isinstance(payload.get("server"), dict) else {}
+    storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
+    live = payload.get("live") if isinstance(payload.get("live"), dict) else {}
     return {
-        "server": payload.get("server") or {"listen": "0.0.0.0:8088", "public_url": ""},
-        "storage": payload.get("storage")
-        or {
-            "recordings_dir": "/media/edge-of-infinity/recordings",
-            "database_path": "/homeassistant/edge/edge.db",
-            "retention_days": 14,
+        "server": {
+            "listen": server.get("listen") or "0.0.0.0:8088",
+            "public_url": server.get("public_url") or "",
+        },
+        "storage": {
+            "recordings_dir": storage.get("recordings_dir") or "/media/edge-of-infinity/recordings",
+            "database_path": storage.get("database_path") or "/homeassistant/edge/edge.db",
+            "retention_days": safe_int(storage.get("retention_days"), 14),
+        },
+        "live": {
+            "engine": live.get("engine") or "jpeg",
+            "frame_interval_ms": safe_int(live.get("frame_interval_ms"), 1200),
         },
         "cameras": normalized,
         "future_vendors": payload.get("future_vendors") or ["dahua", "onvif", "rtsp"],
@@ -195,6 +211,20 @@ def validate_config_for_save(payload: dict) -> None:
     ]
     if not meaningful:
         raise ValueError("Refusing to save cameras without host or RTSP.")
+    storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
+    try:
+        retention_days = int(storage.get("retention_days") or 14)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Retention days must be a number.") from error
+    if retention_days < 1 or retention_days > 365:
+        raise ValueError("Retention days must be between 1 and 365.")
+    live = payload.get("live") if isinstance(payload.get("live"), dict) else {}
+    try:
+        frame_interval_ms = int(live.get("frame_interval_ms") or 1200)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Live frame interval must be a number.") from error
+    if frame_interval_ms < 250 or frame_interval_ms > 10000:
+        raise ValueError("Live frame interval must be between 250 and 10000 ms.")
 
 
 def load_config() -> dict:
@@ -1168,14 +1198,12 @@ INDEX_HTML = r"""<!doctype html>
               <p>Core paths, retention, future WebRTC settings, and diagnostics.</p>
             </div>
           </header>
-          <section class="panel">
-            <h2>Storage</h2>
-            <p>Recordings: <code>/media/edge-of-infinity/recordings</code></p>
-            <p>Config: <code>/homeassistant/edge/edge.json</code></p>
-          </section>
-          <section class="panel">
-            <h2>Live Engine</h2>
-            <p>Current preview uses refreshed JPEG frames. The next engine target is low-latency WebRTC.</p>
+          <section class="settings">
+            <form id="edge-settings-form"></form>
+            <div class="actions">
+              <button class="primary" id="save-edge-settings" type="button">Save Edge settings</button>
+            </div>
+            <p class="notice" id="edge-save-state">Core settings are saved to <code>/homeassistant/edge/edge.json</code>. Some runtime changes may need an add-on restart.</p>
           </section>
         </section>
 
@@ -1203,9 +1231,11 @@ INDEX_HTML = r"""<!doctype html>
       const grid = document.getElementById('camera-grid');
       const nvrGrid = document.getElementById('nvr-grid');
       const form = document.getElementById('config-form');
+      const edgeForm = document.getElementById('edge-settings-form');
       const presetSelect = document.getElementById('preset-select');
       const presetSlot = document.getElementById('preset-slot');
       const saveState = document.getElementById('save-state');
+      const edgeSaveState = document.getElementById('edge-save-state');
       const menuToggle = document.getElementById('menu-toggle');
       let config = { cameras: [] };
       let live = {};
@@ -1464,6 +1494,42 @@ INDEX_HTML = r"""<!doctype html>
         ];
         form.innerHTML = cameras.map(cameraForm).join('');
         nvrGrid.innerHTML = cameras.map(nvrCard).join('');
+        renderEdgeSettings();
+      }
+
+      function renderEdgeSettings() {
+        const server = config.server || {};
+        const storage = config.storage || {};
+        const liveConfig = config.live || {};
+        edgeForm.innerHTML = `
+          <section class="camera-form">
+            <h2>Server</h2>
+            <div class="form-grid">
+              <label>Listen address<input name="server-listen" value="${escapeHtml(text(server.listen, '0.0.0.0:8088'))}"></label>
+              <label>Public URL<input name="server-public-url" value="${escapeHtml(server.public_url || '')}" placeholder="Optional external URL"></label>
+            </div>
+            <p class="notice">Listen address is controlled by the add-on port at runtime. Changing it here prepares the config, but usually requires restart.</p>
+          </section>
+          <section class="camera-form">
+            <h2>Storage</h2>
+            <div class="form-grid">
+              <label>Recordings directory<input name="storage-recordings-dir" value="${escapeHtml(text(storage.recordings_dir, '/media/edge-of-infinity/recordings'))}"></label>
+              <label>Database path<input name="storage-database-path" value="${escapeHtml(text(storage.database_path, '/homeassistant/edge/edge.db'))}"></label>
+              <label>Retention days<input name="storage-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(storage.retention_days, 14))}"></label>
+            </div>
+          </section>
+          <section class="camera-form">
+            <h2>Live Preview</h2>
+            <div class="form-grid">
+              <label>Engine<select name="live-engine">
+                <option value="jpeg" ${liveConfig.engine !== 'mjpeg' && liveConfig.engine !== 'webrtc_next' ? 'selected' : ''}>JPEG frames</option>
+                <option value="mjpeg" ${liveConfig.engine === 'mjpeg' ? 'selected' : ''}>MJPEG preview</option>
+                <option value="webrtc_next" ${liveConfig.engine === 'webrtc_next' ? 'selected' : ''}>WebRTC next</option>
+              </select></label>
+              <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}"></label>
+            </div>
+          </section>
+        `;
       }
 
       function renderPresets() {
@@ -1505,6 +1571,26 @@ INDEX_HTML = r"""<!doctype html>
           };
         });
         return { ...config, cameras };
+      }
+
+      function collectEdgeSettings() {
+        const get = (name) => edgeForm.elements[name];
+        return {
+          ...config,
+          server: {
+            listen: get('server-listen').value.trim() || '0.0.0.0:8088',
+            public_url: get('server-public-url').value.trim()
+          },
+          storage: {
+            recordings_dir: get('storage-recordings-dir').value.trim() || '/media/edge-of-infinity/recordings',
+            database_path: get('storage-database-path').value.trim() || '/homeassistant/edge/edge.db',
+            retention_days: Number(get('storage-retention-days').value || 14)
+          },
+          live: {
+            engine: get('live-engine').value,
+            frame_interval_ms: Number(get('live-frame-interval-ms').value || 1200)
+          }
+        };
       }
 
       function applyPresetToSlot() {
@@ -1645,7 +1731,8 @@ INDEX_HTML = r"""<!doctype html>
       function updateLiveTimer() {
         const hasLive = Object.values(live).some(Boolean);
         if (hasLive && !liveTimer) {
-          liveTimer = window.setInterval(() => loadCameras(), 1200);
+          const interval = Math.min(10000, Math.max(250, Number(config.live?.frame_interval_ms || 1200)));
+          liveTimer = window.setInterval(() => loadCameras(), interval);
         }
         if (!hasLive && liveTimer) {
           window.clearInterval(liveTimer);
@@ -1708,6 +1795,33 @@ INDEX_HTML = r"""<!doctype html>
         await loadPresets();
         await loadCameras();
         saveState.textContent = 'Saved. Backup created and status refreshed.';
+      });
+
+      document.getElementById('save-edge-settings').addEventListener('click', async () => {
+        const payload = collectEdgeSettings();
+        if (!hasMeaningfulCameras(payload)) {
+          edgeSaveState.textContent = 'Save blocked: camera configuration is empty, so existing settings were not overwritten.';
+          return;
+        }
+        edgeSaveState.textContent = 'Saving Edge settings...';
+        const response = await fetch(panelPath('api/config'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          edgeSaveState.textContent = data.error || 'Could not save Edge settings.';
+          return;
+        }
+        config = data;
+        renderConfig();
+        if (liveTimer) {
+          window.clearInterval(liveTimer);
+          liveTimer = null;
+          updateLiveTimer();
+        }
+        edgeSaveState.textContent = 'Saved. Edge settings are stored in /homeassistant/edge/edge.json.';
       });
 
       document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);

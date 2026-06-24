@@ -220,6 +220,8 @@ Starting with version `0.4.13`, the NVR page lists recent MP4 segments per camer
 
 Starting with version `0.4.14`, the newest segment is selected automatically. Rewind moves to an older segment, Forward returns to a newer segment, and the active item is highlighted in the recording list.
 
+Starting with version `0.4.15`, the Edge Settings page can edit server metadata, storage paths, retention days, and live preview settings directly from the panel. Settings are saved to `/homeassistant/edge/edge.json` with the same backup protection as camera changes.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.
