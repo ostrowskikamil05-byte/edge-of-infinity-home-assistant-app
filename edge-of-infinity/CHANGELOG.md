@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.14
+
+- Auto-select the newest NVR segment for playback.
+- Enable Rewind and Forward controls between recorded segments.
+- Highlight the active segment in the NVR list.
+
 ## 0.4.13
 
 - Add recent recording segment listing to the NVR page.

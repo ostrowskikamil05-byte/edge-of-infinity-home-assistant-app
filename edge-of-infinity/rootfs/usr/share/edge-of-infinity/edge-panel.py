@@ -1037,6 +1037,10 @@ INDEX_HTML = r"""<!doctype html>
         padding: 8px;
         background: rgba(0,0,0,.14);
       }
+      .recording-item.active {
+        border-color: rgba(86,214,181,.65);
+        background: rgba(86,214,181,.08);
+      }
       .recording-item button {
         min-width: 0;
         overflow-wrap: anywhere;
@@ -1330,12 +1334,13 @@ INDEX_HTML = r"""<!doctype html>
         const isRecording = Boolean(status.recording);
         const files = Array.isArray(status.files) ? status.files : [];
         const selected = selectedRecording[index] || '';
+        const selectedIndex = files.findIndex((file) => file.url === selected);
         const player = selected
           ? `<video class="recording-player" src="${escapeHtml(panelPath(selected))}" controls preload="metadata"></video>`
           : '';
         const recordingList = files.length
           ? `<div class="recording-list">${files.map((file) => `
-              <div class="recording-item">
+              <div class="recording-item ${file.url === selected ? 'active' : ''}">
                 <button type="button" data-play-recording="${escapeHtml(file.url)}" data-record-index="${index}">${escapeHtml(file.name)}</button>
                 <span class="recording-meta">${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatDate(file.modified_at))}</span>
               </div>
@@ -1357,8 +1362,8 @@ INDEX_HTML = r"""<!doctype html>
               <p class="notice">${escapeHtml(text(status.directory, 'Recording directory will appear after start.'))}</p>
               <div class="actions">
                 <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}">${isRecording ? 'Stop recording' : 'Start recording'}</button>
-                <button disabled>Rewind</button>
-                <button disabled>Forward</button>
+                <button data-playback-step="older" data-record-index="${index}" ${selectedIndex >= 0 && selectedIndex < files.length - 1 ? '' : 'disabled'}>Rewind</button>
+                <button data-playback-step="newer" data-record-index="${index}" ${selectedIndex > 0 ? '' : 'disabled'}>Forward</button>
               </div>
               ${player}
               ${recordingList}
@@ -1545,7 +1550,26 @@ INDEX_HTML = r"""<!doctype html>
         recordingStatus = {};
         (Array.isArray(data.cameras) ? data.cameras : []).forEach((item) => {
           recordingStatus[item.index] = item;
+          const files = Array.isArray(item.files) ? item.files : [];
+          const selected = selectedRecording[item.index];
+          if (files.length && !files.some((file) => file.url === selected)) {
+            selectedRecording[item.index] = files[0].url;
+          }
+          if (!files.length) {
+            delete selectedRecording[item.index];
+          }
         });
+        renderConfig();
+      }
+
+      function moveRecording(index, direction) {
+        const files = Array.isArray(recordingStatus[index]?.files) ? recordingStatus[index].files : [];
+        if (!files.length) return;
+        const current = Math.max(0, files.findIndex((file) => file.url === selectedRecording[index]));
+        const next = direction === 'older'
+          ? Math.min(files.length - 1, current + 1)
+          : Math.max(0, current - 1);
+        selectedRecording[index] = files[next].url;
         renderConfig();
       }
 
@@ -1715,6 +1739,11 @@ INDEX_HTML = r"""<!doctype html>
         if (index !== undefined && playRecording) {
           selectedRecording[index] = playRecording;
           renderConfig();
+          return;
+        }
+        const playbackStep = event.target?.dataset?.playbackStep;
+        if (index !== undefined && playbackStep) {
+          moveRecording(index, playbackStep);
           return;
         }
         const action = event.target?.dataset?.recordAction;
