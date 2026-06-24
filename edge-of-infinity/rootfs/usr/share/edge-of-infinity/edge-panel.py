@@ -305,9 +305,11 @@ def isapi_request(camera: dict, method: str, path: str, body: bytes | None = Non
         "curl",
         "--silent",
         "--show-error",
-        "--digest",
+        "--anyauth",
         "--user",
         f"{username}:{password}",
+        "--connect-timeout",
+        "5",
         "--max-time",
         str(timeout),
         "--request",
@@ -342,10 +344,10 @@ def isapi_request(camera: dict, method: str, path: str, body: bytes | None = Non
         status = 0
 
     if result.returncode != 0:
-        raise RuntimeError(stderr or f"isapi_curl_error_{result.returncode}")
+        raise RuntimeError(f"{path}: {stderr or f'isapi_curl_error_{result.returncode}'}")
     if status >= 400 or status == 0:
         detail = payload.strip() or stderr or f"isapi_http_{status}"
-        raise RuntimeError(detail[-500:])
+        raise RuntimeError(f"{path}: isapi_http_{status}: {detail[-420:]}")
     return payload
 
 
@@ -474,17 +476,34 @@ def fetch_camera_autoconfig(camera: dict) -> dict:
         except (RuntimeError, ValueError) as error:
             raw_sections[name] = {"ok": False, "error": str(error)}
 
-    if not raw_sections["deviceInfo"]["ok"] and not raw_sections["streamMain"]["ok"] and not raw_sections["streamSub"]["ok"]:
-        raise RuntimeError("Camera ISAPI did not return device or stream configuration.")
-
     streams = {}
     for stream_name, section in (("main", "streamMain"), ("sub", "streamSub")):
         if raw_sections[section]["ok"]:
-            streams[stream_name] = parse_stream_config(raw_sections[section]["xml"])
+            try:
+                streams[stream_name] = parse_stream_config(raw_sections[section]["xml"])
+            except ET.ParseError as error:
+                raw_sections[section] = {"ok": False, "error": f"xml_parse_error: {error}"}
 
-    device = parse_device_info(raw_sections["deviceInfo"]["xml"]) if raw_sections["deviceInfo"]["ok"] else {}
+    device = {}
+    if raw_sections["deviceInfo"]["ok"]:
+        try:
+            device = parse_device_info(raw_sections["deviceInfo"]["xml"])
+        except ET.ParseError as error:
+            raw_sections["deviceInfo"] = {"ok": False, "error": f"xml_parse_error: {error}"}
+
+    essential_errors = [
+        f"{section}: {raw_sections[section].get('error', 'not available')}"
+        for section in ("deviceInfo", "streamMain", "streamSub")
+        if not raw_sections[section].get("ok")
+    ]
+    autoconfig_error = ""
+    if not device and not streams:
+        autoconfig_error = "Camera ISAPI did not return device or stream configuration. " + " | ".join(essential_errors)
+
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "ok": not autoconfig_error,
+        "error": autoconfig_error,
         "device": device,
         "streams": streams,
         "sections": {
@@ -1237,7 +1256,9 @@ INDEX_HTML = r"""<!doctype html>
           });
           const data = await response.json();
           if (!response.ok) throw new Error(data.error || 'Could not read camera configuration.');
-          cameraAuto[index] = { data, message: 'Camera configuration loaded.' };
+          cameraAuto[index] = data.error
+            ? { data, error: data.error }
+            : { data, message: 'Camera configuration loaded.' };
         } catch (error) {
           cameraAuto[index] = { error: error.message };
         }

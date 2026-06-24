@@ -192,6 +192,14 @@ PUT /ISAPI/Streaming/channels/102
 
 This is the first camera-control layer. Wider image, motion, OSD, and event settings can be added after the stream editor is stable.
 
+Starting with version `0.4.9`, Autoconfig uses curl `--anyauth` and reports the exact result for each ISAPI endpoint. If every ISAPI read fails, check the camera web panel:
+
+```text
+Network -> Advanced Settings -> Integration Protocol
+```
+
+Enable ISAPI/Hikvision-CGI support if the camera firmware exposes that option, then confirm the HTTP port and camera user permissions.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.

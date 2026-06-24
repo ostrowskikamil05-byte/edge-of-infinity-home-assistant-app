@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.9
+
+- Use curl `--anyauth` for Hikvision ISAPI so the camera can negotiate Basic or Digest authentication.
+- Return detailed Autoconfig diagnostics per ISAPI endpoint instead of a generic failure.
+- Keep the Autoconfig panel visible even when all ISAPI reads fail, so the exact camera-side problem is shown.
+
 ## 0.4.8
 
 - Fix Start Live camera targeting by using the camera list index instead of only the camera id.
