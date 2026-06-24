@@ -29,7 +29,21 @@ Enable a public/local host port in the app network settings only if another serv
 Configuration:
 
 ```text
-/config
+/homeassistant/edge
+```
+
+In Home Assistant File Editor this same folder appears as:
+
+```text
+/config/edge
+```
+
+The add-on keeps `/config` only as an internal/fallback mount for older installs.
+
+Database:
+
+```text
+/homeassistant/edge/edge.db
 ```
 
 Recordings:
@@ -45,16 +59,22 @@ Recordings are excluded from normal app backup by default.
 On first start, the app creates:
 
 ```text
-/config/edge.json
+/homeassistant/edge/edge.json
+```
+
+This is visible in File Editor as:
+
+```text
+/config/edge/edge.json
 ```
 
 The app also writes a template:
 
 ```text
-/config/edge.example.json
+/homeassistant/edge/edge.example.json
 ```
 
-`edge.example.json` may be refreshed by the app. Your real camera settings belong in `edge.json`.
+`edge.example.json` may be refreshed by the app. Your real camera settings belong in `/homeassistant/edge/edge.json`, visible in File Editor as `/config/edge/edge.json`.
 
 The app must not overwrite an existing `edge.json`.
 

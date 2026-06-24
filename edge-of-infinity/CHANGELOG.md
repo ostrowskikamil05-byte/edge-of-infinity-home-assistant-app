@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.6
+
+- Move the default database path to `/homeassistant/edge/edge.db` so user-facing files live under the Home Assistant config tree.
+- Pass the selected `/homeassistant/edge/edge.json` camera config to the future `edge-core` binary.
+- Clarify in the sidebar that File Editor shows this folder as `/config/edge`.
+
+## 0.3.5
+
+- Prefer `/homeassistant/edge/edge.json` as the editable camera config visible in Home Assistant File Editor.
+- Keep `/config/edge.json` only as a fallback for older installs.
+- Write the example template to both `/homeassistant/edge/edge.example.json` and `/config/edge.example.json`.
+
 ## 0.3.4
 
 - Never overwrite an existing `/config/edge.json`.

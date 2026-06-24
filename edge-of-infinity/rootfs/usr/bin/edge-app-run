@@ -19,16 +19,20 @@ read_option() {
 LOG_LEVEL="$(read_option 'log_level' 'info')"
 API_PORT="$(read_option 'api_port' '8088')"
 RECORDINGS_DIR="$(read_option 'recordings_dir' '/media/edge-of-infinity/recordings')"
-DATABASE_PATH="$(read_option 'database_path' '/config/edge.db')"
+DATABASE_PATH="$(read_option 'database_path' '/homeassistant/edge/edge.db')"
 RETENTION_DAYS="$(read_option 'retention_days' '14')"
 INSTALL_CUSTOM_COMPONENT="$(read_option 'install_custom_component' 'true')"
 
 LOG_LEVEL="${LOG_LEVEL:-info}"
 API_PORT="${API_PORT:-8088}"
 RECORDINGS_DIR="${RECORDINGS_DIR:-/media/edge-of-infinity/recordings}"
-DATABASE_PATH="${DATABASE_PATH:-/config/edge.db}"
+DATABASE_PATH="${DATABASE_PATH:-/homeassistant/edge/edge.db}"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
 INSTALL_CUSTOM_COMPONENT="${INSTALL_CUSTOM_COMPONENT:-true}"
+
+if [[ "${DATABASE_PATH}" == "/config/edge.db" ]]; then
+  DATABASE_PATH="/homeassistant/edge/edge.db"
+fi
 
 mkdir -p "${RECORDINGS_DIR}"
 mkdir -p "$(dirname "${DATABASE_PATH}")"
@@ -70,23 +74,12 @@ bashio::log.info "Install custom component: ${INSTALL_CUSTOM_COMPONENT}"
 
 install_custom_component
 
-if command -v edge-core >/dev/null 2>&1; then
-  exec edge-core \
-    -config /config/edge.json \
-    -listen "0.0.0.0:${API_PORT}" \
-    -recordings-dir "${RECORDINGS_DIR}" \
-    -database "${DATABASE_PATH}" \
-    -retention-days "${RETENTION_DAYS}" \
-    -log-level "${LOG_LEVEL}"
-fi
+EDGE_HOME_CONFIG=/homeassistant/edge/edge.json
+EDGE_HOME_EXAMPLE_CONFIG=/homeassistant/edge/edge.example.json
+EDGE_ADDON_CONFIG=/config/edge.json
+EDGE_ADDON_EXAMPLE_CONFIG=/config/edge.example.json
 
-bashio::log.warning "edge-core binary is not bundled yet."
-bashio::log.warning "Running RTSP probe shell until the video engine is bundled."
-
-EDGE_CONFIG=/config/edge.json
-EDGE_EXAMPLE_CONFIG=/config/edge.example.json
-
-cat > "${EDGE_EXAMPLE_CONFIG}" <<'EOF'
+cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
 {
   "server": {
     "listen": "0.0.0.0:8088",
@@ -94,7 +87,7 @@ cat > "${EDGE_EXAMPLE_CONFIG}" <<'EOF'
   },
   "storage": {
     "recordings_dir": "/media/edge-of-infinity/recordings",
-    "database_path": "/config/edge.db",
+    "database_path": "/homeassistant/edge/edge.db",
     "retention_days": 14
   },
   "cameras": [
@@ -136,13 +129,32 @@ cat > "${EDGE_EXAMPLE_CONFIG}" <<'EOF'
   ]
 }
 EOF
+cp "${EDGE_HOME_EXAMPLE_CONFIG}" "${EDGE_ADDON_EXAMPLE_CONFIG}"
 
-if [[ ! -f "${EDGE_CONFIG}" ]]; then
-  bashio::log.info "Creating first-run camera config at ${EDGE_CONFIG}"
-  cp "${EDGE_EXAMPLE_CONFIG}" "${EDGE_CONFIG}"
+if [[ -f "${EDGE_HOME_CONFIG}" ]]; then
+  EDGE_CONFIG="${EDGE_HOME_CONFIG}"
+  bashio::log.info "Using Home Assistant camera config at ${EDGE_CONFIG}"
+elif [[ -f "${EDGE_ADDON_CONFIG}" ]]; then
+  EDGE_CONFIG="${EDGE_ADDON_CONFIG}"
+  bashio::log.info "Using add-on camera config at ${EDGE_CONFIG}"
 else
-  bashio::log.info "Keeping existing camera config at ${EDGE_CONFIG}"
+  EDGE_CONFIG="${EDGE_HOME_CONFIG}"
+  bashio::log.info "Creating first-run camera config at ${EDGE_CONFIG}"
+  cp "${EDGE_HOME_EXAMPLE_CONFIG}" "${EDGE_CONFIG}"
 fi
+
+if command -v edge-core >/dev/null 2>&1; then
+  exec edge-core \
+    -config "${EDGE_CONFIG}" \
+    -listen "0.0.0.0:${API_PORT}" \
+    -recordings-dir "${RECORDINGS_DIR}" \
+    -database "${DATABASE_PATH}" \
+    -retention-days "${RETENTION_DAYS}" \
+    -log-level "${LOG_LEVEL}"
+fi
+
+bashio::log.warning "edge-core binary is not bundled yet."
+bashio::log.warning "Running RTSP probe shell until the video engine is bundled."
 
 mkdir -p /tmp/edge-placeholder
 
@@ -428,7 +440,7 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
       <section class="grid" id="camera-grid"></section>
 
       <section class="notice">
-        <p>Edit <code>/config/edge.json</code> in the add-on config folder to set your real Hikvision IPs, usernames, passwords, and RTSP URLs. Set <code>enabled</code> to <code>true</code> for each real camera. This shell probes RTSP every 30 seconds; WebRTC live comes next.</p>
+        <p>Edit <code>/homeassistant/edge/edge.json</code> in File Editor to set your real Hikvision IPs, usernames, passwords, and RTSP URLs. In Home Assistant File Editor this is shown as <code>/config/edge/edge.json</code>. Set <code>enabled</code> to <code>true</code> for each real camera. This shell probes RTSP every 30 seconds; WebRTC live comes next.</p>
       </section>
     </main>
     <script>
