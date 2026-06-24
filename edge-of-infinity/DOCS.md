@@ -2,7 +2,7 @@
 
 ## Sidebar
 
-The app enables Home Assistant Ingress and adds an Edge Infinity item to the sidebar for administrators.
+The app enables Home Assistant Ingress and adds an Edge Infinity item to the sidebar for administrators. The sidebar panel can edit Hikvision camera settings, refresh RTSP status, and open an experimental MJPEG live preview.
 
 ## Logs
 
@@ -56,7 +56,7 @@ Recordings are excluded from normal app backup by default.
 
 ## Camera Configuration
 
-The preferred configuration path is now the Home Assistant add-on options page. Configure each Hikvision camera there:
+The preferred configuration path is now the Edge of Infinity sidebar panel. Configure each Hikvision camera there:
 
 - enabled,
 - name,
@@ -75,7 +75,7 @@ When `host`, `username`, and `password` are set but RTSP fields are empty, Edge 
 /Streaming/Channels/102
 ```
 
-The JSON file below is still supported as a fallback for older installs and manual recovery.
+The JSON file below stores panel changes and is still useful for manual recovery.
 
 On first start, the app creates:
 
@@ -140,6 +140,16 @@ Starting with version `0.4.0`, the shell also captures one JPEG snapshot for eac
 Use `sub` for a lighter panel or `main` for a full-quality snapshot. `rtsp_main` remains the quality probe.
 
 This is not live video yet. It is the first real camera connectivity test before WebRTC live is added. Restart the add-on when you want to rerun the temporary probe.
+
+## Experimental Live Preview
+
+Starting with version `0.4.2`, the panel includes a first live preview path:
+
+```text
+/live/<camera_id>.mjpg
+```
+
+This uses FFmpeg to expose an MJPEG preview from the configured RTSP stream. It is useful for testing the live pipeline from the Edge panel, but it is not the final low-latency WebRTC engine.
 
 ## Custom Component Auto-Install
 

@@ -302,13 +302,13 @@ cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
 EOF
 cp "${EDGE_HOME_EXAMPLE_CONFIG}" "${EDGE_ADDON_EXAMPLE_CONFIG}"
 
-if has_addon_camera_options; then
-  EDGE_CONFIG="${EDGE_OPTIONS_CONFIG}"
-  write_addon_options_config "${EDGE_CONFIG}"
-  bashio::log.info "Using camera config from Home Assistant add-on options."
-elif [[ -f "${EDGE_HOME_CONFIG}" ]]; then
+if [[ -f "${EDGE_HOME_CONFIG}" ]]; then
   EDGE_CONFIG="${EDGE_HOME_CONFIG}"
   bashio::log.info "Using Home Assistant camera config at ${EDGE_CONFIG}"
+elif has_addon_camera_options; then
+  EDGE_CONFIG="${EDGE_HOME_CONFIG}"
+  write_addon_options_config "${EDGE_CONFIG}"
+  bashio::log.info "Created camera config from Home Assistant add-on options at ${EDGE_CONFIG}."
 elif [[ -f "${EDGE_ADDON_CONFIG}" ]]; then
   EDGE_CONFIG="${EDGE_ADDON_CONFIG}"
   bashio::log.info "Using add-on camera config at ${EDGE_CONFIG}"
@@ -458,7 +458,15 @@ generate_camera_status() {
   cp /tmp/edge-placeholder/cameras.json /homeassistant/edge/cameras.json
 }
 
-generate_camera_status
+# The Python panel refreshes camera status before serving requests.
+
+export EDGE_CONFIG
+export EDGE_HOME_CONFIG
+export EDGE_HOME_DIR=/homeassistant/edge
+export EDGE_DATA_DIR=/tmp/edge-placeholder
+export API_PORT
+
+exec python3 /usr/share/edge-of-infinity/edge-panel.py
 
 cat > /tmp/edge-placeholder/index.html <<'EOF'
 <!doctype html>

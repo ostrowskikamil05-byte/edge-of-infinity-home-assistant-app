@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2
+
+- Replace the static sidebar page with a lightweight Python panel server.
+- Add camera editing directly inside the Edge of Infinity panel.
+- Save panel camera changes to `/homeassistant/edge/edge.json`.
+- Add manual status refresh from the panel.
+- Add an experimental MJPEG live preview endpoint per camera as the next step after snapshots.
+- Prefer the panel config file on startup; add-on camera options now only initialize the file when it does not exist.
+
 ## 0.4.1
 
 - Add Home Assistant add-on options for two Hikvision cameras.

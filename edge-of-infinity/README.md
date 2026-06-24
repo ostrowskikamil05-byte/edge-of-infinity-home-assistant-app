@@ -16,7 +16,7 @@ This app runs Edge Core and exposes the Edge web UI through Home Assistant Ingre
 
 ## First Configuration
 
-Use the Edge of Infinity add-on options page as the preferred camera configuration UI. The add-on exposes two Hikvision camera slots with host, credentials, RTSP main/sub, ONVIF/ISAPI, recording, low-latency, and snapshot stream settings.
+Use the Edge of Infinity sidebar panel as the preferred camera configuration UI. The panel exposes Hikvision camera slots with host, credentials, RTSP main/sub, ONVIF/ISAPI, recording, low-latency, and snapshot stream settings.
 
 If RTSP main/sub are left empty, Edge builds the standard Hikvision paths from host, username, and password.
 
@@ -51,3 +51,5 @@ This package currently contains the Home Assistant app shell. The actual Edge Co
 The shell creates `/homeassistant/edge/edge.json` with two Hikvision camera slots so the app can be configured for multiple cameras before the real engine is bundled.
 
 Enabled cameras are probed through `rtsp_main` once when the add-on starts. The shell also captures one JPEG snapshot through the per-camera `snapshot_stream` setting, either `sub` or `main`. This verifies camera connectivity before WebRTC live is implemented without refreshing the sidebar page.
+
+From version `0.4.2`, the panel also includes an experimental MJPEG live preview. It is a stepping stone for testing the live path before the low-latency WebRTC engine is bundled.
