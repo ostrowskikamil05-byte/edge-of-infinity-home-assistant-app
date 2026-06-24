@@ -703,10 +703,18 @@ INDEX_HTML = r"""<!doctype html>
         --accent: #56d6b5;
         --warn: #e4b45d;
         --danger: #e66b6b;
+        --sidebar-width: 220px;
+        --sidebar-collapsed-width: 74px;
       }
       * { box-sizing: border-box; }
       body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; }
-      .app { min-height: 100vh; display: grid; grid-template-columns: 220px 1fr; }
+      .app {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+        transition: grid-template-columns .18s ease;
+      }
+      body.nav-collapsed .app { grid-template-columns: var(--sidebar-collapsed-width) minmax(0, 1fr); }
       .sidebar {
         border-right: 1px solid var(--line);
         background: #0f171c;
@@ -714,8 +722,36 @@ INDEX_HTML = r"""<!doctype html>
         position: sticky;
         top: 0;
         height: 100vh;
+        overflow: hidden;
       }
-      .brand { margin: 0 0 18px; font-size: 18px; font-weight: 800; }
+      .sidebar-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 18px;
+        min-height: 38px;
+      }
+      .menu-toggle {
+        width: 38px;
+        height: 38px;
+        flex: 0 0 38px;
+        display: grid;
+        place-items: center;
+        padding: 0;
+      }
+      .menu-toggle-lines {
+        width: 18px;
+        height: 14px;
+        display: grid;
+        gap: 4px;
+      }
+      .menu-toggle-lines span {
+        height: 2px;
+        border-radius: 999px;
+        background: currentColor;
+      }
+      .brand { min-width: 0; font-size: 18px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      body.nav-collapsed .brand { display: none; }
       .nav { display: grid; gap: 7px; }
       .nav button {
         width: 100%;
@@ -724,7 +760,10 @@ INDEX_HTML = r"""<!doctype html>
         display: flex;
         align-items: center;
         gap: 10px;
+        min-height: 40px;
       }
+      body.nav-collapsed .nav button { justify-content: center; padding-inline: 8px; }
+      body.nav-collapsed .nav-label { display: none; }
       .nav-icon {
         width: 20px;
         height: 20px;
@@ -741,7 +780,7 @@ INDEX_HTML = r"""<!doctype html>
         background: rgba(86,214,181,.08);
         color: var(--accent);
       }
-      main { width: min(1180px, calc(100vw - 28px)); margin: 0 auto; padding: 24px 0 40px; }
+      main { width: min(1180px, calc(100vw - 28px)); min-width: 0; margin: 0 auto; padding: 24px 0 40px; }
       .page[hidden] { display: none; }
       header { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-bottom: 18px; }
       h1 { margin: 0 0 7px; font-size: clamp(28px, 5vw, 44px); line-height: 1; }
@@ -759,7 +798,7 @@ INDEX_HTML = r"""<!doctype html>
       button.primary { border-color: rgba(86,214,181,.65); color: var(--accent); }
       button.danger { color: var(--danger); }
       .toolbar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(285px, 1fr)); gap: 14px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(285px, 100%), 1fr)); gap: 14px; }
       .camera, .settings, .panel {
         border: 1px solid var(--line);
         border-radius: 8px;
@@ -813,7 +852,7 @@ INDEX_HTML = r"""<!doctype html>
       .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
       .settings, .panel { padding: 14px; }
       .panel + .panel { margin-top: 14px; }
-      .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+      .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 10px; }
       label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
       input, select {
         width: 100%;
@@ -828,7 +867,7 @@ INDEX_HTML = r"""<!doctype html>
       .camera-form { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
       .autoconfig { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 12px; background: rgba(0,0,0,.14); }
       .autoconfig-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
-      .stream-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+      .stream-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 10px; margin-top: 10px; }
       .stream-editor { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: rgba(255,255,255,.03); }
       .section-status { margin-top: 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
       .notice { margin-top: 10px; color: var(--muted); font-size: 13px; }
@@ -847,26 +886,53 @@ INDEX_HTML = r"""<!doctype html>
         margin-top: 12px;
       }
       code { color: var(--accent); overflow-wrap: anywhere; }
-      @media (max-width: 720px) {
+      @media (max-width: 820px) {
         .app { grid-template-columns: 1fr; }
-        .sidebar { position: static; height: auto; }
+        body.nav-collapsed .app { grid-template-columns: 1fr; }
+        .sidebar {
+          position: sticky;
+          top: 0;
+          z-index: 20;
+          height: auto;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+          padding: 10px;
+        }
+        .sidebar-header { margin-bottom: 10px; }
+        body.nav-collapsed .brand { display: block; }
+        body.nav-collapsed .nav { display: none; }
+        body.nav-collapsed .nav-label { display: inline; }
         .nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .nav button { justify-content: flex-start; }
         .preset-bar { grid-template-columns: 1fr; }
         header { align-items: start; flex-direction: column; }
         .toolbar { justify-content: flex-start; }
+        main { width: min(100% - 18px, 1180px); padding-top: 16px; }
+      }
+      @media (max-width: 480px) {
+        .nav { grid-template-columns: 1fr; }
+        h1 { font-size: 32px; }
+        .meta { grid-template-columns: 1fr; }
+        .toolbar, .actions { width: 100%; }
+        .toolbar button, .actions button { flex: 1 1 auto; }
       }
     </style>
   </head>
   <body>
     <div class="app">
       <aside class="sidebar">
-        <div class="brand">Edge of Infinity</div>
+        <div class="sidebar-header">
+          <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Toggle navigation" aria-expanded="true">
+            <span class="menu-toggle-lines" aria-hidden="true"><span></span><span></span><span></span></span>
+          </button>
+          <div class="brand">Edge of Infinity</div>
+        </div>
         <nav class="nav">
-          <button class="active" data-page-target="home"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg></span><span>Home</span></button>
-          <button data-page-target="nvr"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/></svg></span><span>NVR</span></button>
-          <button data-page-target="camera-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h11l5 4-5 4H4z"/><circle cx="9" cy="12" r="2"/></svg></span><span>Camera Settings</span></button>
-          <button data-page-target="edge-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a8 8 0 0 0 .1-6"/><path d="M4.5 9a8 8 0 0 0 .1 6"/><path d="M15 4.6a8 8 0 0 0-6 0"/><path d="M9 19.4a8 8 0 0 0 6 0"/></svg></span><span>Edge Settings</span></button>
-          <button data-page-target="account"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c1.8-4 14.2-4 16 0"/></svg></span><span>Account</span></button>
+          <button class="active" data-page-target="home"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg></span><span class="nav-label">Home</span></button>
+          <button data-page-target="nvr"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/></svg></span><span class="nav-label">NVR</span></button>
+          <button data-page-target="camera-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h11l5 4-5 4H4z"/><circle cx="9" cy="12" r="2"/></svg></span><span class="nav-label">Camera Settings</span></button>
+          <button data-page-target="edge-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a8 8 0 0 0 .1-6"/><path d="M4.5 9a8 8 0 0 0 .1 6"/><path d="M15 4.6a8 8 0 0 0-6 0"/><path d="M9 19.4a8 8 0 0 0 6 0"/></svg></span><span class="nav-label">Edge Settings</span></button>
+          <button data-page-target="account"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c1.8-4 14.2-4 16 0"/></svg></span><span class="nav-label">Account</span></button>
         </nav>
       </aside>
       <main>
@@ -971,6 +1037,7 @@ INDEX_HTML = r"""<!doctype html>
       const presetSelect = document.getElementById('preset-select');
       const presetSlot = document.getElementById('preset-slot');
       const saveState = document.getElementById('save-state');
+      const menuToggle = document.getElementById('menu-toggle');
       let config = { cameras: [] };
       let live = {};
       let presets = [];
@@ -983,6 +1050,27 @@ INDEX_HTML = r"""<!doctype html>
 
       function panelPath(path) {
         return `${panelBase}${String(path).replace(/^\/+/, '')}`;
+      }
+
+      function setNavCollapsed(collapsed, persist = true) {
+        document.body.classList.toggle('nav-collapsed', collapsed);
+        menuToggle.setAttribute('aria-expanded', String(!collapsed));
+        if (persist) {
+          try {
+            window.localStorage.setItem('edge-nav-collapsed', collapsed ? 'true' : 'false');
+          } catch (_) {}
+        }
+      }
+
+      function restoreNavState() {
+        let saved = null;
+        try {
+          saved = window.localStorage.getItem('edge-nav-collapsed');
+        } catch (_) {}
+        const shouldCollapse = saved === null
+          ? window.matchMedia('(max-width: 820px)').matches
+          : saved === 'true';
+        setNavCollapsed(shouldCollapse, false);
       }
 
       function text(value, fallback = 'unknown') {
@@ -1330,7 +1418,27 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       document.querySelectorAll('[data-page-target]').forEach((button) => {
-        button.addEventListener('click', () => showPage(button.dataset.pageTarget));
+        button.addEventListener('click', () => {
+          showPage(button.dataset.pageTarget);
+          if (window.matchMedia('(max-width: 820px)').matches && !button.closest('.toolbar')) {
+            setNavCollapsed(true);
+          }
+        });
+      });
+
+      menuToggle.addEventListener('click', () => {
+        setNavCollapsed(!document.body.classList.contains('nav-collapsed'));
+      });
+
+      window.addEventListener('resize', () => {
+        if (window.matchMedia('(max-width: 820px)').matches) return;
+        let saved = null;
+        try {
+          saved = window.localStorage.getItem('edge-nav-collapsed');
+        } catch (_) {}
+        if (saved === null) {
+          setNavCollapsed(false, false);
+        }
       });
 
       document.getElementById('refresh').addEventListener('click', async () => {
@@ -1401,6 +1509,8 @@ INDEX_HTML = r"""<!doctype html>
         renderConfig();
         await loadCameras();
       });
+
+      restoreNavState();
 
       Promise.all([loadConfig(), loadPresets(), loadCameras()]).catch((error) => {
         grid.innerHTML = `<p>${escapeHtml(error.message)}</p>`;

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.11
+
+- Add a hamburger navigation toggle for the left panel.
+- Collapse the desktop sidebar to icon-only navigation.
+- Hide and show the navigation menu cleanly on mobile.
+- Improve responsive layout for camera cards, forms, toolbars, and narrow screens.
+
 ## 0.4.10
 
 - Fix Autoconfig fallback when the panel request does not include `host` or `isapi_base_url`.

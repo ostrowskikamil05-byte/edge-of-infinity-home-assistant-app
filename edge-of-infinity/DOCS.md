@@ -202,6 +202,10 @@ Enable ISAPI/Hikvision-CGI support if the camera firmware exposes that option, t
 
 Starting with version `0.4.10`, Autoconfig also merges the clicked camera slot with the saved `/homeassistant/edge/edge.json` camera entry. This prevents `isapi_base_url_missing` when the panel request does not include the host or ISAPI URL.
 
+## Responsive Panel
+
+Starting with version `0.4.11`, the left navigation includes a hamburger toggle. On desktop it collapses the sidebar to icon-only mode. On phone and tablet layouts it hides or reveals the navigation menu above the panel content.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.
