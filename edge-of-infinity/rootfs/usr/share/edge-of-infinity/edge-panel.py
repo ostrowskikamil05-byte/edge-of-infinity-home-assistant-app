@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -286,6 +287,263 @@ def capture_live_frame(camera: dict, stream_name: str) -> bytes:
     return result.stdout
 
 
+def isapi_base(camera: dict) -> str:
+    base = camera.get("isapi_base_url") or (f"http://{camera.get('host')}" if camera.get("host") else "")
+    return base.rstrip("/")
+
+
+def isapi_request(camera: dict, method: str, path: str, body: bytes | None = None, timeout: int = 15) -> str:
+    base = isapi_base(camera)
+    username = camera.get("username") or ""
+    password = camera.get("password") or ""
+    if not base:
+        raise ValueError("isapi_base_url_missing")
+    if not username:
+        raise ValueError("camera_username_missing")
+
+    command = [
+        "curl",
+        "--silent",
+        "--show-error",
+        "--digest",
+        "--user",
+        f"{username}:{password}",
+        "--max-time",
+        str(timeout),
+        "--request",
+        method,
+        f"{base}{path}",
+        "--write-out",
+        "\n%{http_code}",
+    ]
+    if body is not None:
+        command.extend(["--header", "Content-Type: application/xml", "--data-binary", "@-"])
+
+    try:
+        result = subprocess.run(
+            command,
+            input=body,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout + 3,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError("curl_not_installed") from error
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("isapi_timeout") from error
+
+    output = result.stdout.decode("utf-8", errors="replace")
+    stderr = result.stderr.decode("utf-8", errors="replace").strip()
+    payload, _, status_text = output.rpartition("\n")
+    try:
+        status = int(status_text.strip())
+    except ValueError:
+        status = 0
+
+    if result.returncode != 0:
+        raise RuntimeError(stderr or f"isapi_curl_error_{result.returncode}")
+    if status >= 400 or status == 0:
+        detail = payload.strip() or stderr or f"isapi_http_{status}"
+        raise RuntimeError(detail[-500:])
+    return payload
+
+
+def local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def first_child(element: ET.Element, name: str) -> ET.Element | None:
+    for child in element.iter():
+        if local_name(child.tag) == name:
+            return child
+    return None
+
+
+def child_text(element: ET.Element | None, name: str, fallback: str = "") -> str:
+    if element is None:
+        return fallback
+    child = first_child(element, name)
+    if child is None or child.text is None:
+        return fallback
+    return child.text.strip()
+
+
+def set_child_text(element: ET.Element | None, name: str, value: str) -> bool:
+    if element is None:
+        return False
+    child = first_child(element, name)
+    if child is None:
+        return False
+    child.text = str(value)
+    return True
+
+
+def hik_fps(raw_value: str) -> str:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return raw_value or ""
+    if value > 100:
+        value = value / 100
+    return str(int(value)) if value.is_integer() else f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def hik_raw_fps(value: str) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value or "")
+    if number <= 60:
+        number *= 100
+    return str(int(number))
+
+
+def parse_xml(payload: str) -> ET.Element:
+    return ET.fromstring(payload.encode("utf-8"))
+
+
+def xml_namespace(root: ET.Element) -> str:
+    if root.tag.startswith("{"):
+        return root.tag[1:].split("}", 1)[0]
+    return ""
+
+
+def xml_to_bytes(root: ET.Element) -> bytes:
+    namespace = xml_namespace(root)
+    if namespace:
+        ET.register_namespace("", namespace)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def parse_device_info(payload: str) -> dict:
+    root = parse_xml(payload)
+    return {
+        "device_name": child_text(root, "deviceName"),
+        "model": child_text(root, "model"),
+        "serial_number": child_text(root, "serialNumber"),
+        "firmware": child_text(root, "firmwareVersion"),
+        "mac": child_text(root, "macAddress"),
+    }
+
+
+def parse_stream_config(payload: str) -> dict:
+    root = parse_xml(payload)
+    video = first_child(root, "Video")
+    audio = first_child(root, "Audio")
+    max_frame_rate = child_text(video, "maxFrameRate")
+    return {
+        "id": child_text(root, "id"),
+        "name": child_text(root, "channelName"),
+        "enabled": child_text(root, "enabled"),
+        "video": {
+            "enabled": child_text(video, "enabled"),
+            "codec": child_text(video, "videoCodecType"),
+            "width": child_text(video, "videoResolutionWidth"),
+            "height": child_text(video, "videoResolutionHeight"),
+            "fps": hik_fps(max_frame_rate),
+            "raw_fps": max_frame_rate,
+            "bitrate_mode": child_text(video, "videoQualityControlType"),
+            "bitrate": child_text(video, "constantBitRate"),
+            "quality": child_text(video, "fixedQuality"),
+            "keyframe_interval": child_text(video, "keyFrameInterval"),
+        },
+        "audio": {
+            "enabled": child_text(audio, "enabled"),
+            "codec": child_text(audio, "audioCompressionType") or child_text(audio, "audioEncoding"),
+            "sample_rate": child_text(audio, "audioSamplingRate"),
+            "bitrate": child_text(audio, "audioBitRate"),
+        },
+    }
+
+
+def fetch_camera_autoconfig(camera: dict) -> dict:
+    endpoints = {
+        "deviceInfo": "/ISAPI/System/deviceInfo",
+        "streamMain": "/ISAPI/Streaming/channels/101",
+        "streamSub": "/ISAPI/Streaming/channels/102",
+        "time": "/ISAPI/System/time",
+        "videoInputs": "/ISAPI/System/Video/inputs/channels",
+        "networkInterfaces": "/ISAPI/System/Network/interfaces",
+        "imageChannel": "/ISAPI/Image/channels/1",
+    }
+    raw_sections: dict[str, dict] = {}
+    for name, path in endpoints.items():
+        try:
+            raw_sections[name] = {"ok": True, "xml": isapi_request(camera, "GET", path)}
+        except (RuntimeError, ValueError) as error:
+            raw_sections[name] = {"ok": False, "error": str(error)}
+
+    if not raw_sections["deviceInfo"]["ok"] and not raw_sections["streamMain"]["ok"] and not raw_sections["streamSub"]["ok"]:
+        raise RuntimeError("Camera ISAPI did not return device or stream configuration.")
+
+    streams = {}
+    for stream_name, section in (("main", "streamMain"), ("sub", "streamSub")):
+        if raw_sections[section]["ok"]:
+            streams[stream_name] = parse_stream_config(raw_sections[section]["xml"])
+
+    device = parse_device_info(raw_sections["deviceInfo"]["xml"]) if raw_sections["deviceInfo"]["ok"] else {}
+    return {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "device": device,
+        "streams": streams,
+        "sections": {
+            key: {"ok": value.get("ok", False), "error": value.get("error", "")}
+            for key, value in raw_sections.items()
+        },
+    }
+
+
+def update_stream_config(camera: dict, stream_name: str, settings: dict) -> dict:
+    channel_id = "101" if stream_name == "main" else "102"
+    current_xml = isapi_request(camera, "GET", f"/ISAPI/Streaming/channels/{channel_id}")
+    root = parse_xml(current_xml)
+    video = first_child(root, "Video")
+    audio = first_child(root, "Audio")
+    video_settings = settings.get("video") if isinstance(settings.get("video"), dict) else {}
+    audio_settings = settings.get("audio") if isinstance(settings.get("audio"), dict) else {}
+
+    video_map = {
+        "enabled": "enabled",
+        "codec": "videoCodecType",
+        "width": "videoResolutionWidth",
+        "height": "videoResolutionHeight",
+        "bitrate_mode": "videoQualityControlType",
+        "bitrate": "constantBitRate",
+        "quality": "fixedQuality",
+        "keyframe_interval": "keyFrameInterval",
+    }
+    audio_map = {
+        "enabled": "enabled",
+        "sample_rate": "audioSamplingRate",
+        "bitrate": "audioBitRate",
+    }
+
+    changed = False
+    for source, target in video_map.items():
+        if source in video_settings:
+            changed = set_child_text(video, target, str(video_settings[source])) or changed
+    if "fps" in video_settings:
+        changed = set_child_text(video, "maxFrameRate", hik_raw_fps(str(video_settings["fps"]))) or changed
+    for source, target in audio_map.items():
+        if source in audio_settings:
+            changed = set_child_text(audio, target, str(audio_settings[source])) or changed
+    if "codec" in audio_settings:
+        changed = (
+            set_child_text(audio, "audioCompressionType", str(audio_settings["codec"]))
+            or set_child_text(audio, "audioEncoding", str(audio_settings["codec"]))
+            or changed
+        )
+
+    if not changed:
+        raise ValueError("No supported stream fields were changed.")
+
+    updated_xml = xml_to_bytes(root)
+    isapi_request(camera, "PUT", f"/ISAPI/Streaming/channels/{channel_id}", updated_xml)
+    refreshed_xml = isapi_request(camera, "GET", f"/ISAPI/Streaming/channels/{channel_id}")
+    return parse_stream_config(refreshed_xml)
+
+
 def refresh_status() -> dict:
     config = load_config()
     cameras = []
@@ -487,6 +745,11 @@ INDEX_HTML = r"""<!doctype html>
       input[type="checkbox"] { width: auto; }
       .check-row { display: flex; align-items: center; gap: 8px; min-height: 36px; }
       .camera-form { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+      .autoconfig { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 12px; background: rgba(0,0,0,.14); }
+      .autoconfig-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+      .stream-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+      .stream-editor { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: rgba(255,255,255,.03); }
+      .section-status { margin-top: 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
       .notice { margin-top: 10px; color: var(--muted); font-size: 13px; }
       .preset-bar {
         display: grid;
@@ -596,7 +859,7 @@ INDEX_HTML = r"""<!doctype html>
           </section>
           <section class="panel">
             <h2>Live Engine</h2>
-            <p>Current preview is MJPEG. The next engine target is low-latency WebRTC.</p>
+            <p>Current preview uses refreshed JPEG frames. The next engine target is low-latency WebRTC.</p>
           </section>
         </section>
 
@@ -631,6 +894,7 @@ INDEX_HTML = r"""<!doctype html>
       let live = {};
       let presets = [];
       let liveTimer = null;
+      let cameraAuto = {};
 
       const panelBase = window.location.pathname.endsWith('/')
         ? window.location.pathname
@@ -710,6 +974,65 @@ INDEX_HTML = r"""<!doctype html>
         `;
       }
 
+      function original(value) {
+        return `data-original="${escapeHtml(value || '')}"`;
+      }
+
+      function streamEditor(index, streamName, stream) {
+        const video = stream?.video || {};
+        const audio = stream?.audio || {};
+        return `
+          <div class="stream-editor" data-stream-editor data-camera-index="${index}" data-stream="${streamName}">
+            <div class="row">
+              <div class="name">${streamName === 'main' ? 'Main stream' : 'Sub stream'}</div>
+              <div class="vendor">${escapeHtml(text(stream?.id, streamName))}</div>
+            </div>
+            <div class="form-grid">
+              <label>Video enabled<input data-stream-field="video.enabled" ${original(video.enabled)} value="${escapeHtml(video.enabled || '')}"></label>
+              <label>Codec<input data-stream-field="video.codec" ${original(video.codec)} value="${escapeHtml(video.codec || '')}"></label>
+              <label>Width<input data-stream-field="video.width" ${original(video.width)} value="${escapeHtml(video.width || '')}"></label>
+              <label>Height<input data-stream-field="video.height" ${original(video.height)} value="${escapeHtml(video.height || '')}"></label>
+              <label>FPS<input data-stream-field="video.fps" ${original(video.fps)} value="${escapeHtml(video.fps || '')}"></label>
+              <label>Bitrate kbps<input data-stream-field="video.bitrate" ${original(video.bitrate)} value="${escapeHtml(video.bitrate || '')}"></label>
+              <label>Bitrate mode<input data-stream-field="video.bitrate_mode" ${original(video.bitrate_mode)} value="${escapeHtml(video.bitrate_mode || '')}"></label>
+              <label>Quality<input data-stream-field="video.quality" ${original(video.quality)} value="${escapeHtml(video.quality || '')}"></label>
+              <label>Keyframe interval<input data-stream-field="video.keyframe_interval" ${original(video.keyframe_interval)} value="${escapeHtml(video.keyframe_interval || '')}"></label>
+              <label>Audio enabled<input data-stream-field="audio.enabled" ${original(audio.enabled)} value="${escapeHtml(audio.enabled || '')}"></label>
+              <label>Audio codec<input data-stream-field="audio.codec" ${original(audio.codec)} value="${escapeHtml(audio.codec || '')}"></label>
+              <label>Audio sample rate<input data-stream-field="audio.sample_rate" ${original(audio.sample_rate)} value="${escapeHtml(audio.sample_rate || '')}"></label>
+            </div>
+            <div class="actions">
+              <button class="primary" type="button" data-save-stream="${streamName}" data-camera-index="${index}">Save ${streamName}</button>
+            </div>
+          </div>
+        `;
+      }
+
+      function cameraAutoconfig(index) {
+        const state = cameraAuto[index] || {};
+        const device = state.data?.device || {};
+        const streams = state.data?.streams || {};
+        const sectionSummary = state.data?.sections
+          ? Object.entries(state.data.sections).map(([name, item]) => `${name}: ${item.ok ? 'ok' : item.error}`).join(' | ')
+          : '';
+        return `
+          <div class="autoconfig">
+            <div class="autoconfig-head">
+              <div>
+                <h2>Autoconfig</h2>
+                <p>${device.model ? `${escapeHtml(device.model)} ${escapeHtml(device.firmware || '')}` : 'Read camera settings through Hikvision ISAPI.'}</p>
+              </div>
+              <button type="button" data-autoconfig="${index}" ${state.loading ? 'disabled' : ''}>${state.loading ? 'Reading...' : 'Autoconfig'}</button>
+            </div>
+            ${state.error ? `<p class="section-status state-offline">${escapeHtml(state.error)}</p>` : ''}
+            ${state.message ? `<p class="section-status state-online">${escapeHtml(state.message)}</p>` : ''}
+            ${device.serial_number ? `<p class="section-status">Serial: ${escapeHtml(device.serial_number)} ${device.device_name ? `| Name: ${escapeHtml(device.device_name)}` : ''}</p>` : ''}
+            ${Object.keys(streams).length ? `<div class="stream-grid">${Object.entries(streams).map(([name, stream]) => streamEditor(index, name, stream)).join('')}</div>` : ''}
+            ${sectionSummary ? `<p class="section-status">${escapeHtml(sectionSummary)}</p>` : ''}
+          </div>
+        `;
+      }
+
       function cameraForm(camera, index) {
         const prefix = `camera-${index}`;
         return `
@@ -732,6 +1055,7 @@ INDEX_HTML = r"""<!doctype html>
               <label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record</label>
               <label class="check-row"><input name="${prefix}-low-latency" type="checkbox" ${camera.low_latency !== false ? 'checked' : ''}> Low latency</label>
             </div>
+            ${cameraAutoconfig(index)}
           </div>
         `;
       }
@@ -823,6 +1147,64 @@ INDEX_HTML = r"""<!doctype html>
         grid.innerHTML = cameras.length ? cameras.map(cameraCard).join('') : '<p>No cameras configured yet.</p>';
       }
 
+      function streamSettingsFromEditor(editor) {
+        const settings = { video: {}, audio: {} };
+        editor.querySelectorAll('[data-stream-field]').forEach((field) => {
+          const path = field.dataset.streamField.split('.');
+          const value = field.value.trim();
+          if (!value || value === (field.dataset.original || '')) return;
+          settings[path[0]][path[1]] = value;
+        });
+        return settings;
+      }
+
+      async function loadCameraAutoconfig(index) {
+        config = collectConfig();
+        const camera = config.cameras[index];
+        if (!camera) return;
+        cameraAuto[index] = { loading: true };
+        renderConfig();
+        try {
+          const response = await fetch(panelPath('api/camera-autoconfig'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ camera })
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || 'Could not read camera configuration.');
+          cameraAuto[index] = { data, message: 'Camera configuration loaded.' };
+        } catch (error) {
+          cameraAuto[index] = { error: error.message };
+        }
+        renderConfig();
+      }
+
+      async function saveCameraStream(index, streamName, editor) {
+        config = collectConfig();
+        const camera = config.cameras[index];
+        if (!camera) return;
+        const previous = cameraAuto[index]?.data || null;
+        cameraAuto[index] = { data: previous, message: `Saving ${streamName} stream...` };
+        renderConfig();
+        try {
+          const response = await fetch(panelPath('api/camera-stream-config'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ camera, stream: streamName, settings: streamSettingsFromEditor(editor) })
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || 'Could not save stream configuration.');
+          const next = previous || { streams: {}, device: {}, sections: {} };
+          next.streams = { ...(next.streams || {}), [streamName]: data.stream };
+          cameraAuto[index] = { data: next, message: `${streamName} stream saved.` };
+          await fetch(panelPath('api/refresh'), { method: 'POST' });
+          await loadCameras();
+        } catch (error) {
+          cameraAuto[index] = { data: previous, error: error.message };
+        }
+        renderConfig();
+      }
+
       function showPage(pageName) {
         document.querySelectorAll('[data-page]').forEach((page) => {
           page.hidden = page.dataset.page !== pageName;
@@ -877,6 +1259,19 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);
+
+      form.addEventListener('click', async (event) => {
+        const autoconfigIndex = event.target?.dataset?.autoconfig;
+        if (autoconfigIndex !== undefined) {
+          await loadCameraAutoconfig(Number(autoconfigIndex));
+          return;
+        }
+        const streamName = event.target?.dataset?.saveStream;
+        if (streamName) {
+          const editor = event.target.closest('[data-stream-editor]');
+          await saveCameraStream(Number(event.target.dataset.cameraIndex), streamName, editor);
+        }
+      });
 
       grid.addEventListener('click', async (event) => {
         const id = event.target?.dataset?.live;
@@ -969,6 +1364,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/refresh":
             self.send_json(refresh_status())
             return
+        if parsed.path == "/api/camera-autoconfig":
+            self.camera_autoconfig()
+            return
+        if parsed.path == "/api/camera-stream-config":
+            self.camera_stream_config()
+            return
         self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
     def read_body_json(self) -> dict:
@@ -989,6 +1390,27 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.send_json(payload)
         except (json.JSONDecodeError, OSError, ValueError) as error:
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+
+    def camera_autoconfig(self) -> None:
+        try:
+            payload = self.read_body_json()
+            camera = normalize_camera(payload.get("camera") or {}, 1)
+            self.send_json(fetch_camera_autoconfig(camera))
+        except (json.JSONDecodeError, ET.ParseError, RuntimeError, ValueError) as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+
+    def camera_stream_config(self) -> None:
+        try:
+            payload = self.read_body_json()
+            camera = normalize_camera(payload.get("camera") or {}, 1)
+            stream_name = payload.get("stream") if payload.get("stream") in ("main", "sub") else "sub"
+            settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
+            stream = update_stream_config(camera, stream_name, settings)
+            self.send_json({"stream": stream})
+        except ValueError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        except (json.JSONDecodeError, ET.ParseError, RuntimeError) as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
 
     def serve_snapshot(self, filename: str) -> None:
         safe_name = Path(filename).name

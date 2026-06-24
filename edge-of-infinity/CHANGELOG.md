@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.7
+
+- Add Hikvision ISAPI Autoconfig in Camera Settings.
+- Read device info, stream 101, stream 102, time, video input, network, and image sections when available.
+- Add safe stream editors for main/sub video and audio fields.
+- Save stream changes back to the camera through Digest-authenticated ISAPI PUT requests.
+
 ## 0.4.6
 
 - Replace the default Start Live view with Ingress-safe refreshed JPEG live frames.

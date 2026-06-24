@@ -159,6 +159,29 @@ The older diagnostic MJPEG path is still available:
 
 Both paths use FFmpeg and are stepping stones for testing the live pipeline from the Edge panel. The final low-latency engine should use WebRTC.
 
+## Hikvision Autoconfig
+
+Starting with version `0.4.7`, Camera Settings includes an `Autoconfig` action per camera. It reads Hikvision ISAPI sections through Digest authentication:
+
+```text
+/ISAPI/System/deviceInfo
+/ISAPI/Streaming/channels/101
+/ISAPI/Streaming/channels/102
+/ISAPI/System/time
+/ISAPI/System/Video/inputs/channels
+/ISAPI/System/Network/interfaces
+/ISAPI/Image/channels/1
+```
+
+The panel exposes safe editors for the main and sub stream. Saving writes back only supported stream fields through:
+
+```text
+PUT /ISAPI/Streaming/channels/101
+PUT /ISAPI/Streaming/channels/102
+```
+
+This is the first camera-control layer. Wider image, motion, OSD, and event settings can be added after the stream editor is stable.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.
