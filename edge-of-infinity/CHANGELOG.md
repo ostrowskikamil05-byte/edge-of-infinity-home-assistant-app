@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+- Read app options directly from `/data/options.json` with `jq` to avoid Supervisor API permission errors.
+- Replace the placeholder health server with BusyBox `httpd` for simpler Home Assistant compatibility.
+
 ## 0.1.2
 
 - Replace BusyBox `nc -q` placeholder server with `socat` for Home Assistant base image compatibility.

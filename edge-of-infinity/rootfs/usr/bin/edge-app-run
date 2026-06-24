@@ -1,14 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CONFIG_PATH=/data/options.json
 source /usr/lib/bashio/bashio.sh
 
-LOG_LEVEL="$(bashio::config 'log_level' || echo 'info')"
-API_PORT="$(bashio::config 'api_port' || echo '8088')"
-RECORDINGS_DIR="$(bashio::config 'recordings_dir' || echo '/media/edge-of-infinity/recordings')"
-DATABASE_PATH="$(bashio::config 'database_path' || echo '/config/edge.db')"
-RETENTION_DAYS="$(bashio::config 'retention_days' || echo '14')"
+OPTIONS_PATH=/data/options.json
+
+read_option() {
+  local key="$1"
+  local fallback="$2"
+
+  if [[ -f "${OPTIONS_PATH}" ]]; then
+    jq -er --arg key "${key}" --arg fallback "${fallback}" '.[$key] // $fallback' "${OPTIONS_PATH}" 2>/dev/null || echo "${fallback}"
+  else
+    echo "${fallback}"
+  fi
+}
+
+LOG_LEVEL="$(read_option 'log_level' 'info')"
+API_PORT="$(read_option 'api_port' '8088')"
+RECORDINGS_DIR="$(read_option 'recordings_dir' '/media/edge-of-infinity/recordings')"
+DATABASE_PATH="$(read_option 'database_path' '/config/edge.db')"
+RETENTION_DAYS="$(read_option 'retention_days' '14')"
 
 LOG_LEVEL="${LOG_LEVEL:-info}"
 API_PORT="${API_PORT:-8088}"
@@ -39,6 +51,51 @@ fi
 bashio::log.warning "edge-core binary is not bundled yet."
 bashio::log.warning "Running placeholder HTTP health server for packaging tests."
 
-while true; do
-  socat -T 10 TCP-LISTEN:"${API_PORT}",fork,reuseaddr SYSTEM:'printf "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"ok\",\"product\":\"Edge of Infinity App placeholder\"}\n"'
-done
+mkdir -p /tmp/edge-placeholder
+cat > /tmp/edge-placeholder/index.html <<'EOF'
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Edge of Infinity</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #101418;
+        color: #eaf2f8;
+        font-family: system-ui, sans-serif;
+      }
+      main {
+        width: min(720px, calc(100vw - 32px));
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 32px;
+      }
+      p {
+        color: #9fb3c3;
+        font-size: 16px;
+        line-height: 1.5;
+      }
+      code {
+        color: #8ad7ff;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Edge of Infinity</h1>
+      <p>Home Assistant app shell is running. The real <code>edge-core</code> video engine is not bundled yet.</p>
+    </main>
+  </body>
+</html>
+EOF
+
+cat > /tmp/edge-placeholder/health <<'EOF'
+{"status":"ok","product":"Edge of Infinity App placeholder"}
+EOF
+
+exec httpd -f -p "0.0.0.0:${API_PORT}" -h /tmp/edge-placeholder
