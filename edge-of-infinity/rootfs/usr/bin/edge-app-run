@@ -98,4 +98,4 @@ cat > /tmp/edge-placeholder/health <<'EOF'
 {"status":"ok","product":"Edge of Infinity App placeholder"}
 EOF
 
-exec httpd -f -p "0.0.0.0:${API_PORT}" -h /tmp/edge-placeholder
+exec darkhttpd /tmp/edge-placeholder --addr 0.0.0.0 --port "${API_PORT}"

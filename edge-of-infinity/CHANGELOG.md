@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4
+
+- Use `darkhttpd` for the placeholder web server because the Home Assistant base image does not include `httpd`.
+
 ## 0.1.3
 
 - Read app options directly from `/data/options.json` with `jq` to avoid Supervisor API permission errors.
