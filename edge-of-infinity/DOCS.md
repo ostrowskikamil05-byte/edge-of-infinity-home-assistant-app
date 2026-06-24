@@ -232,6 +232,8 @@ Starting with version `0.4.19`, active live preview uses Edge's own MJPEG multip
 
 Starting with version `0.4.20`, each camera has a separate Live stream selector. Snapshot stream controls still image snapshots, while Live stream controls the MJPEG endpoint. Live defaults to `sub` to avoid accidentally decoding a HEVC/H.265 main stream.
 
+Starting with version `0.4.21`, each MJPEG live attempt writes the selected camera, stream name, and redacted RTSP URL to `/homeassistant/edge/live-*.log`. This helps verify whether Edge is using `sub`/`102` or accidentally receiving a HEVC stream.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.

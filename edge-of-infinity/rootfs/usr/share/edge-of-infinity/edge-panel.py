@@ -31,6 +31,10 @@ def safe_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value or "camera")
 
 
+def redact_rtsp(value: str) -> str:
+    return re.sub(r"(rtsp://[^:/@]+:)[^@]+@", r"\1***@", value or "")
+
+
 def safe_int(value, fallback: int) -> int:
     try:
         return int(value)
@@ -2298,6 +2302,13 @@ class EdgeHandler(BaseHTTPRequestHandler):
         ]
         log_path = HOME_DIR / f"live-{safe_id(camera.get('id') or camera_id)}.log"
         log_file = log_path.open("ab")
+        log_file.write(
+            (
+                f"\n[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] "
+                f"camera={camera.get('id') or camera_id} stream={stream_name} rtsp={redact_rtsp(stream)}\n"
+            ).encode("utf-8")
+        )
+        log_file.flush()
         try:
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log_file)
         except OSError as error:

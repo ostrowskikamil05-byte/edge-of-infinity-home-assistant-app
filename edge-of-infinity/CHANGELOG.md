@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.21
+
+- Add live MJPEG diagnostics showing selected camera, stream, and redacted RTSP URL.
+- Keep the MJPEG live pipeline unchanged while diagnosing HEVC input issues.
+
 ## 0.4.20
 
 - Add a dedicated Live stream selector per camera.
