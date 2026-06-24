@@ -65,6 +65,14 @@ def build_rtsp(explicit: str, host: str, username: str, password: str, channel: 
     return ""
 
 
+def build_dahua_rtsp(explicit: str, host: str, username: str, password: str, subtype: int) -> str:
+    if explicit:
+        return explicit
+    if host and username and password:
+        return f"rtsp://{username}:{password}@{host}:554/cam/realmonitor?channel=1&subtype={subtype}"
+    return ""
+
+
 def normalize_camera(raw: dict, index: int) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     vendor = raw.get("vendor") if raw.get("vendor") in ("hikvision", "dahua", "onvif", "rtsp") else "hikvision"
@@ -80,6 +88,9 @@ def normalize_camera(raw: dict, index: int) -> dict:
     if vendor == "hikvision":
         rtsp_main = build_rtsp(rtsp_main, host, username, password, "101")
         rtsp_sub = build_rtsp(rtsp_sub, host, username, password, "102")
+    elif vendor == "dahua":
+        rtsp_main = build_dahua_rtsp(rtsp_main, host, username, password, 0)
+        rtsp_sub = build_dahua_rtsp(rtsp_sub, host, username, password, 1)
     snapshot_stream = raw.get("snapshot_stream") if raw.get("snapshot_stream") == "main" else "sub"
 
     onvif_url = raw.get("onvif_url") or (f"http://{host}:80/onvif/device_service" if host else "")
@@ -1505,6 +1516,9 @@ INDEX_HTML = r"""<!doctype html>
               <label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record</label>
               <label class="check-row"><input name="${prefix}-low-latency" type="checkbox" ${camera.low_latency !== false ? 'checked' : ''}> Low latency</label>
             </div>
+            <div class="actions">
+              <button type="button" data-build-rtsp="${index}">Build RTSP</button>
+            </div>
           </div>
         `;
       }
@@ -1636,6 +1650,35 @@ INDEX_HTML = r"""<!doctype html>
         config.cameras = config.cameras.filter((_, currentIndex) => currentIndex !== index);
         renderConfig();
         saveState.textContent = 'Camera removed from the form. Click Save cameras to write the change.';
+      }
+
+      function buildRtspForCamera(index) {
+        const prefix = `camera-${index}`;
+        const get = (name) => form.elements[`${prefix}-${name}`];
+        const vendor = get('vendor').value;
+        const host = get('host').value.trim();
+        const username = get('username').value.trim();
+        const password = get('password').value;
+        if (!host || !username || !password) {
+          saveState.textContent = 'Host, username, and password are required to build RTSP URLs.';
+          return;
+        }
+        if (vendor === 'hikvision') {
+          get('rtsp-main').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/101`;
+          get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/102`;
+          get('onvif').value = get('onvif').value || `http://${host}:80/onvif/device_service`;
+          get('isapi').value = get('isapi').value || `http://${host}`;
+          saveState.textContent = 'Hikvision RTSP URLs prepared. Click Save cameras to write them.';
+          return;
+        }
+        if (vendor === 'dahua') {
+          get('rtsp-main').value = `rtsp://${username}:${password}@${host}:554/cam/realmonitor?channel=1&subtype=0`;
+          get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/cam/realmonitor?channel=1&subtype=1`;
+          get('onvif').value = get('onvif').value || `http://${host}:80/onvif/device_service`;
+          saveState.textContent = 'Dahua RTSP URLs prepared. Click Save cameras to write them.';
+          return;
+        }
+        saveState.textContent = 'Generic ONVIF/RTSP cameras need manual RTSP URLs for now.';
       }
 
       function collectEdgeSettings() {
@@ -1903,6 +1946,11 @@ INDEX_HTML = r"""<!doctype html>
         const removeIndex = event.target?.dataset?.removeCamera;
         if (removeIndex !== undefined) {
           removeCamera(Number(removeIndex));
+          return;
+        }
+        const buildRtspIndex = event.target?.dataset?.buildRtsp;
+        if (buildRtspIndex !== undefined) {
+          buildRtspForCamera(Number(buildRtspIndex));
           return;
         }
         const autoconfigIndex = event.target?.dataset?.autoconfig;

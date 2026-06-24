@@ -226,6 +226,8 @@ Starting with version `0.4.16`, active live preview prefers the continuous MJPEG
 
 Starting with version `0.4.17`, Camera Settings can add and remove camera slots directly from the panel. Each camera can choose a vendor: Hikvision, Dahua, ONVIF, or generic RTSP. If a settings save request does not include camera data, the backend preserves the existing camera configuration instead of rejecting the save or overwriting cameras.
 
+Starting with version `0.4.18`, Camera Settings includes a Build RTSP action. Hikvision uses `/Streaming/Channels/101` and `/Streaming/Channels/102`. Dahua uses `/cam/realmonitor?channel=1&subtype=0` and `/cam/realmonitor?channel=1&subtype=1`. ONVIF and generic RTSP cameras keep manual RTSP fields for now.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.

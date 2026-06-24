@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.18
+
+- Add Dahua RTSP URL generation for main and sub streams.
+- Add a Build RTSP action in Camera Settings for Hikvision and Dahua cameras.
+- Keep ONVIF and generic RTSP cameras manual until vendor-specific discovery is added.
+
 ## 0.4.17
 
 - Add Camera Settings controls for adding and removing camera slots.
