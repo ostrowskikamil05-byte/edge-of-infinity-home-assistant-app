@@ -81,3 +81,21 @@ The panel checks `rtsp_main` every 30 seconds and shows:
 - FPS value reported by the stream.
 
 This is not live video yet. It is the first real camera connectivity test before WebRTC live is added.
+
+## Custom Component Auto-Install
+
+Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.
+
+The add-on maps the Home Assistant config folder and writes:
+
+```text
+/homeassistant/custom_components/edge
+```
+
+The option is enabled by default:
+
+```yaml
+install_custom_component: true
+```
+
+After the add-on updates this folder, restart Home Assistant Core so the integration reloads.

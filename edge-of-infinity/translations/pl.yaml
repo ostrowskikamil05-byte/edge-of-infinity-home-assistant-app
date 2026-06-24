@@ -14,5 +14,8 @@ configuration:
   retention_days:
     name: Dni retencji
     description: Liczba dni przechowywania nagran.
+  install_custom_component:
+    name: Instaluj custom component
+    description: Automatycznie instaluj lub aktualizuj /homeassistant/custom_components/edge przy starcie aplikacji.
 network:
   8088/TCP: API Edge Core i interfejs webowy

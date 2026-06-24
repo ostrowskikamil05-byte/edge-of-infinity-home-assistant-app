@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.3.1"
+version: "0.3.2"
 slug: edge_of_infinity
 description: Private low-latency live NVR core for Hikvision and ONVIF cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -24,6 +24,9 @@ ports:
 ports_description:
   8088/tcp: Edge Core API and web interface
 map:
+  - type: homeassistant_config
+    read_only: false
+    path: /homeassistant
   - type: addon_config
     read_only: false
     path: /config
@@ -36,12 +39,14 @@ options:
   recordings_dir: /media/edge-of-infinity/recordings
   database_path: /config/edge.db
   retention_days: 14
+  install_custom_component: true
 schema:
   log_level: list(trace|debug|info|notice|warning|error|fatal)
   api_port: port
   recordings_dir: str
   database_path: str
   retention_days: int(1,365)
+  install_custom_component: bool
 backup: hot
 backup_exclude:
   - /media/edge-of-infinity/recordings

@@ -14,5 +14,8 @@ configuration:
   retention_days:
     name: Retention days
     description: Number of days to keep recordings.
+  install_custom_component:
+    name: Install custom component
+    description: Automatically install or update /homeassistant/custom_components/edge when the app starts.
 network:
   8088/TCP: Edge Core API and web interface

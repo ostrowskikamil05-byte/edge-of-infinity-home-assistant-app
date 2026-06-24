@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Polacz Edge of Infinity",
+        "description": "Podaj adres aplikacji Edge of Infinity. Uzyj lokalnego adresu add-onu albo wystawionego adresu API.",
+        "data": {
+          "url": "Adres Edge",
+          "api_key": "Klucz API"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Nie mozna polaczyc sie z Edge of Infinity",
+      "invalid_auth": "Nieprawidlowy klucz API",
+      "invalid_url": "Nieprawidlowy adres URL",
+      "unknown": "Nieoczekiwany blad"
+    },
+    "abort": {
+      "already_configured": "Edge of Infinity jest juz skonfigurowany"
+    }
+  }
+}

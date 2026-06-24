@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Edge of Infinity",
+        "description": "Enter the Edge of Infinity app URL. Use the add-on local URL or the exposed API URL.",
+        "data": {
+          "url": "Edge URL",
+          "api_key": "API key"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to Edge of Infinity",
+      "invalid_auth": "Invalid API key",
+      "invalid_url": "Invalid URL",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Edge of Infinity is already configured"
+    }
+  }
+}

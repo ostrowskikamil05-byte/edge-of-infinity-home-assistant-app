@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- Bundle the `edge` Home Assistant custom component inside the add-on image.
+- Add `homeassistant_config` mapping so the add-on can install or update `/homeassistant/custom_components/edge`.
+- Add `install_custom_component` option, enabled by default.
+
 ## 0.3.1
 
 - Expose port `8088` by default so the Home Assistant custom component can connect to the add-on through `http://HOME_ASSISTANT_IP:8088`.
