@@ -257,12 +257,6 @@ generate_camera_status() {
 }
 
 generate_camera_status
-(
-  while true; do
-    sleep 30
-    generate_camera_status || true
-  done
-) &
 
 cat > /tmp/edge-placeholder/index.html <<'EOF'
 <!doctype html>
@@ -440,7 +434,7 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
       <section class="grid" id="camera-grid"></section>
 
       <section class="notice">
-        <p>Edit <code>/homeassistant/edge/edge.json</code> in File Editor to set your real Hikvision IPs, usernames, passwords, and RTSP URLs. In Home Assistant File Editor this is shown as <code>/config/edge/edge.json</code>. Set <code>enabled</code> to <code>true</code> for each real camera. This shell probes RTSP every 30 seconds; WebRTC live comes next.</p>
+        <p>Edit <code>/homeassistant/edge/edge.json</code> in File Editor to set your real Hikvision IPs, usernames, passwords, and RTSP URLs. In Home Assistant File Editor this is shown as <code>/config/edge/edge.json</code>. Set <code>enabled</code> to <code>true</code> for each real camera. This shell probes RTSP once at add-on start; WebRTC live comes next.</p>
       </section>
     </main>
     <script>
@@ -485,8 +479,6 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
         .catch(() => {
           grid.innerHTML = '<p>Could not load camera configuration.</p>';
         });
-
-      setInterval(() => window.location.reload(), 30000);
     </script>
   </body>
 </html>

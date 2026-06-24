@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.7
+
+- Stop auto-refreshing the sidebar page every 30 seconds.
+- Run the temporary RTSP probe only once on add-on start, until the real live engine is bundled.
+
 ## 0.3.6
 
 - Move the default database path to `/homeassistant/edge/edge.db` so user-facing files live under the Home Assistant config tree.

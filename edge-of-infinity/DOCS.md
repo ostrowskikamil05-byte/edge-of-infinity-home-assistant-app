@@ -103,14 +103,14 @@ For each camera:
 "enabled": true
 ```
 
-The panel checks `rtsp_main` every 30 seconds and shows:
+The panel checks `rtsp_main` once when the add-on starts and shows:
 
 - online/offline/disabled status,
 - codec,
 - resolution,
 - FPS value reported by the stream.
 
-This is not live video yet. It is the first real camera connectivity test before WebRTC live is added.
+This is not live video yet. It is the first real camera connectivity test before WebRTC live is added. Restart the add-on when you want to rerun the temporary probe.
 
 ## Custom Component Auto-Install
 
