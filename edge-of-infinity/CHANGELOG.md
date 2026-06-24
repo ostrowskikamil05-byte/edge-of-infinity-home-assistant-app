@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.16
+
+- Prefer continuous MJPEG for active live preview instead of repeated JPEG frame reloads.
+- Stop the grid refresh timer when MJPEG live is active.
+- Keep JPEG frames available as a fallback live engine in Edge Settings.
+
 ## 0.4.15
 
 - Turn Edge Settings into an editable panel form.
