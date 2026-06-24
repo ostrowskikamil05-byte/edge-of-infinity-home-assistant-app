@@ -228,6 +228,8 @@ Starting with version `0.4.17`, Camera Settings can add and remove camera slots 
 
 Starting with version `0.4.18`, Camera Settings includes a Build RTSP action. Hikvision uses `/Streaming/Channels/101` and `/Streaming/Channels/102`. Dahua uses `/cam/realmonitor?channel=1&subtype=0` and `/cam/realmonitor?channel=1&subtype=1`. ONVIF and generic RTSP cameras keep manual RTSP fields for now.
 
+Starting with version `0.4.19`, active live preview uses Edge's own MJPEG multipart response. JPEG remains for snapshots, not active live. If MJPEG fails, FFmpeg errors are written under `/homeassistant/edge/live-*.log`.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.19
+
+- Rework MJPEG live output to use Edge's own multipart stream writer.
+- Keep JPEG only for snapshots while active live uses MJPEG.
+- Write MJPEG FFmpeg errors to `/homeassistant/edge/live-*.log` for diagnostics.
+
 ## 0.4.18
 
 - Add Dahua RTSP URL generation for main and sub streams.
@@ -17,7 +23,7 @@
 
 - Prefer continuous MJPEG for active live preview instead of repeated JPEG frame reloads.
 - Stop the grid refresh timer when MJPEG live is active.
-- Keep JPEG frames available as a fallback live engine in Edge Settings.
+- Keep JPEG snapshots separate from the active live path.
 
 ## 0.4.15
 

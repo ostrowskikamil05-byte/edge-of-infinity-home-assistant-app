@@ -134,7 +134,7 @@ def normalize_config(payload: dict) -> dict:
             "retention_days": safe_int(storage.get("retention_days"), 14),
         },
         "live": {
-            "engine": live.get("engine") or "mjpeg",
+            "engine": live.get("engine") if live.get("engine") in ("mjpeg", "webrtc_next") else "mjpeg",
             "frame_interval_ms": safe_int(live.get("frame_interval_ms"), 1200),
         },
         "cameras": normalized,
@@ -1347,15 +1347,11 @@ INDEX_HTML = r"""<!doctype html>
         const audioCodec = camera.audio_codec
           ? `${camera.audio_codec}${camera.audio_sample_rate ? ` ${camera.audio_sample_rate}Hz` : ''}${camera.audio_channels ? ` ${camera.audio_channels}ch` : ''}`
           : 'none';
-        const liveEngine = config.live?.engine || 'mjpeg';
         const liveStream = camera.snapshot_stream || 'sub';
-        const liveFrameUrl = panelPath(`live-frame/${encodeURIComponent(liveKey)}.jpg?camera_index=${encodeURIComponent(camera.index ?? 0)}&stream=${encodeURIComponent(liveStream)}&t=${Date.now()}`);
         const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveKey)}.mjpg?camera_index=${encodeURIComponent(camera.index ?? 0)}&stream=${encodeURIComponent(liveStream)}&t=${Date.now()}`);
-        const liveUrl = liveEngine === 'jpeg' ? liveFrameUrl : liveMjpegUrl;
-        const liveMode = liveEngine === 'jpeg' ? 'JPEG live' : 'MJPEG live';
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         const preview = live[liveKey]
-          ? `<img src="${liveUrl}" alt="${escapeHtml(text(camera.name, camera.id))} ${liveMode}" onerror="this.outerHTML='<span>Live stream failed. Check logs.</span>'">`
+          ? `<img src="${liveMjpegUrl}" alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live" onerror="this.outerHTML='<span>MJPEG live failed. Check /homeassistant/edge/live-*.log.</span>'">`
           : camera.snapshot_url
             ? `<img src="${panelPath(`${camera.snapshot_url}?t=${Date.now()}`)}" alt="${escapeHtml(text(camera.name, camera.id))} snapshot">`
             : `<span>${online ? 'RTSP reachable' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
@@ -1376,7 +1372,7 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="metric"><b>Bitrate</b><span>${escapeHtml(bitrateText(camera.bitrate))}</span></div>
               </div>
               <div class="actions">
-                <button data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" ${online ? '' : 'disabled'}>${live[liveKey] ? 'Stop live' : `Start ${liveEngine === 'jpeg' ? 'JPEG' : 'MJPEG'} live`}</button>
+                <button data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" ${online ? '' : 'disabled'}>${live[liveKey] ? 'Stop live' : 'Start MJPEG live'}</button>
               </div>
             </div>
           </article>
@@ -1566,12 +1562,12 @@ INDEX_HTML = r"""<!doctype html>
             <h2>Live Preview</h2>
             <div class="form-grid">
               <label>Engine<select name="live-engine">
-                <option value="jpeg" ${liveConfig.engine === 'jpeg' ? 'selected' : ''}>JPEG frames</option>
                 <option value="mjpeg" ${liveConfig.engine === 'mjpeg' ? 'selected' : ''}>MJPEG preview</option>
                 <option value="webrtc_next" ${liveConfig.engine === 'webrtc_next' ? 'selected' : ''}>WebRTC next</option>
               </select></label>
-              <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}"></label>
+              <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label>
             </div>
+            <p class="notice">JPEG remains for snapshots. Active live uses the MJPEG stream endpoint.</p>
           </section>
         `;
       }
@@ -1835,20 +1831,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function updateLiveTimer() {
-        const hasLive = Object.values(live).some(Boolean);
-        const liveEngine = config.live?.engine || 'mjpeg';
-        if (liveEngine !== 'jpeg') {
-          if (liveTimer) {
-            window.clearInterval(liveTimer);
-            liveTimer = null;
-          }
-          return;
-        }
-        if (hasLive && !liveTimer) {
-          const interval = Math.min(10000, Math.max(250, Number(config.live?.frame_interval_ms || 1200)));
-          liveTimer = window.setInterval(() => loadCameras(), interval);
-        }
-        if (!hasLive && liveTimer) {
+        if (liveTimer) {
           window.clearInterval(liveTimer);
           liveTimer = null;
         }
@@ -2293,35 +2276,55 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "-an",
             "-vf",
             "fps=10",
-            "-c:v",
+            "-vcodec",
             "mjpeg",
             "-q:v",
             "5",
             "-flush_packets",
             "1",
             "-f",
-            "mpjpeg",
+            "image2pipe",
             "-",
         ]
+        log_path = HOME_DIR / f"live-{safe_id(camera.get('id') or camera_id)}.log"
+        log_file = log_path.open("ab")
         try:
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log_file)
         except OSError as error:
+            log_file.close()
             self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
+        finally:
+            log_file.close()
 
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=ffmpeg")
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=edgeframe")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
         try:
             assert process.stdout is not None
+            buffer = b""
             while True:
                 chunk = process.stdout.read(16384)
                 if not chunk:
                     break
-                self.wfile.write(chunk)
-                self.wfile.flush()
+                buffer += chunk
+                while True:
+                    start = buffer.find(b"\xff\xd8")
+                    if start > 0:
+                        buffer = buffer[start:]
+                    end = buffer.find(b"\xff\xd9")
+                    if start == -1 or end == -1:
+                        break
+                    frame = buffer[: end + 2]
+                    buffer = buffer[end + 2 :]
+                    self.wfile.write(b"--edgeframe\r\n")
+                    self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                    self.wfile.write(f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii"))
+                    self.wfile.write(frame)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
