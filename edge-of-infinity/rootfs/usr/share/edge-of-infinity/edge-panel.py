@@ -107,6 +107,24 @@ def normalize_config(payload: dict) -> dict:
     }
 
 
+def camera_from_payload(payload: dict) -> dict:
+    raw_camera = payload.get("camera") if isinstance(payload.get("camera"), dict) else {}
+    config = load_config()
+    stored_camera = {}
+    camera_index = payload.get("index")
+    if isinstance(camera_index, int) and 0 <= camera_index < len(config.get("cameras", [])):
+        stored_camera = config["cameras"][camera_index]
+    elif str(camera_index).isdigit():
+        index = int(str(camera_index))
+        if 0 <= index < len(config.get("cameras", [])):
+            stored_camera = config["cameras"][index]
+    if not stored_camera and raw_camera.get("id"):
+        stored_camera = next((item for item in config.get("cameras", []) if item.get("id") == raw_camera.get("id")), {})
+
+    merged = {**stored_camera, **{key: value for key, value in raw_camera.items() if value not in ("", None)}}
+    return normalize_camera(merged, int(camera_index) + 1 if str(camera_index).isdigit() else 1)
+
+
 def preset_key(camera: dict) -> str:
     return camera.get("host") or camera.get("rtsp_main") or camera.get("id") or camera.get("name") or ""
 
@@ -1252,7 +1270,7 @@ INDEX_HTML = r"""<!doctype html>
           const response = await fetch(panelPath('api/camera-autoconfig'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ camera })
+            body: JSON.stringify({ index, camera })
           });
           const data = await response.json();
           if (!response.ok) throw new Error(data.error || 'Could not read camera configuration.');
@@ -1276,7 +1294,7 @@ INDEX_HTML = r"""<!doctype html>
           const response = await fetch(panelPath('api/camera-stream-config'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ camera, stream: streamName, settings: streamSettingsFromEditor(editor) })
+            body: JSON.stringify({ index, camera, stream: streamName, settings: streamSettingsFromEditor(editor) })
           });
           const data = await response.json();
           if (!response.ok) throw new Error(data.error || 'Could not save stream configuration.');
@@ -1480,7 +1498,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def camera_autoconfig(self) -> None:
         try:
             payload = self.read_body_json()
-            camera = normalize_camera(payload.get("camera") or {}, 1)
+            camera = camera_from_payload(payload)
             self.send_json(fetch_camera_autoconfig(camera))
         except (json.JSONDecodeError, ET.ParseError, RuntimeError, ValueError) as error:
             self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
@@ -1488,7 +1506,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def camera_stream_config(self) -> None:
         try:
             payload = self.read_body_json()
-            camera = normalize_camera(payload.get("camera") or {}, 1)
+            camera = camera_from_payload(payload)
             stream_name = payload.get("stream") if payload.get("stream") in ("main", "sub") else "sub"
             settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
             stream = update_stream_config(camera, stream_name, settings)

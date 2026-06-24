@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.10
+
+- Fix Autoconfig fallback when the panel request does not include `host` or `isapi_base_url`.
+- Merge camera settings from the saved `/homeassistant/edge/edge.json` slot before calling Hikvision ISAPI.
+- Send the camera slot index for Autoconfig and stream writes.
+
 ## 0.4.9
 
 - Use curl `--anyauth` for Hikvision ISAPI so the camera can negotiate Basic or Digest authentication.

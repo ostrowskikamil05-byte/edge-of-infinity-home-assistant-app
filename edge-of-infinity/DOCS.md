@@ -200,6 +200,8 @@ Network -> Advanced Settings -> Integration Protocol
 
 Enable ISAPI/Hikvision-CGI support if the camera firmware exposes that option, then confirm the HTTP port and camera user permissions.
 
+Starting with version `0.4.10`, Autoconfig also merges the clicked camera slot with the saved `/homeassistant/edge/edge.json` camera entry. This prevents `isapi_base_url_missing` when the panel request does not include the host or ISAPI URL.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.
