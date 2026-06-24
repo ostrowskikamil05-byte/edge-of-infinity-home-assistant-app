@@ -17,5 +17,77 @@ configuration:
   install_custom_component:
     name: Install custom component
     description: Automatically install or update /homeassistant/custom_components/edge when the app starts.
+  hikvision_1_enabled:
+    name: Camera 1 enabled
+    description: Enables the first Hikvision camera in Edge.
+  hikvision_1_name:
+    name: Camera 1 name
+    description: Name of the first camera in Edge and Home Assistant.
+  hikvision_1_host:
+    name: Camera 1 IP address
+    description: IP address of the first Hikvision camera.
+  hikvision_1_username:
+    name: Camera 1 username
+    description: Username for the first camera.
+  hikvision_1_password:
+    name: Camera 1 password
+    description: Password for the first camera.
+  hikvision_1_rtsp_main:
+    name: Camera 1 RTSP main
+    description: Optional main RTSP URL. When empty, Edge builds the standard Hikvision 101 path.
+  hikvision_1_rtsp_sub:
+    name: Camera 1 RTSP sub
+    description: Optional sub RTSP URL. When empty, Edge builds the standard Hikvision 102 path.
+  hikvision_1_onvif_url:
+    name: Camera 1 ONVIF URL
+    description: Optional ONVIF URL for the first camera.
+  hikvision_1_isapi_base_url:
+    name: Camera 1 ISAPI URL
+    description: Optional ISAPI base URL for the first camera.
+  hikvision_1_record:
+    name: Camera 1 recording
+    description: Marks the first camera as ready for recording.
+  hikvision_1_low_latency:
+    name: Camera 1 low latency
+    description: Prefer low-latency mode for the first camera.
+  hikvision_1_snapshot_stream:
+    name: Camera 1 snapshot stream
+    description: Selects the snapshot stream, sub or main.
+  hikvision_2_enabled:
+    name: Camera 2 enabled
+    description: Enables the second Hikvision camera in Edge.
+  hikvision_2_name:
+    name: Camera 2 name
+    description: Name of the second camera in Edge and Home Assistant.
+  hikvision_2_host:
+    name: Camera 2 IP address
+    description: IP address of the second Hikvision camera.
+  hikvision_2_username:
+    name: Camera 2 username
+    description: Username for the second camera.
+  hikvision_2_password:
+    name: Camera 2 password
+    description: Password for the second camera.
+  hikvision_2_rtsp_main:
+    name: Camera 2 RTSP main
+    description: Optional main RTSP URL. When empty, Edge builds the standard Hikvision 101 path.
+  hikvision_2_rtsp_sub:
+    name: Camera 2 RTSP sub
+    description: Optional sub RTSP URL. When empty, Edge builds the standard Hikvision 102 path.
+  hikvision_2_onvif_url:
+    name: Camera 2 ONVIF URL
+    description: Optional ONVIF URL for the second camera.
+  hikvision_2_isapi_base_url:
+    name: Camera 2 ISAPI URL
+    description: Optional ISAPI base URL for the second camera.
+  hikvision_2_record:
+    name: Camera 2 recording
+    description: Marks the second camera as ready for recording.
+  hikvision_2_low_latency:
+    name: Camera 2 low latency
+    description: Prefer low-latency mode for the second camera.
+  hikvision_2_snapshot_stream:
+    name: Camera 2 snapshot stream
+    description: Selects the snapshot stream, sub or main.
 network:
   8088/TCP: Edge Core API and web interface

@@ -10,7 +10,7 @@ read_option() {
   local fallback="$2"
 
   if [[ -f "${OPTIONS_PATH}" ]]; then
-    jq -er --arg key "${key}" --arg fallback "${fallback}" '.[$key] // $fallback' "${OPTIONS_PATH}" 2>/dev/null || echo "${fallback}"
+    jq -r --arg key "${key}" --arg fallback "${fallback}" '.[$key] // $fallback' "${OPTIONS_PATH}" 2>/dev/null || echo "${fallback}"
   else
     echo "${fallback}"
   fi
@@ -39,6 +39,7 @@ mkdir -p "$(dirname "${DATABASE_PATH}")"
 mkdir -p /config
 mkdir -p /homeassistant/edge
 mkdir -p /homeassistant/edge/snapshots
+mkdir -p /tmp/edge-runtime
 
 install_custom_component() {
   local source_dir="/usr/share/edge-of-infinity/custom_components/edge"
@@ -65,6 +66,172 @@ install_custom_component() {
   bashio::log.info "Installed Home Assistant custom component at ${target_dir}"
 }
 
+option_has_value() {
+  local key="$1"
+  local value
+
+  value="$(read_option "${key}" "")"
+  [[ -n "${value}" && "${value}" != "null" ]]
+}
+
+has_addon_camera_options() {
+  option_has_value "hikvision_1_host" ||
+    option_has_value "hikvision_1_rtsp_main" ||
+    option_has_value "hikvision_2_host" ||
+    option_has_value "hikvision_2_rtsp_main"
+}
+
+default_if_empty() {
+  local value="$1"
+  local fallback="$2"
+
+  if [[ -n "${value}" && "${value}" != "null" ]]; then
+    echo "${value}"
+  else
+    echo "${fallback}"
+  fi
+}
+
+build_hikvision_rtsp() {
+  local explicit="$1"
+  local host="$2"
+  local username="$3"
+  local password="$4"
+  local channel="$5"
+
+  if [[ -n "${explicit}" && "${explicit}" != "null" ]]; then
+    echo "${explicit}"
+  elif [[ -n "${host}" && -n "${username}" && -n "${password}" ]]; then
+    echo "rtsp://${username}:${password}@${host}:554/Streaming/Channels/${channel}"
+  else
+    echo ""
+  fi
+}
+
+write_addon_options_config() {
+  local output="$1"
+  local camera1_name camera1_host camera1_username camera1_password
+  local camera1_rtsp_main camera1_rtsp_sub camera1_onvif camera1_isapi
+  local camera1_enabled camera1_record camera1_low_latency camera1_snapshot_stream
+  local camera2_name camera2_host camera2_username camera2_password
+  local camera2_rtsp_main camera2_rtsp_sub camera2_onvif camera2_isapi
+  local camera2_enabled camera2_record camera2_low_latency camera2_snapshot_stream
+
+  camera1_name="$(read_option 'hikvision_1_name' 'Hikvision 1')"
+  camera1_host="$(read_option 'hikvision_1_host' '')"
+  camera1_username="$(read_option 'hikvision_1_username' 'admin')"
+  camera1_password="$(read_option 'hikvision_1_password' '')"
+  camera1_enabled="$(read_option 'hikvision_1_enabled' 'false')"
+  camera1_record="$(read_option 'hikvision_1_record' 'true')"
+  camera1_low_latency="$(read_option 'hikvision_1_low_latency' 'true')"
+  camera1_snapshot_stream="$(read_option 'hikvision_1_snapshot_stream' 'sub')"
+  camera1_rtsp_main="$(build_hikvision_rtsp "$(read_option 'hikvision_1_rtsp_main' '')" "${camera1_host}" "${camera1_username}" "${camera1_password}" "101")"
+  camera1_rtsp_sub="$(build_hikvision_rtsp "$(read_option 'hikvision_1_rtsp_sub' '')" "${camera1_host}" "${camera1_username}" "${camera1_password}" "102")"
+  camera1_onvif="$(read_option 'hikvision_1_onvif_url' '')"
+  camera1_isapi="$(read_option 'hikvision_1_isapi_base_url' '')"
+  if [[ -n "${camera1_host}" ]]; then
+    camera1_onvif="$(default_if_empty "${camera1_onvif}" "http://${camera1_host}:80/onvif/device_service")"
+    camera1_isapi="$(default_if_empty "${camera1_isapi}" "http://${camera1_host}")"
+  fi
+
+  camera2_name="$(read_option 'hikvision_2_name' 'Hikvision 2')"
+  camera2_host="$(read_option 'hikvision_2_host' '')"
+  camera2_username="$(read_option 'hikvision_2_username' 'admin')"
+  camera2_password="$(read_option 'hikvision_2_password' '')"
+  camera2_enabled="$(read_option 'hikvision_2_enabled' 'false')"
+  camera2_record="$(read_option 'hikvision_2_record' 'true')"
+  camera2_low_latency="$(read_option 'hikvision_2_low_latency' 'true')"
+  camera2_snapshot_stream="$(read_option 'hikvision_2_snapshot_stream' 'sub')"
+  camera2_rtsp_main="$(build_hikvision_rtsp "$(read_option 'hikvision_2_rtsp_main' '')" "${camera2_host}" "${camera2_username}" "${camera2_password}" "101")"
+  camera2_rtsp_sub="$(build_hikvision_rtsp "$(read_option 'hikvision_2_rtsp_sub' '')" "${camera2_host}" "${camera2_username}" "${camera2_password}" "102")"
+  camera2_onvif="$(read_option 'hikvision_2_onvif_url' '')"
+  camera2_isapi="$(read_option 'hikvision_2_isapi_base_url' '')"
+  if [[ -n "${camera2_host}" ]]; then
+    camera2_onvif="$(default_if_empty "${camera2_onvif}" "http://${camera2_host}:80/onvif/device_service")"
+    camera2_isapi="$(default_if_empty "${camera2_isapi}" "http://${camera2_host}")"
+  fi
+
+  jq -n \
+    --arg listen "0.0.0.0:${API_PORT}" \
+    --arg recordings_dir "${RECORDINGS_DIR}" \
+    --arg database_path "${DATABASE_PATH}" \
+    --arg retention_days "${RETENTION_DAYS}" \
+    --arg camera1_name "${camera1_name}" \
+    --arg camera1_host "${camera1_host}" \
+    --arg camera1_username "${camera1_username}" \
+    --arg camera1_password "${camera1_password}" \
+    --arg camera1_rtsp_main "${camera1_rtsp_main}" \
+    --arg camera1_rtsp_sub "${camera1_rtsp_sub}" \
+    --arg camera1_onvif "${camera1_onvif}" \
+    --arg camera1_isapi "${camera1_isapi}" \
+    --arg camera1_enabled "${camera1_enabled}" \
+    --arg camera1_record "${camera1_record}" \
+    --arg camera1_low_latency "${camera1_low_latency}" \
+    --arg camera1_snapshot_stream "${camera1_snapshot_stream}" \
+    --arg camera2_name "${camera2_name}" \
+    --arg camera2_host "${camera2_host}" \
+    --arg camera2_username "${camera2_username}" \
+    --arg camera2_password "${camera2_password}" \
+    --arg camera2_rtsp_main "${camera2_rtsp_main}" \
+    --arg camera2_rtsp_sub "${camera2_rtsp_sub}" \
+    --arg camera2_onvif "${camera2_onvif}" \
+    --arg camera2_isapi "${camera2_isapi}" \
+    --arg camera2_enabled "${camera2_enabled}" \
+    --arg camera2_record "${camera2_record}" \
+    --arg camera2_low_latency "${camera2_low_latency}" \
+    --arg camera2_snapshot_stream "${camera2_snapshot_stream}" \
+    '{
+      server: {
+        listen: $listen,
+        public_url: ""
+      },
+      storage: {
+        recordings_dir: $recordings_dir,
+        database_path: $database_path,
+        retention_days: ($retention_days | tonumber)
+      },
+      cameras: [
+        {
+          id: "hikvision_1",
+          name: $camera1_name,
+          vendor: "hikvision",
+          host: $camera1_host,
+          username: $camera1_username,
+          password: $camera1_password,
+          rtsp_main: $camera1_rtsp_main,
+          rtsp_sub: $camera1_rtsp_sub,
+          onvif_url: $camera1_onvif,
+          isapi_base_url: $camera1_isapi,
+          enabled: ($camera1_enabled == "true"),
+          record: ($camera1_record == "true"),
+          low_latency: ($camera1_low_latency == "true"),
+          snapshot_stream: (if $camera1_snapshot_stream == "main" then "main" else "sub" end)
+        },
+        {
+          id: "hikvision_2",
+          name: $camera2_name,
+          vendor: "hikvision",
+          host: $camera2_host,
+          username: $camera2_username,
+          password: $camera2_password,
+          rtsp_main: $camera2_rtsp_main,
+          rtsp_sub: $camera2_rtsp_sub,
+          onvif_url: $camera2_onvif,
+          isapi_base_url: $camera2_isapi,
+          enabled: ($camera2_enabled == "true"),
+          record: ($camera2_record == "true"),
+          low_latency: ($camera2_low_latency == "true"),
+          snapshot_stream: (if $camera2_snapshot_stream == "main" then "main" else "sub" end)
+        }
+      ],
+      future_vendors: [
+        "dahua",
+        "onvif",
+        "rtsp"
+      ]
+    }' > "${output}"
+}
+
 bashio::log.info "Starting Edge of Infinity"
 bashio::log.info "Log level: ${LOG_LEVEL}"
 bashio::log.info "API port: ${API_PORT}"
@@ -79,6 +246,7 @@ EDGE_HOME_CONFIG=/homeassistant/edge/edge.json
 EDGE_HOME_EXAMPLE_CONFIG=/homeassistant/edge/edge.example.json
 EDGE_ADDON_CONFIG=/config/edge.json
 EDGE_ADDON_EXAMPLE_CONFIG=/config/edge.example.json
+EDGE_OPTIONS_CONFIG=/tmp/edge-runtime/edge.options.json
 
 cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
 {
@@ -134,7 +302,11 @@ cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
 EOF
 cp "${EDGE_HOME_EXAMPLE_CONFIG}" "${EDGE_ADDON_EXAMPLE_CONFIG}"
 
-if [[ -f "${EDGE_HOME_CONFIG}" ]]; then
+if has_addon_camera_options; then
+  EDGE_CONFIG="${EDGE_OPTIONS_CONFIG}"
+  write_addon_options_config "${EDGE_CONFIG}"
+  bashio::log.info "Using camera config from Home Assistant add-on options."
+elif [[ -f "${EDGE_HOME_CONFIG}" ]]; then
   EDGE_CONFIG="${EDGE_HOME_CONFIG}"
   bashio::log.info "Using Home Assistant camera config at ${EDGE_CONFIG}"
 elif [[ -f "${EDGE_ADDON_CONFIG}" ]]; then
@@ -471,7 +643,7 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
       <section class="grid" id="camera-grid"></section>
 
       <section class="notice">
-        <p>Edit <code>/homeassistant/edge/edge.json</code> in File Editor to set your real Hikvision IPs, usernames, passwords, and RTSP URLs. In Home Assistant File Editor this is shown as <code>/config/edge/edge.json</code>. Set <code>enabled</code> to <code>true</code> for each real camera. This shell probes RTSP once at add-on start; WebRTC live comes next.</p>
+        <p>Configure Hikvision cameras in the Edge of Infinity add-on options. Set the camera host, username, password, enabled flag, and snapshot stream there. The old <code>/homeassistant/edge/edge.json</code> file still works as a fallback. This shell probes RTSP once at add-on start; WebRTC live comes next.</p>
       </section>
     </main>
     <script>

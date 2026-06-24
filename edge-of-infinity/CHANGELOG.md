@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+- Add Home Assistant add-on options for two Hikvision cameras.
+- Let add-on options configure host, credentials, RTSP URLs, ONVIF/ISAPI URLs, recording, low-latency mode, and `snapshot_stream`.
+- Auto-build standard Hikvision RTSP URLs from host, username, and password when RTSP fields are left empty.
+- Prefer add-on camera options over `/homeassistant/edge/edge.json`, while keeping the JSON file as a fallback.
+- Fix option parsing so explicit `false` values stay false.
+
 ## 0.4.0
 
 - Capture one RTSP snapshot per online camera when the add-on starts.

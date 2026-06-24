@@ -16,7 +16,11 @@ This app runs Edge Core and exposes the Edge web UI through Home Assistant Ingre
 
 ## First Configuration
 
-Create an Edge Core config at:
+Use the Edge of Infinity add-on options page as the preferred camera configuration UI. The add-on exposes two Hikvision camera slots with host, credentials, RTSP main/sub, ONVIF/ISAPI, recording, low-latency, and snapshot stream settings.
+
+If RTSP main/sub are left empty, Edge builds the standard Hikvision paths from host, username, and password.
+
+The legacy fallback config is:
 
 ```text
 /homeassistant/edge/edge.json

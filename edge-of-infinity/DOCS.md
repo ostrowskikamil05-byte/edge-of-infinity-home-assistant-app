@@ -56,6 +56,27 @@ Recordings are excluded from normal app backup by default.
 
 ## Camera Configuration
 
+The preferred configuration path is now the Home Assistant add-on options page. Configure each Hikvision camera there:
+
+- enabled,
+- name,
+- host,
+- username,
+- password,
+- optional RTSP main/sub URLs,
+- optional ONVIF/ISAPI URLs,
+- recording and low-latency flags,
+- `snapshot_stream` as `sub` or `main`.
+
+When `host`, `username`, and `password` are set but RTSP fields are empty, Edge builds the standard Hikvision paths automatically:
+
+```text
+/Streaming/Channels/101
+/Streaming/Channels/102
+```
+
+The JSON file below is still supported as a fallback for older installs and manual recovery.
+
 On first start, the app creates:
 
 ```text
@@ -91,7 +112,7 @@ Edit the IP address, username, password, RTSP URLs, ONVIF URL, and ISAPI base UR
 "enabled": true
 ```
 
-Restart the app to refresh the current shell panel. The real video engine will use the same file once `edge-core` is bundled.
+Restart the app to refresh the current shell panel. The real video engine will use the same effective camera config once `edge-core` is bundled.
 
 ## RTSP Probe Shell
 
