@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3
+
+- Fix Home Assistant Ingress JSON loading by using relative panel API paths.
+- Add a left sidebar with Home, NVR, Camera Settings, Edge Settings, and Account sections.
+- Add navigation icons for each sidebar section.
+- Move camera previews to the Home section.
+- Add an NVR section shell with recording toggles and a timeline placeholder.
+- Add Edge settings and account security placeholders for the next implementation steps.
+
 ## 0.4.2
 
 - Replace the static sidebar page with a lightweight Python panel server.
