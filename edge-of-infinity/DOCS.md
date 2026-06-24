@@ -143,13 +143,21 @@ This is not live video yet. It is the first real camera connectivity test before
 
 ## Experimental Live Preview
 
-Starting with version `0.4.2`, the panel includes a first live preview path:
+Starting with version `0.4.6`, the panel uses refreshed JPEG live frames by default:
+
+```text
+/live-frame/<camera_id>.jpg
+```
+
+This avoids browser and Home Assistant Ingress problems with multipart MJPEG. When `Start live` is enabled, the panel keeps requesting fresh frames from the selected `sub` or `main` RTSP stream.
+
+The older diagnostic MJPEG path is still available:
 
 ```text
 /live/<camera_id>.mjpg
 ```
 
-This uses FFmpeg to expose an MJPEG preview from the configured RTSP stream. It is useful for testing the live pipeline from the Edge panel, but it is not the final low-latency WebRTC engine.
+Both paths use FFmpeg and are stepping stones for testing the live pipeline from the Edge panel. The final low-latency engine should use WebRTC.
 
 ## Custom Component Auto-Install
 

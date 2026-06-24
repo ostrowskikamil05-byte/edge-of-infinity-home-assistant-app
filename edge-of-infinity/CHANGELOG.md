@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.6
+
+- Replace the default Start Live view with Ingress-safe refreshed JPEG live frames.
+- Add `/live-frame/<camera_id>.jpg` for browser-compatible live preview frames.
+- Keep MJPEG stream code available for diagnostics, but avoid using it as the default UI path.
+
 ## 0.4.5
 
 - Add saved camera presets at `/homeassistant/edge/camera-presets.json`.

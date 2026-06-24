@@ -208,9 +208,7 @@ def run_json(command: list[str], timeout: int) -> dict | None:
 
 
 def capture_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
-    stream = camera.get("rtsp_main") if camera.get("snapshot_stream") == "main" else camera.get("rtsp_sub")
-    if not stream:
-        stream = camera.get("rtsp_main")
+    stream = camera_stream(camera, camera.get("snapshot_stream") or "sub")
     if not stream:
         return "", ""
 
@@ -239,6 +237,53 @@ def capture_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
         return "", ""
     shutil.copyfile(data_path, home_path)
     return f"snapshots/{target_id}.jpg", f"snapshots/{target_id}.jpg"
+
+
+def camera_stream(camera: dict, stream_name: str) -> str:
+    stream = camera.get("rtsp_main") if stream_name == "main" else camera.get("rtsp_sub")
+    return stream or camera.get("rtsp_main") or ""
+
+
+def capture_live_frame(camera: dict, stream_name: str) -> bytes:
+    stream = camera_stream(camera, stream_name)
+    if not stream:
+        raise ValueError("rtsp_not_configured")
+
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-rtsp_transport",
+        "tcp",
+        "-i",
+        stream,
+        "-an",
+        "-frames:v",
+        "1",
+        "-q:v",
+        "5",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "-",
+    ]
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8, check=False)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("live_frame_timeout") from error
+    except OSError as error:
+        raise RuntimeError(str(error)) from error
+
+    if result.returncode != 0 or not result.stdout:
+        detail = result.stderr.decode("utf-8", errors="replace").strip() or "live_frame_failed"
+        raise RuntimeError(detail[-500:])
+    return result.stdout
 
 
 def refresh_status() -> dict:
@@ -585,6 +630,7 @@ INDEX_HTML = r"""<!doctype html>
       let config = { cameras: [] };
       let live = {};
       let presets = [];
+      let liveTimer = null;
 
       const panelBase = window.location.pathname.endsWith('/')
         ? window.location.pathname
@@ -612,9 +658,9 @@ INDEX_HTML = r"""<!doctype html>
         const audioCodec = camera.audio_codec
           ? `${camera.audio_codec}${camera.audio_sample_rate ? ` ${camera.audio_sample_rate}Hz` : ''}${camera.audio_channels ? ` ${camera.audio_channels}ch` : ''}`
           : 'none';
-        const liveUrl = panelPath(`live/${encodeURIComponent(camera.id)}.mjpg?stream=${encodeURIComponent(camera.snapshot_stream || 'sub')}&t=${Date.now()}`);
+        const liveUrl = panelPath(`live-frame/${encodeURIComponent(camera.id)}.jpg?stream=${encodeURIComponent(camera.snapshot_stream || 'sub')}&t=${Date.now()}`);
         const preview = live[camera.id]
-          ? `<img src="${liveUrl}" alt="${escapeHtml(text(camera.name, camera.id))} live">`
+          ? `<img src="${liveUrl}" alt="${escapeHtml(text(camera.name, camera.id))} live" onerror="this.outerHTML='<span>Live frame failed. Check logs.</span>'">`
           : camera.snapshot_url
             ? `<img src="${panelPath(`${camera.snapshot_url}?t=${Date.now()}`)}" alt="${escapeHtml(text(camera.name, camera.id))} snapshot">`
             : `<span>${online ? 'RTSP reachable' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
@@ -786,6 +832,17 @@ INDEX_HTML = r"""<!doctype html>
         });
       }
 
+      function updateLiveTimer() {
+        const hasLive = Object.values(live).some(Boolean);
+        if (hasLive && !liveTimer) {
+          liveTimer = window.setInterval(() => loadCameras(), 1200);
+        }
+        if (!hasLive && liveTimer) {
+          window.clearInterval(liveTimer);
+          liveTimer = null;
+        }
+      }
+
       document.querySelectorAll('[data-page-target]').forEach((button) => {
         button.addEventListener('click', () => showPage(button.dataset.pageTarget));
       });
@@ -825,6 +882,7 @@ INDEX_HTML = r"""<!doctype html>
         const id = event.target?.dataset?.live;
         if (!id) return;
         live[id] = !live[id];
+        updateLiveTimer();
         await loadCameras();
       });
 
@@ -894,6 +952,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path.startswith("/snapshots/"):
             self.serve_snapshot(path.removeprefix("/snapshots/"))
             return
+        if path.startswith("/live-frame/") and path.endswith(".jpg"):
+            self.serve_live_frame(path, parse_qs(parsed.query))
+            return
         if path.startswith("/live/") and path.endswith(".mjpg"):
             self.serve_live(path, parse_qs(parsed.query))
             return
@@ -939,6 +1000,21 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         self.send_bytes(path.read_bytes(), "image/jpeg")
 
+    def serve_live_frame(self, path: str, query: dict[str, list[str]]) -> None:
+        camera_id = path.removeprefix("/live-frame/").removesuffix(".jpg")
+        stream_name = (query.get("stream") or ["sub"])[0]
+        config = load_config()
+        camera = next((item for item in config.get("cameras", []) if item.get("id") == camera_id), None)
+        if not camera:
+            self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+        try:
+            self.send_bytes(capture_live_frame(camera, stream_name), "image/jpeg")
+        except ValueError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        except RuntimeError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+
     def serve_live(self, path: str, query: dict[str, list[str]]) -> None:
         camera_id = path.removeprefix("/live/").removesuffix(".mjpg")
         stream_name = (query.get("stream") or ["sub"])[0]
@@ -948,9 +1024,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
             return
 
-        stream = camera.get("rtsp_main") if stream_name == "main" else camera.get("rtsp_sub")
-        if not stream:
-            stream = camera.get("rtsp_main")
+        stream = camera_stream(camera, stream_name)
         if not stream:
             self.send_json({"error": "rtsp_not_configured"}, HTTPStatus.BAD_REQUEST)
             return
