@@ -1,6 +1,6 @@
 FROM ghcr.io/home-assistant/base:latest
 
-ARG BUILD_VERSION=0.1.0
+ARG BUILD_VERSION=0.1.2
 ARG BUILD_ARCH=amd64
 
 LABEL \
@@ -10,6 +10,7 @@ LABEL \
 
 COPY rootfs /
 
+RUN apk add --no-cache socat
 RUN chmod a+x /usr/bin/edge-app-run
 
 CMD [ "/usr/bin/edge-app-run" ]

@@ -40,11 +40,5 @@ bashio::log.warning "edge-core binary is not bundled yet."
 bashio::log.warning "Running placeholder HTTP health server for packaging tests."
 
 while true; do
-  {
-    printf 'HTTP/1.1 200 OK\r\n'
-    printf 'Content-Type: application/json\r\n'
-    printf 'Connection: close\r\n'
-    printf '\r\n'
-    printf '{"status":"ok","product":"Edge of Infinity App placeholder"}\n'
-  } | nc -l -p "${API_PORT}" -q 1
+  socat -T 10 TCP-LISTEN:"${API_PORT}",fork,reuseaddr SYSTEM:'printf "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"ok\",\"product\":\"Edge of Infinity App placeholder\"}\n"'
 done

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Replace BusyBox `nc -q` placeholder server with `socat` for Home Assistant base image compatibility.
+
 ## 0.1.1
 
 - Fix startup option loading by reading `/data/options.json` through Bashio.
