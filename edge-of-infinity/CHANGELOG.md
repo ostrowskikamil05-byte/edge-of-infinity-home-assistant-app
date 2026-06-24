@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.12
+
+- Park the visible Autoconfig UI so Camera Settings returns to the main camera connection workflow.
+- Add first NVR recording controls backed by FFmpeg segment recording.
+- Add recording start, stop, and status APIs.
+- Show recording PID, segment count, and output directory in the NVR panel.
+
 ## 0.4.11
 
 - Add a hamburger navigation toggle for the left panel.

@@ -24,6 +24,7 @@ PRESETS_PATH = HOME_DIR / "camera-presets.json"
 PORT = int(os.environ.get("API_PORT", "8088"))
 SNAPSHOT_DIR = HOME_DIR / "snapshots"
 DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
+RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
 
 
 def safe_id(value: str) -> str:
@@ -303,6 +304,111 @@ def capture_live_frame(camera: dict, stream_name: str) -> bytes:
         detail = result.stderr.decode("utf-8", errors="replace").strip() or "live_frame_failed"
         raise RuntimeError(detail[-500:])
     return result.stdout
+
+
+def recording_key(camera: dict, index: int) -> str:
+    return f"{safe_id(camera.get('id') or 'camera')}_{index}"
+
+
+def cleanup_recording_processes() -> None:
+    for key, process in list(RECORDING_PROCESSES.items()):
+        if process.poll() is not None:
+            RECORDING_PROCESSES.pop(key, None)
+
+
+def recording_base_dir(camera: dict, index: int) -> Path:
+    config = load_config()
+    storage = config.get("storage") or {}
+    recordings_dir = Path(storage.get("recordings_dir") or "/media/edge-of-infinity/recordings")
+    return recordings_dir / safe_id(camera.get("id") or f"camera_{index + 1}")
+
+
+def recording_status_payload(config: dict | None = None) -> dict:
+    cleanup_recording_processes()
+    config = config or load_config()
+    cameras = []
+    for index, camera in enumerate(config.get("cameras", [])):
+        key = recording_key(camera, index)
+        process = RECORDING_PROCESSES.get(key)
+        directory = recording_base_dir(camera, index)
+        segment_count = len(list(directory.glob("*.mp4"))) if directory.exists() else 0
+        cameras.append(
+            {
+                "index": index,
+                "id": camera.get("id"),
+                "key": key,
+                "recording": bool(process and process.poll() is None),
+                "pid": process.pid if process and process.poll() is None else None,
+                "directory": str(directory),
+                "segments": segment_count,
+            }
+        )
+    return {"cameras": cameras}
+
+
+def start_recording(camera: dict, index: int) -> dict:
+    cleanup_recording_processes()
+    key = recording_key(camera, index)
+    existing = RECORDING_PROCESSES.get(key)
+    if existing and existing.poll() is None:
+        return {"started": False, "status": "already_recording", "key": key, "pid": existing.pid}
+
+    stream = camera_stream(camera, "main")
+    if not stream:
+        raise ValueError("rtsp_not_configured")
+
+    directory = recording_base_dir(camera, index)
+    directory.mkdir(parents=True, exist_ok=True)
+    log_path = directory / "ffmpeg.log"
+    output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-rtsp_transport",
+        "tcp",
+        "-i",
+        stream,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c",
+        "copy",
+        "-f",
+        "segment",
+        "-segment_time",
+        "60",
+        "-reset_timestamps",
+        "1",
+        "-strftime",
+        "1",
+        output_pattern,
+    ]
+    log_file = log_path.open("ab")
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=log_file)
+    except OSError:
+        raise
+    finally:
+        log_file.close()
+    RECORDING_PROCESSES[key] = process
+    return {"started": True, "status": "recording", "key": key, "pid": process.pid, "directory": str(directory)}
+
+
+def stop_recording(camera: dict, index: int) -> dict:
+    cleanup_recording_processes()
+    key = recording_key(camera, index)
+    process = RECORDING_PROCESSES.pop(key, None)
+    if not process or process.poll() is not None:
+        return {"stopped": False, "status": "not_recording", "key": key}
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    return {"stopped": True, "status": "stopped", "key": key}
 
 
 def isapi_base(camera: dict) -> str:
@@ -1043,6 +1149,7 @@ INDEX_HTML = r"""<!doctype html>
       let presets = [];
       let liveTimer = null;
       let cameraAuto = {};
+      let recordingStatus = {};
 
       const panelBase = window.location.pathname.endsWith('/')
         ? window.location.pathname
@@ -1143,19 +1250,24 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function nvrCard(camera, index) {
+        const status = recordingStatus[index] || {};
+        const isRecording = Boolean(status.recording);
         return `
           <article class="camera">
             <div class="body">
               <div class="row">
                 <div class="name">${escapeHtml(text(camera.name, `Camera ${index + 1}`))}</div>
-                <div class="vendor">${camera.record !== false ? 'RECORD' : 'OFF'}</div>
+                <div class="vendor">${isRecording ? 'REC' : 'READY'}</div>
               </div>
               <div class="meta">
                 <div class="metric"><b>Host</b><span>${escapeHtml(text(camera.host))}</span></div>
-                <div class="metric"><b>Status</b><span>${camera.record !== false ? 'recording enabled' : 'recording disabled'}</span></div>
+                <div class="metric"><b>Status</b><span class="${isRecording ? 'state-online' : ''}">${isRecording ? 'recording' : 'stopped'}</span></div>
+                <div class="metric"><b>Segments</b><span>${escapeHtml(text(status.segments, '0'))}</span></div>
+                <div class="metric"><b>PID</b><span>${escapeHtml(text(status.pid, 'none'))}</span></div>
               </div>
+              <p class="notice">${escapeHtml(text(status.directory, 'Recording directory will appear after start.'))}</p>
               <div class="actions">
-                <button data-record-toggle="${index}">${camera.record !== false ? 'Disable recording' : 'Enable recording'}</button>
+                <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}">${isRecording ? 'Stop recording' : 'Start recording'}</button>
                 <button disabled>Rewind</button>
                 <button disabled>Forward</button>
               </div>
@@ -1245,7 +1357,6 @@ INDEX_HTML = r"""<!doctype html>
               <label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record</label>
               <label class="check-row"><input name="${prefix}-low-latency" type="checkbox" ${camera.low_latency !== false ? 'checked' : ''}> Low latency</label>
             </div>
-            ${cameraAutoconfig(index)}
           </div>
         `;
       }
@@ -1335,6 +1446,16 @@ INDEX_HTML = r"""<!doctype html>
         const data = await response.json();
         const cameras = Array.isArray(data.cameras) ? data.cameras : [];
         grid.innerHTML = cameras.length ? cameras.map(cameraCard).join('') : '<p>No cameras configured yet.</p>';
+      }
+
+      async function loadRecordingStatus() {
+        const response = await fetch(panelPath('api/recording/status'), { cache: 'no-store' });
+        const data = await response.json();
+        recordingStatus = {};
+        (Array.isArray(data.cameras) ? data.cameras : []).forEach((item) => {
+          recordingStatus[item.index] = item;
+        });
+        renderConfig();
       }
 
       function streamSettingsFromEditor(editor) {
@@ -1494,25 +1615,30 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       nvrGrid.addEventListener('click', async (event) => {
-        const index = event.target?.dataset?.recordToggle;
-        if (index === undefined) return;
-        const camera = config.cameras[Number(index)];
-        if (!camera) return;
-        camera.record = camera.record === false;
-        renderConfig();
-        const response = await fetch(panelPath('api/config'), {
+        const index = event.target?.dataset?.recordIndex;
+        const action = event.target?.dataset?.recordAction;
+        if (index === undefined || !action) return;
+        const response = await fetch(panelPath(`api/recording/${action}`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(config)
+          body: JSON.stringify({ index: Number(index) })
         });
-        config = await response.json();
-        renderConfig();
+        const data = await response.json();
+        if (!response.ok) {
+          saveState.textContent = data.error || 'Recording action failed.';
+        }
+        await loadRecordingStatus();
         await loadCameras();
       });
 
       restoreNavState();
 
-      Promise.all([loadConfig(), loadPresets(), loadCameras()]).catch((error) => {
+      async function boot() {
+        await loadConfig();
+        await Promise.all([loadPresets(), loadCameras(), loadRecordingStatus()]);
+      }
+
+      boot().catch((error) => {
         grid.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
       });
     </script>
@@ -1554,6 +1680,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/presets":
             self.send_json({"presets": load_presets()})
             return
+        if path == "/api/recording/status":
+            self.send_json(recording_status_payload())
+            return
         if path == "/cameras.json":
             payload = read_json(DATA_DIR / "cameras.json", {"cameras": []})
             self.send_json(payload)
@@ -1583,6 +1712,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/camera-stream-config":
             self.camera_stream_config()
+            return
+        if parsed.path == "/api/recording/start":
+            self.recording_action("start")
+            return
+        if parsed.path == "/api/recording/stop":
+            self.recording_action("stop")
             return
         self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
@@ -1624,6 +1759,20 @@ class EdgeHandler(BaseHTTPRequestHandler):
         except ValueError as error:
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         except (json.JSONDecodeError, ET.ParseError, RuntimeError) as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+
+    def recording_action(self, action: str) -> None:
+        try:
+            payload = self.read_body_json()
+            camera = camera_from_payload(payload)
+            index = int(payload.get("index", 0))
+            if action == "start":
+                self.send_json(start_recording(camera, index))
+            else:
+                self.send_json(stop_recording(camera, index))
+        except ValueError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        except (json.JSONDecodeError, OSError, RuntimeError) as error:
             self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
 
     def serve_snapshot(self, filename: str) -> None:

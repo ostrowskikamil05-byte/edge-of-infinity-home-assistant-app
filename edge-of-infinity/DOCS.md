@@ -206,6 +206,16 @@ Starting with version `0.4.10`, Autoconfig also merges the clicked camera slot w
 
 Starting with version `0.4.11`, the left navigation includes a hamburger toggle. On desktop it collapses the sidebar to icon-only mode. On phone and tablet layouts it hides or reveals the navigation menu above the panel content.
 
+## NVR Recording
+
+Starting with version `0.4.12`, the NVR page can start and stop FFmpeg segment recording per camera. Segments are written under:
+
+```text
+/media/edge-of-infinity/recordings/<camera_id>
+```
+
+This first recorder copies the RTSP stream without transcoding and creates 60-second MP4 segments. Playback timeline controls will attach to these segments in the next NVR steps.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.
