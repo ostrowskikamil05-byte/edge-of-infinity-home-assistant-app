@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.13
+
+- Add recent recording segment listing to the NVR page.
+- Serve recorded MP4 files safely through the panel with browser range support.
+- Add an in-panel video player for recorded segments.
+- Add a Refresh NVR action without requiring a Home Assistant restart.
+
 ## 0.4.12
 
 - Park the visible Autoconfig UI so Camera Settings returns to the main camera connection workflow.

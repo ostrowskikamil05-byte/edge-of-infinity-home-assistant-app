@@ -323,6 +323,26 @@ def recording_base_dir(camera: dict, index: int) -> Path:
     return recordings_dir / safe_id(camera.get("id") or f"camera_{index + 1}")
 
 
+def recording_segments(camera: dict, index: int, limit: int = 24) -> list[dict]:
+    directory = recording_base_dir(camera, index)
+    if not directory.exists():
+        return []
+    key = recording_key(camera, index)
+    files = sorted(directory.glob("*.mp4"), key=lambda item: item.stat().st_mtime, reverse=True)
+    segments = []
+    for path in files[:limit]:
+        stat = path.stat()
+        segments.append(
+            {
+                "name": path.name,
+                "url": f"recordings/{key}/{path.name}",
+                "size_bytes": stat.st_size,
+                "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(stat.st_mtime)),
+            }
+        )
+    return segments
+
+
 def recording_status_payload(config: dict | None = None) -> dict:
     cleanup_recording_processes()
     config = config or load_config()
@@ -332,6 +352,7 @@ def recording_status_payload(config: dict | None = None) -> dict:
         process = RECORDING_PROCESSES.get(key)
         directory = recording_base_dir(camera, index)
         segment_count = len(list(directory.glob("*.mp4"))) if directory.exists() else 0
+        segment_files = recording_segments(camera, index)
         cameras.append(
             {
                 "index": index,
@@ -341,6 +362,7 @@ def recording_status_payload(config: dict | None = None) -> dict:
                 "pid": process.pid if process and process.poll() is None else None,
                 "directory": str(directory),
                 "segments": segment_count,
+                "files": segment_files,
             }
         )
     return {"cameras": cameras}
@@ -991,6 +1013,40 @@ INDEX_HTML = r"""<!doctype html>
         background: repeating-linear-gradient(90deg, rgba(86,214,181,.18), rgba(86,214,181,.18) 3px, transparent 3px, transparent 54px), rgba(0,0,0,.16);
         margin-top: 12px;
       }
+      .recording-player {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        display: block;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #05080a;
+        margin-top: 12px;
+      }
+      .recording-list {
+        display: grid;
+        gap: 7px;
+        margin-top: 12px;
+      }
+      .recording-item {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px;
+        background: rgba(0,0,0,.14);
+      }
+      .recording-item button {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        text-align: left;
+      }
+      .recording-meta {
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
       code { color: var(--accent); overflow-wrap: anywhere; }
       @media (max-width: 820px) {
         .app { grid-template-columns: 1fr; }
@@ -1060,7 +1116,10 @@ INDEX_HTML = r"""<!doctype html>
           <header>
             <div>
               <h1>NVR</h1>
-              <p>Recording control and playback timeline. Real segments come next.</p>
+              <p>Recording control, recent segments, and local playback.</p>
+            </div>
+            <div class="toolbar">
+              <button class="primary" id="refresh-nvr">Refresh NVR</button>
             </div>
           </header>
           <section class="panel">
@@ -1069,7 +1128,7 @@ INDEX_HTML = r"""<!doctype html>
           </section>
           <section class="panel">
             <h2>Timeline</h2>
-            <p>Playback, rewind, and forward controls will attach here when recording segments are enabled.</p>
+            <p>Recorded MP4 segments are available inside each camera card. The full rewind/forward timeline will build on these files.</p>
             <div class="timeline"></div>
           </section>
         </section>
@@ -1150,6 +1209,7 @@ INDEX_HTML = r"""<!doctype html>
       let liveTimer = null;
       let cameraAuto = {};
       let recordingStatus = {};
+      let selectedRecording = {};
 
       const panelBase = window.location.pathname.endsWith('/')
         ? window.location.pathname
@@ -1209,6 +1269,22 @@ INDEX_HTML = r"""<!doctype html>
         return `${Math.round(numeric / 1000)} kbps`;
       }
 
+      function formatBytes(value) {
+        const numeric = Number(value || 0);
+        if (!numeric) return '0 B';
+        if (numeric >= 1073741824) return `${(numeric / 1073741824).toFixed(2)} GB`;
+        if (numeric >= 1048576) return `${(numeric / 1048576).toFixed(1)} MB`;
+        if (numeric >= 1024) return `${Math.round(numeric / 1024)} KB`;
+        return `${numeric} B`;
+      }
+
+      function formatDate(value) {
+        if (!value) return 'unknown';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return value;
+        return date.toLocaleString();
+      }
+
       function cameraCard(camera) {
         const online = camera.status === 'online';
         const stateClass = online ? 'state-online' : `state-${text(camera.status)}`;
@@ -1252,6 +1328,19 @@ INDEX_HTML = r"""<!doctype html>
       function nvrCard(camera, index) {
         const status = recordingStatus[index] || {};
         const isRecording = Boolean(status.recording);
+        const files = Array.isArray(status.files) ? status.files : [];
+        const selected = selectedRecording[index] || '';
+        const player = selected
+          ? `<video class="recording-player" src="${escapeHtml(panelPath(selected))}" controls preload="metadata"></video>`
+          : '';
+        const recordingList = files.length
+          ? `<div class="recording-list">${files.map((file) => `
+              <div class="recording-item">
+                <button type="button" data-play-recording="${escapeHtml(file.url)}" data-record-index="${index}">${escapeHtml(file.name)}</button>
+                <span class="recording-meta">${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatDate(file.modified_at))}</span>
+              </div>
+            `).join('')}</div>`
+          : '<p class="notice">No segments yet. Start recording and refresh after the first 60-second segment is closed.</p>';
         return `
           <article class="camera">
             <div class="body">
@@ -1271,6 +1360,8 @@ INDEX_HTML = r"""<!doctype html>
                 <button disabled>Rewind</button>
                 <button disabled>Forward</button>
               </div>
+              ${player}
+              ${recordingList}
             </div>
           </article>
         `;
@@ -1567,6 +1658,10 @@ INDEX_HTML = r"""<!doctype html>
         await loadCameras();
       });
 
+      document.getElementById('refresh-nvr').addEventListener('click', async () => {
+        await loadRecordingStatus();
+      });
+
       document.getElementById('save-config').addEventListener('click', async () => {
         const payload = collectConfig();
         if (!hasMeaningfulCameras(payload)) {
@@ -1616,6 +1711,12 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('click', async (event) => {
         const index = event.target?.dataset?.recordIndex;
+        const playRecording = event.target?.dataset?.playRecording;
+        if (index !== undefined && playRecording) {
+          selectedRecording[index] = playRecording;
+          renderConfig();
+          return;
+        }
         const action = event.target?.dataset?.recordAction;
         if (index === undefined || !action) return;
         const response = await fetch(panelPath(`api/recording/${action}`), {
@@ -1695,6 +1796,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/live/") and path.endswith(".mjpg"):
             self.serve_live(path, parse_qs(parsed.query))
+            return
+        if path.startswith("/recordings/") and path.endswith(".mp4"):
+            self.serve_recording(path)
             return
 
         self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
@@ -1807,6 +1911,73 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         except RuntimeError as error:
             self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+
+    def serve_recording(self, request_path: str) -> None:
+        parts = request_path.removeprefix("/recordings/").split("/", 1)
+        if len(parts) != 2:
+            self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+        key, filename = parts
+        safe_name = Path(filename).name
+        if not safe_name.endswith(".mp4"):
+            self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+
+        config = load_config()
+        target = None
+        for index, camera in enumerate(config.get("cameras", [])):
+            if recording_key(camera, index) == key:
+                target = recording_base_dir(camera, index) / safe_name
+                break
+
+        if target is None or not target.exists():
+            self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+
+        file_size = target.stat().st_size
+        if file_size <= 0:
+            self.send_json({"error": "recording_empty"}, HTTPStatus.NOT_FOUND)
+            return
+
+        range_header = self.headers.get("Range", "")
+        start = 0
+        end = file_size - 1
+        status = HTTPStatus.OK
+
+        if range_header.startswith("bytes="):
+            requested = range_header.removeprefix("bytes=").split("-", 1)
+            try:
+                start = int(requested[0]) if requested[0] else 0
+                end = int(requested[1]) if len(requested) > 1 and requested[1] else file_size - 1
+                start = max(0, min(start, file_size - 1))
+                end = max(start, min(end, file_size - 1))
+                status = HTTPStatus.PARTIAL_CONTENT
+            except ValueError:
+                self.send_json({"error": "invalid_range"}, HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                return
+
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        with target.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+                remaining -= len(chunk)
 
     def serve_live(self, path: str, query: dict[str, list[str]]) -> None:
         camera_id = path.removeprefix("/live/").removesuffix(".mjpg")

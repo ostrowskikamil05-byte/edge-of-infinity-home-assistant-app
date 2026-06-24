@@ -216,6 +216,8 @@ Starting with version `0.4.12`, the NVR page can start and stop FFmpeg segment r
 
 This first recorder copies the RTSP stream without transcoding and creates 60-second MP4 segments. Playback timeline controls will attach to these segments in the next NVR steps.
 
+Starting with version `0.4.13`, the NVR page lists recent MP4 segments per camera and can play them directly in the panel. The segment endpoint supports browser range requests so video playback and seeking can work without exposing the raw media folder.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.
