@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+- Capture one RTSP snapshot per online camera when the add-on starts.
+- Show camera snapshots in the Edge sidebar shell when available.
+- Expose snapshot paths in `cameras.json` for the Home Assistant camera entities.
+- Add per-camera `snapshot_stream` selection: `sub` by default or `main` for full-quality snapshots.
+
 ## 0.3.7
 
 - Stop auto-refreshing the sidebar page every 30 seconds.

@@ -51,6 +51,21 @@ class EdgeClient:
             "Local Edge files were not found. Start the Edge of Infinity add-on first."
         )
 
+    def _read_local_bytes(self, filename: str) -> bytes:
+        """Read a binary file mirrored by the Edge add-on."""
+        relative_path = Path(filename)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise EdgeConnectionError("Invalid local Edge file path.")
+
+        paths = (
+            Path("/config/edge") / relative_path,
+            Path("/homeassistant/edge") / relative_path,
+        )
+        for path in paths:
+            if path.exists():
+                return path.read_bytes()
+        raise EdgeConnectionError("Local Edge snapshot was not found.")
+
     async def _request(
         self,
         method: str,
@@ -105,3 +120,19 @@ class EdgeClient:
             if isinstance(cameras, list):
                 return cameras
         return []
+
+    async def camera_image(self, camera: dict[str, Any]) -> bytes | None:
+        """Return the latest camera snapshot image."""
+        snapshot_path = camera.get("snapshot_path") or ""
+        snapshot_url = camera.get("snapshot_url") or ""
+
+        if self.is_local:
+            if not snapshot_path:
+                return None
+            return self._read_local_bytes(snapshot_path)
+
+        if not snapshot_url:
+            return None
+
+        path = snapshot_url if snapshot_url.startswith("/") else f"/{snapshot_url}"
+        return await self._request("GET", path, expect_json=False)

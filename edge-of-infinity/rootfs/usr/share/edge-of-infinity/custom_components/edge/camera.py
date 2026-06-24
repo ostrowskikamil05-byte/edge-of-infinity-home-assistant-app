@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .client import EdgeClientError
 from .const import DOMAIN
 from .coordinator import EdgeCoordinator
 
@@ -68,6 +69,9 @@ class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
             "codec": camera.get("codec"),
             "resolution": _resolution(camera),
             "fps": camera.get("fps"),
+            "snapshot_stream": camera.get("snapshot_stream"),
+            "snapshot_path": camera.get("snapshot_path"),
+            "snapshot_url": camera.get("snapshot_url"),
             "low_latency": camera.get("low_latency"),
             "record": camera.get("record"),
         }
@@ -78,7 +82,10 @@ class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
         height: int | None = None,
     ) -> bytes | None:
         """Return camera snapshot image."""
-        return None
+        try:
+            return await self.coordinator.client.camera_image(self._camera())
+        except EdgeClientError:
+            return None
 
 
 def _resolution(camera: dict[str, Any]) -> str | None:

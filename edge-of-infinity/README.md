@@ -46,4 +46,4 @@ This package currently contains the Home Assistant app shell. The actual Edge Co
 
 The shell creates `/homeassistant/edge/edge.json` with two Hikvision camera slots so the app can be configured for multiple cameras before the real engine is bundled.
 
-Enabled cameras are probed through `rtsp_main` once when the add-on starts. This verifies camera connectivity before WebRTC live is implemented without refreshing the sidebar page.
+Enabled cameras are probed through `rtsp_main` once when the add-on starts. The shell also captures one JPEG snapshot through the per-camera `snapshot_stream` setting, either `sub` or `main`. This verifies camera connectivity before WebRTC live is implemented without refreshing the sidebar page.

@@ -38,6 +38,7 @@ mkdir -p "${RECORDINGS_DIR}"
 mkdir -p "$(dirname "${DATABASE_PATH}")"
 mkdir -p /config
 mkdir -p /homeassistant/edge
+mkdir -p /homeassistant/edge/snapshots
 
 install_custom_component() {
   local source_dir="/usr/share/edge-of-infinity/custom_components/edge"
@@ -104,7 +105,8 @@ cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
       "isapi_base_url": "http://192.168.1.64",
       "enabled": false,
       "record": true,
-      "low_latency": true
+      "low_latency": true,
+      "snapshot_stream": "sub"
     },
     {
       "id": "hikvision_2",
@@ -119,7 +121,8 @@ cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
       "isapi_base_url": "http://192.168.1.65",
       "enabled": false,
       "record": true,
-      "low_latency": true
+      "low_latency": true,
+      "snapshot_stream": "sub"
     }
   ],
   "future_vendors": [
@@ -157,6 +160,7 @@ bashio::log.warning "edge-core binary is not bundled yet."
 bashio::log.warning "Running RTSP probe shell until the video engine is bundled."
 
 mkdir -p /tmp/edge-placeholder
+mkdir -p /tmp/edge-placeholder/snapshots
 
 cat > /tmp/edge-placeholder/health <<'EOF'
 {"status":"ok","product":"Edge of Infinity App placeholder","mode":"rtsp-probe-shell"}
@@ -172,8 +176,8 @@ generate_camera_status() {
 
   if jq -e '.cameras' "${EDGE_CONFIG}" >/dev/null 2>&1; then
     while IFS= read -r camera; do
-      local id name vendor host enabled record low_latency rtsp
-      local status detail codec width height fps
+      local id name vendor host enabled record low_latency snapshot_stream rtsp rtsp_sub snapshot_rtsp
+      local status detail codec width height fps safe_id snapshot_url snapshot_path
       id="$(jq -r '.id // "unknown"' <<< "${camera}")"
       name="$(jq -r '.name // .id // "Unknown camera"' <<< "${camera}")"
       vendor="$(jq -r '.vendor // "rtsp"' <<< "${camera}")"
@@ -181,7 +185,19 @@ generate_camera_status() {
       enabled="$(jq -r '.enabled // false' <<< "${camera}")"
       record="$(jq -r '.record // false' <<< "${camera}")"
       low_latency="$(jq -r '.low_latency // false' <<< "${camera}")"
+      snapshot_stream="$(jq -r '.snapshot_stream // "sub"' <<< "${camera}")"
       rtsp="$(jq -r '.rtsp_main // ""' <<< "${camera}")"
+      rtsp_sub="$(jq -r '.rtsp_sub // ""' <<< "${camera}")"
+      if [[ "${snapshot_stream}" == "main" ]]; then
+        snapshot_rtsp="${rtsp}"
+      else
+        snapshot_stream="sub"
+        snapshot_rtsp="${rtsp_sub}"
+        if [[ -z "${snapshot_rtsp}" || "${snapshot_rtsp}" == "null" ]]; then
+          snapshot_rtsp="${rtsp}"
+        fi
+      fi
+      safe_id="$(printf '%s' "${id}" | tr -c 'A-Za-z0-9_.-' '_')"
 
       status="disabled"
       detail="Camera is configured but disabled."
@@ -189,6 +205,8 @@ generate_camera_status() {
       width=""
       height=""
       fps=""
+      snapshot_url=""
+      snapshot_path=""
 
       if [[ "${enabled}" == "true" ]]; then
         if [[ -z "${rtsp}" || "${rtsp}" == "null" ]]; then
@@ -205,6 +223,12 @@ generate_camera_status() {
             width="$(jq -r '.streams[0].width // ""' <<< "${probe_json}")"
             height="$(jq -r '.streams[0].height // ""' <<< "${probe_json}")"
             fps="$(jq -r '.streams[0].r_frame_rate // ""' <<< "${probe_json}")"
+            local tmp_snapshot="/tmp/edge-placeholder/snapshots/${safe_id}.jpg"
+            if timeout 10 ffmpeg -rtsp_transport tcp -y -i "${snapshot_rtsp}" -frames:v 1 -q:v 4 "${tmp_snapshot}" >/dev/null 2>&1; then
+              cp "${tmp_snapshot}" "/homeassistant/edge/snapshots/${safe_id}.jpg"
+              snapshot_url="snapshots/${safe_id}.jpg"
+              snapshot_path="snapshots/${safe_id}.jpg"
+            fi
           else
             status="offline"
             detail="$(head -c 180 "${err}" | tr '\r\n' ' ')"
@@ -227,12 +251,15 @@ generate_camera_status() {
         --arg enabled "${enabled}" \
         --arg record "${record}" \
         --arg low_latency "${low_latency}" \
+        --arg snapshot_stream "${snapshot_stream}" \
         --arg status "${status}" \
         --arg detail "${detail}" \
         --arg codec "${codec}" \
         --arg width "${width}" \
         --arg height "${height}" \
         --arg fps "${fps}" \
+        --arg snapshot_url "${snapshot_url}" \
+        --arg snapshot_path "${snapshot_path}" \
         '{
           id: $id,
           name: $name,
@@ -241,12 +268,15 @@ generate_camera_status() {
           enabled: ($enabled == "true"),
           record: ($record == "true"),
           low_latency: ($low_latency == "true"),
+          snapshot_stream: $snapshot_stream,
           status: $status,
           detail: $detail,
           codec: $codec,
           width: $width,
           height: $height,
-          fps: $fps
+          fps: $fps,
+          snapshot_url: $snapshot_url,
+          snapshot_path: $snapshot_path
         }' >> "${output}"
     done < <(jq -c '.cameras[]?' "${EDGE_CONFIG}")
   fi
@@ -343,11 +373,18 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
         aspect-ratio: 16 / 9;
         display: grid;
         place-items: center;
+        position: relative;
         background:
           linear-gradient(135deg, rgba(86, 214, 181, 0.12), transparent 45%),
           repeating-linear-gradient(90deg, rgba(255,255,255,0.035), rgba(255,255,255,0.035) 1px, transparent 1px, transparent 22px),
           #080d10;
         border-bottom: 1px solid var(--line);
+      }
+      .preview img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
       }
       .preview span {
         color: var(--muted);
@@ -449,9 +486,12 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
         const stateClass = online ? 'state-enabled' : 'state-disabled';
         const stateLabel = text(camera.status);
         const resolution = camera.width && camera.height ? `${camera.width}x${camera.height}` : 'unknown';
+        const preview = camera.snapshot_url
+          ? `<img src="${camera.snapshot_url}" alt="${text(camera.name, camera.id)} snapshot">`
+          : `<span>${online ? 'RTSP reachable' : text(camera.detail, 'Waiting for camera')}</span>`;
         return `
           <article class="camera">
-            <div class="preview"><span>${online ? 'RTSP reachable' : text(camera.detail, 'Waiting for camera')}</span></div>
+            <div class="preview">${preview}</div>
             <div class="body">
               <div class="row">
                 <div class="name">${text(camera.name, camera.id)}</div>
@@ -462,6 +502,7 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
                 <div class="metric"><b>Status</b><span class="${stateClass}">${stateLabel}</span></div>
                 <div class="metric"><b>Video</b><span>${text(camera.codec)} ${resolution}</span></div>
                 <div class="metric"><b>FPS</b><span>${text(camera.fps)}</span></div>
+                <div class="metric"><b>Snapshot</b><span>${text(camera.snapshot_stream)}</span></div>
               </div>
             </div>
           </article>

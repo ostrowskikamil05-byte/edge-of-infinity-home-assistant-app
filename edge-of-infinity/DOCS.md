@@ -110,6 +110,14 @@ The panel checks `rtsp_main` once when the add-on starts and shows:
 - resolution,
 - FPS value reported by the stream.
 
+Starting with version `0.4.0`, the shell also captures one JPEG snapshot for each online camera. Choose the snapshot source per camera:
+
+```json
+"snapshot_stream": "sub"
+```
+
+Use `sub` for a lighter panel or `main` for a full-quality snapshot. `rtsp_main` remains the quality probe.
+
 This is not live video yet. It is the first real camera connectivity test before WebRTC live is added. Restart the add-on when you want to rerun the temporary probe.
 
 ## Custom Component Auto-Install
