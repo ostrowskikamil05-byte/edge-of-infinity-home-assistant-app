@@ -66,22 +66,29 @@ def build_rtsp(explicit: str, host: str, username: str, password: str, channel: 
 
 
 def normalize_camera(raw: dict, index: int) -> dict:
-    camera_id = raw.get("id") or f"hikvision_{index}"
-    name = raw.get("name") or f"Hikvision {index}"
+    raw = raw if isinstance(raw, dict) else {}
+    vendor = raw.get("vendor") if raw.get("vendor") in ("hikvision", "dahua", "onvif", "rtsp") else "hikvision"
+    vendor_labels = {"hikvision": "Hikvision", "dahua": "Dahua", "onvif": "ONVIF", "rtsp": "RTSP"}
+    vendor_label = vendor_labels.get(vendor, "Camera")
+    camera_id = raw.get("id") or f"{vendor}_{index}"
+    name = raw.get("name") or f"{vendor_label} {index}"
     host = raw.get("host") or ""
     username = raw.get("username") or "admin"
     password = raw.get("password") or ""
-    rtsp_main = build_rtsp(raw.get("rtsp_main") or "", host, username, password, "101")
-    rtsp_sub = build_rtsp(raw.get("rtsp_sub") or "", host, username, password, "102")
+    rtsp_main = raw.get("rtsp_main") or ""
+    rtsp_sub = raw.get("rtsp_sub") or ""
+    if vendor == "hikvision":
+        rtsp_main = build_rtsp(rtsp_main, host, username, password, "101")
+        rtsp_sub = build_rtsp(rtsp_sub, host, username, password, "102")
     snapshot_stream = raw.get("snapshot_stream") if raw.get("snapshot_stream") == "main" else "sub"
 
     onvif_url = raw.get("onvif_url") or (f"http://{host}:80/onvif/device_service" if host else "")
-    isapi_base_url = raw.get("isapi_base_url") or (f"http://{host}" if host else "")
+    isapi_base_url = raw.get("isapi_base_url") or (f"http://{host}" if host and vendor == "hikvision" else "")
 
     return {
         "id": camera_id,
         "name": name,
-        "vendor": raw.get("vendor") or "hikvision",
+        "vendor": vendor,
         "host": host,
         "username": username,
         "password": password,
@@ -1185,6 +1192,7 @@ INDEX_HTML = r"""<!doctype html>
             </div>
             <form id="config-form"></form>
             <div class="actions">
+              <button id="add-camera" type="button">Add camera</button>
               <button class="primary" id="save-config" type="button">Save cameras</button>
             </div>
             <p class="notice" id="save-state">Changes are saved to <code>/homeassistant/edge/edge.json</code>.</p>
@@ -1470,9 +1478,18 @@ INDEX_HTML = r"""<!doctype html>
         const prefix = `camera-${index}`;
         return `
           <div class="camera-form" data-index="${index}">
-            <h2>${escapeHtml(text(camera.name, `Hikvision ${index + 1}`))}</h2>
+            <div class="row">
+              <h2>${escapeHtml(text(camera.name, `Camera ${index + 1}`))}</h2>
+              <button class="danger" type="button" data-remove-camera="${index}" ${config.cameras.length <= 1 ? 'disabled' : ''}>Remove</button>
+            </div>
             <div class="form-grid">
-              <label>Name<input name="${prefix}-name" value="${escapeHtml(text(camera.name, `Hikvision ${index + 1}`))}"></label>
+              <label>Name<input name="${prefix}-name" value="${escapeHtml(text(camera.name, `Camera ${index + 1}`))}"></label>
+              <label>Vendor<select name="${prefix}-vendor">
+                <option value="hikvision" ${camera.vendor === 'hikvision' ? 'selected' : ''}>Hikvision</option>
+                <option value="dahua" ${camera.vendor === 'dahua' ? 'selected' : ''}>Dahua</option>
+                <option value="onvif" ${camera.vendor === 'onvif' ? 'selected' : ''}>ONVIF</option>
+                <option value="rtsp" ${camera.vendor === 'rtsp' ? 'selected' : ''}>RTSP</option>
+              </select></label>
               <label>Host/IP<input name="${prefix}-host" value="${escapeHtml(camera.host || '')}"></label>
               <label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label>
               <label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label>
@@ -1497,9 +1514,17 @@ INDEX_HTML = r"""<!doctype html>
           { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', record: true, low_latency: true },
           { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', record: true, low_latency: true }
         ];
+        config = { ...config, cameras };
         form.innerHTML = cameras.map(cameraForm).join('');
         nvrGrid.innerHTML = cameras.map(nvrCard).join('');
+        renderPresetSlots(cameras);
         renderEdgeSettings();
+      }
+
+      function renderPresetSlots(cameras) {
+        presetSlot.innerHTML = cameras.map((camera, index) =>
+          `<option value="${index}">Camera ${index + 1}: ${escapeHtml(text(camera.name, camera.id || 'unnamed'))}</option>`
+        ).join('');
       }
 
       function renderEdgeSettings() {
@@ -1559,9 +1584,9 @@ INDEX_HTML = r"""<!doctype html>
           const prefix = `camera-${index}`;
           const get = (name) => form.elements[`${prefix}-${name}`];
           return {
-            id: config.cameras[index]?.id || `hikvision_${index + 1}`,
+            id: config.cameras[index]?.id || `${get('vendor').value}_${index + 1}`,
             name: get('name').value,
-            vendor: 'hikvision',
+            vendor: get('vendor').value,
             host: get('host').value.trim(),
             username: get('username').value.trim(),
             password: get('password').value,
@@ -1576,6 +1601,41 @@ INDEX_HTML = r"""<!doctype html>
           };
         });
         return { ...config, cameras };
+      }
+
+      function newCamera(index) {
+        return {
+          id: `hikvision_${index + 1}`,
+          name: `Hikvision ${index + 1}`,
+          vendor: 'hikvision',
+          username: 'admin',
+          snapshot_stream: 'sub',
+          enabled: false,
+          record: true,
+          low_latency: true
+        };
+      }
+
+      function addCamera() {
+        config = collectConfig();
+        if (config.cameras.length >= 8) {
+          saveState.textContent = 'Maximum 8 cameras are supported in this panel for now.';
+          return;
+        }
+        config.cameras = [...config.cameras, newCamera(config.cameras.length)];
+        renderConfig();
+        saveState.textContent = 'Camera added. Fill connection details and click Save cameras.';
+      }
+
+      function removeCamera(index) {
+        config = collectConfig();
+        if (config.cameras.length <= 1) {
+          saveState.textContent = 'At least one camera slot must remain.';
+          return;
+        }
+        config.cameras = config.cameras.filter((_, currentIndex) => currentIndex !== index);
+        renderConfig();
+        saveState.textContent = 'Camera removed from the form. Click Save cameras to write the change.';
       }
 
       function collectEdgeSettings() {
@@ -1602,10 +1662,8 @@ INDEX_HTML = r"""<!doctype html>
         const preset = presets[Number(presetSelect.value)];
         const slot = Number(presetSlot.value);
         if (!preset || Number.isNaN(slot)) return;
-        const current = config.cameras && config.cameras.length ? [...config.cameras] : [
-          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', record: true, low_latency: true },
-          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', record: true, low_latency: true }
-        ];
+        config = collectConfig();
+        const current = config.cameras && config.cameras.length ? [...config.cameras] : [newCamera(0)];
         current[slot] = {
           ...preset,
           id: current[slot]?.id || `hikvision_${slot + 1}`,
@@ -1786,6 +1844,8 @@ INDEX_HTML = r"""<!doctype html>
         await loadRecordingStatus();
       });
 
+      document.getElementById('add-camera').addEventListener('click', addCamera);
+
       document.getElementById('save-config').addEventListener('click', async () => {
         const payload = collectConfig();
         if (!hasMeaningfulCameras(payload)) {
@@ -1840,6 +1900,11 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);
 
       form.addEventListener('click', async (event) => {
+        const removeIndex = event.target?.dataset?.removeCamera;
+        if (removeIndex !== undefined) {
+          removeCamera(Number(removeIndex));
+          return;
+        }
         const autoconfigIndex = event.target?.dataset?.autoconfig;
         if (autoconfigIndex !== undefined) {
           await loadCameraAutoconfig(Number(autoconfigIndex));
@@ -1989,6 +2054,13 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def save_config(self) -> None:
         try:
             raw_payload = self.read_body_json()
+            if not isinstance(raw_payload, dict):
+                raw_payload = {}
+            raw_cameras = raw_payload.get("cameras") if isinstance(raw_payload, dict) else None
+            if not raw_cameras:
+                existing = load_config()
+                if existing.get("cameras"):
+                    raw_payload = {**existing, **raw_payload, "cameras": existing["cameras"]}
             validate_config_for_save(raw_payload)
             payload = normalize_config(raw_payload)
             validate_config_for_save(payload)

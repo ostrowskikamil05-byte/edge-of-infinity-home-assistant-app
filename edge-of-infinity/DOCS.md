@@ -224,6 +224,8 @@ Starting with version `0.4.15`, the Edge Settings page can edit server metadata,
 
 Starting with version `0.4.16`, active live preview prefers the continuous MJPEG endpoint. This avoids repeatedly rebuilding the camera grid for every JPEG frame. The older JPEG frame mode remains available from Edge Settings as a fallback.
 
+Starting with version `0.4.17`, Camera Settings can add and remove camera slots directly from the panel. Each camera can choose a vendor: Hikvision, Dahua, ONVIF, or generic RTSP. If a settings save request does not include camera data, the backend preserves the existing camera configuration instead of rejecting the save or overwriting cameras.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.

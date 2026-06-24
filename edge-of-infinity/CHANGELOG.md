@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.17
+
+- Add Camera Settings controls for adding and removing camera slots.
+- Add vendor selection for Hikvision, Dahua, ONVIF, and generic RTSP cameras.
+- Render preset target slots dynamically for any configured camera count.
+- Preserve existing cameras when saving settings payloads that do not include camera data.
+
 ## 0.4.16
 
 - Prefer continuous MJPEG for active live preview instead of repeated JPEG frame reloads.
