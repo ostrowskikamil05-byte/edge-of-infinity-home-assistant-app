@@ -19,6 +19,7 @@ HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
 CONFIG_PATH = Path(os.environ.get("EDGE_HOME_CONFIG", "/homeassistant/edge/edge.json"))
 CONFIG_BACKUP_PATH = HOME_DIR / "edge.backup.json"
+PRESETS_PATH = HOME_DIR / "camera-presets.json"
 PORT = int(os.environ.get("API_PORT", "8088"))
 SNAPSHOT_DIR = HOME_DIR / "snapshots"
 DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
@@ -103,6 +104,64 @@ def normalize_config(payload: dict) -> dict:
         "cameras": normalized,
         "future_vendors": payload.get("future_vendors") or ["dahua", "onvif", "rtsp"],
     }
+
+
+def preset_key(camera: dict) -> str:
+    return camera.get("host") or camera.get("rtsp_main") or camera.get("id") or camera.get("name") or ""
+
+
+def preset_camera(camera: dict) -> dict:
+    return {
+        key: camera.get(key)
+        for key in (
+            "id",
+            "name",
+            "vendor",
+            "host",
+            "username",
+            "password",
+            "rtsp_main",
+            "rtsp_sub",
+            "onvif_url",
+            "isapi_base_url",
+            "enabled",
+            "record",
+            "low_latency",
+            "snapshot_stream",
+        )
+    }
+
+
+def load_presets() -> list[dict]:
+    payload = read_json(PRESETS_PATH, [])
+    if isinstance(payload, dict):
+        payload = payload.get("presets", [])
+    if not isinstance(payload, list):
+        return []
+    presets = []
+    for index, camera in enumerate(payload):
+        if isinstance(camera, dict) and (camera.get("host") or camera.get("rtsp_main")):
+            presets.append(normalize_camera(camera, index + 1))
+    return presets
+
+
+def save_presets(presets: list[dict]) -> None:
+    write_json(PRESETS_PATH, [preset_camera(camera) for camera in presets[:20]])
+
+
+def remember_camera_presets(cameras: list[dict]) -> None:
+    presets = load_presets()
+    by_key = {preset_key(camera): camera for camera in presets if preset_key(camera)}
+
+    for camera in cameras:
+        if not isinstance(camera, dict) or not (camera.get("host") or camera.get("rtsp_main")):
+            continue
+        normalized = normalize_camera(camera, len(by_key) + 1)
+        key = preset_key(normalized)
+        if key:
+            by_key[key] = normalized
+
+    save_presets(list(by_key.values()))
 
 
 def validate_config_for_save(payload: dict) -> None:
@@ -384,6 +443,13 @@ INDEX_HTML = r"""<!doctype html>
       .check-row { display: flex; align-items: center; gap: 8px; min-height: 36px; }
       .camera-form { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
       .notice { margin-top: 10px; color: var(--muted); font-size: 13px; }
+      .preset-bar {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) 120px auto;
+        gap: 8px;
+        align-items: end;
+        margin-bottom: 14px;
+      }
       .timeline {
         height: 88px;
         border: 1px solid var(--line);
@@ -396,6 +462,7 @@ INDEX_HTML = r"""<!doctype html>
         .app { grid-template-columns: 1fr; }
         .sidebar { position: static; height: auto; }
         .nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .preset-bar { grid-template-columns: 1fr; }
         header { align-items: start; flex-direction: column; }
         .toolbar { justify-content: flex-start; }
       }
@@ -453,7 +520,15 @@ INDEX_HTML = r"""<!doctype html>
               <p>Edit Hikvision camera connection, streams, and low-latency preferences.</p>
             </div>
           </header>
-          <section class="settings" id="settings">
+        <section class="settings" id="settings">
+            <div class="preset-bar">
+              <label>Saved camera preset<select id="preset-select"></select></label>
+              <label>Slot<select id="preset-slot">
+                <option value="0">Camera 1</option>
+                <option value="1">Camera 2</option>
+              </select></label>
+              <button id="apply-preset" type="button">Load preset</button>
+            </div>
             <form id="config-form"></form>
             <div class="actions">
               <button class="primary" id="save-config" type="button">Save cameras</button>
@@ -504,9 +579,12 @@ INDEX_HTML = r"""<!doctype html>
       const grid = document.getElementById('camera-grid');
       const nvrGrid = document.getElementById('nvr-grid');
       const form = document.getElementById('config-form');
+      const presetSelect = document.getElementById('preset-select');
+      const presetSlot = document.getElementById('preset-slot');
       const saveState = document.getElementById('save-state');
       let config = { cameras: [] };
       let live = {};
+      let presets = [];
 
       const panelBase = window.location.pathname.endsWith('/')
         ? window.location.pathname
@@ -621,6 +699,23 @@ INDEX_HTML = r"""<!doctype html>
         nvrGrid.innerHTML = cameras.map(nvrCard).join('');
       }
 
+      function renderPresets() {
+        presetSelect.innerHTML = presets.length
+          ? presets.map((camera, index) => {
+              const label = `${text(camera.name, `Preset ${index + 1}`)} - ${text(camera.host, camera.rtsp_main || 'RTSP')}`;
+              return `<option value="${index}">${escapeHtml(label)}</option>`;
+            }).join('')
+          : '<option value="">No saved presets yet</option>';
+        document.getElementById('apply-preset').disabled = presets.length === 0;
+      }
+
+      async function loadPresets() {
+        const response = await fetch(panelPath('api/presets'), { cache: 'no-store' });
+        const data = await response.json();
+        presets = Array.isArray(data.presets) ? data.presets : [];
+        renderPresets();
+      }
+
       function collectConfig() {
         const cameras = Array.from(form.querySelectorAll('.camera-form')).map((section, index) => {
           const prefix = `camera-${index}`;
@@ -643,6 +738,24 @@ INDEX_HTML = r"""<!doctype html>
           };
         });
         return { ...config, cameras };
+      }
+
+      function applyPresetToSlot() {
+        const preset = presets[Number(presetSelect.value)];
+        const slot = Number(presetSlot.value);
+        if (!preset || Number.isNaN(slot)) return;
+        const current = config.cameras && config.cameras.length ? [...config.cameras] : [
+          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', record: true, low_latency: true },
+          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', record: true, low_latency: true }
+        ];
+        current[slot] = {
+          ...preset,
+          id: current[slot]?.id || `hikvision_${slot + 1}`,
+          name: preset.name || current[slot]?.name || `Hikvision ${slot + 1}`
+        };
+        config = { ...config, cameras: current };
+        renderConfig();
+        saveState.textContent = 'Preset loaded into the form. Click Save cameras to write it.';
       }
 
       function hasMeaningfulCameras(payload) {
@@ -701,9 +814,12 @@ INDEX_HTML = r"""<!doctype html>
         }
         config = data;
         renderConfig();
+        await loadPresets();
         await loadCameras();
         saveState.textContent = 'Saved. Backup created and status refreshed.';
       });
+
+      document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);
 
       grid.addEventListener('click', async (event) => {
         const id = event.target?.dataset?.live;
@@ -729,7 +845,7 @@ INDEX_HTML = r"""<!doctype html>
         await loadCameras();
       });
 
-      Promise.all([loadConfig(), loadCameras()]).catch((error) => {
+      Promise.all([loadConfig(), loadPresets(), loadCameras()]).catch((error) => {
         grid.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
       });
     </script>
@@ -768,6 +884,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/config":
             self.send_json(load_config())
             return
+        if path == "/api/presets":
+            self.send_json({"presets": load_presets()})
+            return
         if path == "/cameras.json":
             payload = read_json(DATA_DIR / "cameras.json", {"cameras": []})
             self.send_json(payload)
@@ -804,6 +923,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             validate_config_for_save(payload)
             backup_config()
             write_json(CONFIG_PATH, payload)
+            remember_camera_presets(payload.get("cameras", []))
             refresh_status()
             self.send_json(payload)
         except (json.JSONDecodeError, OSError, ValueError) as error:

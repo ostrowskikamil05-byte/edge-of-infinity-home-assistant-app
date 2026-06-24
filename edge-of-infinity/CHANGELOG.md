@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.5
+
+- Add saved camera presets at `/homeassistant/edge/camera-presets.json`.
+- Automatically remember camera connection settings after a successful save.
+- Add preset selection in Camera Settings so saved cameras can be loaded into a slot without retyping.
+
 ## 0.4.4
 
 - Prevent empty UI saves from wiping camera configuration.
