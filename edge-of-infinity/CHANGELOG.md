@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.20
+
+- Add a dedicated Live stream selector per camera.
+- Keep Snapshot stream and MJPEG Live stream separate.
+- Default MJPEG live to the sub stream so it does not accidentally use a HEVC main stream.
+
 ## 0.4.19
 
 - Rework MJPEG live output to use Edge's own multipart stream writer.

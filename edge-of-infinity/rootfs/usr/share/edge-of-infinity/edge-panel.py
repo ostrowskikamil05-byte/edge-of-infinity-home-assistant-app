@@ -92,6 +92,7 @@ def normalize_camera(raw: dict, index: int) -> dict:
         rtsp_main = build_dahua_rtsp(rtsp_main, host, username, password, 0)
         rtsp_sub = build_dahua_rtsp(rtsp_sub, host, username, password, 1)
     snapshot_stream = raw.get("snapshot_stream") if raw.get("snapshot_stream") == "main" else "sub"
+    live_stream = raw.get("live_stream") if raw.get("live_stream") == "main" else "sub"
 
     onvif_url = raw.get("onvif_url") or (f"http://{host}:80/onvif/device_service" if host else "")
     isapi_base_url = raw.get("isapi_base_url") or (f"http://{host}" if host and vendor == "hikvision" else "")
@@ -111,6 +112,7 @@ def normalize_camera(raw: dict, index: int) -> dict:
         "record": bool(raw.get("record", True)),
         "low_latency": bool(raw.get("low_latency", True)),
         "snapshot_stream": snapshot_stream,
+        "live_stream": live_stream,
     }
 
 
@@ -182,6 +184,7 @@ def preset_camera(camera: dict) -> dict:
             "record",
             "low_latency",
             "snapshot_stream",
+            "live_stream",
         )
     }
 
@@ -835,6 +838,7 @@ def refresh_status() -> dict:
             "record": bool(camera.get("record")),
             "low_latency": bool(camera.get("low_latency")),
             "snapshot_stream": camera.get("snapshot_stream") or "sub",
+            "live_stream": camera.get("live_stream") or "sub",
             "status": status,
             "detail": detail,
             "codec": video_codec,
@@ -1347,7 +1351,7 @@ INDEX_HTML = r"""<!doctype html>
         const audioCodec = camera.audio_codec
           ? `${camera.audio_codec}${camera.audio_sample_rate ? ` ${camera.audio_sample_rate}Hz` : ''}${camera.audio_channels ? ` ${camera.audio_channels}ch` : ''}`
           : 'none';
-        const liveStream = camera.snapshot_stream || 'sub';
+        const liveStream = camera.live_stream || 'sub';
         const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveKey)}.mjpg?camera_index=${encodeURIComponent(camera.index ?? 0)}&stream=${encodeURIComponent(liveStream)}&t=${Date.now()}`);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         const preview = live[liveKey]
@@ -1508,6 +1512,10 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="sub" ${camera.snapshot_stream !== 'main' ? 'selected' : ''}>sub</option>
                 <option value="main" ${camera.snapshot_stream === 'main' ? 'selected' : ''}>main</option>
               </select></label>
+              <label>Live stream<select name="${prefix}-live-stream">
+                <option value="sub" ${camera.live_stream !== 'main' ? 'selected' : ''}>sub</option>
+                <option value="main" ${camera.live_stream === 'main' ? 'selected' : ''}>main</option>
+              </select></label>
               <label class="check-row"><input name="${prefix}-enabled" type="checkbox" ${camera.enabled ? 'checked' : ''}> Enabled</label>
               <label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record</label>
               <label class="check-row"><input name="${prefix}-low-latency" type="checkbox" ${camera.low_latency !== false ? 'checked' : ''}> Low latency</label>
@@ -1521,8 +1529,8 @@ INDEX_HTML = r"""<!doctype html>
 
       function renderConfig() {
         const cameras = config.cameras && config.cameras.length ? config.cameras : [
-          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', record: true, low_latency: true },
-          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', record: true, low_latency: true }
+          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', live_stream: 'sub', record: true, low_latency: true },
+          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', live_stream: 'sub', record: true, low_latency: true }
         ];
         config = { ...config, cameras };
         form.innerHTML = cameras.map(cameraForm).join('');
@@ -1607,7 +1615,8 @@ INDEX_HTML = r"""<!doctype html>
             enabled: get('enabled').checked,
             record: get('record').checked,
             low_latency: get('low-latency').checked,
-            snapshot_stream: get('snapshot-stream').value
+            snapshot_stream: get('snapshot-stream').value,
+            live_stream: get('live-stream').value
           };
         });
         return { ...config, cameras };
@@ -1620,6 +1629,7 @@ INDEX_HTML = r"""<!doctype html>
           vendor: 'hikvision',
           username: 'admin',
           snapshot_stream: 'sub',
+          live_stream: 'sub',
           enabled: false,
           record: true,
           low_latency: true
