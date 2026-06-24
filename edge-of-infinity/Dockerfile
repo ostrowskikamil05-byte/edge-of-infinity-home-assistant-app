@@ -1,6 +1,6 @@
 FROM ghcr.io/home-assistant/base:latest
 
-ARG BUILD_VERSION=0.2.0
+ARG BUILD_VERSION=0.3.0
 ARG BUILD_ARCH=amd64
 
 LABEL \
@@ -10,7 +10,7 @@ LABEL \
 
 COPY rootfs /
 
-RUN apk add --no-cache darkhttpd jq
+RUN apk add --no-cache darkhttpd ffmpeg jq
 RUN chmod a+x /usr/bin/edge-app-run
 
 CMD [ "/usr/bin/edge-app-run" ]

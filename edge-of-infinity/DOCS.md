@@ -62,3 +62,22 @@ Edit the IP address, username, password, RTSP URLs, ONVIF URL, and ISAPI base UR
 ```
 
 Restart the app to refresh the current shell panel. The real video engine will use the same file once `edge-core` is bundled.
+
+## RTSP Probe Shell
+
+Starting with version `0.3.0`, the app shell probes enabled cameras with `ffprobe`.
+
+For each camera:
+
+```json
+"enabled": true
+```
+
+The panel checks `rtsp_main` every 30 seconds and shows:
+
+- online/offline/disabled status,
+- codec,
+- resolution,
+- FPS value reported by the stream.
+
+This is not live video yet. It is the first real camera connectivity test before WebRTC live is added.

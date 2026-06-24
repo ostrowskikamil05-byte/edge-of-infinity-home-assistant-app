@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- Add `ffprobe` based RTSP reachability checks for enabled cameras.
+- Refresh camera status every 30 seconds in the Home Assistant sidebar shell.
+- Show online/offline/disabled status plus codec, resolution, and FPS when the RTSP stream is reachable.
+
 ## 0.2.0
 
 - Add multi-camera shell UI for the Home Assistant sidebar.

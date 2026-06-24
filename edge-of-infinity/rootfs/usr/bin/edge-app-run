@@ -50,7 +50,7 @@ if command -v edge-core >/dev/null 2>&1; then
 fi
 
 bashio::log.warning "edge-core binary is not bundled yet."
-bashio::log.warning "Running multi-camera shell until the video engine is bundled."
+bashio::log.warning "Running RTSP probe shell until the video engine is bundled."
 
 if [[ ! -f /config/edge.json ]]; then
   bashio::log.info "Creating example multi-camera config at /config/edge.json"
@@ -109,14 +109,108 @@ fi
 mkdir -p /tmp/edge-placeholder
 
 cat > /tmp/edge-placeholder/health <<'EOF'
-{"status":"ok","product":"Edge of Infinity App placeholder","mode":"multi-camera-shell"}
+{"status":"ok","product":"Edge of Infinity App placeholder","mode":"rtsp-probe-shell"}
 EOF
 
-if jq -e '.cameras' /config/edge.json >/dev/null 2>&1; then
-  jq '{cameras: [.cameras[] | {id, name, vendor, host, enabled, record, low_latency}], generated_at: now | todate}' /config/edge.json > /tmp/edge-placeholder/cameras.json
-else
-  printf '{"cameras":[],"generated_at":"unknown"}\n' > /tmp/edge-placeholder/cameras.json
-fi
+generate_camera_status() {
+  local output=/tmp/edge-placeholder/cameras.json.tmp
+  local err=/tmp/edge-ffprobe.err
+  local first=true
+
+  printf '{"generated_at":"%s","cameras":[' "$(date -Iseconds)" > "${output}"
+
+  if jq -e '.cameras' /config/edge.json >/dev/null 2>&1; then
+    while IFS= read -r camera; do
+      local id name vendor host enabled record low_latency rtsp
+      local status detail codec width height fps
+      id="$(jq -r '.id // "unknown"' <<< "${camera}")"
+      name="$(jq -r '.name // .id // "Unknown camera"' <<< "${camera}")"
+      vendor="$(jq -r '.vendor // "rtsp"' <<< "${camera}")"
+      host="$(jq -r '.host // ""' <<< "${camera}")"
+      enabled="$(jq -r '.enabled // false' <<< "${camera}")"
+      record="$(jq -r '.record // false' <<< "${camera}")"
+      low_latency="$(jq -r '.low_latency // false' <<< "${camera}")"
+      rtsp="$(jq -r '.rtsp_main // ""' <<< "${camera}")"
+
+      status="disabled"
+      detail="Camera is configured but disabled."
+      codec=""
+      width=""
+      height=""
+      fps=""
+
+      if [[ "${enabled}" == "true" ]]; then
+        if [[ -z "${rtsp}" || "${rtsp}" == "null" ]]; then
+          status="missing_rtsp"
+          detail="Camera is enabled, but rtsp_main is empty."
+        else
+          : > "${err}"
+          local probe_json
+          probe_json="$(timeout 8 ffprobe -rtsp_transport tcp -v error -select_streams v:0 -show_entries stream=codec_name,width,height,r_frame_rate -of json "${rtsp}" 2>"${err}" || true)"
+          if jq -e '.streams[0]' <<< "${probe_json}" >/dev/null 2>&1; then
+            status="online"
+            detail="RTSP main stream is reachable."
+            codec="$(jq -r '.streams[0].codec_name // ""' <<< "${probe_json}")"
+            width="$(jq -r '.streams[0].width // ""' <<< "${probe_json}")"
+            height="$(jq -r '.streams[0].height // ""' <<< "${probe_json}")"
+            fps="$(jq -r '.streams[0].r_frame_rate // ""' <<< "${probe_json}")"
+          else
+            status="offline"
+            detail="$(head -c 180 "${err}" | tr '\r\n' ' ')"
+            detail="${detail:-RTSP probe failed. Check IP, credentials, port 554, and camera stream path.}"
+          fi
+        fi
+      fi
+
+      if [[ "${first}" == "true" ]]; then
+        first=false
+      else
+        printf ',' >> "${output}"
+      fi
+
+      jq -n \
+        --arg id "${id}" \
+        --arg name "${name}" \
+        --arg vendor "${vendor}" \
+        --arg host "${host}" \
+        --arg enabled "${enabled}" \
+        --arg record "${record}" \
+        --arg low_latency "${low_latency}" \
+        --arg status "${status}" \
+        --arg detail "${detail}" \
+        --arg codec "${codec}" \
+        --arg width "${width}" \
+        --arg height "${height}" \
+        --arg fps "${fps}" \
+        '{
+          id: $id,
+          name: $name,
+          vendor: $vendor,
+          host: $host,
+          enabled: ($enabled == "true"),
+          record: ($record == "true"),
+          low_latency: ($low_latency == "true"),
+          status: $status,
+          detail: $detail,
+          codec: $codec,
+          width: $width,
+          height: $height,
+          fps: $fps
+        }' >> "${output}"
+    done < <(jq -c '.cameras[]?' /config/edge.json)
+  fi
+
+  printf ']}\n' >> "${output}"
+  mv "${output}" /tmp/edge-placeholder/cameras.json
+}
+
+generate_camera_status
+(
+  while true; do
+    sleep 30
+    generate_camera_status || true
+  done
+) &
 
 cat > /tmp/edge-placeholder/index.html <<'EOF'
 <!doctype html>
@@ -285,7 +379,7 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
           <p>Private low-latency NVR shell. Hikvision-first, ready for multi-camera expansion.</p>
         </div>
         <div class="status">
-          <div class="pill">Mode <strong>Shell</strong></div>
+          <div class="pill">Mode <strong>RTSP probe</strong></div>
           <div class="pill">Live <strong>WebRTC next</strong></div>
           <div class="pill">Vendors <strong>Hikvision, Dahua later</strong></div>
         </div>
@@ -294,7 +388,7 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
       <section class="grid" id="camera-grid"></section>
 
       <section class="notice">
-        <p>Edit <code>/config/edge.json</code> in the add-on config folder to set your real Hikvision IPs, usernames, passwords, and RTSP URLs. The video engine is not bundled yet; this panel confirms the Home Assistant app, sidebar, storage, and multi-camera model.</p>
+        <p>Edit <code>/config/edge.json</code> in the add-on config folder to set your real Hikvision IPs, usernames, passwords, and RTSP URLs. Set <code>enabled</code> to <code>true</code> for each real camera. This shell probes RTSP every 30 seconds; WebRTC live comes next.</p>
       </section>
     </main>
     <script>
@@ -305,12 +399,13 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
       }
 
       function cameraCard(camera) {
-        const enabled = camera.enabled === true;
-        const stateClass = enabled ? 'state-enabled' : 'state-disabled';
-        const stateLabel = enabled ? 'enabled' : 'disabled';
+        const online = camera.status === 'online';
+        const stateClass = online ? 'state-enabled' : 'state-disabled';
+        const stateLabel = text(camera.status);
+        const resolution = camera.width && camera.height ? `${camera.width}x${camera.height}` : 'unknown';
         return `
           <article class="camera">
-            <div class="preview"><span>Waiting for edge-core video pipeline</span></div>
+            <div class="preview"><span>${online ? 'RTSP reachable' : text(camera.detail, 'Waiting for camera')}</span></div>
             <div class="body">
               <div class="row">
                 <div class="name">${text(camera.name, camera.id)}</div>
@@ -319,8 +414,8 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
               <div class="meta">
                 <div class="metric"><b>Host</b><span>${text(camera.host)}</span></div>
                 <div class="metric"><b>Status</b><span class="${stateClass}">${stateLabel}</span></div>
-                <div class="metric"><b>Record</b><span>${camera.record ? 'on' : 'off'}</span></div>
-                <div class="metric"><b>Latency</b><span>${camera.low_latency ? 'low-latency' : 'standard'}</span></div>
+                <div class="metric"><b>Video</b><span>${text(camera.codec)} ${resolution}</span></div>
+                <div class="metric"><b>FPS</b><span>${text(camera.fps)}</span></div>
               </div>
             </div>
           </article>
@@ -338,6 +433,8 @@ cat > /tmp/edge-placeholder/index.html <<'EOF'
         .catch(() => {
           grid.innerHTML = '<p>Could not load camera configuration.</p>';
         });
+
+      setInterval(() => window.location.reload(), 30000);
     </script>
   </body>
 </html>
