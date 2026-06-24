@@ -1,0 +1,41 @@
+# Edge of Infinity App Documentation
+
+## Sidebar
+
+The app enables Home Assistant Ingress and adds an Edge Infinity item to the sidebar for administrators.
+
+## Logs
+
+Open the app page in Home Assistant and use the Logs tab. Edge Core should write all logs to stdout/stderr so Supervisor can capture them.
+
+## Watchdog
+
+The watchdog checks:
+
+```text
+http://[HOST]:[PORT:8088]/health
+```
+
+If the app stops answering, Home Assistant Supervisor can mark it unhealthy.
+
+## Public API Port
+
+The `8088/tcp` port is disabled by default. Ingress is preferred.
+
+Enable a public/local host port in the app network settings only if another service needs direct API access.
+
+## Storage
+
+Configuration:
+
+```text
+/config
+```
+
+Recordings:
+
+```text
+/media/edge-of-infinity/recordings
+```
+
+Recordings are excluded from normal app backup by default.

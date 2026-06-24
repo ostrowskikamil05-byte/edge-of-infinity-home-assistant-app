@@ -1,0 +1,18 @@
+configuration:
+  log_level:
+    name: Log level
+    description: Controls how much Edge Core writes to the app logs.
+  api_port:
+    name: API port
+    description: Internal port used by Edge Core and Ingress.
+  recordings_dir:
+    name: Recordings directory
+    description: Directory where Edge stores recording segments.
+  database_path:
+    name: Database path
+    description: Path for the Edge Core database.
+  retention_days:
+    name: Retention days
+    description: Number of days to keep recordings.
+network:
+  8088/TCP: Edge Core API and web interface

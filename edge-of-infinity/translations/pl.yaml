@@ -1,0 +1,18 @@
+configuration:
+  log_level:
+    name: Poziom logow
+    description: Okresla ile informacji Edge Core zapisuje w logach aplikacji.
+  api_port:
+    name: Port API
+    description: Wewnetrzny port uzywany przez Edge Core i Ingress.
+  recordings_dir:
+    name: Katalog nagran
+    description: Katalog, w ktorym Edge zapisuje segmenty nagran.
+  database_path:
+    name: Sciezka bazy danych
+    description: Sciezka do bazy danych Edge Core.
+  retention_days:
+    name: Dni retencji
+    description: Liczba dni przechowywania nagran.
+network:
+  8088/TCP: API Edge Core i interfejs webowy

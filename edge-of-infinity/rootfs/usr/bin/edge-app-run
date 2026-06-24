@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /usr/lib/bashio/bashio.sh
+
+LOG_LEVEL="$(bashio::config 'log_level')"
+API_PORT="$(bashio::config 'api_port')"
+RECORDINGS_DIR="$(bashio::config 'recordings_dir')"
+DATABASE_PATH="$(bashio::config 'database_path')"
+RETENTION_DAYS="$(bashio::config 'retention_days')"
+
+mkdir -p "${RECORDINGS_DIR}"
+mkdir -p "$(dirname "${DATABASE_PATH}")"
+
+bashio::log.info "Starting Edge of Infinity"
+bashio::log.info "Log level: ${LOG_LEVEL}"
+bashio::log.info "API port: ${API_PORT}"
+bashio::log.info "Recordings: ${RECORDINGS_DIR}"
+bashio::log.info "Database: ${DATABASE_PATH}"
+bashio::log.info "Retention days: ${RETENTION_DAYS}"
+
+if command -v edge-core >/dev/null 2>&1; then
+  exec edge-core \
+    -config /config/edge.json \
+    -listen "0.0.0.0:${API_PORT}" \
+    -recordings-dir "${RECORDINGS_DIR}" \
+    -database "${DATABASE_PATH}" \
+    -retention-days "${RETENTION_DAYS}" \
+    -log-level "${LOG_LEVEL}"
+fi
+
+bashio::log.warning "edge-core binary is not bundled yet."
+bashio::log.warning "Running placeholder HTTP health server for packaging tests."
+
+while true; do
+  {
+    printf 'HTTP/1.1 200 OK\r\n'
+    printf 'Content-Type: application/json\r\n'
+    printf 'Connection: close\r\n'
+    printf '\r\n'
+    printf '{"status":"ok","product":"Edge of Infinity App placeholder"}\n'
+  } | nc -l -p "${API_PORT}" -q 1
+done
