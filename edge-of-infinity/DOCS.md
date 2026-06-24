@@ -159,6 +159,16 @@ The older diagnostic MJPEG path is still available:
 
 Both paths use FFmpeg and are stepping stones for testing the live pipeline from the Edge panel. The final low-latency engine should use WebRTC.
 
+Starting with version `0.4.8`, live preview targeting uses the camera slot index in addition to the camera id. This prevents a duplicated or stale camera id from opening the wrong stream. Camera cards also show a small rounded status badge:
+
+```text
+online
+offline
+lost connection
+```
+
+The `lost connection` state appears when a camera was previously online and the next RTSP probe fails.
+
 ## Hikvision Autoconfig
 
 Starting with version `0.4.7`, Camera Settings includes an `Autoconfig` action per camera. It reads Hikvision ISAPI sections through Digest authentication:

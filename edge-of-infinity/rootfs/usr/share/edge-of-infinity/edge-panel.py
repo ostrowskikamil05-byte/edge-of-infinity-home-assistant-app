@@ -546,10 +546,18 @@ def update_stream_config(camera: dict, stream_name: str, settings: dict) -> dict
 
 def refresh_status() -> dict:
     config = load_config()
+    previous_payload = read_json(DATA_DIR / "cameras.json", {"cameras": []})
+    previous_by_key = {
+        f"{item.get('id')}::{item.get('index')}": item
+        for item in previous_payload.get("cameras", [])
+        if isinstance(item, dict)
+    }
     cameras = []
 
-    for camera in config.get("cameras", []):
+    for index, camera in enumerate(config.get("cameras", [])):
         camera_id = safe_id(camera.get("id", "camera"))
+        camera_key = f"{camera_id}_{index}"
+        previous = previous_by_key.get(f"{camera.get('id')}::{index}") or {}
         status = "disabled"
         detail = "Camera is configured but disabled."
         video_codec = ""
@@ -559,6 +567,7 @@ def refresh_status() -> dict:
         width = ""
         height = ""
         fps = ""
+        bitrate = ""
         snapshot_url = ""
         snapshot_path = ""
 
@@ -576,7 +585,7 @@ def refresh_status() -> dict:
                         "-v",
                         "error",
                         "-show_entries",
-                        "stream=index,codec_type,codec_name,width,height,r_frame_rate,sample_rate,channels",
+                        "stream=index,codec_type,codec_name,width,height,r_frame_rate,bit_rate,sample_rate,channels",
                         "-of",
                         "json",
                         rtsp_main,
@@ -593,16 +602,19 @@ def refresh_status() -> dict:
                     width = str(video_stream.get("width") or "")
                     height = str(video_stream.get("height") or "")
                     fps = str(video_stream.get("r_frame_rate") or "")
+                    bitrate = str(video_stream.get("bit_rate") or "")
                     audio_codec = str(audio_stream.get("codec_name") or "")
                     audio_sample_rate = str(audio_stream.get("sample_rate") or "")
                     audio_channels = str(audio_stream.get("channels") or "")
                     snapshot_url, snapshot_path = capture_snapshot(camera, camera_id)
                 else:
-                    status = "offline"
-                    detail = "RTSP probe failed. Check IP, credentials, port 554, and camera stream path."
+                    status = "lost_connection" if previous.get("status") == "online" else "offline"
+                    detail = "RTSP connection was lost." if status == "lost_connection" else "RTSP probe failed. Check IP, credentials, port 554, and camera stream path."
 
         camera_status = {
             "id": camera.get("id"),
+            "index": index,
+            "key": camera_key,
             "name": camera.get("name"),
             "vendor": camera.get("vendor"),
             "host": camera.get("host"),
@@ -620,6 +632,7 @@ def refresh_status() -> dict:
             "width": width,
             "height": height,
             "fps": fps,
+            "bitrate": bitrate,
             "snapshot_url": snapshot_url,
             "snapshot_path": snapshot_path,
         }
@@ -716,9 +729,39 @@ INDEX_HTML = r"""<!doctype html>
         background: linear-gradient(180deg, var(--panel-2), var(--panel));
         overflow: hidden;
       }
-      .preview { aspect-ratio: 16 / 9; display: grid; place-items: center; background: #080d10; border-bottom: 1px solid var(--line); }
+      .preview { position: relative; aspect-ratio: 16 / 9; display: grid; place-items: center; background: #080d10; border-bottom: 1px solid var(--line); }
       .preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
       .preview span { color: var(--muted); font-size: 13px; padding: 12px; text-align: center; }
+      .connection-badge {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        z-index: 2;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 25px;
+        padding: 4px 9px;
+        border: 1px solid currentColor;
+        border-radius: 999px;
+        background: rgba(8, 13, 16, .58);
+        backdrop-filter: blur(6px);
+        font-size: 12px;
+        font-weight: 750;
+        line-height: 1;
+        text-transform: uppercase;
+      }
+      .connection-badge::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: currentColor;
+        box-shadow: 0 0 10px currentColor;
+      }
+      .badge-online { color: #56d6b5; }
+      .badge-lost-connection { color: #e4b45d; }
+      .badge-offline, .badge-disabled, .badge-missing-rtsp { color: #e66b6b; }
       .body, .settings { padding: 14px; }
       .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
       .name { font-weight: 750; overflow-wrap: anywhere; }
@@ -728,7 +771,8 @@ INDEX_HTML = r"""<!doctype html>
       .metric b { display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; text-transform: uppercase; }
       .metric span { font-size: 14px; overflow-wrap: anywhere; }
       .state-online { color: var(--accent); }
-      .state-offline, .state-disabled { color: var(--warn); }
+      .state-lost_connection { color: var(--warn); }
+      .state-offline, .state-disabled, .state-missing_rtsp { color: var(--danger); }
       .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
       .settings, .panel { padding: 14px; }
       .panel + .panel { margin-top: 14px; }
@@ -914,23 +958,44 @@ INDEX_HTML = r"""<!doctype html>
         }[char]));
       }
 
+      function statusLabel(status) {
+        if (status === 'online') return 'online';
+        if (status === 'lost_connection') return 'lost connection';
+        return 'offline';
+      }
+
+      function statusClass(status) {
+        if (status === 'online') return 'badge-online';
+        if (status === 'lost_connection') return 'badge-lost-connection';
+        return 'badge-offline';
+      }
+
+      function bitrateText(value) {
+        const numeric = Number(value || 0);
+        if (!numeric) return 'unknown';
+        if (numeric >= 1000000) return `${(numeric / 1000000).toFixed(2)} Mbps`;
+        return `${Math.round(numeric / 1000)} kbps`;
+      }
+
       function cameraCard(camera) {
         const online = camera.status === 'online';
         const stateClass = online ? 'state-online' : `state-${text(camera.status)}`;
+        const liveKey = camera.key || `${camera.id || 'camera'}_${camera.index ?? 0}`;
         const resolution = camera.width && camera.height ? `${camera.width}x${camera.height}` : 'unknown';
         const videoCodec = camera.video_codec || camera.codec;
         const audioCodec = camera.audio_codec
           ? `${camera.audio_codec}${camera.audio_sample_rate ? ` ${camera.audio_sample_rate}Hz` : ''}${camera.audio_channels ? ` ${camera.audio_channels}ch` : ''}`
           : 'none';
-        const liveUrl = panelPath(`live-frame/${encodeURIComponent(camera.id)}.jpg?stream=${encodeURIComponent(camera.snapshot_stream || 'sub')}&t=${Date.now()}`);
-        const preview = live[camera.id]
+        const liveUrl = panelPath(`live-frame/${encodeURIComponent(liveKey)}.jpg?camera_index=${encodeURIComponent(camera.index ?? 0)}&stream=${encodeURIComponent(camera.snapshot_stream || 'sub')}&t=${Date.now()}`);
+        const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
+        const preview = live[liveKey]
           ? `<img src="${liveUrl}" alt="${escapeHtml(text(camera.name, camera.id))} live" onerror="this.outerHTML='<span>Live frame failed. Check logs.</span>'">`
           : camera.snapshot_url
             ? `<img src="${panelPath(`${camera.snapshot_url}?t=${Date.now()}`)}" alt="${escapeHtml(text(camera.name, camera.id))} snapshot">`
             : `<span>${online ? 'RTSP reachable' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         return `
           <article class="camera">
-            <div class="preview">${preview}</div>
+            <div class="preview">${preview}${statusBadge}</div>
             <div class="body">
               <div class="row">
                 <div class="name">${escapeHtml(text(camera.name, camera.id))}</div>
@@ -938,14 +1003,14 @@ INDEX_HTML = r"""<!doctype html>
               </div>
               <div class="meta">
                 <div class="metric"><b>Host</b><span>${escapeHtml(text(camera.host))}</span></div>
-                <div class="metric"><b>Status</b><span class="${stateClass}">${escapeHtml(text(camera.status))}</span></div>
+                <div class="metric"><b>Status</b><span class="${stateClass}">${escapeHtml(statusLabel(camera.status))}</span></div>
                 <div class="metric"><b>Video</b><span>${escapeHtml(text(videoCodec))} ${escapeHtml(resolution)}</span></div>
                 <div class="metric"><b>Audio</b><span>${escapeHtml(audioCodec)}</span></div>
                 <div class="metric"><b>FPS</b><span>${escapeHtml(text(camera.fps))}</span></div>
-                <div class="metric"><b>Snapshot</b><span>${escapeHtml(text(camera.snapshot_stream))}</span></div>
+                <div class="metric"><b>Bitrate</b><span>${escapeHtml(bitrateText(camera.bitrate))}</span></div>
               </div>
               <div class="actions">
-                <button data-live="${escapeHtml(camera.id)}" ${online ? '' : 'disabled'}>${live[camera.id] ? 'Stop live' : 'Start live'}</button>
+                <button data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" ${online ? '' : 'disabled'}>${live[liveKey] ? 'Stop live' : 'Start live'}</button>
               </div>
             </div>
           </article>
@@ -1274,9 +1339,9 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       grid.addEventListener('click', async (event) => {
-        const id = event.target?.dataset?.live;
-        if (!id) return;
-        live[id] = !live[id];
+        const liveKey = event.target?.dataset?.liveKey;
+        if (!liveKey) return;
+        live[liveKey] = !live[liveKey];
         updateLiveTimer();
         await loadCameras();
       });
@@ -1426,7 +1491,15 @@ class EdgeHandler(BaseHTTPRequestHandler):
         camera_id = path.removeprefix("/live-frame/").removesuffix(".jpg")
         stream_name = (query.get("stream") or ["sub"])[0]
         config = load_config()
-        camera = next((item for item in config.get("cameras", []) if item.get("id") == camera_id), None)
+        cameras = config.get("cameras", [])
+        camera = None
+        camera_index = (query.get("camera_index") or [""])[0]
+        if str(camera_index).isdigit():
+            index = int(camera_index)
+            if 0 <= index < len(cameras):
+                camera = cameras[index]
+        if camera is None:
+            camera = next((item for item in cameras if item.get("id") == camera_id), None)
         if not camera:
             self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
             return
@@ -1441,7 +1514,15 @@ class EdgeHandler(BaseHTTPRequestHandler):
         camera_id = path.removeprefix("/live/").removesuffix(".mjpg")
         stream_name = (query.get("stream") or ["sub"])[0]
         config = load_config()
-        camera = next((item for item in config.get("cameras", []) if item.get("id") == camera_id), None)
+        cameras = config.get("cameras", [])
+        camera = None
+        camera_index = (query.get("camera_index") or [""])[0]
+        if str(camera_index).isdigit():
+            index = int(camera_index)
+            if 0 <= index < len(cameras):
+                camera = cameras[index]
+        if camera is None:
+            camera = next((item for item in cameras if item.get("id") == camera_id), None)
         if not camera:
             self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
             return

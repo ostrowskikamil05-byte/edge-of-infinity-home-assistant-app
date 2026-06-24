@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.8
+
+- Fix Start Live camera targeting by using the camera list index instead of only the camera id.
+- Add visible rounded connection badges on every camera preview.
+- Track `online`, `offline`, and `lost connection` states.
+- Show video bitrate when FFprobe reports it.
+
 ## 0.4.7
 
 - Add Hikvision ISAPI Autoconfig in Camera Settings.
