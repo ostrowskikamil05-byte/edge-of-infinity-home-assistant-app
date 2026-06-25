@@ -47,7 +47,6 @@ options:
   hikvision_1_password: ""
   hikvision_1_rtsp_main: ""
   hikvision_1_rtsp_sub: ""
-  hikvision_1_rtsp_sub_channel: "102"
   hikvision_1_onvif_url: ""
   hikvision_1_isapi_base_url: ""
   hikvision_1_record: true
@@ -61,7 +60,6 @@ options:
   hikvision_2_password: ""
   hikvision_2_rtsp_main: ""
   hikvision_2_rtsp_sub: ""
-  hikvision_2_rtsp_sub_channel: "102"
   hikvision_2_onvif_url: ""
   hikvision_2_isapi_base_url: ""
   hikvision_2_record: true
@@ -82,7 +80,6 @@ schema:
   hikvision_1_password: password
   hikvision_1_rtsp_main: str
   hikvision_1_rtsp_sub: str
-  hikvision_1_rtsp_sub_channel: str
   hikvision_1_onvif_url: str
   hikvision_1_isapi_base_url: str
   hikvision_1_record: bool
@@ -96,7 +93,6 @@ schema:
   hikvision_2_password: password
   hikvision_2_rtsp_main: str
   hikvision_2_rtsp_sub: str
-  hikvision_2_rtsp_sub_channel: str
   hikvision_2_onvif_url: str
   hikvision_2_isapi_base_url: str
   hikvision_2_record: bool

@@ -25,6 +25,8 @@ PORT = int(os.environ.get("API_PORT", "8088"))
 SNAPSHOT_DIR = HOME_DIR / "snapshots"
 DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
+HIKVISION_MAIN_CHANNEL = "101"
+HIKVISION_SUB_CHANNEL = "102"
 
 
 def safe_id(value: str) -> str:
@@ -76,11 +78,6 @@ def hikvision_channel_from_rtsp(value: str, fallback: str) -> str:
     return fallback
 
 
-def normalize_hikvision_channel(value: str, fallback: str) -> str:
-    channel = str(value or "").strip()
-    return channel if channel.isdigit() else fallback
-
-
 def hikvision_rtsp_with_channel(value: str, channel: str) -> str:
     if not value or not channel or "/Streaming/Channels/" not in value:
         return value
@@ -107,15 +104,13 @@ def normalize_camera(raw: dict, index: int) -> dict:
     password = raw.get("password") or ""
     rtsp_main = raw.get("rtsp_main") or ""
     rtsp_sub = raw.get("rtsp_sub") or ""
-    rtsp_sub_channel = normalize_hikvision_channel(
-        raw.get("rtsp_sub_channel"),
-        hikvision_channel_from_rtsp(rtsp_sub, "102"),
-    )
+    rtsp_sub_channel = hikvision_channel_from_rtsp(rtsp_sub, HIKVISION_SUB_CHANNEL)
     if vendor == "hikvision":
-        rtsp_main = build_rtsp(rtsp_main, host, username, password, "101")
-        rtsp_sub = hikvision_rtsp_with_channel(rtsp_sub, rtsp_sub_channel)
-        rtsp_sub = build_rtsp(rtsp_sub, host, username, password, rtsp_sub_channel)
-        rtsp_sub_channel = normalize_hikvision_channel(hikvision_channel_from_rtsp(rtsp_sub, rtsp_sub_channel), "102")
+        rtsp_main = hikvision_rtsp_with_channel(rtsp_main, HIKVISION_MAIN_CHANNEL)
+        rtsp_main = build_rtsp(rtsp_main, host, username, password, HIKVISION_MAIN_CHANNEL)
+        rtsp_sub = hikvision_rtsp_with_channel(rtsp_sub, HIKVISION_SUB_CHANNEL)
+        rtsp_sub = build_rtsp(rtsp_sub, host, username, password, HIKVISION_SUB_CHANNEL)
+        rtsp_sub_channel = HIKVISION_SUB_CHANNEL
     elif vendor == "dahua":
         rtsp_main = build_dahua_rtsp(rtsp_main, host, username, password, 0)
         rtsp_sub = build_dahua_rtsp(rtsp_sub, host, username, password, 1)
@@ -1614,7 +1609,6 @@ INDEX_HTML = r"""<!doctype html>
 
       function cameraForm(camera, index) {
         const prefix = `camera-${index}`;
-        const subChannel = camera.rtsp_sub_channel || (String(camera.rtsp_sub || '').match(/\/Streaming\/Channels\/(\d+)/)?.[1] || '102');
         return `
           <div class="camera-form" data-index="${index}">
             <div class="row">
@@ -1633,15 +1627,6 @@ INDEX_HTML = r"""<!doctype html>
               <label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label>
               <label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label>
               <label>RTSP main<input name="${prefix}-rtsp-main" value="${escapeHtml(camera.rtsp_main || '')}"></label>
-              <label>Hikvision sub channel<input name="${prefix}-rtsp-sub-channel" list="${prefix}-rtsp-channel-options" value="${escapeHtml(subChannel)}"></label>
-              <datalist id="${prefix}-rtsp-channel-options">
-                <option value="102"></option>
-                <option value="202"></option>
-                <option value="302"></option>
-                <option value="402"></option>
-                <option value="101"></option>
-                <option value="201"></option>
-              </datalist>
               <label>RTSP sub<input name="${prefix}-rtsp-sub" value="${escapeHtml(camera.rtsp_sub || '')}"></label>
               <label>ONVIF URL<input name="${prefix}-onvif" value="${escapeHtml(camera.onvif_url || '')}"></label>
               <label>ISAPI URL<input name="${prefix}-isapi" value="${escapeHtml(camera.isapi_base_url || '')}"></label>
@@ -1744,18 +1729,15 @@ INDEX_HTML = r"""<!doctype html>
         return value.replace(/\/Streaming\/Channels\/\d+/, `/Streaming/Channels/${channel}`);
       }
 
-      function normalizeHikvisionChannel(value, fallback = '102') {
-        const channel = String(value || '').trim();
-        return /^\d+$/.test(channel) ? channel : fallback;
-      }
-
       function collectConfig() {
         const cameras = Array.from(form.querySelectorAll('.camera-form')).map((section, index) => {
           const prefix = `camera-${index}`;
           const get = (name) => form.elements[`${prefix}-${name}`];
           const vendor = get('vendor').value;
-          const currentSub = String(get('rtsp-sub').value || '').match(/\/Streaming\/Channels\/(\d+)/)?.[1] || '102';
-          const rtspSubChannel = normalizeHikvisionChannel(get('rtsp-sub-channel').value, currentSub);
+          const rtspSubChannel = '102';
+          const rtspMain = vendor === 'hikvision'
+            ? rtspWithHikvisionChannel(get('rtsp-main').value.trim(), '101')
+            : get('rtsp-main').value.trim();
           const rtspSub = vendor === 'hikvision'
             ? rtspWithHikvisionChannel(get('rtsp-sub').value.trim(), rtspSubChannel)
             : get('rtsp-sub').value.trim();
@@ -1766,7 +1748,7 @@ INDEX_HTML = r"""<!doctype html>
             host: get('host').value.trim(),
             username: get('username').value.trim(),
             password: get('password').value,
-            rtsp_main: get('rtsp-main').value.trim(),
+            rtsp_main: rtspMain,
             rtsp_sub: rtspSub,
             rtsp_sub_channel: rtspSubChannel,
             onvif_url: get('onvif').value.trim(),
@@ -1827,14 +1809,13 @@ INDEX_HTML = r"""<!doctype html>
         const host = get('host').value.trim();
         const username = get('username').value.trim();
         const password = get('password').value;
-        const subChannel = normalizeHikvisionChannel(get('rtsp-sub-channel')?.value, '102');
         if (!host || !username || !password) {
           saveState.textContent = 'Host, username, and password are required to build RTSP URLs.';
           return;
         }
         if (vendor === 'hikvision') {
           get('rtsp-main').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/101`;
-          get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/${subChannel}`;
+          get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/102`;
           get('onvif').value = get('onvif').value || `http://${host}:80/onvif/device_service`;
           get('isapi').value = get('isapi').value || `http://${host}`;
           saveState.textContent = 'Hikvision RTSP URLs prepared. Click Save cameras to write them.';

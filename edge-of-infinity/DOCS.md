@@ -238,7 +238,7 @@ Starting with version `0.4.22`, Hikvision camera settings include a Sub channel 
 
 Starting with version `0.4.23`, the backend also treats `rtsp_sub_channel` as authoritative when normalizing camera config, stops orphaned recording processes after camera removal, and stores the validated URL when the Home Assistant config flow updates an existing entry.
 
-Starting with version `0.4.24`, NVR recording has its own `record_stream` setting. Use `main` to record full quality such as Hikvision `101`, or `sub` to record the selected sub-channel such as `202`. The NVR page shows the exact redacted Record RTSP separately from the Live RTSP so live preview and recording cannot be confused.
+Starting with version `0.4.24`, NVR recording has its own `record_stream` setting. For Hikvision, `main` always uses channel `101` and `sub` always uses channel `102`. The NVR page shows the exact redacted Record RTSP separately from the Live RTSP so live preview and recording cannot be confused.
 
 ## Custom Component Auto-Install
 

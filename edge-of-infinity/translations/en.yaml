@@ -38,9 +38,6 @@ configuration:
   hikvision_1_rtsp_sub:
     name: Camera 1 RTSP sub
     description: Optional sub RTSP URL. When empty, Edge builds the standard Hikvision 102 path.
-  hikvision_1_rtsp_sub_channel:
-    name: Camera 1 Hikvision sub channel
-    description: Hikvision channel number used to build RTSP sub, for example 102 or 202.
   hikvision_1_onvif_url:
     name: Camera 1 ONVIF URL
     description: Optional ONVIF URL for the first camera.
@@ -80,9 +77,6 @@ configuration:
   hikvision_2_rtsp_sub:
     name: Camera 2 RTSP sub
     description: Optional sub RTSP URL. When empty, Edge builds the standard Hikvision 102 path.
-  hikvision_2_rtsp_sub_channel:
-    name: Camera 2 Hikvision sub channel
-    description: Hikvision channel number used to build RTSP sub, for example 102 or 202.
   hikvision_2_onvif_url:
     name: Camera 2 ONVIF URL
     description: Optional ONVIF URL for the second camera.
