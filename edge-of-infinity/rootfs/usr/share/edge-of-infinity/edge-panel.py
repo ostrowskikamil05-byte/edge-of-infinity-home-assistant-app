@@ -1491,6 +1491,7 @@ INDEX_HTML = r"""<!doctype html>
       let cameraAuto = {};
       let recordingStatus = {};
       let selectedRecording = {};
+      let configDirty = false;
 
       const panelBase = window.location.pathname.endsWith('/')
         ? window.location.pathname
@@ -1804,6 +1805,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function renderConfig() {
+        configDirty = false;
         const cameras = config.cameras && config.cameras.length ? config.cameras : [
           { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', record_stream: 'main', record: true, low_latency: true },
           { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', record_stream: 'main', record: true, low_latency: true }
@@ -1887,7 +1889,13 @@ INDEX_HTML = r"""<!doctype html>
       function collectConfig() {
         const cameras = Array.from(form.querySelectorAll('.camera-form')).map((section, index) => {
           const prefix = `camera-${index}`;
-          const get = (name) => form.elements[`${prefix}-${name}`];
+          const get = (name) => {
+            const element = section.querySelector(`[name="${prefix}-${name}"]`);
+            if (!element) {
+              throw new Error(`Missing camera field: ${prefix}-${name}`);
+            }
+            return element;
+          };
           const vendor = get('vendor').value;
           const rtspMain = get('rtsp-main').value.trim();
           const rtspSub = get('rtsp-sub').value.trim();
@@ -2063,7 +2071,12 @@ INDEX_HTML = r"""<!doctype html>
             delete selectedRecording[item.index];
           }
         });
-        renderConfig();
+        if (configDirty) {
+          const cameras = config.cameras && config.cameras.length ? config.cameras : [];
+          nvrGrid.innerHTML = cameras.map(nvrCard).join('');
+        } else {
+          renderConfig();
+        }
       }
 
       function moveRecording(index, direction) {
@@ -2194,7 +2207,7 @@ INDEX_HTML = r"""<!doctype html>
           saveState.textContent = 'Save blocked: at least one camera needs host/IP or RTSP, so existing configuration was not overwritten.';
           return;
         }
-        saveState.textContent = 'Saving cameras...';
+        saveState.textContent = `Saving cameras... ${saveSummary(payload)}`;
         const response = await fetch(panelPath('api/config'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2207,9 +2220,14 @@ INDEX_HTML = r"""<!doctype html>
         }
         config = data;
         renderConfig();
+        configDirty = false;
         await loadPresets();
         await loadCameras();
-        saveState.textContent = `Saved. ${saveSummary(data)}`;
+        const sentSummary = saveSummary(payload);
+        const savedSummary = saveSummary(data);
+        saveState.textContent = sentSummary === savedSummary
+          ? `Saved. ${savedSummary}`
+          : `Saved, but server normalized values. Sent: ${sentSummary} | Server: ${savedSummary}`;
       });
 
       document.getElementById('save-edge-settings').addEventListener('click', async () => {
@@ -2240,6 +2258,13 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);
+
+      form.addEventListener('input', () => {
+        configDirty = true;
+      });
+      form.addEventListener('change', () => {
+        configDirty = true;
+      });
 
       form.addEventListener('click', async (event) => {
         const removeIndex = event.target?.dataset?.removeCamera;
@@ -2317,7 +2342,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.4"
+    server_version = "EdgePanel/0.5.1"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

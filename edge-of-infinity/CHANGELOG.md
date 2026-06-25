@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+- Read Camera Settings values directly from each camera card before saving so `main`/`sub` selectors cannot fall back to stale form values.
+- Preserve unsaved camera edits when NVR status refreshes while the settings form is dirty.
+- Show both the submitted stream mapping and the saved server mapping when the server normalizes a camera payload.
+
 ## 0.5.0
 
 - Make `/homeassistant/edge/edge.json` the panel-owned source of truth after first setup so add-on options no longer overwrite camera changes on restart unless `sync_addon_options` is enabled.
