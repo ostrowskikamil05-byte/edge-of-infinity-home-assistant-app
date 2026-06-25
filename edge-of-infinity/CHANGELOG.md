@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.23
+
+- Keep Hikvision `rtsp_sub_channel` authoritative even if a stale RTSP sub URL is submitted.
+- Stop orphaned FFmpeg recording processes when cameras are removed from the config.
+- Fix Home Assistant config-flow updates to store the validated Edge URL.
+
 ## 0.4.22
 
 - Add a Hikvision sub-channel selector so manual tests can switch between `102` and `202`.

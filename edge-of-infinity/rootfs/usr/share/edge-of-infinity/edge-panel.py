@@ -76,6 +76,12 @@ def hikvision_channel_from_rtsp(value: str, fallback: str) -> str:
     return fallback
 
 
+def hikvision_rtsp_with_channel(value: str, channel: str) -> str:
+    if not value or not channel or "/Streaming/Channels/" not in value:
+        return value
+    return re.sub(r"/Streaming/Channels/\d+", f"/Streaming/Channels/{channel}", value, count=1)
+
+
 def build_dahua_rtsp(explicit: str, host: str, username: str, password: str, subtype: int) -> str:
     if explicit:
         return explicit
@@ -99,6 +105,7 @@ def normalize_camera(raw: dict, index: int) -> dict:
     rtsp_sub_channel = str(raw.get("rtsp_sub_channel") or hikvision_channel_from_rtsp(rtsp_sub, "102"))
     if vendor == "hikvision":
         rtsp_main = build_rtsp(rtsp_main, host, username, password, "101")
+        rtsp_sub = hikvision_rtsp_with_channel(rtsp_sub, rtsp_sub_channel)
         rtsp_sub = build_rtsp(rtsp_sub, host, username, password, rtsp_sub_channel)
         rtsp_sub_channel = hikvision_channel_from_rtsp(rtsp_sub, rtsp_sub_channel)
     elif vendor == "dahua":
@@ -408,6 +415,24 @@ def cleanup_recording_processes() -> None:
     for key, process in list(RECORDING_PROCESSES.items()):
         if process.poll() is not None:
             RECORDING_PROCESSES.pop(key, None)
+
+
+def stop_orphan_recordings(config: dict) -> None:
+    active_keys = {
+        recording_key(camera, index)
+        for index, camera in enumerate(config.get("cameras", []))
+    }
+    for key, process in list(RECORDING_PROCESSES.items()):
+        if key in active_keys:
+            continue
+        RECORDING_PROCESSES.pop(key, None)
+        if process.poll() is not None:
+            continue
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
 
 
 def recording_base_dir(camera: dict, index: int) -> Path:
@@ -2197,6 +2222,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             validate_config_for_save(payload)
             backup_config()
             write_json(CONFIG_PATH, payload)
+            stop_orphan_recordings(payload)
             remember_camera_presets(payload.get("cameras", []))
             refresh_status()
             self.send_json(payload)

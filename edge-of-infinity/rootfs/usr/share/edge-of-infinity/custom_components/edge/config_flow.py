@@ -113,7 +113,7 @@ class EdgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         parsed = urlparse(user_input[CONF_URL])
                         unique_id = parsed.netloc
                     await self.async_set_unique_id(unique_id)
-                    self._abort_if_unique_id_configured(updates={CONF_URL: url})
+                    self._abort_if_unique_id_configured(updates={CONF_URL: user_input[CONF_URL]})
                     return self.async_create_entry(
                         title=info["title"],
                         data=user_input,
