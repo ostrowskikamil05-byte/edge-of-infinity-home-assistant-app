@@ -81,6 +81,42 @@ has_addon_camera_options() {
     option_has_value "hikvision_2_rtsp_main"
 }
 
+addon_camera_options_hash() {
+  if [[ ! -f "${OPTIONS_PATH}" ]]; then
+    echo ""
+    return
+  fi
+
+  jq -c '{
+    hikvision_1_enabled,
+    hikvision_1_name,
+    hikvision_1_host,
+    hikvision_1_username,
+    hikvision_1_password,
+    hikvision_1_rtsp_main,
+    hikvision_1_rtsp_sub,
+    hikvision_1_onvif_url,
+    hikvision_1_isapi_base_url,
+    hikvision_1_record,
+    hikvision_1_low_latency,
+    hikvision_1_snapshot_stream,
+    hikvision_1_record_stream,
+    hikvision_2_enabled,
+    hikvision_2_name,
+    hikvision_2_host,
+    hikvision_2_username,
+    hikvision_2_password,
+    hikvision_2_rtsp_main,
+    hikvision_2_rtsp_sub,
+    hikvision_2_onvif_url,
+    hikvision_2_isapi_base_url,
+    hikvision_2_record,
+    hikvision_2_low_latency,
+    hikvision_2_snapshot_stream,
+    hikvision_2_record_stream
+  }' "${OPTIONS_PATH}" 2>/dev/null | sha256sum | awk '{print $1}'
+}
+
 default_if_empty() {
   local value="$1"
   local fallback="$2"
@@ -326,13 +362,29 @@ cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
 EOF
 cp "${EDGE_HOME_EXAMPLE_CONFIG}" "${EDGE_ADDON_EXAMPLE_CONFIG}"
 
-if [[ -f "${EDGE_HOME_CONFIG}" ]]; then
-  EDGE_CONFIG="${EDGE_HOME_CONFIG}"
-  bashio::log.info "Using Home Assistant camera config at ${EDGE_CONFIG}"
-elif has_addon_camera_options; then
+ADDON_OPTIONS_HASH_PATH=/homeassistant/edge/addon-options.hash
+ADDON_OPTIONS_HASH="$(addon_camera_options_hash)"
+PREVIOUS_ADDON_OPTIONS_HASH=""
+if [[ -f "${ADDON_OPTIONS_HASH_PATH}" ]]; then
+  PREVIOUS_ADDON_OPTIONS_HASH="$(cat "${ADDON_OPTIONS_HASH_PATH}")"
+fi
+
+if has_addon_camera_options && [[ ! -f "${EDGE_HOME_CONFIG}" ]]; then
   EDGE_CONFIG="${EDGE_HOME_CONFIG}"
   write_addon_options_config "${EDGE_CONFIG}"
+  echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
   bashio::log.info "Created camera config from Home Assistant add-on options at ${EDGE_CONFIG}."
+elif has_addon_camera_options && [[ -n "${ADDON_OPTIONS_HASH}" && "${ADDON_OPTIONS_HASH}" != "${PREVIOUS_ADDON_OPTIONS_HASH}" ]]; then
+  EDGE_CONFIG="${EDGE_HOME_CONFIG}"
+  if [[ -f "${EDGE_HOME_CONFIG}" ]]; then
+    cp "${EDGE_HOME_CONFIG}" /homeassistant/edge/edge.before-addon-options.json
+  fi
+  write_addon_options_config "${EDGE_CONFIG}"
+  echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
+  bashio::log.info "Applied updated Home Assistant add-on camera options to ${EDGE_CONFIG}."
+elif [[ -f "${EDGE_HOME_CONFIG}" ]]; then
+  EDGE_CONFIG="${EDGE_HOME_CONFIG}"
+  bashio::log.info "Using Home Assistant camera config at ${EDGE_CONFIG}"
 elif [[ -f "${EDGE_ADDON_CONFIG}" ]]; then
   EDGE_CONFIG="${EDGE_ADDON_CONFIG}"
   bashio::log.info "Using add-on camera config at ${EDGE_CONFIG}"

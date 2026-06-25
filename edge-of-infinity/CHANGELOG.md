@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.26
+
+- Apply changed Home Assistant add-on camera options to `/homeassistant/edge/edge.json` instead of ignoring them when the file already exists.
+- Track a hash of add-on camera options so Edge panel saves are preserved until the add-on options actually change.
+- Keep a backup at `/homeassistant/edge/edge.before-addon-options.json` before applying changed add-on options.
+
 ## 0.4.25
 
 - Bump the add-on and Home Assistant integration versions so Home Assistant detects the stream-mapping update.
