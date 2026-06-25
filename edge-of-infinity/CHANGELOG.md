@@ -6,6 +6,7 @@
 - Show `Record stream` and redacted `Record RTSP` in the NVR panel.
 - Restore strict Hikvision stream mapping: `main` rewrites RTSP to channel `101`, and `sub` rewrites RTSP to channel `102`.
 - Remove the manual Hikvision sub-channel option so stream selection stays controlled by `main` or `sub`.
+- Normalize Hikvision stream diagnostics inside the Home Assistant integration before exposing entity attributes.
 - Keep add-on options, first-run config, panel config, and Home Assistant camera attributes aligned with the new stream fields.
 
 ## 0.4.23

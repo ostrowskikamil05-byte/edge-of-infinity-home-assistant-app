@@ -9,6 +9,9 @@ from typing import Any
 
 from aiohttp import ClientError, ClientResponseError, ClientSession
 
+HIKVISION_MAIN_CHANNEL = "101"
+HIKVISION_SUB_CHANNEL = "102"
+
 
 class EdgeClientError(Exception):
     """Base Edge client error."""
@@ -106,7 +109,7 @@ class EdgeClient:
         if self.is_local:
             payload = self._read_local_json("cameras.json")
             cameras = payload.get("cameras") if isinstance(payload, dict) else payload
-            return cameras if isinstance(cameras, list) else []
+            return _normalize_cameras(cameras if isinstance(cameras, list) else [])
 
         try:
             payload = await self._request("GET", "/cameras")
@@ -114,11 +117,11 @@ class EdgeClient:
             payload = await self._request("GET", "/cameras.json")
 
         if isinstance(payload, list):
-            return payload
+            return _normalize_cameras(payload)
         if isinstance(payload, dict):
             cameras = payload.get("cameras")
             if isinstance(cameras, list):
-                return cameras
+                return _normalize_cameras(cameras)
         return []
 
     async def camera_image(self, camera: dict[str, Any]) -> bytes | None:
@@ -136,3 +139,63 @@ class EdgeClient:
 
         path = snapshot_url if snapshot_url.startswith("/") else f"/{snapshot_url}"
         return await self._request("GET", path, expect_json=False)
+
+
+def _rewrite_hikvision_channel(value: str | None, channel: str) -> str | None:
+    """Return a Hikvision RTSP URL with the expected channel number."""
+    if not value or "/Streaming/Channels/" not in value:
+        return value
+    prefix, _, suffix = value.partition("/Streaming/Channels/")
+    tail = suffix.split("/", 1)
+    rest = f"/{tail[1]}" if len(tail) > 1 else ""
+    return f"{prefix}/Streaming/Channels/{channel}{rest}"
+
+
+def _stream_rtsp(camera: dict[str, Any], stream_name: str) -> str | None:
+    if stream_name == "main":
+        return camera.get("rtsp_main") or camera.get("live_rtsp") or camera.get("record_rtsp")
+    return camera.get("rtsp_sub") or camera.get("live_rtsp") or camera.get("record_rtsp")
+
+
+def _normalize_camera(camera: dict[str, Any]) -> dict[str, Any]:
+    """Normalize camera diagnostics before Home Assistant exposes them."""
+    normalized = dict(camera)
+    if normalized.get("vendor") != "hikvision":
+        return normalized
+
+    normalized["rtsp_sub_channel"] = HIKVISION_SUB_CHANNEL
+    normalized["hikvision_main_channel"] = HIKVISION_MAIN_CHANNEL
+    normalized["hikvision_sub_channel"] = HIKVISION_SUB_CHANNEL
+    normalized["rtsp_main"] = _rewrite_hikvision_channel(
+        normalized.get("rtsp_main"),
+        HIKVISION_MAIN_CHANNEL,
+    )
+    normalized["rtsp_sub"] = _rewrite_hikvision_channel(
+        normalized.get("rtsp_sub"),
+        HIKVISION_SUB_CHANNEL,
+    )
+
+    live_stream = normalized.get("live_stream") if normalized.get("live_stream") == "main" else "sub"
+    record_stream = normalized.get("record_stream") if normalized.get("record_stream") == "sub" else "main"
+    normalized["live_stream"] = live_stream
+    normalized["record_stream"] = record_stream
+
+    live_channel = HIKVISION_MAIN_CHANNEL if live_stream == "main" else HIKVISION_SUB_CHANNEL
+    record_channel = HIKVISION_MAIN_CHANNEL if record_stream == "main" else HIKVISION_SUB_CHANNEL
+    normalized["live_rtsp"] = _rewrite_hikvision_channel(
+        normalized.get("live_rtsp") or _stream_rtsp(normalized, live_stream),
+        live_channel,
+    )
+    normalized["record_rtsp"] = _rewrite_hikvision_channel(
+        normalized.get("record_rtsp") or _stream_rtsp(normalized, record_stream),
+        record_channel,
+    )
+    return normalized
+
+
+def _normalize_cameras(cameras: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        _normalize_camera(camera)
+        for camera in cameras
+        if isinstance(camera, dict)
+    ]
