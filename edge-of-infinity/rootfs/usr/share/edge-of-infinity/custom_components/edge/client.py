@@ -141,14 +141,13 @@ class EdgeClient:
         return await self._request("GET", path, expect_json=False)
 
 
-def _rewrite_hikvision_channel(value: str | None, channel: str) -> str | None:
-    """Return a Hikvision RTSP URL with the expected channel number."""
+def _hikvision_channel_from_rtsp(value: str | None, fallback: str) -> str:
+    """Return the channel number from a Hikvision RTSP URL."""
     if not value or "/Streaming/Channels/" not in value:
-        return value
-    prefix, _, suffix = value.partition("/Streaming/Channels/")
-    tail = suffix.split("/", 1)
-    rest = f"/{tail[1]}" if len(tail) > 1 else ""
-    return f"{prefix}/Streaming/Channels/{channel}{rest}"
+        return fallback
+    _, _, suffix = value.partition("/Streaming/Channels/")
+    channel = suffix.split("/", 1)[0]
+    return channel if channel.isdigit() else fallback
 
 
 def _stream_rtsp(camera: dict[str, Any], stream_name: str) -> str | None:
@@ -163,33 +162,22 @@ def _normalize_camera(camera: dict[str, Any]) -> dict[str, Any]:
     if normalized.get("vendor") != "hikvision":
         return normalized
 
-    normalized["rtsp_sub_channel"] = HIKVISION_SUB_CHANNEL
-    normalized["hikvision_main_channel"] = HIKVISION_MAIN_CHANNEL
-    normalized["hikvision_sub_channel"] = HIKVISION_SUB_CHANNEL
-    normalized["rtsp_main"] = _rewrite_hikvision_channel(
-        normalized.get("rtsp_main"),
-        HIKVISION_MAIN_CHANNEL,
-    )
-    normalized["rtsp_sub"] = _rewrite_hikvision_channel(
-        normalized.get("rtsp_sub"),
-        HIKVISION_SUB_CHANNEL,
-    )
-
     live_stream = normalized.get("live_stream") if normalized.get("live_stream") == "main" else "sub"
     record_stream = normalized.get("record_stream") if normalized.get("record_stream") == "sub" else "main"
     normalized["live_stream"] = live_stream
     normalized["record_stream"] = record_stream
 
-    live_channel = HIKVISION_MAIN_CHANNEL if live_stream == "main" else HIKVISION_SUB_CHANNEL
-    record_channel = HIKVISION_MAIN_CHANNEL if record_stream == "main" else HIKVISION_SUB_CHANNEL
-    normalized["live_rtsp"] = _rewrite_hikvision_channel(
-        normalized.get("live_rtsp") or _stream_rtsp(normalized, live_stream),
-        live_channel,
+    normalized["live_rtsp"] = _stream_rtsp(normalized, live_stream) or normalized.get("live_rtsp")
+    normalized["record_rtsp"] = _stream_rtsp(normalized, record_stream) or normalized.get("record_rtsp")
+    normalized["rtsp_sub_channel"] = _hikvision_channel_from_rtsp(
+        normalized.get("rtsp_sub"),
+        HIKVISION_SUB_CHANNEL,
     )
-    normalized["record_rtsp"] = _rewrite_hikvision_channel(
-        normalized.get("record_rtsp") or _stream_rtsp(normalized, record_stream),
-        record_channel,
+    normalized["hikvision_main_channel"] = _hikvision_channel_from_rtsp(
+        normalized.get("rtsp_main"),
+        HIKVISION_MAIN_CHANNEL,
     )
+    normalized["hikvision_sub_channel"] = normalized["rtsp_sub_channel"]
     return normalized
 
 

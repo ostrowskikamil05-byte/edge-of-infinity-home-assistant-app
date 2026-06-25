@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.27
+
+- Preserve manually entered Hikvision RTSP URLs during panel saves and add-on option config generation.
+- Stop rewriting explicit camera URLs to fixed `101`/`102` channels; `main` and `sub` now select the saved main/sub URLs.
+- Report Hikvision channel diagnostics in Home Assistant from the actual saved RTSP URLs.
+
 ## 0.4.26
 
 - Apply changed Home Assistant add-on camera options to `/homeassistant/edge/edge.json` instead of ignoring them when the file already exists.

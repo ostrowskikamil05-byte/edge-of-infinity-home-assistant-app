@@ -106,11 +106,9 @@ def normalize_camera(raw: dict, index: int) -> dict:
     rtsp_sub = raw.get("rtsp_sub") or ""
     rtsp_sub_channel = hikvision_channel_from_rtsp(rtsp_sub, HIKVISION_SUB_CHANNEL)
     if vendor == "hikvision":
-        rtsp_main = hikvision_rtsp_with_channel(rtsp_main, HIKVISION_MAIN_CHANNEL)
         rtsp_main = build_rtsp(rtsp_main, host, username, password, HIKVISION_MAIN_CHANNEL)
-        rtsp_sub = hikvision_rtsp_with_channel(rtsp_sub, HIKVISION_SUB_CHANNEL)
         rtsp_sub = build_rtsp(rtsp_sub, host, username, password, HIKVISION_SUB_CHANNEL)
-        rtsp_sub_channel = HIKVISION_SUB_CHANNEL
+        rtsp_sub_channel = hikvision_channel_from_rtsp(rtsp_sub, HIKVISION_SUB_CHANNEL)
     elif vendor == "dahua":
         rtsp_main = build_dahua_rtsp(rtsp_main, host, username, password, 0)
         rtsp_sub = build_dahua_rtsp(rtsp_sub, host, username, password, 1)
@@ -1729,18 +1727,19 @@ INDEX_HTML = r"""<!doctype html>
         return value.replace(/\/Streaming\/Channels\/\d+/, `/Streaming/Channels/${channel}`);
       }
 
+      function hikvisionChannelFromRtsp(value, fallback = '102') {
+        const match = String(value || '').match(/\/Streaming\/Channels\/(\d+)/);
+        return match ? match[1] : fallback;
+      }
+
       function collectConfig() {
         const cameras = Array.from(form.querySelectorAll('.camera-form')).map((section, index) => {
           const prefix = `camera-${index}`;
           const get = (name) => form.elements[`${prefix}-${name}`];
           const vendor = get('vendor').value;
-          const rtspSubChannel = '102';
-          const rtspMain = vendor === 'hikvision'
-            ? rtspWithHikvisionChannel(get('rtsp-main').value.trim(), '101')
-            : get('rtsp-main').value.trim();
-          const rtspSub = vendor === 'hikvision'
-            ? rtspWithHikvisionChannel(get('rtsp-sub').value.trim(), rtspSubChannel)
-            : get('rtsp-sub').value.trim();
+          const rtspMain = get('rtsp-main').value.trim();
+          const rtspSub = get('rtsp-sub').value.trim();
+          const rtspSubChannel = vendor === 'hikvision' ? hikvisionChannelFromRtsp(rtspSub, '102') : '';
           return {
             id: config.cameras[index]?.id || `${get('vendor').value}_${index + 1}`,
             name: get('name').value,

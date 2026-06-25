@@ -140,11 +140,7 @@ build_hikvision_rtsp() {
   esac
 
   if [[ -n "${explicit}" && "${explicit}" != "null" ]]; then
-    if [[ "${explicit}" == *"/Streaming/Channels/"* ]]; then
-      echo "${explicit}" | sed -E "s#/Streaming/Channels/[0-9]+#/Streaming/Channels/${channel}#"
-    else
-      echo "${explicit}"
-    fi
+    echo "${explicit}"
   elif [[ -n "${host}" && -n "${username}" && -n "${password}" ]]; then
     echo "rtsp://${username}:${password}@${host}:554/Streaming/Channels/${channel}"
   else
