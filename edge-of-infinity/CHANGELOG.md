@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.25
+
+- Bump the add-on and Home Assistant integration versions so Home Assistant detects the stream-mapping update.
+
 ## 0.4.24
 
 - Add a separate `Recording stream` setting so NVR can use either `main` or `sub`.
