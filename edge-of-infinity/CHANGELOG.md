@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.22
+
+- Add a Hikvision sub-channel selector so manual tests can switch between `102` and `202`.
+- Preserve the chosen Hikvision sub-channel when saving camera settings and building RTSP URLs.
+- Show live-stream probe details separately from the main RTSP status.
+
 ## 0.4.21
 
 - Add live MJPEG diagnostics showing selected camera, stream, and redacted RTSP URL.

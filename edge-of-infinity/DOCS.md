@@ -234,6 +234,8 @@ Starting with version `0.4.20`, each camera has a separate Live stream selector.
 
 Starting with version `0.4.21`, each MJPEG live attempt writes the selected camera, stream name, and redacted RTSP URL to `/homeassistant/edge/live-*.log`. This helps verify whether Edge is using `sub`/`102` or accidentally receiving a HEVC stream.
 
+Starting with version `0.4.22`, Hikvision camera settings include a Sub channel selector for `102` and `202`. Saving camera settings rewrites the Hikvision `RTSP sub` URL to the selected channel, and the Home camera cards show a separate Live probe so the active live stream can be compared against the main-stream status.
+
 ## Custom Component Auto-Install
 
 Starting with version `0.3.2`, the add-on can install or update the Home Assistant custom component automatically.

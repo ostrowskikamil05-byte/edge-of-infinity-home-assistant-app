@@ -269,12 +269,14 @@ cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
       "password": "change-me",
       "rtsp_main": "rtsp://admin:change-me@192.168.1.64:554/Streaming/Channels/101",
       "rtsp_sub": "rtsp://admin:change-me@192.168.1.64:554/Streaming/Channels/102",
+      "rtsp_sub_channel": "102",
       "onvif_url": "http://192.168.1.64:80/onvif/device_service",
       "isapi_base_url": "http://192.168.1.64",
       "enabled": false,
       "record": true,
       "low_latency": true,
-      "snapshot_stream": "sub"
+      "snapshot_stream": "sub",
+      "live_stream": "sub"
     },
     {
       "id": "hikvision_2",
@@ -285,12 +287,14 @@ cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
       "password": "change-me",
       "rtsp_main": "rtsp://admin:change-me@192.168.1.65:554/Streaming/Channels/101",
       "rtsp_sub": "rtsp://admin:change-me@192.168.1.65:554/Streaming/Channels/102",
+      "rtsp_sub_channel": "102",
       "onvif_url": "http://192.168.1.65:80/onvif/device_service",
       "isapi_base_url": "http://192.168.1.65",
       "enabled": false,
       "record": true,
       "low_latency": true,
-      "snapshot_stream": "sub"
+      "snapshot_stream": "sub",
+      "live_stream": "sub"
     }
   ],
   "future_vendors": [

@@ -69,6 +69,13 @@ def build_rtsp(explicit: str, host: str, username: str, password: str, channel: 
     return ""
 
 
+def hikvision_channel_from_rtsp(value: str, fallback: str) -> str:
+    match = re.search(r"/Streaming/Channels/(\d+)", value or "")
+    if match:
+        return match.group(1)
+    return fallback
+
+
 def build_dahua_rtsp(explicit: str, host: str, username: str, password: str, subtype: int) -> str:
     if explicit:
         return explicit
@@ -89,12 +96,15 @@ def normalize_camera(raw: dict, index: int) -> dict:
     password = raw.get("password") or ""
     rtsp_main = raw.get("rtsp_main") or ""
     rtsp_sub = raw.get("rtsp_sub") or ""
+    rtsp_sub_channel = str(raw.get("rtsp_sub_channel") or hikvision_channel_from_rtsp(rtsp_sub, "102"))
     if vendor == "hikvision":
         rtsp_main = build_rtsp(rtsp_main, host, username, password, "101")
-        rtsp_sub = build_rtsp(rtsp_sub, host, username, password, "102")
+        rtsp_sub = build_rtsp(rtsp_sub, host, username, password, rtsp_sub_channel)
+        rtsp_sub_channel = hikvision_channel_from_rtsp(rtsp_sub, rtsp_sub_channel)
     elif vendor == "dahua":
         rtsp_main = build_dahua_rtsp(rtsp_main, host, username, password, 0)
         rtsp_sub = build_dahua_rtsp(rtsp_sub, host, username, password, 1)
+        rtsp_sub_channel = ""
     snapshot_stream = raw.get("snapshot_stream") if raw.get("snapshot_stream") == "main" else "sub"
     live_stream = raw.get("live_stream") if raw.get("live_stream") == "main" else "sub"
 
@@ -110,6 +120,7 @@ def normalize_camera(raw: dict, index: int) -> dict:
         "password": password,
         "rtsp_main": rtsp_main,
         "rtsp_sub": rtsp_sub,
+        "rtsp_sub_channel": rtsp_sub_channel,
         "onvif_url": onvif_url,
         "isapi_base_url": isapi_base_url,
         "enabled": bool(raw.get("enabled")),
@@ -182,6 +193,7 @@ def preset_camera(camera: dict) -> dict:
             "password",
             "rtsp_main",
             "rtsp_sub",
+            "rtsp_sub_channel",
             "onvif_url",
             "isapi_base_url",
             "enabled",
@@ -280,6 +292,33 @@ def run_json(command: list[str], timeout: int) -> dict | None:
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         return None
+
+
+def probe_rtsp_stream(stream: str, timeout: int = 8) -> dict:
+    if not stream:
+        return {}
+    probe = run_json(
+        [
+            "ffprobe",
+            "-rtsp_transport",
+            "tcp",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=index,codec_type,codec_name,width,height,r_frame_rate,bit_rate,sample_rate,channels",
+            "-of",
+            "json",
+            stream,
+        ],
+        timeout=timeout,
+    )
+    streams = (probe or {}).get("streams", []) if probe else []
+    video_stream = next((item for item in streams if item.get("codec_type") == "video"), {})
+    audio_stream = next((item for item in streams if item.get("codec_type") == "audio"), {})
+    return {
+        "video": video_stream,
+        "audio": audio_stream,
+    }
 
 
 def capture_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
@@ -788,6 +827,14 @@ def refresh_status() -> dict:
         height = ""
         fps = ""
         bitrate = ""
+        live_stream_name = camera.get("live_stream") or "sub"
+        live_rtsp = camera_stream(camera, live_stream_name)
+        live_video_codec = ""
+        live_width = ""
+        live_height = ""
+        live_fps = ""
+        live_bitrate = ""
+        live_probe_status = "not_checked"
         snapshot_url = ""
         snapshot_path = ""
 
@@ -797,24 +844,9 @@ def refresh_status() -> dict:
                 status = "missing_rtsp"
                 detail = "Camera is enabled, but rtsp_main is empty."
             else:
-                probe = run_json(
-                    [
-                        "ffprobe",
-                        "-rtsp_transport",
-                        "tcp",
-                        "-v",
-                        "error",
-                        "-show_entries",
-                        "stream=index,codec_type,codec_name,width,height,r_frame_rate,bit_rate,sample_rate,channels",
-                        "-of",
-                        "json",
-                        rtsp_main,
-                    ],
-                    timeout=8,
-                )
-                streams = (probe or {}).get("streams", []) if probe else []
-                video_stream = next((item for item in streams if item.get("codec_type") == "video"), {})
-                audio_stream = next((item for item in streams if item.get("codec_type") == "audio"), {})
+                main_probe = probe_rtsp_stream(rtsp_main)
+                video_stream = main_probe.get("video") or {}
+                audio_stream = main_probe.get("audio") or {}
                 if video_stream:
                     status = "online"
                     detail = "RTSP main stream is reachable."
@@ -830,6 +862,28 @@ def refresh_status() -> dict:
                 else:
                     status = "lost_connection" if previous.get("status") == "online" else "offline"
                     detail = "RTSP connection was lost." if status == "lost_connection" else "RTSP probe failed. Check IP, credentials, port 554, and camera stream path."
+            if live_rtsp:
+                if live_rtsp == rtsp_main and video_codec:
+                    live_probe_status = "online"
+                    live_video_codec = video_codec
+                    live_width = width
+                    live_height = height
+                    live_fps = fps
+                    live_bitrate = bitrate
+                else:
+                    live_probe = probe_rtsp_stream(live_rtsp)
+                    live_video_stream = live_probe.get("video") or {}
+                    if live_video_stream:
+                        live_probe_status = "online"
+                        live_video_codec = str(live_video_stream.get("codec_name") or "")
+                        live_width = str(live_video_stream.get("width") or "")
+                        live_height = str(live_video_stream.get("height") or "")
+                        live_fps = str(live_video_stream.get("r_frame_rate") or "")
+                        live_bitrate = str(live_video_stream.get("bit_rate") or "")
+                    else:
+                        live_probe_status = "offline"
+            else:
+                live_probe_status = "missing_rtsp"
 
         camera_status = {
             "id": camera.get("id"),
@@ -842,7 +896,14 @@ def refresh_status() -> dict:
             "record": bool(camera.get("record")),
             "low_latency": bool(camera.get("low_latency")),
             "snapshot_stream": camera.get("snapshot_stream") or "sub",
-            "live_stream": camera.get("live_stream") or "sub",
+            "live_stream": live_stream_name,
+            "live_rtsp": redact_rtsp(live_rtsp),
+            "live_probe_status": live_probe_status,
+            "live_video_codec": live_video_codec,
+            "live_width": live_width,
+            "live_height": live_height,
+            "live_fps": live_fps,
+            "live_bitrate": live_bitrate,
             "status": status,
             "detail": detail,
             "codec": video_codec,
@@ -1028,6 +1089,7 @@ INDEX_HTML = r"""<!doctype html>
       .vendor { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; color: var(--accent); font-size: 12px; text-transform: uppercase; }
       .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
       .metric { border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: rgba(0,0,0,.14); }
+      .metric.wide { grid-column: 1 / -1; }
       .metric b { display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; text-transform: uppercase; }
       .metric span { font-size: 14px; overflow-wrap: anywhere; }
       .state-online { color: var(--accent); }
@@ -1356,6 +1418,8 @@ INDEX_HTML = r"""<!doctype html>
           ? `${camera.audio_codec}${camera.audio_sample_rate ? ` ${camera.audio_sample_rate}Hz` : ''}${camera.audio_channels ? ` ${camera.audio_channels}ch` : ''}`
           : 'none';
         const liveStream = camera.live_stream || 'sub';
+        const liveResolution = camera.live_width && camera.live_height ? `${camera.live_width}x${camera.live_height}` : 'unknown';
+        const liveCodec = camera.live_video_codec ? `${camera.live_video_codec} ${liveResolution}` : `probe ${text(camera.live_probe_status, 'unknown')}`;
         const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveKey)}.mjpg?camera_index=${encodeURIComponent(camera.index ?? 0)}&stream=${encodeURIComponent(liveStream)}&t=${Date.now()}`);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         const preview = live[liveKey]
@@ -1376,6 +1440,8 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="metric"><b>Status</b><span class="${stateClass}">${escapeHtml(statusLabel(camera.status))}</span></div>
                 <div class="metric"><b>Video</b><span>${escapeHtml(text(videoCodec))} ${escapeHtml(resolution)}</span></div>
                 <div class="metric"><b>Audio</b><span>${escapeHtml(audioCodec)}</span></div>
+                <div class="metric"><b>Live</b><span>${escapeHtml(liveStream)} ${escapeHtml(liveCodec)}</span></div>
+                <div class="metric wide"><b>Live RTSP</b><span>${escapeHtml(text(camera.live_rtsp, 'missing'))}</span></div>
                 <div class="metric"><b>FPS</b><span>${escapeHtml(text(camera.fps))}</span></div>
                 <div class="metric"><b>Bitrate</b><span>${escapeHtml(bitrateText(camera.bitrate))}</span></div>
               </div>
@@ -1491,6 +1557,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function cameraForm(camera, index) {
         const prefix = `camera-${index}`;
+        const subChannel = camera.rtsp_sub_channel || (String(camera.rtsp_sub || '').match(/\/Streaming\/Channels\/(\d+)/)?.[1] || '102');
         return `
           <div class="camera-form" data-index="${index}">
             <div class="row">
@@ -1509,6 +1576,11 @@ INDEX_HTML = r"""<!doctype html>
               <label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label>
               <label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label>
               <label>RTSP main<input name="${prefix}-rtsp-main" value="${escapeHtml(camera.rtsp_main || '')}"></label>
+              <label>Hikvision sub channel<select name="${prefix}-rtsp-sub-channel">
+                <option value="102" ${subChannel === '102' ? 'selected' : ''}>102</option>
+                <option value="202" ${subChannel === '202' ? 'selected' : ''}>202</option>
+                ${subChannel !== '102' && subChannel !== '202' ? `<option value="${escapeHtml(subChannel)}" selected>${escapeHtml(subChannel)}</option>` : ''}
+              </select></label>
               <label>RTSP sub<input name="${prefix}-rtsp-sub" value="${escapeHtml(camera.rtsp_sub || '')}"></label>
               <label>ONVIF URL<input name="${prefix}-onvif" value="${escapeHtml(camera.onvif_url || '')}"></label>
               <label>ISAPI URL<input name="${prefix}-isapi" value="${escapeHtml(camera.isapi_base_url || '')}"></label>
@@ -1533,8 +1605,8 @@ INDEX_HTML = r"""<!doctype html>
 
       function renderConfig() {
         const cameras = config.cameras && config.cameras.length ? config.cameras : [
-          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', live_stream: 'sub', record: true, low_latency: true },
-          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', snapshot_stream: 'sub', live_stream: 'sub', record: true, low_latency: true }
+          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', record: true, low_latency: true },
+          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', record: true, low_latency: true }
         ];
         config = { ...config, cameras };
         form.innerHTML = cameras.map(cameraForm).join('');
@@ -1601,19 +1673,31 @@ INDEX_HTML = r"""<!doctype html>
         renderPresets();
       }
 
+      function rtspWithHikvisionChannel(value, channel) {
+        if (!value || !channel) return value || '';
+        if (!value.includes('/Streaming/Channels/')) return value;
+        return value.replace(/\/Streaming\/Channels\/\d+/, `/Streaming/Channels/${channel}`);
+      }
+
       function collectConfig() {
         const cameras = Array.from(form.querySelectorAll('.camera-form')).map((section, index) => {
           const prefix = `camera-${index}`;
           const get = (name) => form.elements[`${prefix}-${name}`];
+          const vendor = get('vendor').value;
+          const rtspSubChannel = get('rtsp-sub-channel').value;
+          const rtspSub = vendor === 'hikvision'
+            ? rtspWithHikvisionChannel(get('rtsp-sub').value.trim(), rtspSubChannel)
+            : get('rtsp-sub').value.trim();
           return {
             id: config.cameras[index]?.id || `${get('vendor').value}_${index + 1}`,
             name: get('name').value,
-            vendor: get('vendor').value,
+            vendor,
             host: get('host').value.trim(),
             username: get('username').value.trim(),
             password: get('password').value,
             rtsp_main: get('rtsp-main').value.trim(),
-            rtsp_sub: get('rtsp-sub').value.trim(),
+            rtsp_sub: rtspSub,
+            rtsp_sub_channel: rtspSubChannel,
             onvif_url: get('onvif').value.trim(),
             isapi_base_url: get('isapi').value.trim(),
             enabled: get('enabled').checked,
@@ -1632,6 +1716,7 @@ INDEX_HTML = r"""<!doctype html>
           name: `Hikvision ${index + 1}`,
           vendor: 'hikvision',
           username: 'admin',
+          rtsp_sub_channel: '102',
           snapshot_stream: 'sub',
           live_stream: 'sub',
           enabled: false,
@@ -1669,13 +1754,14 @@ INDEX_HTML = r"""<!doctype html>
         const host = get('host').value.trim();
         const username = get('username').value.trim();
         const password = get('password').value;
+        const subChannel = get('rtsp-sub-channel')?.value || '102';
         if (!host || !username || !password) {
           saveState.textContent = 'Host, username, and password are required to build RTSP URLs.';
           return;
         }
         if (vendor === 'hikvision') {
           get('rtsp-main').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/101`;
-          get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/102`;
+          get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/${subChannel}`;
           get('onvif').value = get('onvif').value || `http://${host}:80/onvif/device_service`;
           get('isapi').value = get('isapi').value || `http://${host}`;
           saveState.textContent = 'Hikvision RTSP URLs prepared. Click Save cameras to write them.';
