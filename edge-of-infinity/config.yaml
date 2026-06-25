@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.4.27"
+version: "0.5.0"
 slug: edge_of_infinity
 description: Private low-latency live NVR core for Hikvision and ONVIF cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -40,6 +40,7 @@ options:
   database_path: /homeassistant/edge/edge.db
   retention_days: 14
   install_custom_component: true
+  sync_addon_options: false
   hikvision_1_enabled: false
   hikvision_1_name: Hikvision 1
   hikvision_1_host: ""
@@ -52,6 +53,7 @@ options:
   hikvision_1_record: true
   hikvision_1_low_latency: true
   hikvision_1_snapshot_stream: sub
+  hikvision_1_live_stream: sub
   hikvision_1_record_stream: main
   hikvision_2_enabled: false
   hikvision_2_name: Hikvision 2
@@ -65,6 +67,7 @@ options:
   hikvision_2_record: true
   hikvision_2_low_latency: true
   hikvision_2_snapshot_stream: sub
+  hikvision_2_live_stream: sub
   hikvision_2_record_stream: main
 schema:
   log_level: list(trace|debug|info|notice|warning|error|fatal)
@@ -73,6 +76,7 @@ schema:
   database_path: str
   retention_days: int(1,365)
   install_custom_component: bool
+  sync_addon_options: bool
   hikvision_1_enabled: bool
   hikvision_1_name: str
   hikvision_1_host: str
@@ -85,6 +89,7 @@ schema:
   hikvision_1_record: bool
   hikvision_1_low_latency: bool
   hikvision_1_snapshot_stream: list(sub|main)
+  hikvision_1_live_stream: list(sub|main)
   hikvision_1_record_stream: list(main|sub)
   hikvision_2_enabled: bool
   hikvision_2_name: str
@@ -98,6 +103,7 @@ schema:
   hikvision_2_record: bool
   hikvision_2_low_latency: bool
   hikvision_2_snapshot_stream: list(sub|main)
+  hikvision_2_live_stream: list(sub|main)
   hikvision_2_record_stream: list(main|sub)
 backup: hot
 backup_exclude:

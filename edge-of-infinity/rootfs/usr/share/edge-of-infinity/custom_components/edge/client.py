@@ -156,19 +156,58 @@ def _stream_rtsp(camera: dict[str, Any], stream_name: str) -> str | None:
     return camera.get("rtsp_sub") or camera.get("live_rtsp") or camera.get("record_rtsp")
 
 
+def _redact_rtsp(value: str | None) -> str:
+    if not value:
+        return ""
+    prefix = "rtsp://"
+    if not value.startswith(prefix) or "@" not in value:
+        return value
+    auth, _, rest = value.removeprefix(prefix).partition("@")
+    if ":" not in auth:
+        return value
+    username, _, _password = auth.partition(":")
+    return f"{prefix}{username}:***@{rest}"
+
+
+def _stream_profile(camera: dict[str, Any], stream_name: str) -> dict[str, Any]:
+    stream_name = stream_name if stream_name in ("main", "sub") else "sub"
+    fallback = HIKVISION_MAIN_CHANNEL if stream_name == "main" else HIKVISION_SUB_CHANNEL
+    rtsp = _stream_rtsp(camera, stream_name) or ""
+    return {
+        "stream": stream_name,
+        "channel": _hikvision_channel_from_rtsp(rtsp, fallback),
+        "rtsp": _redact_rtsp(rtsp),
+        "configured": bool(rtsp),
+    }
+
+
+def _effective_streams(camera: dict[str, Any]) -> dict[str, Any]:
+    live_stream = camera.get("live_stream") if camera.get("live_stream") == "main" else "sub"
+    record_stream = camera.get("record_stream") if camera.get("record_stream") in ("main", "sub") else "main"
+    snapshot_stream = camera.get("snapshot_stream") if camera.get("snapshot_stream") == "main" else "sub"
+    return {
+        "main": _stream_profile(camera, "main"),
+        "sub": _stream_profile(camera, "sub"),
+        "live": _stream_profile(camera, live_stream),
+        "record": _stream_profile(camera, record_stream),
+        "snapshot": _stream_profile(camera, snapshot_stream),
+    }
+
+
 def _normalize_camera(camera: dict[str, Any]) -> dict[str, Any]:
     """Normalize camera diagnostics before Home Assistant exposes them."""
     normalized = dict(camera)
-    if normalized.get("vendor") != "hikvision":
-        return normalized
-
     live_stream = normalized.get("live_stream") if normalized.get("live_stream") == "main" else "sub"
-    record_stream = normalized.get("record_stream") if normalized.get("record_stream") == "sub" else "main"
+    record_stream = normalized.get("record_stream") if normalized.get("record_stream") in ("main", "sub") else "main"
     normalized["live_stream"] = live_stream
     normalized["record_stream"] = record_stream
 
     normalized["live_rtsp"] = _stream_rtsp(normalized, live_stream) or normalized.get("live_rtsp")
     normalized["record_rtsp"] = _stream_rtsp(normalized, record_stream) or normalized.get("record_rtsp")
+    normalized["effective_streams"] = normalized.get("effective_streams") or _effective_streams(normalized)
+    if normalized.get("vendor") != "hikvision":
+        return normalized
+
     normalized["rtsp_sub_channel"] = _hikvision_channel_from_rtsp(
         normalized.get("rtsp_sub"),
         HIKVISION_SUB_CHANNEL,

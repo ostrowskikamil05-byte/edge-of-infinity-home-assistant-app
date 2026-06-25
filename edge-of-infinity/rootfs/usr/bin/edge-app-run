@@ -22,6 +22,7 @@ RECORDINGS_DIR="$(read_option 'recordings_dir' '/media/edge-of-infinity/recordin
 DATABASE_PATH="$(read_option 'database_path' '/homeassistant/edge/edge.db')"
 RETENTION_DAYS="$(read_option 'retention_days' '14')"
 INSTALL_CUSTOM_COMPONENT="$(read_option 'install_custom_component' 'true')"
+SYNC_ADDON_OPTIONS="$(read_option 'sync_addon_options' 'false')"
 
 LOG_LEVEL="${LOG_LEVEL:-info}"
 API_PORT="${API_PORT:-8088}"
@@ -29,6 +30,7 @@ RECORDINGS_DIR="${RECORDINGS_DIR:-/media/edge-of-infinity/recordings}"
 DATABASE_PATH="${DATABASE_PATH:-/homeassistant/edge/edge.db}"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
 INSTALL_CUSTOM_COMPONENT="${INSTALL_CUSTOM_COMPONENT:-true}"
+SYNC_ADDON_OPTIONS="${SYNC_ADDON_OPTIONS:-false}"
 
 if [[ "${DATABASE_PATH}" == "/config/edge.db" ]]; then
   DATABASE_PATH="/homeassistant/edge/edge.db"
@@ -100,6 +102,7 @@ addon_camera_options_hash() {
     hikvision_1_record,
     hikvision_1_low_latency,
     hikvision_1_snapshot_stream,
+    hikvision_1_live_stream,
     hikvision_1_record_stream,
     hikvision_2_enabled,
     hikvision_2_name,
@@ -113,6 +116,7 @@ addon_camera_options_hash() {
     hikvision_2_record,
     hikvision_2_low_latency,
     hikvision_2_snapshot_stream,
+    hikvision_2_live_stream,
     hikvision_2_record_stream
   }' "${OPTIONS_PATH}" 2>/dev/null | sha256sum | awk '{print $1}'
 }
@@ -148,14 +152,25 @@ build_hikvision_rtsp() {
   fi
 }
 
+hikvision_channel_from_rtsp() {
+  local value="$1"
+  local fallback="$2"
+
+  if [[ "${value}" =~ /Streaming/Channels/([0-9]+) ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "${fallback}"
+  fi
+}
+
 write_addon_options_config() {
   local output="$1"
   local camera1_name camera1_host camera1_username camera1_password
   local camera1_rtsp_main camera1_rtsp_sub camera1_onvif camera1_isapi
-  local camera1_enabled camera1_record camera1_low_latency camera1_snapshot_stream camera1_record_stream
+  local camera1_enabled camera1_record camera1_low_latency camera1_snapshot_stream camera1_live_stream camera1_record_stream camera1_rtsp_sub_channel
   local camera2_name camera2_host camera2_username camera2_password
   local camera2_rtsp_main camera2_rtsp_sub camera2_onvif camera2_isapi
-  local camera2_enabled camera2_record camera2_low_latency camera2_snapshot_stream camera2_record_stream
+  local camera2_enabled camera2_record camera2_low_latency camera2_snapshot_stream camera2_live_stream camera2_record_stream camera2_rtsp_sub_channel
 
   camera1_name="$(read_option 'hikvision_1_name' 'Hikvision 1')"
   camera1_host="$(read_option 'hikvision_1_host' '')"
@@ -165,9 +180,11 @@ write_addon_options_config() {
   camera1_record="$(read_option 'hikvision_1_record' 'true')"
   camera1_low_latency="$(read_option 'hikvision_1_low_latency' 'true')"
   camera1_snapshot_stream="$(read_option 'hikvision_1_snapshot_stream' 'sub')"
+  camera1_live_stream="$(read_option 'hikvision_1_live_stream' 'sub')"
   camera1_record_stream="$(read_option 'hikvision_1_record_stream' 'main')"
   camera1_rtsp_main="$(build_hikvision_rtsp "$(read_option 'hikvision_1_rtsp_main' '')" "${camera1_host}" "${camera1_username}" "${camera1_password}" "101")"
   camera1_rtsp_sub="$(build_hikvision_rtsp "$(read_option 'hikvision_1_rtsp_sub' '')" "${camera1_host}" "${camera1_username}" "${camera1_password}" "102")"
+  camera1_rtsp_sub_channel="$(hikvision_channel_from_rtsp "${camera1_rtsp_sub}" "102")"
   camera1_onvif="$(read_option 'hikvision_1_onvif_url' '')"
   camera1_isapi="$(read_option 'hikvision_1_isapi_base_url' '')"
   if [[ -n "${camera1_host}" ]]; then
@@ -183,9 +200,11 @@ write_addon_options_config() {
   camera2_record="$(read_option 'hikvision_2_record' 'true')"
   camera2_low_latency="$(read_option 'hikvision_2_low_latency' 'true')"
   camera2_snapshot_stream="$(read_option 'hikvision_2_snapshot_stream' 'sub')"
+  camera2_live_stream="$(read_option 'hikvision_2_live_stream' 'sub')"
   camera2_record_stream="$(read_option 'hikvision_2_record_stream' 'main')"
   camera2_rtsp_main="$(build_hikvision_rtsp "$(read_option 'hikvision_2_rtsp_main' '')" "${camera2_host}" "${camera2_username}" "${camera2_password}" "101")"
   camera2_rtsp_sub="$(build_hikvision_rtsp "$(read_option 'hikvision_2_rtsp_sub' '')" "${camera2_host}" "${camera2_username}" "${camera2_password}" "102")"
+  camera2_rtsp_sub_channel="$(hikvision_channel_from_rtsp "${camera2_rtsp_sub}" "102")"
   camera2_onvif="$(read_option 'hikvision_2_onvif_url' '')"
   camera2_isapi="$(read_option 'hikvision_2_isapi_base_url' '')"
   if [[ -n "${camera2_host}" ]]; then
@@ -210,7 +229,9 @@ write_addon_options_config() {
     --arg camera1_record "${camera1_record}" \
     --arg camera1_low_latency "${camera1_low_latency}" \
     --arg camera1_snapshot_stream "${camera1_snapshot_stream}" \
+    --arg camera1_live_stream "${camera1_live_stream}" \
     --arg camera1_record_stream "${camera1_record_stream}" \
+    --arg camera1_rtsp_sub_channel "${camera1_rtsp_sub_channel}" \
     --arg camera2_name "${camera2_name}" \
     --arg camera2_host "${camera2_host}" \
     --arg camera2_username "${camera2_username}" \
@@ -223,7 +244,9 @@ write_addon_options_config() {
     --arg camera2_record "${camera2_record}" \
     --arg camera2_low_latency "${camera2_low_latency}" \
     --arg camera2_snapshot_stream "${camera2_snapshot_stream}" \
+    --arg camera2_live_stream "${camera2_live_stream}" \
     --arg camera2_record_stream "${camera2_record_stream}" \
+    --arg camera2_rtsp_sub_channel "${camera2_rtsp_sub_channel}" \
     '{
       server: {
         listen: $listen,
@@ -244,14 +267,14 @@ write_addon_options_config() {
           password: $camera1_password,
           rtsp_main: $camera1_rtsp_main,
           rtsp_sub: $camera1_rtsp_sub,
-          rtsp_sub_channel: "102",
+          rtsp_sub_channel: $camera1_rtsp_sub_channel,
           onvif_url: $camera1_onvif,
           isapi_base_url: $camera1_isapi,
           enabled: ($camera1_enabled == "true"),
           record: ($camera1_record == "true"),
           low_latency: ($camera1_low_latency == "true"),
           snapshot_stream: (if $camera1_snapshot_stream == "main" then "main" else "sub" end),
-          live_stream: "sub",
+          live_stream: (if $camera1_live_stream == "main" then "main" else "sub" end),
           record_stream: (if $camera1_record_stream == "sub" then "sub" else "main" end)
         },
         {
@@ -263,14 +286,14 @@ write_addon_options_config() {
           password: $camera2_password,
           rtsp_main: $camera2_rtsp_main,
           rtsp_sub: $camera2_rtsp_sub,
-          rtsp_sub_channel: "102",
+          rtsp_sub_channel: $camera2_rtsp_sub_channel,
           onvif_url: $camera2_onvif,
           isapi_base_url: $camera2_isapi,
           enabled: ($camera2_enabled == "true"),
           record: ($camera2_record == "true"),
           low_latency: ($camera2_low_latency == "true"),
           snapshot_stream: (if $camera2_snapshot_stream == "main" then "main" else "sub" end),
-          live_stream: "sub",
+          live_stream: (if $camera2_live_stream == "main" then "main" else "sub" end),
           record_stream: (if $camera2_record_stream == "sub" then "sub" else "main" end)
         }
       ],
@@ -370,14 +393,21 @@ if has_addon_camera_options && [[ ! -f "${EDGE_HOME_CONFIG}" ]]; then
   write_addon_options_config "${EDGE_CONFIG}"
   echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
   bashio::log.info "Created camera config from Home Assistant add-on options at ${EDGE_CONFIG}."
-elif has_addon_camera_options && [[ -n "${ADDON_OPTIONS_HASH}" && "${ADDON_OPTIONS_HASH}" != "${PREVIOUS_ADDON_OPTIONS_HASH}" ]]; then
+elif has_addon_camera_options && { [[ "${SYNC_ADDON_OPTIONS}" == "true" ]] || [[ -n "${ADDON_OPTIONS_HASH}" && "${ADDON_OPTIONS_HASH}" != "${PREVIOUS_ADDON_OPTIONS_HASH}" ]]; }; then
   EDGE_CONFIG="${EDGE_HOME_CONFIG}"
-  if [[ -f "${EDGE_HOME_CONFIG}" ]]; then
+  if [[ "${SYNC_ADDON_OPTIONS}" == "true" && -f "${EDGE_HOME_CONFIG}" ]]; then
     cp "${EDGE_HOME_CONFIG}" /homeassistant/edge/edge.before-addon-options.json
+    write_addon_options_config "${EDGE_CONFIG}"
+    echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
+    bashio::log.info "Applied updated Home Assistant add-on camera options to ${EDGE_CONFIG}."
+  elif [[ "${SYNC_ADDON_OPTIONS}" == "true" ]]; then
+    write_addon_options_config "${EDGE_CONFIG}"
+    echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
+    bashio::log.info "Applied Home Assistant add-on camera options to ${EDGE_CONFIG}."
+  else
+    echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
+    bashio::log.info "Panel camera config already exists. Skipping add-on option sync to avoid overwriting panel changes."
   fi
-  write_addon_options_config "${EDGE_CONFIG}"
-  echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
-  bashio::log.info "Applied updated Home Assistant add-on camera options to ${EDGE_CONFIG}."
 elif [[ -f "${EDGE_HOME_CONFIG}" ]]; then
   EDGE_CONFIG="${EDGE_HOME_CONFIG}"
   bashio::log.info "Using Home Assistant camera config at ${EDGE_CONFIG}"
@@ -401,7 +431,7 @@ if command -v edge-core >/dev/null 2>&1; then
 fi
 
 bashio::log.warning "edge-core binary is not bundled yet."
-bashio::log.warning "Running RTSP probe shell until the video engine is bundled."
+bashio::log.warning "Running Python panel with RTSP probe and MJPEG live until the native video engine is bundled."
 
 mkdir -p /tmp/edge-placeholder
 mkdir -p /tmp/edge-placeholder/snapshots
@@ -420,7 +450,7 @@ generate_camera_status() {
 
   if jq -e '.cameras' "${EDGE_CONFIG}" >/dev/null 2>&1; then
     while IFS= read -r camera; do
-      local id name vendor host enabled record low_latency snapshot_stream rtsp rtsp_sub snapshot_rtsp
+      local id name vendor host enabled record low_latency snapshot_stream live_stream record_stream rtsp rtsp_sub snapshot_rtsp live_rtsp record_rtsp
       local status detail codec width height fps safe_id snapshot_url snapshot_path
       id="$(jq -r '.id // "unknown"' <<< "${camera}")"
       name="$(jq -r '.name // .id // "Unknown camera"' <<< "${camera}")"
@@ -430,6 +460,8 @@ generate_camera_status() {
       record="$(jq -r '.record // false' <<< "${camera}")"
       low_latency="$(jq -r '.low_latency // false' <<< "${camera}")"
       snapshot_stream="$(jq -r '.snapshot_stream // "sub"' <<< "${camera}")"
+      live_stream="$(jq -r '.live_stream // "sub"' <<< "${camera}")"
+      record_stream="$(jq -r '.record_stream // "main"' <<< "${camera}")"
       rtsp="$(jq -r '.rtsp_main // ""' <<< "${camera}")"
       rtsp_sub="$(jq -r '.rtsp_sub // ""' <<< "${camera}")"
       if [[ "${snapshot_stream}" == "main" ]]; then
@@ -440,6 +472,18 @@ generate_camera_status() {
         if [[ -z "${snapshot_rtsp}" || "${snapshot_rtsp}" == "null" ]]; then
           snapshot_rtsp="${rtsp}"
         fi
+      fi
+      if [[ "${live_stream}" == "main" ]]; then
+        live_rtsp="${rtsp}"
+      else
+        live_stream="sub"
+        live_rtsp="${rtsp_sub:-${rtsp}}"
+      fi
+      if [[ "${record_stream}" == "sub" ]]; then
+        record_rtsp="${rtsp_sub:-${rtsp}}"
+      else
+        record_stream="main"
+        record_rtsp="${rtsp}"
       fi
       safe_id="$(printf '%s' "${id}" | tr -c 'A-Za-z0-9_.-' '_')"
 
@@ -502,6 +546,10 @@ generate_camera_status() {
         --arg width "${width}" \
         --arg height "${height}" \
         --arg fps "${fps}" \
+        --arg live_stream "${live_stream}" \
+        --arg record_stream "${record_stream}" \
+        --arg live_rtsp "${live_rtsp}" \
+        --arg record_rtsp "${record_rtsp}" \
         --arg snapshot_url "${snapshot_url}" \
         --arg snapshot_path "${snapshot_path}" \
         '{
@@ -513,6 +561,10 @@ generate_camera_status() {
           record: ($record == "true"),
           low_latency: ($low_latency == "true"),
           snapshot_stream: $snapshot_stream,
+          live_stream: $live_stream,
+          record_stream: $record_stream,
+          live_rtsp: $live_rtsp,
+          record_rtsp: $record_rtsp,
           status: $status,
           detail: $detail,
           codec: $codec,

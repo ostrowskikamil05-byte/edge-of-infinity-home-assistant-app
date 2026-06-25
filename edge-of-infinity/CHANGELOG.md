@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+- Make `/homeassistant/edge/edge.json` the panel-owned source of truth after first setup so add-on options no longer overwrite camera changes on restart unless `sync_addon_options` is enabled.
+- Add add-on options for the live stream selector and preserve manually entered Hikvision RTSP URLs from both the panel and add-on options.
+- Add Scrypted-inspired effective stream profiles for `main`, `sub`, `live`, `record`, and `snapshot` with channel diagnostics and redacted RTSP output.
+- Read Hikvision ISAPI autoconfig from the channels in the saved RTSP URLs instead of assuming fixed `101` and `102` paths.
+- Show detected Hikvision streaming channels, codec, resolution, bitrate mode, and bitrate in Autoconfig.
+- Add CBR/VBR bitrate-mode editing in the stream settings panel while keeping changes manual and explicit.
+- Normalize the Home Assistant integration around the same live/record/effective-stream mapping used by the panel.
+
 ## 0.4.27
 
 - Preserve manually entered Hikvision RTSP URLs during panel saves and add-on option config generation.

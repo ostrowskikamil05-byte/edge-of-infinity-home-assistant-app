@@ -27,6 +27,7 @@ DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
+STREAM_FALLBACK_CHANNELS = {"main": HIKVISION_MAIN_CHANNEL, "sub": HIKVISION_SUB_CHANNEL}
 
 
 def safe_id(value: str) -> str:
@@ -78,6 +79,46 @@ def hikvision_channel_from_rtsp(value: str, fallback: str) -> str:
     return fallback
 
 
+def normalize_stream_name(value: str | None, fallback: str) -> str:
+    return value if value in ("main", "sub") else fallback
+
+
+def hikvision_camera_number_from_channel(channel: str) -> str:
+    if not channel or len(channel) <= 2:
+        return "1"
+    return channel[:-2] or "1"
+
+
+def stream_channel(camera: dict, stream_name: str) -> str:
+    stream_name = normalize_stream_name(stream_name, "sub")
+    fallback = STREAM_FALLBACK_CHANNELS[stream_name]
+    return hikvision_channel_from_rtsp(camera_stream(camera, stream_name), fallback)
+
+
+def stream_profile(camera: dict, stream_name: str) -> dict:
+    stream_name = normalize_stream_name(stream_name, "sub")
+    rtsp = camera_stream(camera, stream_name)
+    return {
+        "stream": stream_name,
+        "channel": hikvision_channel_from_rtsp(rtsp, STREAM_FALLBACK_CHANNELS[stream_name]),
+        "rtsp": redact_rtsp(rtsp),
+        "configured": bool(rtsp),
+    }
+
+
+def effective_streams(camera: dict) -> dict:
+    snapshot_stream = normalize_stream_name(camera.get("snapshot_stream"), "sub")
+    live_stream = normalize_stream_name(camera.get("live_stream"), "sub")
+    record_stream = normalize_stream_name(camera.get("record_stream"), "main")
+    return {
+        "main": stream_profile(camera, "main"),
+        "sub": stream_profile(camera, "sub"),
+        "snapshot": stream_profile(camera, snapshot_stream),
+        "live": stream_profile(camera, live_stream),
+        "record": stream_profile(camera, record_stream),
+    }
+
+
 def hikvision_rtsp_with_channel(value: str, channel: str) -> str:
     if not value or not channel or "/Streaming/Channels/" not in value:
         return value
@@ -113,9 +154,9 @@ def normalize_camera(raw: dict, index: int) -> dict:
         rtsp_main = build_dahua_rtsp(rtsp_main, host, username, password, 0)
         rtsp_sub = build_dahua_rtsp(rtsp_sub, host, username, password, 1)
         rtsp_sub_channel = ""
-    snapshot_stream = raw.get("snapshot_stream") if raw.get("snapshot_stream") == "main" else "sub"
-    live_stream = raw.get("live_stream") if raw.get("live_stream") == "main" else "sub"
-    record_stream = raw.get("record_stream") if raw.get("record_stream") == "sub" else "main"
+    snapshot_stream = normalize_stream_name(raw.get("snapshot_stream"), "sub")
+    live_stream = normalize_stream_name(raw.get("live_stream"), "sub")
+    record_stream = normalize_stream_name(raw.get("record_stream"), "main")
 
     onvif_url = raw.get("onvif_url") or (f"http://{host}:80/onvif/device_service" if host else "")
     isapi_base_url = raw.get("isapi_base_url") or (f"http://{host}" if host and vendor == "hikvision" else "")
@@ -741,16 +782,59 @@ def parse_stream_config(payload: str) -> dict:
     }
 
 
-def fetch_camera_autoconfig(camera: dict) -> dict:
-    endpoints = {
+def parse_stream_channel_list(payload: str) -> list[dict]:
+    root = parse_xml(payload)
+    channels = []
+    for item in root.iter():
+        if local_name(item.tag) != "StreamingChannel":
+            continue
+        video = first_child(item, "Video")
+        audio = first_child(item, "Audio")
+        max_frame_rate = child_text(video, "maxFrameRate")
+        channel = {
+            "id": child_text(item, "id"),
+            "name": child_text(item, "channelName"),
+            "enabled": child_text(item, "enabled"),
+            "video": {
+                "codec": child_text(video, "videoCodecType"),
+                "width": child_text(video, "videoResolutionWidth"),
+                "height": child_text(video, "videoResolutionHeight"),
+                "fps": hik_fps(max_frame_rate),
+                "raw_fps": max_frame_rate,
+                "bitrate_mode": child_text(video, "videoQualityControlType"),
+                "bitrate": child_text(video, "constantBitRate"),
+                "quality": child_text(video, "fixedQuality"),
+                "keyframe_interval": child_text(video, "keyFrameInterval"),
+            },
+            "audio": {
+                "codec": child_text(audio, "audioCompressionType") or child_text(audio, "audioEncoding"),
+                "sample_rate": child_text(audio, "audioSamplingRate"),
+                "bitrate": child_text(audio, "audioBitRate"),
+            },
+        }
+        if channel["id"]:
+            channels.append(channel)
+    return channels
+
+
+def autoconfig_endpoints(camera: dict) -> dict[str, str]:
+    main_channel = stream_channel(camera, "main")
+    sub_channel = stream_channel(camera, "sub")
+    image_channel = hikvision_camera_number_from_channel(main_channel)
+    return {
         "deviceInfo": "/ISAPI/System/deviceInfo",
-        "streamMain": "/ISAPI/Streaming/channels/101",
-        "streamSub": "/ISAPI/Streaming/channels/102",
+        "streamMain": f"/ISAPI/Streaming/channels/{main_channel}",
+        "streamSub": f"/ISAPI/Streaming/channels/{sub_channel}",
+        "streamChannels": "/ISAPI/Streaming/channels",
         "time": "/ISAPI/System/time",
         "videoInputs": "/ISAPI/System/Video/inputs/channels",
         "networkInterfaces": "/ISAPI/System/Network/interfaces",
-        "imageChannel": "/ISAPI/Image/channels/1",
+        "imageChannel": f"/ISAPI/Image/channels/{image_channel}",
     }
+
+
+def fetch_camera_autoconfig(camera: dict) -> dict:
+    endpoints = autoconfig_endpoints(camera)
     raw_sections: dict[str, dict] = {}
     for name, path in endpoints.items():
         try:
@@ -765,6 +849,13 @@ def fetch_camera_autoconfig(camera: dict) -> dict:
                 streams[stream_name] = parse_stream_config(raw_sections[section]["xml"])
             except ET.ParseError as error:
                 raw_sections[section] = {"ok": False, "error": f"xml_parse_error: {error}"}
+
+    channels = []
+    if raw_sections["streamChannels"]["ok"]:
+        try:
+            channels = parse_stream_channel_list(raw_sections["streamChannels"]["xml"])
+        except ET.ParseError as error:
+            raw_sections["streamChannels"] = {"ok": False, "error": f"xml_parse_error: {error}"}
 
     device = {}
     if raw_sections["deviceInfo"]["ok"]:
@@ -788,6 +879,8 @@ def fetch_camera_autoconfig(camera: dict) -> dict:
         "error": autoconfig_error,
         "device": device,
         "streams": streams,
+        "channels": channels,
+        "effective_streams": effective_streams(camera),
         "sections": {
             key: {"ok": value.get("ok", False), "error": value.get("error", "")}
             for key, value in raw_sections.items()
@@ -796,7 +889,8 @@ def fetch_camera_autoconfig(camera: dict) -> dict:
 
 
 def update_stream_config(camera: dict, stream_name: str, settings: dict) -> dict:
-    channel_id = "101" if stream_name == "main" else "102"
+    stream_name = normalize_stream_name(stream_name, "sub")
+    channel_id = stream_channel(camera, stream_name)
     current_xml = isapi_request(camera, "GET", f"/ISAPI/Streaming/channels/{channel_id}")
     root = parse_xml(current_xml)
     video = first_child(root, "Video")
@@ -944,6 +1038,9 @@ def refresh_status() -> dict:
             "record_stream": record_stream_name,
             "record_rtsp": redact_rtsp(record_rtsp),
             "live_rtsp": redact_rtsp(live_rtsp),
+            "effective_streams": effective_streams(camera),
+            "main_channel": stream_channel(camera, "main"),
+            "sub_channel": stream_channel(camera, "sub"),
             "live_probe_status": live_probe_status,
             "live_video_codec": live_video_codec,
             "live_width": live_width,
@@ -1161,6 +1258,21 @@ INDEX_HTML = r"""<!doctype html>
       .autoconfig-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
       .stream-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 10px; margin-top: 10px; }
       .stream-editor { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: rgba(255,255,255,.03); }
+      .stream-strip { display: grid; gap: 6px; margin-top: 10px; }
+      .stream-pill {
+        display: grid;
+        grid-template-columns: 76px 72px minmax(0, 1fr);
+        gap: 8px;
+        align-items: center;
+        border: 1px solid rgba(86, 214, 181, .22);
+        border-radius: 8px;
+        padding: 7px 8px;
+        background: rgba(86, 214, 181, .07);
+        color: var(--text);
+        font-size: 12px;
+      }
+      .stream-pill b { color: var(--accent); text-transform: uppercase; }
+      .stream-pill code { overflow-wrap: anywhere; }
       .section-status { margin-top: 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
       .notice { margin-top: 10px; color: var(--muted); font-size: 13px; }
       .preset-bar {
@@ -1454,6 +1566,24 @@ INDEX_HTML = r"""<!doctype html>
         return date.toLocaleString();
       }
 
+      function renderEffectiveStreams(streams) {
+        const order = ['main', 'sub', 'live', 'record', 'snapshot'];
+        if (!streams || typeof streams !== 'object') return '';
+        const rows = order
+          .filter((name) => streams[name])
+          .map((name) => {
+            const item = streams[name] || {};
+            return `
+              <div class="stream-pill">
+                <b>${escapeHtml(name)}</b>
+                <span>${escapeHtml(text(item.stream))} / ch ${escapeHtml(text(item.channel))}</span>
+                <code>${escapeHtml(text(item.rtsp, 'missing'))}</code>
+              </div>
+            `;
+          }).join('');
+        return rows ? `<div class="stream-strip">${rows}</div>` : '';
+      }
+
       function cameraCard(camera) {
         const online = camera.status === 'online';
         const stateClass = online ? 'state-online' : `state-${text(camera.status)}`;
@@ -1468,6 +1598,7 @@ INDEX_HTML = r"""<!doctype html>
         const liveCodec = camera.live_video_codec ? `${camera.live_video_codec} ${liveResolution}` : `probe ${text(camera.live_probe_status, 'unknown')}`;
         const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveKey)}.mjpg?camera_index=${encodeURIComponent(camera.index ?? 0)}&stream=${encodeURIComponent(liveStream)}&t=${Date.now()}`);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
+        const effective = renderEffectiveStreams(camera.effective_streams);
         const preview = live[liveKey]
           ? `<img src="${liveMjpegUrl}" alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live" onerror="this.outerHTML='<span>MJPEG live failed. Check /homeassistant/edge/live-*.log.</span>'">`
           : camera.snapshot_url
@@ -1494,6 +1625,7 @@ INDEX_HTML = r"""<!doctype html>
               <div class="actions">
                 <button data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" ${online ? '' : 'disabled'}>${live[liveKey] ? 'Stop live' : 'Start MJPEG live'}</button>
               </div>
+              ${effective}
             </div>
           </article>
         `;
@@ -1550,6 +1682,10 @@ INDEX_HTML = r"""<!doctype html>
         return `data-original="${escapeHtml(value || '')}"`;
       }
 
+      function option(value, current, label = value) {
+        return `<option value="${escapeHtml(value)}" ${String(current || '') === String(value) ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+      }
+
       function streamEditor(index, streamName, stream) {
         const video = stream?.video || {};
         const audio = stream?.audio || {};
@@ -1566,7 +1702,13 @@ INDEX_HTML = r"""<!doctype html>
               <label>Height<input data-stream-field="video.height" ${original(video.height)} value="${escapeHtml(video.height || '')}"></label>
               <label>FPS<input data-stream-field="video.fps" ${original(video.fps)} value="${escapeHtml(video.fps || '')}"></label>
               <label>Bitrate kbps<input data-stream-field="video.bitrate" ${original(video.bitrate)} value="${escapeHtml(video.bitrate || '')}"></label>
-              <label>Bitrate mode<input data-stream-field="video.bitrate_mode" ${original(video.bitrate_mode)} value="${escapeHtml(video.bitrate_mode || '')}"></label>
+              <label>Bitrate mode<select data-stream-field="video.bitrate_mode" ${original(video.bitrate_mode)}>
+                ${option('', video.bitrate_mode, 'keep')}
+                ${option('VBR', video.bitrate_mode)}
+                ${option('CBR', video.bitrate_mode)}
+                ${option('variable', video.bitrate_mode)}
+                ${option('constant', video.bitrate_mode)}
+              </select></label>
               <label>Quality<input data-stream-field="video.quality" ${original(video.quality)} value="${escapeHtml(video.quality || '')}"></label>
               <label>Keyframe interval<input data-stream-field="video.keyframe_interval" ${original(video.keyframe_interval)} value="${escapeHtml(video.keyframe_interval || '')}"></label>
               <label>Audio enabled<input data-stream-field="audio.enabled" ${original(audio.enabled)} value="${escapeHtml(audio.enabled || '')}"></label>
@@ -1584,6 +1726,8 @@ INDEX_HTML = r"""<!doctype html>
         const state = cameraAuto[index] || {};
         const device = state.data?.device || {};
         const streams = state.data?.streams || {};
+        const channels = Array.isArray(state.data?.channels) ? state.data.channels : [];
+        const effective = renderEffectiveStreams(state.data?.effective_streams);
         const sectionSummary = state.data?.sections
           ? Object.entries(state.data.sections).map(([name, item]) => `${name}: ${item.ok ? 'ok' : item.error}`).join(' | ')
           : '';
@@ -1599,6 +1743,14 @@ INDEX_HTML = r"""<!doctype html>
             ${state.error ? `<p class="section-status state-offline">${escapeHtml(state.error)}</p>` : ''}
             ${state.message ? `<p class="section-status state-online">${escapeHtml(state.message)}</p>` : ''}
             ${device.serial_number ? `<p class="section-status">Serial: ${escapeHtml(device.serial_number)} ${device.device_name ? `| Name: ${escapeHtml(device.device_name)}` : ''}</p>` : ''}
+            ${effective}
+            ${channels.length ? `<div class="stream-strip">${channels.map((channel) => `
+              <div class="stream-pill">
+                <b>ch ${escapeHtml(text(channel.id))}</b>
+                <span>${escapeHtml(text(channel.video?.codec))} ${escapeHtml(text(channel.video?.width))}x${escapeHtml(text(channel.video?.height))}</span>
+                <code>${escapeHtml(text(channel.video?.bitrate_mode, 'bitrate'))} ${escapeHtml(text(channel.video?.bitrate, 'unknown'))}</code>
+              </div>
+            `).join('')}</div>` : ''}
             ${Object.keys(streams).length ? `<div class="stream-grid">${Object.entries(streams).map(([name, stream]) => streamEditor(index, name, stream)).join('')}</div>` : ''}
             ${sectionSummary ? `<p class="section-status">${escapeHtml(sectionSummary)}</p>` : ''}
           </div>
@@ -1872,6 +2024,17 @@ INDEX_HTML = r"""<!doctype html>
         );
       }
 
+      function saveSummary(payload) {
+        const cameras = Array.isArray(payload.cameras) ? payload.cameras : [];
+        const parts = cameras.map((camera) => {
+          const name = text(camera.name, camera.id || 'camera');
+          const mainChannel = hikvisionChannelFromRtsp(camera.rtsp_main, '101');
+          const subChannel = hikvisionChannelFromRtsp(camera.rtsp_sub, '102');
+          return `${name}: live=${text(camera.live_stream, 'sub')}, record=${text(camera.record_stream, 'main')}, snapshot=${text(camera.snapshot_stream, 'sub')}, main ch=${mainChannel}, sub ch=${subChannel}`;
+        });
+        return parts.length ? parts.join(' | ') : 'no cameras';
+      }
+
       async function loadConfig() {
         const response = await fetch(panelPath('api/config'), { cache: 'no-store' });
         config = await response.json();
@@ -2046,7 +2209,7 @@ INDEX_HTML = r"""<!doctype html>
         renderConfig();
         await loadPresets();
         await loadCameras();
-        saveState.textContent = 'Saved. Backup created and status refreshed.';
+        saveState.textContent = `Saved. ${saveSummary(data)}`;
       });
 
       document.getElementById('save-edge-settings').addEventListener('click', async () => {
