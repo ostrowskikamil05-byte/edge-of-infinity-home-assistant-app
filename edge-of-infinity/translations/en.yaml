@@ -38,6 +38,9 @@ configuration:
   hikvision_1_rtsp_sub:
     name: Camera 1 RTSP sub
     description: Optional sub RTSP URL. When empty, Edge builds the standard Hikvision 102 path.
+  hikvision_1_rtsp_sub_channel:
+    name: Camera 1 Hikvision sub channel
+    description: Hikvision channel number used to build RTSP sub, for example 102 or 202.
   hikvision_1_onvif_url:
     name: Camera 1 ONVIF URL
     description: Optional ONVIF URL for the first camera.
@@ -53,6 +56,9 @@ configuration:
   hikvision_1_snapshot_stream:
     name: Camera 1 snapshot stream
     description: Selects the snapshot stream, sub or main.
+  hikvision_1_record_stream:
+    name: Camera 1 recording stream
+    description: Selects whether NVR recordings use main or sub.
   hikvision_2_enabled:
     name: Camera 2 enabled
     description: Enables the second Hikvision camera in Edge.
@@ -74,6 +80,9 @@ configuration:
   hikvision_2_rtsp_sub:
     name: Camera 2 RTSP sub
     description: Optional sub RTSP URL. When empty, Edge builds the standard Hikvision 102 path.
+  hikvision_2_rtsp_sub_channel:
+    name: Camera 2 Hikvision sub channel
+    description: Hikvision channel number used to build RTSP sub, for example 102 or 202.
   hikvision_2_onvif_url:
     name: Camera 2 ONVIF URL
     description: Optional ONVIF URL for the second camera.
@@ -89,5 +98,8 @@ configuration:
   hikvision_2_snapshot_stream:
     name: Camera 2 snapshot stream
     description: Selects the snapshot stream, sub or main.
+  hikvision_2_record_stream:
+    name: Camera 2 recording stream
+    description: Selects whether NVR recordings use main or sub.
 network:
   8088/TCP: Edge Core API and web interface

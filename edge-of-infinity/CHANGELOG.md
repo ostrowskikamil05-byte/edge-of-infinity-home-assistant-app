@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.24
+
+- Add a separate `Recording stream` setting so NVR can use either `main` or `sub`.
+- Show `Record stream` and redacted `Record RTSP` in the NVR panel.
+- Allow manual Hikvision sub-channel entry with suggested channel values instead of limiting the selector to only `102` and `202`.
+- Normalize stale Hikvision sub RTSP URLs to the selected channel during panel saves and add-on option config generation.
+- Keep add-on options, first-run config, panel config, and Home Assistant camera attributes aligned with the new stream fields.
+
 ## 0.4.23
 
 - Keep Hikvision `rtsp_sub_channel` authoritative even if a stale RTSP sub URL is submitted.
