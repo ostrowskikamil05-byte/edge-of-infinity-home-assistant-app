@@ -339,7 +339,11 @@ def normalize_config(payload: dict) -> dict:
 
 
 def preserve_submitted_stream_choices(payload: dict, raw_payload: dict) -> dict:
-    """Keep explicit UI stream choices after normalization builds RTSP URLs."""
+    """Keep explicit UI stream choices after normalization builds RTSP URLs.
+
+    FIX 0.5.8: always use index as primary match (not id) so new cameras
+    without a stable id still get their stream choices preserved correctly.
+    """
     raw_cameras = raw_payload.get("cameras") if isinstance(raw_payload, dict) else []
     cameras = payload.get("cameras") if isinstance(payload, dict) else []
     if not isinstance(raw_cameras, list) or not isinstance(cameras, list):
@@ -352,9 +356,13 @@ def preserve_submitted_stream_choices(payload: dict, raw_payload: dict) -> dict:
     for index, raw_camera in enumerate(raw_cameras):
         if not isinstance(raw_camera, dict):
             continue
-        target = cameras_by_id.get(str(raw_camera.get("id"))) if raw_camera.get("id") else None
-        if target is None and index < len(cameras):
+        # FIX: prefer index-based match first (reliable), then id-based fallback
+        if index < len(cameras):
             target = cameras[index]
+        elif raw_camera.get("id"):
+            target = cameras_by_id.get(str(raw_camera.get("id")))
+        else:
+            target = None
         if not isinstance(target, dict):
             continue
         for field in ("snapshot_stream", "live_stream", "record_stream"):
@@ -1188,6 +1196,13 @@ def refresh_status() -> dict:
                         live_probe_status = "offline"
             else:
                 live_probe_status = "missing_rtsp"
+
+        # FIX 0.5.8: capture snapshot when camera is online
+        if status == "online":
+            try:
+                snapshot_path, snapshot_url = capture_snapshot(camera, camera_key)
+            except Exception:
+                snapshot_path, snapshot_url = "", ""
 
         camera_status = {
             "id": camera.get("id"),
@@ -2636,7 +2651,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.7"
+    server_version = "EdgePanel/0.5.8"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -2646,6 +2661,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -2655,6 +2671,15 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+
+        # Strip Home Assistant Ingress prefix so routes work with and without Ingress.
+        # Ingress path looks like: /api/hassio_ingress/<token>/live/cam.mjpg
+        for _seg in ("/api/hassio_ingress/", "/api/hassio/ingress/"):
+            if _seg in path:
+                _after = path.split(_seg, 1)[1]
+                _stripped = "/" + (_after.split("/", 1)[-1] if "/" in _after else "")
+                path = _stripped if _stripped != "/" else path
+                break
 
         if path in ("/", "/index.html"):
             self.send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
@@ -2692,6 +2717,15 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        _post_path = parsed.path
+        for _seg in ("/api/hassio_ingress/", "/api/hassio/ingress/"):
+            if _seg in _post_path:
+                _after = _post_path.split(_seg, 1)[1]
+                _stripped = "/" + (_after.split("/", 1)[-1] if "/" in _after else "")
+                if _stripped != "/":
+                    _post_path = _stripped
+                break
+        parsed = parsed._replace(path=_post_path)
         write_debug_event("api_post", {"path": parsed.path, "client": self.client_address[0]})
         if parsed.path == "/api/config":
             self.save_config()
@@ -3035,6 +3069,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=edgeframe")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
         frame_count = 0

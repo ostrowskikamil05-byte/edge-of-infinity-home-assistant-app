@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.8
+
+- **Fix**: Snapshot (`async_camera_image`) zawsze zwracal `None` — `capture_snapshot()` nie byla wywolywana w `refresh_status()`. Naprawione.
+- **Fix**: MJPEG live stream nie dzialal przez Home Assistant Ingress — sciezki z prefixem `/api/hassio_ingress/` nie pasowaly do routera. Dodano automatyczne usuwanie prefixu w `do_GET` i `do_POST`.
+- **Fix**: Ustawienia `live_stream` / `snapshot_stream` / `record_stream` wracaly do wartosci domyslnych po zapisie — `preserve_submitted_stream_choices()` dopasowywala po `camera.id`, ktore nie istnieje dla nowych kamer. Naprawione: dopasowanie po indeksie jako priorytet.
+- **Fix**: Brakujacy naglowek `Access-Control-Allow-Origin` w odpowiedziach HTTP i strumieniu MJPEG — przeglądarka blokowała odpowiedzi w środowisku Ingress.
+- **Improvement**: Dockerfile — przypięta wersja base image (`3.20` zamiast `latest`), dodano `py3-pip`.
+
 ## 0.5.7
 
 - Move local Home Assistant file reads in the custom integration to the executor to avoid blocking the HA event loop.

@@ -1,6 +1,6 @@
-FROM ghcr.io/home-assistant/base:latest
+FROM ghcr.io/home-assistant/base:3.20
 
-ARG BUILD_VERSION=0.5.7
+ARG BUILD_VERSION=0.5.8
 ARG BUILD_ARCH=amd64
 
 LABEL \
@@ -10,7 +10,7 @@ LABEL \
 
 COPY rootfs /
 
-RUN apk add --no-cache curl ffmpeg jq python3
-RUN chmod a+x /usr/bin/edge-app-run
+RUN apk add --no-cache curl ffmpeg jq python3 py3-pip && \
+    chmod a+x /usr/bin/edge-app-run
 
 CMD [ "/usr/bin/edge-app-run" ]
