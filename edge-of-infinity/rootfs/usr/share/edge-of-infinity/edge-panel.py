@@ -1968,9 +1968,12 @@ INDEX_HTML = r"""<!doctype html>
         const liveId = camera.id || liveKey;
         const videoCodec = camera.video_codec || camera.codec;
         const liveStream = camera.live_stream || 'sub';
+        const hasSubPreview = camera.effective_streams?.sub?.configured;
+        const previewStream = hasSubPreview ? 'sub' : liveStream;
         const liveResolution = camera.live_width && camera.live_height ? `${camera.live_width}x${camera.live_height}` : 'unknown';
+        const previewResolution = previewStream === liveStream ? liveResolution : 'tile';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
-        const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveId)}.mjpg?t=${Date.now()}`);
+        const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveId)}.mjpg?tile=1&t=${Date.now()}`);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         const preview = live[liveKey]
           ? `<img src="${liveMjpegUrl}" alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live" onerror="this.outerHTML='<span>MJPEG live failed. Check /homeassistant/edge/live-*.log.</span>'">`
@@ -1984,7 +1987,7 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="vendor">${escapeHtml(text(camera.vendor))}</div>
               </div>
               <div class="tile-line">
-                <span>${escapeHtml(liveStream)} ${escapeHtml(liveCodec)} ${escapeHtml(liveResolution)}</span>
+                <span>preview ${escapeHtml(previewStream)} ${escapeHtml(liveCodec)} ${escapeHtml(previewResolution)}</span>
                 <span>${escapeHtml(text(camera.fps, ''))}</span>
               </div>
             </div>
@@ -2779,7 +2782,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.13"
+    server_version = "EdgePanel/0.5.14"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -3070,6 +3073,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         camera_id = path.removeprefix("/live/").removesuffix(".mjpg")
         requested_stream = normalize_stream_name((query.get("stream") or [""])[0], "")
         allow_stream_override = (query.get("override") or query.get("debug_stream") or ["0"])[0] in ("1", "true", "yes")
+        tile_mode = (query.get("tile") or ["0"])[0] in ("1", "true", "yes")
         config = load_config()
         cameras = config.get("cameras", [])
         camera = None
@@ -3087,6 +3091,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
         configured_stream = normalize_stream_name(camera.get("live_stream"), "sub")
         stream_name = requested_stream if requested_stream and allow_stream_override else configured_stream
+        if tile_mode and camera_stream(camera, "sub"):
+            stream_name = "sub"
         if requested_stream and requested_stream != configured_stream and not allow_stream_override:
             write_debug_event("live_stream_override_ignored", {
                 "camera_id": camera.get("id") or camera_id,
@@ -3107,6 +3113,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         mjpeg_fps = clamp_int(live_config.get("mjpeg_fps"), 5, 1, 15)
         mjpeg_quality = clamp_int(live_config.get("mjpeg_quality"), 8, 2, 31)
         mjpeg_max_width = clamp_int(live_config.get("mjpeg_max_width"), 1280, 320, 3840)
+        if tile_mode:
+            mjpeg_fps = min(mjpeg_fps, 5)
+            mjpeg_max_width = min(mjpeg_max_width, 960)
         vf = f"fps={mjpeg_fps},scale=w='min({mjpeg_max_width}\\,iw)':h=-2"
 
         command = [
@@ -3163,6 +3172,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "camera": camera_profile,
             "command": redact_command(command),
             "mjpeg": {
+                "tile": tile_mode,
                 "fps": mjpeg_fps,
                 "quality": mjpeg_quality,
                 "max_width": mjpeg_max_width,
@@ -3175,7 +3185,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 f"client={self.client_address[0]} path={self.path}\n"
                 f"user_agent={self.headers.get('User-Agent', '')}\n"
                 f"camera={camera.get('id') or camera_id} index={camera_index or 'lookup'} "
-                f"requested_stream={requested_stream or 'none'} stream={stream_name} configured_live={configured_stream} "
+                f"tile_mode={tile_mode} requested_stream={requested_stream or 'none'} stream={stream_name} configured_live={configured_stream} "
                 f"status={camera.get('status', 'unknown')}\n"
                 f"rtsp={redact_rtsp(stream)}\n"
                 f"command={json.dumps(redact_command(command))}\n"
@@ -3278,6 +3288,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "request_id": request_id,
                 "camera": camera_profile,
                 "mjpeg": {
+                    "tile": tile_mode,
                     "fps": mjpeg_fps,
                     "quality": mjpeg_quality,
                     "max_width": mjpeg_max_width,

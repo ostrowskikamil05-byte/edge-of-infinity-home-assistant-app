@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.14
+
+- Add a lightweight Home tile live mode that prefers the sub stream for camera cards while leaving direct `/live/<camera>.mjpg` and recording settings untouched.
+- Cap tile MJPEG previews to 5 FPS and 960 px width to reduce Ingress and mobile browser disconnects.
+- Include tile mode details in live debug logs.
+
 ## 0.5.13
 
 - Capture Hikvision snapshots through ISAPI JPEG endpoints before falling back to ffmpeg.
