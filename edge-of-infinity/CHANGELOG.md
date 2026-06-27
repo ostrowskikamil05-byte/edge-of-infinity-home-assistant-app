@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+- Split camera stream roles into `tile_stream`, `live_stream`, `record_stream`, and `snapshot_stream` so Home tiles no longer overwrite live or recording choices.
+- Add stream capability manifests with MJPEG, experimental LL-HLS, and planned MSE/WebRTC engine URLs per camera.
+- Add experimental `/hls/<camera>/index.m3u8` fMP4 HLS generation using ffmpeg stream copy.
+- Improve NVR recording with configurable short MP4 segments, stream-copy recording, retention cleanup, and richer recording debug logs.
+- Add NVR segment settings to Edge Settings.
+
 ## 0.5.15
 
 - Load Home tile MJPEG images through the direct Edge port URL first, matching working manual links like `http://<host>:8088/live/hikvision_1.mjpg`.

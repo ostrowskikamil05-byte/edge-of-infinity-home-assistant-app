@@ -203,12 +203,14 @@ def _effective_streams(camera: dict[str, Any]) -> dict[str, Any]:
     live_stream = camera.get("live_stream") if camera.get("live_stream") == "main" else "sub"
     record_stream = camera.get("record_stream") if camera.get("record_stream") in ("main", "sub") else "main"
     snapshot_stream = camera.get("snapshot_stream") if camera.get("snapshot_stream") == "main" else "sub"
+    tile_stream = camera.get("tile_stream") if camera.get("tile_stream") == "main" else "sub"
     return {
         "main": _stream_profile(camera, "main"),
         "sub": _stream_profile(camera, "sub"),
         "live": _stream_profile(camera, live_stream),
         "record": _stream_profile(camera, record_stream),
         "snapshot": _stream_profile(camera, snapshot_stream),
+        "tile": _stream_profile(camera, tile_stream),
     }
 
 
@@ -217,8 +219,12 @@ def _normalize_camera(camera: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(camera)
     live_stream = normalized.get("live_stream") if normalized.get("live_stream") == "main" else "sub"
     record_stream = normalized.get("record_stream") if normalized.get("record_stream") in ("main", "sub") else "main"
+    snapshot_stream = normalized.get("snapshot_stream") if normalized.get("snapshot_stream") == "main" else "sub"
+    tile_stream = normalized.get("tile_stream") if normalized.get("tile_stream") == "main" else "sub"
     normalized["live_stream"] = live_stream
     normalized["record_stream"] = record_stream
+    normalized["snapshot_stream"] = snapshot_stream
+    normalized["tile_stream"] = tile_stream
 
     normalized["live_rtsp"] = _stream_rtsp(normalized, live_stream) or normalized.get("live_rtsp")
     normalized["record_rtsp"] = _stream_rtsp(normalized, record_stream) or normalized.get("record_rtsp")
