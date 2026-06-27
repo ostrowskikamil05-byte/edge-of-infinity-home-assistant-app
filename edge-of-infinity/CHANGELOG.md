@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.15
+
+- Load Home tile MJPEG images through the direct Edge port URL first, matching working manual links like `http://<host>:8088/live/hikvision_1.mjpg`.
+- Keep the Home Assistant Ingress live URL as an image fallback if direct access is unavailable.
+- Allow `server.public_url` to override the direct live base URL for custom network setups.
+
 ## 0.5.14
 
 - Add a lightweight Home tile live mode that prefers the sub stream for camera cards while leaving direct `/live/<camera>.mjpg` and recording settings untouched.

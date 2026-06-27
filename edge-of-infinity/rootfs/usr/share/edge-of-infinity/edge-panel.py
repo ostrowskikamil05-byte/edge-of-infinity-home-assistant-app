@@ -1862,6 +1862,16 @@ INDEX_HTML = r"""<!doctype html>
         return `${panelBase}${String(path).replace(/^\/+/, '')}`;
       }
 
+      function directPanelPath(path) {
+        const clean = String(path).replace(/^\/+/, '');
+        const publicUrl = String(config?.server?.public_url || '').trim().replace(/\/+$/, '');
+        if (publicUrl) return `${publicUrl}/${clean}`;
+        if (window.location.hostname) {
+          return `${window.location.protocol}//${window.location.hostname}:8088/${clean}`;
+        }
+        return panelPath(clean);
+      }
+
       function debugEvent(event, payload = {}) {
         const body = JSON.stringify({
           event,
@@ -1973,10 +1983,12 @@ INDEX_HTML = r"""<!doctype html>
         const liveResolution = camera.live_width && camera.live_height ? `${camera.live_width}x${camera.live_height}` : 'unknown';
         const previewResolution = previewStream === liveStream ? liveResolution : 'tile';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
-        const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveId)}.mjpg?tile=1&t=${Date.now()}`);
+        const livePath = `live/${encodeURIComponent(liveId)}.mjpg?tile=1&t=${Date.now()}`;
+        const liveMjpegUrl = directPanelPath(livePath);
+        const liveMjpegFallbackUrl = panelPath(livePath);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         const preview = live[liveKey]
-          ? `<img src="${liveMjpegUrl}" alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live" onerror="this.outerHTML='<span>MJPEG live failed. Check /homeassistant/edge/live-*.log.</span>'">`
+          ? `<img src="${escapeHtml(liveMjpegUrl)}" data-fallback-src="${escapeHtml(liveMjpegFallbackUrl)}" alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live" onerror="if (this.dataset.fallbackSrc) { this.src = this.dataset.fallbackSrc; this.dataset.fallbackSrc = ''; } else { this.outerHTML='<span>MJPEG live failed. Check /homeassistant/edge/live-*.log.</span>'; }">`
           : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         return `
           <article class="camera video-tile">
@@ -2782,7 +2794,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.14"
+    server_version = "EdgePanel/0.5.15"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
