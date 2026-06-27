@@ -142,6 +142,18 @@ def extract_ffmpeg_stderr(log_text: str, begin_marker: str) -> str:
     return request_text[-12000:]
 
 
+def route_path(raw_path: str) -> str:
+    path = raw_path or "/"
+    for segment in ("/api/hassio_ingress/", "/api/hassio/ingress/"):
+        if segment in path:
+            after = path.split(segment, 1)[1]
+            after = after.split("/", 1)[-1] if "/" in after else ""
+            path = "/" + after.lstrip("/")
+            break
+    path = re.sub(r"/{2,}", "/", path)
+    return path or "/"
+
+
 def camera_debug_profile(camera: dict, stream_name: str, probe: dict | None = None) -> dict:
     probe = probe or {}
     video = probe.get("video") or {}
@@ -2654,7 +2666,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.11"
+    server_version = "EdgePanel/0.5.12"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -2673,16 +2685,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        path = parsed.path
-
-        # Strip Home Assistant Ingress prefix so routes work with and without Ingress.
-        # Ingress path looks like: /api/hassio_ingress/<token>/live/cam.mjpg
-        for _seg in ("/api/hassio_ingress/", "/api/hassio/ingress/"):
-            if _seg in path:
-                _after = path.split(_seg, 1)[1]
-                _stripped = "/" + (_after.split("/", 1)[-1] if "/" in _after else "")
-                path = _stripped if _stripped != "/" else path
-                break
+        path = route_path(parsed.path)
 
         if path in ("/", "/index.html"):
             self.send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
@@ -2720,14 +2723,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        _post_path = parsed.path
-        for _seg in ("/api/hassio_ingress/", "/api/hassio/ingress/"):
-            if _seg in _post_path:
-                _after = _post_path.split(_seg, 1)[1]
-                _stripped = "/" + (_after.split("/", 1)[-1] if "/" in _after else "")
-                if _stripped != "/":
-                    _post_path = _stripped
-                break
+        _post_path = route_path(parsed.path)
         parsed = parsed._replace(path=_post_path)
         write_debug_event("api_post", {"path": parsed.path, "client": self.client_address[0]})
         if parsed.path == "/api/config":

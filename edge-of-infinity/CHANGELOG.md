@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.12
+
+- Normalize Home Assistant Ingress paths so doubled slashes like `//live/hikvision_1.mjpg` route to `/live/hikvision_1.mjpg`.
+- Share the same route normalization for GET and POST panel requests.
+
 ## 0.5.11
 
 - Make Home live tiles call canonical camera IDs, for example `/live/hikvision_1.mjpg`, instead of generated keys like `/live/hikvision_1_0.mjpg`.
