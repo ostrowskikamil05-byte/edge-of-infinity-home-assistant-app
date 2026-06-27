@@ -111,7 +111,7 @@ def classify_ffmpeg_error(stderr_text: str, frame_count: int, end_reason: str, b
         hints.append("camera_auth_failed")
     if "connection refused" in text_lower:
         hints.append("rtsp_port_refused")
-    if "timed out" in text_lower or "timeout" in text_lower:
+    if "timed out" in text_lower or "connection timed out" in text_lower or "i/o timeout" in text_lower:
         hints.append("rtsp_timeout")
     if "could not find codec parameters" in text_lower:
         hints.append("probe_needs_more_data")
@@ -131,6 +131,15 @@ def classify_ffmpeg_error(stderr_text: str, frame_count: int, end_reason: str, b
         hints.append("mjpeg_frames_sent")
     category = hints[0] if hints else "unknown"
     return category, hints
+
+
+def extract_ffmpeg_stderr(log_text: str, begin_marker: str) -> str:
+    request_text = log_text.rsplit(begin_marker, 1)[-1]
+    if "--- ffmpeg stderr begin ---" in request_text:
+        request_text = request_text.split("--- ffmpeg stderr begin ---", 1)[1]
+    if "--- ffmpeg stderr end ---" in request_text:
+        request_text = request_text.split("--- ffmpeg stderr end ---", 1)[0]
+    return request_text[-12000:]
 
 
 def camera_debug_profile(camera: dict, stream_name: str, probe: dict | None = None) -> dict:
@@ -1735,13 +1744,6 @@ INDEX_HTML = r"""<!doctype html>
           location: window.location.pathname,
           payload
         });
-        try {
-          if (navigator.sendBeacon) {
-            const blob = new Blob([body], { type: 'application/json' });
-            navigator.sendBeacon(panelPath('api/debug'), blob);
-            return;
-          }
-        } catch (_) {}
         fetch(panelPath('api/debug'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1838,11 +1840,12 @@ INDEX_HTML = r"""<!doctype html>
       function cameraCard(camera) {
         const online = camera.status === 'online';
         const liveKey = camera.key || `${camera.id || 'camera'}_${camera.index ?? 0}`;
+        const liveId = camera.id || liveKey;
         const videoCodec = camera.video_codec || camera.codec;
         const liveStream = camera.live_stream || 'sub';
         const liveResolution = camera.live_width && camera.live_height ? `${camera.live_width}x${camera.live_height}` : 'unknown';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
-        const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveKey)}.mjpg?camera_index=${encodeURIComponent(camera.index ?? 0)}&stream=${encodeURIComponent(liveStream)}&t=${Date.now()}`);
+        const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveId)}.mjpg?t=${Date.now()}`);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         const preview = live[liveKey]
           ? `<img src="${liveMjpegUrl}" alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live" onerror="this.outerHTML='<span>MJPEG live failed. Check /homeassistant/edge/live-*.log.</span>'">`
@@ -2651,7 +2654,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.8"
+    server_version = "EdgePanel/0.5.11"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -2956,7 +2959,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def serve_live(self, path: str, query: dict[str, list[str]]) -> None:
         camera_id = path.removeprefix("/live/").removesuffix(".mjpg")
-        stream_name = (query.get("stream") or ["sub"])[0]
+        requested_stream = normalize_stream_name((query.get("stream") or [""])[0], "")
+        allow_stream_override = (query.get("override") or query.get("debug_stream") or ["0"])[0] in ("1", "true", "yes")
         config = load_config()
         cameras = config.get("cameras", [])
         camera = None
@@ -2971,6 +2975,16 @@ class EdgeHandler(BaseHTTPRequestHandler):
             write_debug_event("live_error", {"reason": "camera_not_found", "path": path, "query": query})
             self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
             return
+
+        configured_stream = normalize_stream_name(camera.get("live_stream"), "sub")
+        stream_name = requested_stream if requested_stream and allow_stream_override else configured_stream
+        if requested_stream and requested_stream != configured_stream and not allow_stream_override:
+            write_debug_event("live_stream_override_ignored", {
+                "camera_id": camera.get("id") or camera_id,
+                "requested_stream": requested_stream,
+                "configured_live": configured_stream,
+                "path": self.path,
+            })
 
         stream = camera_stream(camera, stream_name)
         if not stream:
@@ -3044,7 +3058,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 f"client={self.client_address[0]} path={self.path}\n"
                 f"user_agent={self.headers.get('User-Agent', '')}\n"
                 f"camera={camera.get('id') or camera_id} index={camera_index or 'lookup'} "
-                f"stream={stream_name} configured_live={camera.get('live_stream') or 'sub'} "
+                f"requested_stream={requested_stream or 'none'} stream={stream_name} configured_live={configured_stream} "
                 f"status={camera.get('status', 'unknown')}\n"
                 f"rtsp={redact_rtsp(stream)}\n"
                 f"command={json.dumps(redact_command(command))}\n"
@@ -3139,7 +3153,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             stderr_text = ""
             try:
                 log_text = log_path.read_text(encoding="utf-8", errors="replace")
-                stderr_text = log_text.rsplit(begin_marker, 1)[-1][-12000:]
+                stderr_text = extract_ffmpeg_stderr(log_text, begin_marker)
             except OSError:
                 stderr_text = ""
             category, hints = classify_ffmpeg_error(stderr_text, frame_count, end_reason, bytes_sent)

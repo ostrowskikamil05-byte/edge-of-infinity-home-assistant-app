@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.11
+
+- Make Home live tiles call canonical camera IDs, for example `/live/hikvision_1.mjpg`, instead of generated keys like `/live/hikvision_1_0.mjpg`.
+- Make the live endpoint use the saved camera `live_stream` by default and ignore stale `stream=` query parameters unless explicit debug override is requested.
+- Improve live debug classification so ffmpeg command options do not create false RTSP timeout hints.
+- Send UI debug events with JSON fetch requests so `/homeassistant/edge/edge-debug.log` keeps useful payloads.
+
 ## 0.5.8
 
 - **Fix**: Snapshot (`async_camera_image`) zawsze zwracal `None` — `capture_snapshot()` nie byla wywolywana w `refresh_status()`. Naprawione.
@@ -7,7 +14,6 @@
 - **Fix**: Ustawienia `live_stream` / `snapshot_stream` / `record_stream` wracaly do wartosci domyslnych po zapisie — `preserve_submitted_stream_choices()` dopasowywala po `camera.id`, ktore nie istnieje dla nowych kamer. Naprawione: dopasowanie po indeksie jako priorytet.
 - **Fix**: Brakujacy naglowek `Access-Control-Allow-Origin` w odpowiedziach HTTP i strumieniu MJPEG — przeglądarka blokowała odpowiedzi w środowisku Ingress.
 - **Improvement**: Dockerfile — przypięta wersja base image (`3.20` zamiast `latest`), dodano `py3-pip`.
-
 ## 0.5.7
 
 - Move local Home Assistant file reads in the custom integration to the executor to avoid blocking the HA event loop.
