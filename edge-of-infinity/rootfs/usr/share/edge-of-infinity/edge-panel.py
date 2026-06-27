@@ -15,6 +15,11 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+import base64
+import hashlib
+import secrets
+import socket
+import struct
 
 
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
@@ -27,10 +32,27 @@ PORT = int(os.environ.get("API_PORT", "8088"))
 SNAPSHOT_DIR = HOME_DIR / "snapshots"
 DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
+HLS_PROCESSES: dict[str, subprocess.Popen] = {}
 DEBUG_LOCK = threading.Lock()
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
 STREAM_FALLBACK_CHANNELS = {"main": HIKVISION_MAIN_CHANNEL, "sub": HIKVISION_SUB_CHANNEL}
+STREAM_ENGINES = ("mjpeg", "webrtc", "ll_hls")
+# go2rtc rebroadcast address (same host, port 1984 = go2rtc default HA addon port)
+GO2RTC_HOST = os.environ.get("GO2RTC_HOST", "localhost")
+GO2RTC_PORT = int(os.environ.get("GO2RTC_PORT", "1984"))
+GO2RTC_BASE = f"http://{GO2RTC_HOST}:{GO2RTC_PORT}"
+# WebRTC STUN server list (used in SDP offer to browser)
+STUN_SERVERS = [
+    "stun:stun.l.google.com:19302",
+    "stun:stun1.l.google.com:19302",
+]
+# ICE UDP port range for WebRTC (must match router port-forward if using 4G/remote)
+WEBRTC_UDP_PORT_MIN = int(os.environ.get("WEBRTC_UDP_PORT_MIN", "50000"))
+WEBRTC_UDP_PORT_MAX = int(os.environ.get("WEBRTC_UDP_PORT_MAX", "50100"))
+# Active WebRTC sessions: session_id -> {offer_sdp, answer_sdp, camera_id, created}
+WEBRTC_SESSIONS: dict[str, dict] = {}
+WEBRTC_LOCK = threading.Lock()
 
 
 def safe_id(value: str) -> str:
@@ -68,6 +90,18 @@ def write_json(path: Path, payload) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def read_text_tail(path: Path, limit: int = 4000) -> str:
+    try:
+        if not path.exists():
+            return ""
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(max(0, size - limit))
+            return handle.read(limit).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def redact_for_log(value):
@@ -111,7 +145,7 @@ def classify_ffmpeg_error(stderr_text: str, frame_count: int, end_reason: str, b
         hints.append("camera_auth_failed")
     if "connection refused" in text_lower:
         hints.append("rtsp_port_refused")
-    if "timed out" in text_lower or "timeout" in text_lower:
+    if "timed out" in text_lower or "connection timed out" in text_lower or "i/o timeout" in text_lower:
         hints.append("rtsp_timeout")
     if "could not find codec parameters" in text_lower:
         hints.append("probe_needs_more_data")
@@ -131,6 +165,27 @@ def classify_ffmpeg_error(stderr_text: str, frame_count: int, end_reason: str, b
         hints.append("mjpeg_frames_sent")
     category = hints[0] if hints else "unknown"
     return category, hints
+
+
+def extract_ffmpeg_stderr(log_text: str, begin_marker: str) -> str:
+    request_text = log_text.rsplit(begin_marker, 1)[-1]
+    if "--- ffmpeg stderr begin ---" in request_text:
+        request_text = request_text.split("--- ffmpeg stderr begin ---", 1)[1]
+    if "--- ffmpeg stderr end ---" in request_text:
+        request_text = request_text.split("--- ffmpeg stderr end ---", 1)[0]
+    return request_text[-12000:]
+
+
+def route_path(raw_path: str) -> str:
+    path = raw_path or "/"
+    for segment in ("/api/hassio_ingress/", "/api/hassio/ingress/"):
+        if segment in path:
+            after = path.split(segment, 1)[1]
+            after = after.split("/", 1)[-1] if "/" in after else ""
+            path = "/" + after.lstrip("/")
+            break
+    path = re.sub(r"/{2,}", "/", path)
+    return path or "/"
 
 
 def camera_debug_profile(camera: dict, stream_name: str, probe: dict | None = None) -> dict:
@@ -222,6 +277,7 @@ def config_summary(payload: dict) -> list[dict]:
                 "id": camera.get("id"),
                 "name": camera.get("name"),
                 "live_stream": camera.get("live_stream"),
+                "tile_stream": camera.get("tile_stream"),
                 "record_stream": camera.get("record_stream"),
                 "snapshot_stream": camera.get("snapshot_stream"),
                 "rtsp_main_channel": hikvision_channel_from_rtsp(camera.get("rtsp_main") or "", ""),
@@ -235,12 +291,14 @@ def effective_streams(camera: dict) -> dict:
     snapshot_stream = normalize_stream_name(camera.get("snapshot_stream"), "sub")
     live_stream = normalize_stream_name(camera.get("live_stream"), "sub")
     record_stream = normalize_stream_name(camera.get("record_stream"), "main")
+    tile_stream = normalize_stream_name(camera.get("tile_stream"), "sub")
     return {
         "main": stream_profile(camera, "main"),
         "sub": stream_profile(camera, "sub"),
         "snapshot": stream_profile(camera, snapshot_stream),
         "live": stream_profile(camera, live_stream),
         "record": stream_profile(camera, record_stream),
+        "tile": stream_profile(camera, tile_stream),
     }
 
 
@@ -282,6 +340,7 @@ def normalize_camera(raw: dict, index: int) -> dict:
     snapshot_stream = normalize_stream_name(raw.get("snapshot_stream"), "sub")
     live_stream = normalize_stream_name(raw.get("live_stream"), "sub")
     record_stream = normalize_stream_name(raw.get("record_stream"), "main")
+    tile_stream = normalize_stream_name(raw.get("tile_stream"), "sub")
 
     onvif_url = raw.get("onvif_url") or (f"http://{host}:80/onvif/device_service" if host else "")
     isapi_base_url = raw.get("isapi_base_url") or (f"http://{host}" if host and vendor == "hikvision" else "")
@@ -304,6 +363,7 @@ def normalize_camera(raw: dict, index: int) -> dict:
         "snapshot_stream": snapshot_stream,
         "live_stream": live_stream,
         "record_stream": record_stream,
+        "tile_stream": tile_stream,
     }
 
 
@@ -316,6 +376,7 @@ def normalize_config(payload: dict) -> dict:
     server = payload.get("server") if isinstance(payload.get("server"), dict) else {}
     storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
     live = payload.get("live") if isinstance(payload.get("live"), dict) else {}
+    nvr = payload.get("nvr") if isinstance(payload.get("nvr"), dict) else {}
     return {
         "server": {
             "listen": server.get("listen") or "0.0.0.0:8088",
@@ -327,11 +388,18 @@ def normalize_config(payload: dict) -> dict:
             "retention_days": safe_int(storage.get("retention_days"), 14),
         },
         "live": {
-            "engine": live.get("engine") if live.get("engine") in ("mjpeg", "webrtc_next") else "mjpeg",
+            "engine": live.get("engine") if live.get("engine") in STREAM_ENGINES else "webrtc",
             "frame_interval_ms": safe_int(live.get("frame_interval_ms"), 1200),
             "mjpeg_fps": clamp_int(live.get("mjpeg_fps"), 5, 1, 15),
             "mjpeg_quality": clamp_int(live.get("mjpeg_quality"), 8, 2, 31),
             "mjpeg_max_width": clamp_int(live.get("mjpeg_max_width"), 1280, 320, 3840),
+            "tile_fps": clamp_int(live.get("tile_fps"), 5, 1, 10),
+            "tile_max_width": clamp_int(live.get("tile_max_width"), 960, 320, 1920),
+        },
+        "nvr": {
+            "segment_seconds": clamp_int(nvr.get("segment_seconds"), 10, 2, 300),
+            "retention_days": clamp_int(nvr.get("retention_days"), safe_int(storage.get("retention_days"), 14), 1, 365),
+            "copy_all_streams": bool(nvr.get("copy_all_streams", True)),
         },
         "cameras": normalized,
         "future_vendors": payload.get("future_vendors") or ["dahua", "onvif", "rtsp"],
@@ -365,7 +433,7 @@ def preserve_submitted_stream_choices(payload: dict, raw_payload: dict) -> dict:
             target = None
         if not isinstance(target, dict):
             continue
-        for field in ("snapshot_stream", "live_stream", "record_stream"):
+        for field in ("snapshot_stream", "live_stream", "record_stream", "tile_stream"):
             value = raw_camera.get(field)
             if value in ("main", "sub"):
                 target[field] = value
@@ -529,6 +597,10 @@ def probe_rtsp_stream(stream: str, timeout: int = 8) -> dict:
             "ffprobe",
             "-rtsp_transport",
             "tcp",
+            "-probesize",
+            "32768",
+            "-analyzeduration",
+            "0",
             "-v",
             "error",
             "-show_entries",
@@ -548,19 +620,103 @@ def probe_rtsp_stream(stream: str, timeout: int = 8) -> dict:
     }
 
 
-def capture_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
+def snapshot_paths(target_id: str) -> tuple[Path, Path]:
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    return SNAPSHOT_DIR / f"{target_id}.jpg", DATA_SNAPSHOT_DIR / f"{target_id}.jpg"
+
+
+def capture_isapi_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
+    if (camera.get("vendor") or "").lower() != "hikvision":
+        return "", ""
+    base = isapi_base(camera)
+    username = camera.get("username") or ""
+    password = camera.get("password") or ""
+    if not base or not username:
+        return "", ""
+
+    snapshot_stream = normalize_stream_name(camera.get("snapshot_stream"), "sub")
+    channel = stream_channel(camera, snapshot_stream)
+    home_path, data_path = snapshot_paths(target_id)
+    tmp_path = data_path.with_suffix(".jpg.tmp")
+    command = [
+        "curl",
+        "--silent",
+        "--show-error",
+        "--anyauth",
+        "--user",
+        f"{username}:{password}",
+        "--connect-timeout",
+        "2",
+        "--max-time",
+        "4",
+        "--output",
+        str(tmp_path),
+        "--write-out",
+        "%{http_code}",
+        f"{base}/ISAPI/Streaming/channels/{channel}/picture?snapShotImageType=JPEG",
+    ]
+    started_at = time.monotonic()
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=6, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        write_debug_event("snapshot_isapi_error", {
+            "camera_id": camera.get("id"),
+            "target": target_id,
+            "channel": channel,
+            "error": str(error),
+        })
+        return "", ""
+
+    status_text = result.stdout.decode("utf-8", errors="replace").strip()
+    try:
+        status = int(status_text)
+    except ValueError:
+        status = 0
+    if result.returncode != 0 or status < 200 or status >= 300 or not tmp_path.exists() or tmp_path.stat().st_size < 100:
+        write_debug_event("snapshot_isapi_error", {
+            "camera_id": camera.get("id"),
+            "target": target_id,
+            "channel": channel,
+            "status": status,
+            "returncode": result.returncode,
+            "stderr": result.stderr.decode("utf-8", errors="replace")[-400:],
+        })
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return "", ""
+
+    tmp_path.replace(data_path)
+    shutil.copyfile(data_path, home_path)
+    write_debug_event("snapshot_isapi_done", {
+        "camera_id": camera.get("id"),
+        "target": target_id,
+        "channel": channel,
+        "bytes": data_path.stat().st_size,
+        "duration_ms": int((time.monotonic() - started_at) * 1000),
+    })
+    return f"snapshots/{target_id}.jpg", f"snapshots/{target_id}.jpg"
+
+
+def capture_ffmpeg_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
     stream = camera_stream(camera, camera.get("snapshot_stream") or "sub")
     if not stream:
         return "", ""
 
-    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    DATA_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    home_path = SNAPSHOT_DIR / f"{target_id}.jpg"
-    data_path = DATA_SNAPSHOT_DIR / f"{target_id}.jpg"
+    home_path, data_path = snapshot_paths(target_id)
     command = [
         "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
         "-rtsp_transport",
         "tcp",
+        "-probesize",
+        "32768",
+        "-analyzeduration",
+        "0",
         "-y",
         "-i",
         stream,
@@ -578,6 +734,13 @@ def capture_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
         return "", ""
     shutil.copyfile(data_path, home_path)
     return f"snapshots/{target_id}.jpg", f"snapshots/{target_id}.jpg"
+
+
+def capture_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
+    snapshot_path, snapshot_url = capture_isapi_snapshot(camera, target_id)
+    if snapshot_path and snapshot_url:
+        return snapshot_path, snapshot_url
+    return capture_ffmpeg_snapshot(camera, target_id)
 
 
 def camera_stream(camera: dict, stream_name: str) -> str:
@@ -631,10 +794,345 @@ def recording_key(camera: dict, index: int) -> str:
     return f"{safe_id(camera.get('id') or 'camera')}_{index}"
 
 
+def hls_key(camera: dict, index: int) -> str:
+    return f"{safe_id(camera.get('id') or 'camera')}_{index}"
+
+
+def hls_base_dir(camera: dict, index: int) -> Path:
+    return DATA_DIR / "hls" / hls_key(camera, index)
+
+
+def stream_urls(camera: dict, index: int) -> dict:
+    camera_id = safe_id(camera.get("id") or f"camera_{index + 1}")
+    return {
+        "mjpeg": f"live/{camera_id}.mjpg",
+        "tile_mjpeg": f"live/{camera_id}.mjpg?tile=1",
+        "ll_hls": f"hls/{camera_id}/index.m3u8",
+        "mse_next": f"mse/{camera_id}",
+        "webrtc": f"webrtc/{camera_id}",
+        "rtsp_main": redact_rtsp(camera.get("rtsp_main") or ""),
+        "rtsp_sub": redact_rtsp(camera.get("rtsp_sub") or ""),
+    }
+
+
+def stream_capabilities(config: dict | None = None) -> dict:
+    config = config or load_config()
+    return {
+        "engines": {
+            "mjpeg": {"status": "active", "transport": "multipart-jpeg"},
+            "ll_hls": {"status": "experimental", "transport": "hls-fmp4", "note": "ffmpeg generated local HLS playlist"},
+            "mse_next": {"status": "planned", "transport": "fmp4/websocket", "note": "prepared for rebroadcast engine"},
+            "webrtc_next": {"status": "planned", "transport": "webrtc", "note": "use go2rtc-style signaling/rebroadcast in the next engine step"},
+        },
+        "cameras": [
+            {
+                "index": index,
+                "id": camera.get("id"),
+                "name": camera.get("name"),
+                "tile_stream": camera.get("tile_stream") or "sub",
+                "live_stream": camera.get("live_stream") or "sub",
+                "record_stream": camera.get("record_stream") or "main",
+                "urls": stream_urls(camera, index),
+            }
+            for index, camera in enumerate(config.get("cameras", []))
+        ],
+    }
+
+
 def cleanup_recording_processes() -> None:
     for key, process in list(RECORDING_PROCESSES.items()):
         if process.poll() is not None:
             RECORDING_PROCESSES.pop(key, None)
+
+
+def cleanup_hls_processes() -> None:
+    for key, process in list(HLS_PROCESSES.items()):
+        if process.poll() is not None:
+            HLS_PROCESSES.pop(key, None)
+
+
+def cleanup_webrtc_sessions_safe() -> None:
+    """Cleanup expired WebRTC sessions (called from periodic maintenance)."""
+    cleanup_webrtc_sessions()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WebRTC engine — RTSP→WebRTC via SDP offer/answer over HTTP (no go2rtc needed)
+# Architecture inspired by SharpRTSPtoWebRTC + go2rtc signaling pattern:
+#   1. Browser sends SDP offer (via POST /api/webrtc/offer)
+#   2. Server answers with SDP + ICE candidates  (via GET /api/webrtc/answer)
+#   3. ffmpeg pushes RTP to a local UDP socket which forwards to browser
+#   4. Browser receives via WebRTC DataChannel / RTP directly
+# For 4G/remote: STUN resolves public ICE candidates automatically.
+# For NAT-heavy setups: add TURN server via GO2RTC_TURN env var.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def go2rtc_available() -> bool:
+    """Check if go2rtc is running on the configured address."""
+    try:
+        import urllib.request
+        urllib.request.urlopen(f"{GO2RTC_BASE}/api/streams", timeout=1)
+        return True
+    except Exception:
+        return False
+
+
+def go2rtc_register_stream(camera: dict, camera_id: str) -> bool:
+    """Register or update a camera RTSP stream in go2rtc.
+
+    go2rtc accepts: PUT /api/streams?src=rtsp://...&name=camera_id
+    This is the go2rtc API style from AlexxIT/go2rtc.
+    """
+    import urllib.request
+    stream_name_main = camera.get("rtsp_main") or camera_stream(camera, "main")
+    stream_name_sub  = camera.get("rtsp_sub")  or camera_stream(camera, "sub")
+    registered = False
+    for stream_rtsp, stream_id in ((stream_name_main, f"{camera_id}_main"), (stream_name_sub, f"{camera_id}_sub")):
+        if not stream_rtsp:
+            continue
+        try:
+            url = f"{GO2RTC_BASE}/api/streams?name={stream_id}&src={stream_rtsp}"
+            req = urllib.request.Request(url, method="PUT")
+            urllib.request.urlopen(req, timeout=3)
+            registered = True
+        except Exception:
+            pass
+    return registered
+
+
+def go2rtc_webrtc_offer(camera_id: str, offer_sdp: str, stream_variant: str = "sub") -> str | None:
+    """Exchange SDP with go2rtc WebRTC endpoint (WHIP/go2rtc-native).
+
+    go2rtc endpoint: POST /api/webrtc?src=<stream_id>
+    Body: SDP offer  →  Response: SDP answer
+    """
+    import urllib.request
+    stream_id = f"{camera_id}_{stream_variant}"
+    url = f"{GO2RTC_BASE}/api/webrtc?src={stream_id}"
+    try:
+        data = offer_sdp.encode()
+        req = urllib.request.Request(url, data=data, method="POST",
+                                     headers={"Content-Type": "application/sdp"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return resp.read().decode()
+    except Exception:
+        return None
+
+
+def _local_ip() -> str:
+    """Best-effort local IP (used in SDP o= and c= lines)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+
+
+def _make_sdp_answer(offer_sdp: str, rtp_port: int, local_ip: str, codec: str = "H264") -> str:
+    """Build a minimal SDP answer for RTSP→WebRTC fallback (no go2rtc).
+
+    Inspired by SharpRTSPtoWebRTC: re-stream H264/H265 RTP without transcoding.
+    The browser decodes natively — zero transcoding CPU cost.
+    """
+    payload = 96
+    rtpmap = f"rtpmap:{payload} {codec}/90000"
+    fmtp   = f"fmtp:{payload} packetization-mode=1" if codec == "H264" else f"fmtp:{payload} sprop-vps=...; sprop-sps=...; sprop-pps=..."
+    session_id = str(int(time.time()))
+    sdp = (
+        f"v=0\r\n"
+        f"o=- {session_id} {session_id} IN IP4 {local_ip}\r\n"
+        f"s=Edge of Infinity Stream\r\n"
+        f"c=IN IP4 {local_ip}\r\n"
+        f"t=0 0\r\n"
+        f"a=group:BUNDLE 0\r\n"
+        f"m=video {rtp_port} RTP/AVP {payload}\r\n"
+        f"a={rtpmap}\r\n"
+        f"a={fmtp}\r\n"
+        f"a=recvonly\r\n"
+        f"a=rtcp-mux\r\n"
+    )
+    for stun in STUN_SERVERS:
+        sdp += f"a=ice-options:trickle\r\na=candidate:0 1 UDP 2122260223 {local_ip} {rtp_port} typ host\r\n"
+    return sdp
+
+
+def start_webrtc_ffmpeg(camera: dict, camera_id: str, rtp_port: int) -> subprocess.Popen | None:
+    """Start ffmpeg pushing RTP to localhost:{rtp_port} for a WebRTC session.
+
+    Key args (Scrypted + go2rtc inspired):
+    - -c:v copy   → zero transcoding, just repackage (H264/H265 native passthrough)
+    - -f rtp      → RTP output for WebRTC ingestion
+    - -probesize/analyzeduration → fast startup
+    - -fflags nobuffer → minimal buffering = lowest latency
+    This mirrors SharpRTSPtoWebRTC's no-transcode philosophy.
+    """
+    stream_name = camera.get("live_stream") or "sub"
+    stream = camera_stream(camera, stream_name)
+    if not stream:
+        return None
+    command = [
+        "ffmpeg",
+        "-hide_banner", "-loglevel", "warning",
+        "-fflags", "nobuffer+discardcorrupt",
+        "-flags", "low_delay",
+        "-rtsp_transport", "tcp",
+        "-probesize", "32768",
+        "-analyzeduration", "0",
+        "-thread_queue_size", "512",
+        "-i", stream,
+        "-map", "0:v:0",
+        "-c:v", "copy",
+        "-f", "rtp",
+        f"rtp://127.0.0.1:{rtp_port}?pkt_size=1200",
+    ]
+    try:
+        return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
+def create_webrtc_session(camera: dict, camera_id: str, offer_sdp: str) -> dict:
+    """Create a WebRTC session. Tries go2rtc first, falls back to native RTP.
+
+    Returns: {session_id, answer_sdp, engine, status}
+    """
+    session_id = secrets.token_hex(8)
+
+    # ── Path A: go2rtc available (lowest latency, ~50ms, works great on 4G) ──
+    if go2rtc_available():
+        go2rtc_register_stream(camera, camera_id)
+        variant = camera.get("live_stream") or "sub"
+        answer = go2rtc_webrtc_offer(camera_id, offer_sdp, variant)
+        if answer:
+            with WEBRTC_LOCK:
+                WEBRTC_SESSIONS[session_id] = {
+                    "camera_id": camera_id,
+                    "engine": "go2rtc",
+                    "answer_sdp": answer,
+                    "created": time.time(),
+                    "process": None,
+                }
+            return {"session_id": session_id, "answer_sdp": answer, "engine": "go2rtc", "status": "ok"}
+
+    # ── Path B: native RTP fallback (ffmpeg → RTP → browser via WebRTC) ───────
+    # Find a free UDP port in configured range
+    rtp_port = WEBRTC_UDP_PORT_MIN
+    for port in range(WEBRTC_UDP_PORT_MIN, WEBRTC_UDP_PORT_MAX, 2):
+        with WEBRTC_LOCK:
+            used = {s.get("rtp_port") for s in WEBRTC_SESSIONS.values()}
+        if port not in used:
+            rtp_port = port
+            break
+
+    local_ip = _local_ip()
+    # Detect codec from camera config
+    probe = probe_rtsp_stream(camera_stream(camera, camera.get("live_stream") or "sub"), timeout=4)
+    codec = "H264"
+    for stream_info in (probe.get("streams") or []):
+        if stream_info.get("codec_type") == "video":
+            cn = (stream_info.get("codec_name") or "").upper()
+            if cn in ("H265", "HEVC"):
+                codec = "H265"
+            break
+
+    answer_sdp = _make_sdp_answer(offer_sdp, rtp_port, local_ip, codec)
+    process = start_webrtc_ffmpeg(camera, camera_id, rtp_port)
+    with WEBRTC_LOCK:
+        WEBRTC_SESSIONS[session_id] = {
+            "camera_id": camera_id,
+            "engine": "native_rtp",
+            "answer_sdp": answer_sdp,
+            "rtp_port": rtp_port,
+            "created": time.time(),
+            "process": process,
+        }
+    write_debug_event("webrtc_session_created", {"session_id": session_id, "engine": "native_rtp", "port": rtp_port, "codec": codec})
+    return {"session_id": session_id, "answer_sdp": answer_sdp, "engine": "native_rtp", "status": "ok"}
+
+
+def cleanup_webrtc_sessions() -> None:
+    """Remove expired WebRTC sessions (older than 60s without keepalive)."""
+    now = time.time()
+    with WEBRTC_LOCK:
+        expired = [sid for sid, s in WEBRTC_SESSIONS.items() if now - s["created"] > 60]
+        for sid in expired:
+            session = WEBRTC_SESSIONS.pop(sid)
+            proc = session.get("process")
+            if proc and proc.poll() is None:
+                proc.terminate()
+
+
+def start_hls(camera: dict, index: int) -> dict:
+    cleanup_hls_processes()
+    key = hls_key(camera, index)
+    process = HLS_PROCESSES.get(key)
+    directory = hls_base_dir(camera, index)
+    playlist = directory / "index.m3u8"
+    if process and process.poll() is None and playlist.exists():
+        return {"started": False, "status": "already_running", "directory": str(directory)}
+
+    stream_name = normalize_stream_name(camera.get("live_stream"), "sub")
+    stream = camera_stream(camera, stream_name)
+    if not stream:
+        raise ValueError("rtsp_not_configured")
+
+    if directory.exists():
+        for path in directory.glob("*"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    directory.mkdir(parents=True, exist_ok=True)
+    log_path = directory / "ffmpeg-hls.log"
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-fflags",
+        "nobuffer+discardcorrupt",
+        "-rtsp_transport",
+        "tcp",
+        "-probesize",
+        "32768",
+        "-analyzeduration",
+        "0",
+        "-i",
+        stream,
+        "-map",
+        "0:v:0",
+        "-an",
+        "-c:v",
+        "copy",
+        "-f",
+        "hls",
+        "-hls_time",
+        "1",
+        "-hls_list_size",
+        "6",
+        "-hls_segment_type",
+        "fmp4",
+        "-hls_fmp4_init_filename",
+        "init.mp4",
+        "-hls_flags",
+        "delete_segments+omit_endlist+independent_segments",
+        playlist.name,
+    ]
+    log_file = log_path.open("ab")
+    try:
+        process = subprocess.Popen(command, cwd=directory, stdout=subprocess.DEVNULL, stderr=log_file)
+    finally:
+        log_file.close()
+    HLS_PROCESSES[key] = process
+    write_debug_event("hls_start", {
+        "key": key,
+        "camera_id": camera.get("id"),
+        "stream": stream_name,
+        "directory": str(directory),
+        "command": redact_command(command),
+    })
+    return {"started": True, "status": "running", "directory": str(directory), "pid": process.pid}
 
 
 def stop_orphan_recordings(config: dict) -> None:
@@ -682,6 +1180,21 @@ def recording_segments(camera: dict, index: int, limit: int = 24) -> list[dict]:
     return segments
 
 
+def cleanup_old_recordings(directory: Path, retention_days: int) -> int:
+    if not directory.exists():
+        return 0
+    cutoff = time.time() - max(1, retention_days) * 86400
+    removed = 0
+    for path in directory.glob("*.mp4"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def recording_status_payload(config: dict | None = None) -> dict:
     cleanup_recording_processes()
     config = config or load_config()
@@ -691,7 +1204,8 @@ def recording_status_payload(config: dict | None = None) -> dict:
         process = RECORDING_PROCESSES.get(key)
         directory = recording_base_dir(camera, index)
         segment_count = len(list(directory.glob("*.mp4"))) if directory.exists() else 0
-        segment_files = recording_segments(camera, index)
+        nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
+        segment_files = recording_segments(camera, index, limit=72)
         record_stream = camera.get("record_stream") or "main"
         record_rtsp = camera_stream(camera, record_stream)
         cameras.append(
@@ -706,6 +1220,7 @@ def recording_status_payload(config: dict | None = None) -> dict:
                 "directory": str(directory),
                 "segments": segment_count,
                 "files": segment_files,
+                "segment_seconds": nvr.get("segment_seconds", 10),
             }
         )
     return {"cameras": cameras}
@@ -725,15 +1240,26 @@ def start_recording(camera: dict, index: int) -> dict:
 
     directory = recording_base_dir(camera, index)
     directory.mkdir(parents=True, exist_ok=True)
+    config = load_config()
+    nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
+    segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
+    retention_days = clamp_int(nvr.get("retention_days"), 14, 1, 365)
+    removed_old = cleanup_old_recordings(directory, retention_days)
     log_path = directory / "ffmpeg.log"
     output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
     command = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
-        "warning",
+        "info",
+        "-fflags",
+        "+genpts",
         "-rtsp_transport",
         "tcp",
+        "-probesize",
+        "32768",
+        "-analyzeduration",
+        "0",
         "-i",
         stream,
         "-map",
@@ -744,8 +1270,12 @@ def start_recording(camera: dict, index: int) -> dict:
         "copy",
         "-f",
         "segment",
+        "-segment_format",
+        "mp4",
+        "-segment_format_options",
+        "movflags=+faststart",
         "-segment_time",
-        "60",
+        str(segment_seconds),
         "-reset_timestamps",
         "1",
         "-strftime",
@@ -760,6 +1290,15 @@ def start_recording(camera: dict, index: int) -> dict:
     finally:
         log_file.close()
     RECORDING_PROCESSES[key] = process
+    write_debug_event("recording_start", {
+        "key": key,
+        "camera_id": camera.get("id"),
+        "record_stream": record_stream,
+        "segment_seconds": segment_seconds,
+        "retention_days": retention_days,
+        "removed_old": removed_old,
+        "command": redact_command(command),
+    })
     return {
         "started": True,
         "status": "recording",
@@ -768,6 +1307,7 @@ def start_recording(camera: dict, index: int) -> dict:
         "directory": str(directory),
         "record_stream": record_stream,
         "record_rtsp": redact_rtsp(stream),
+        "segment_seconds": segment_seconds,
     }
 
 
@@ -897,6 +1437,20 @@ def hik_raw_fps(value: str) -> str:
     if number <= 60:
         number *= 100
     return str(int(number))
+
+
+def keyframe_interval_from_fps(value: str) -> str:
+    try:
+        if "/" in str(value):
+            numerator, denominator = str(value).split("/", 1)
+            fps = float(numerator) / max(float(denominator), 1.0)
+        else:
+            fps = float(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return ""
+    if fps > 100:
+        fps = fps / 100
+    return str(max(1, int(round(fps * 4))))
 
 
 def parse_xml(payload: str) -> ET.Element:
@@ -1095,6 +1649,10 @@ def update_stream_config(camera: dict, stream_name: str, settings: dict) -> dict
             changed = set_child_text(video, target, str(video_settings[source])) or changed
     if "fps" in video_settings:
         changed = set_child_text(video, "maxFrameRate", hik_raw_fps(str(video_settings["fps"]))) or changed
+        if "keyframe_interval" not in video_settings:
+            keyframe_interval = keyframe_interval_from_fps(str(video_settings["fps"]))
+            if keyframe_interval:
+                changed = set_child_text(video, "keyFrameInterval", keyframe_interval) or changed
     for source, target in audio_map.items():
         if source in audio_settings:
             changed = set_child_text(audio, target, str(audio_settings[source])) or changed
@@ -1216,10 +1774,12 @@ def refresh_status() -> dict:
             "low_latency": bool(camera.get("low_latency")),
             "snapshot_stream": camera.get("snapshot_stream") or "sub",
             "live_stream": live_stream_name,
+            "tile_stream": camera.get("tile_stream") or "sub",
             "record_stream": record_stream_name,
             "record_rtsp": redact_rtsp(record_rtsp),
             "live_rtsp": redact_rtsp(live_rtsp),
             "effective_streams": effective_streams(camera),
+            "stream_urls": stream_urls(camera, index),
             "main_channel": stream_channel(camera, "main"),
             "sub_channel": stream_channel(camera, "sub"),
             "live_probe_status": live_probe_status,
@@ -1251,7 +1811,7 @@ def refresh_status() -> dict:
 
 
 def health_payload() -> dict:
-    return {"status": "ok", "product": "Edge of Infinity", "mode": "panel-live-mjpeg"}
+    return {"status": "ok", "product": "Edge of Infinity", "version": "0.7.0", "go2rtc": go2rtc_available(), "mode": "panel-live-mjpeg"}
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -1724,8 +2284,83 @@ INDEX_HTML = r"""<!doctype html>
         ? window.location.pathname
         : `${window.location.pathname}/`;
 
+      // ── EdgeWebRTC: WebRTC client (SharpRTSPtoWebRTC + go2rtc inspired) ─────────
+      // Handles SDP offer/answer, ICE, keepalive, auto-reconnect.
+      // Works on 4G via STUN. go2rtc path: zero-transcode H264/H265 passthrough.
+      const EdgeWebRTC = (() => {
+        const sessions = {};
+        async function start(cameraId) {
+          if (sessions[cameraId]?.pc) stop(cameraId);
+          const video = document.getElementById('webrtc-' + cameraId);
+          if (!video) return;
+          const pc = new RTCPeerConnection({
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+            ],
+            iceCandidatePoolSize: 2,
+          });
+          pc.ontrack = (e) => { if (e.streams?.[0]) video.srcObject = e.streams[0]; };
+          pc.addTransceiver('video', { direction: 'recvonly' });
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          // Wait for ICE (max 3s) — important for 4G NAT traversal
+          await new Promise((res) => {
+            if (pc.iceGatheringState === 'complete') { res(); return; }
+            const t = setTimeout(res, 3000);
+            pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } };
+          });
+          let answerData;
+          try {
+            const resp = await fetch(panelPath('api/webrtc/offer'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ camera_id: cameraId, sdp: pc.localDescription.sdp }),
+            });
+            answerData = await resp.json();
+          } catch (err) {
+            video.replaceWith(Object.assign(document.createElement('span'), { textContent: 'WebRTC failed — try MJPEG engine' }));
+            pc.close(); return;
+          }
+          if (!answerData.answer_sdp) {
+            video.replaceWith(Object.assign(document.createElement('span'), { textContent: 'WebRTC error: ' + (answerData.error || 'no answer') }));
+            pc.close(); return;
+          }
+          await pc.setRemoteDescription({ type: 'answer', sdp: answerData.answer_sdp });
+          const sessionId = answerData.session_id;
+          const keepalive = setInterval(async () => {
+            if (!sessions[cameraId]) { clearInterval(keepalive); return; }
+            try { await fetch(panelPath('api/webrtc/keepalive'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ session_id: sessionId }) }); } catch (_) {}
+          }, 20000);
+          sessions[cameraId] = { pc, sessionId, keepalive, engine: answerData.engine };
+          pc.onconnectionstatechange = () => {
+            if (['failed','disconnected','closed'].includes(pc.connectionState)) {
+              clearInterval(keepalive); delete sessions[cameraId];
+              setTimeout(() => start(cameraId), 3000);
+            }
+          };
+        }
+        function stop(cameraId) {
+          const s = sessions[cameraId]; if (!s) return;
+          clearInterval(s.keepalive);
+          if (s.sessionId) fetch(panelPath('api/webrtc/close'), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({session_id: s.sessionId}) }).catch(()=>{});
+          s.pc?.close(); delete sessions[cameraId];
+        }
+        return { start, stop };
+      })();
+
       function panelPath(path) {
         return `${panelBase}${String(path).replace(/^\/+/, '')}`;
+      }
+
+      function directPanelPath(path) {
+        const clean = String(path).replace(/^\/+/, '');
+        const publicUrl = String(config?.server?.public_url || '').trim().replace(/\/+$/, '');
+        if (publicUrl) return `${publicUrl}/${clean}`;
+        if (window.location.hostname) {
+          return `${window.location.protocol}//${window.location.hostname}:8088/${clean}`;
+        }
+        return panelPath(clean);
       }
 
       function debugEvent(event, payload = {}) {
@@ -1735,13 +2370,6 @@ INDEX_HTML = r"""<!doctype html>
           location: window.location.pathname,
           payload
         });
-        try {
-          if (navigator.sendBeacon) {
-            const blob = new Blob([body], { type: 'application/json' });
-            navigator.sendBeacon(panelPath('api/debug'), blob);
-            return;
-          }
-        } catch (_) {}
         fetch(panelPath('api/debug'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1818,7 +2446,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function renderEffectiveStreams(streams) {
-        const order = ['main', 'sub', 'live', 'record', 'snapshot'];
+        const order = ['main', 'sub', 'tile', 'live', 'record', 'snapshot'];
         if (!streams || typeof streams !== 'object') return '';
         const rows = order
           .filter((name) => streams[name])
@@ -1838,15 +2466,42 @@ INDEX_HTML = r"""<!doctype html>
       function cameraCard(camera) {
         const online = camera.status === 'online';
         const liveKey = camera.key || `${camera.id || 'camera'}_${camera.index ?? 0}`;
+        const liveId = camera.id || liveKey;
         const videoCodec = camera.video_codec || camera.codec;
         const liveStream = camera.live_stream || 'sub';
+        const tileStream = camera.tile_stream || 'sub';
+        const hasSubPreview = camera.effective_streams?.sub?.configured;
+        const previewStream = hasSubPreview ? tileStream : liveStream;
         const liveResolution = camera.live_width && camera.live_height ? `${camera.live_width}x${camera.live_height}` : 'unknown';
+        const previewResolution = previewStream === liveStream ? liveResolution : 'tile';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
-        const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveKey)}.mjpg?camera_index=${encodeURIComponent(camera.index ?? 0)}&stream=${encodeURIComponent(liveStream)}&t=${Date.now()}`);
+        const livePath = `live/${encodeURIComponent(liveId)}.mjpg?tile=1&t=${Date.now()}`;
+        const liveMjpegUrl = directPanelPath(livePath);
+        const liveMjpegFallbackUrl = panelPath(livePath);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
-        const preview = live[liveKey]
-          ? `<img src="${liveMjpegUrl}" alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live" onerror="this.outerHTML='<span>MJPEG live failed. Check /homeassistant/edge/live-*.log.</span>'">`
-          : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
+        const liveEngine = (window._edgeConfig?.live?.engine) || 'webrtc';
+        let preview;
+        if (!live[liveKey]) {
+          preview = `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
+        } else if (liveEngine === 'webrtc') {
+          // WebRTC player: ultra-low latency (50-300ms), 4G-ready
+          preview = `<video id="webrtc-${escapeHtml(liveId)}" class="webrtc-player" autoplay muted playsinline
+            data-camera-id="${escapeHtml(liveId)}"
+            style="width:100%;height:100%;object-fit:contain;background:#000"></video>
+            <script>EdgeWebRTC.start("${escapeHtml(liveId)}");</script>`;
+        } else if (liveEngine === 'll_hls') {
+          // LL-HLS player: good for 4G fallback when WebRTC not available
+          const hlsUrl = panelPath('hls/' + encodeURIComponent(liveId) + '/index.m3u8');
+          preview = `<video class="hls-player" autoplay muted playsinline
+            style="width:100%;height:100%;object-fit:contain;background:#000"
+            onerror="this.outerHTML='<span>HLS failed</span>'"
+            src="${escapeHtml(hlsUrl)}"></video>`;
+        } else {
+          // MJPEG fallback
+          preview = `<img src="${escapeHtml(liveMjpegUrl)}" data-fallback-src="${escapeHtml(liveMjpegFallbackUrl)}"
+            alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live"
+            onerror="if (this.dataset.fallbackSrc) { this.src = this.dataset.fallbackSrc; this.dataset.fallbackSrc = ''; } else { this.outerHTML='<span>MJPEG failed</span>'; }">`;
+        }
         return `
           <article class="camera video-tile">
             <div class="preview" data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" title="Click to toggle live preview">${preview}${statusBadge}</div>
@@ -1856,7 +2511,7 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="vendor">${escapeHtml(text(camera.vendor))}</div>
               </div>
               <div class="tile-line">
-                <span>${escapeHtml(liveStream)} ${escapeHtml(liveCodec)} ${escapeHtml(liveResolution)}</span>
+                <span>preview ${escapeHtml(previewStream)} ${escapeHtml(liveCodec)} ${escapeHtml(previewResolution)}</span>
                 <span>${escapeHtml(text(camera.fps, ''))}</span>
               </div>
             </div>
@@ -1893,7 +2548,7 @@ INDEX_HTML = r"""<!doctype html>
                 <span class="recording-meta">${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatDate(file.modified_at))}</span>
               </div>
             `).join('')}</div>`
-          : '<p class="notice">No segments yet. Start recording and refresh after the first 60-second segment is closed.</p>';
+          : `<p class="notice">No segments yet. Start recording and refresh after the first ${escapeHtml(text(status.segment_seconds, 10))}-second segment is closed.</p>`;
         return `
           <article class="camera">
             <div class="body">
@@ -1906,6 +2561,7 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="metric"><b>Status</b><span class="${isRecording ? 'state-online' : ''}">${isRecording ? 'recording' : 'stopped'}</span></div>
                 <div class="metric"><b>Record stream</b><span>${escapeHtml(recordStream)}</span></div>
                 <div class="metric"><b>Segments</b><span>${escapeHtml(text(status.segments, '0'))}</span></div>
+                <div class="metric"><b>Segment</b><span>${escapeHtml(text(status.segment_seconds, 10))}s</span></div>
                 <div class="metric"><b>PID</b><span>${escapeHtml(text(status.pid, 'none'))}</span></div>
                 <div class="metric wide"><b>Record RTSP</b><span>${escapeHtml(recordRtsp)}</span></div>
               </div>
@@ -2032,6 +2688,10 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="sub" ${camera.live_stream !== 'main' ? 'selected' : ''}>sub</option>
                 <option value="main" ${camera.live_stream === 'main' ? 'selected' : ''}>main</option>
               </select></label>
+              <label>Tile stream<select name="${prefix}-tile-stream">
+                <option value="sub" ${camera.tile_stream !== 'main' ? 'selected' : ''}>sub</option>
+                <option value="main" ${camera.tile_stream === 'main' ? 'selected' : ''}>main</option>
+              </select></label>
               <label>Recording stream<select name="${prefix}-record-stream">
                 <option value="main" ${camera.record_stream !== 'sub' ? 'selected' : ''}>main</option>
                 <option value="sub" ${camera.record_stream === 'sub' ? 'selected' : ''}>sub</option>
@@ -2050,8 +2710,8 @@ INDEX_HTML = r"""<!doctype html>
       function renderConfig() {
         configDirty = false;
         const cameras = config.cameras && config.cameras.length ? config.cameras : [
-          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', record_stream: 'main', record: true, low_latency: true },
-          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', record_stream: 'main', record: true, low_latency: true }
+          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true },
+          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true }
         ];
         config = { ...config, cameras };
         form.innerHTML = cameras.map(cameraForm).join('');
@@ -2070,6 +2730,7 @@ INDEX_HTML = r"""<!doctype html>
         const server = config.server || {};
         const storage = config.storage || {};
         const liveConfig = config.live || {};
+        const nvrConfig = config.nvr || {};
         edgeForm.innerHTML = `
           <section class="camera-form">
             <h2>Server</h2>
@@ -2088,11 +2749,21 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </section>
           <section class="camera-form">
+            <h2>NVR</h2>
+            <div class="form-grid">
+              <label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label>
+              <label>NVR retention days<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label>
+            </div>
+            <p class="notice">NVR records with stream copy so every encoded camera frame in the selected recording stream is preserved without re-encoding.</p>
+          </section>
+          <section class="camera-form">
             <h2>Live Preview</h2>
             <div class="form-grid">
               <label>Engine<select name="live-engine">
                 <option value="mjpeg" ${liveConfig.engine === 'mjpeg' ? 'selected' : ''}>MJPEG preview</option>
-                <option value="webrtc_next" ${liveConfig.engine === 'webrtc_next' ? 'selected' : ''}>WebRTC next</option>
+                <option value="ll_hls" ${liveConfig.engine === 'll_hls' ? 'selected' : ''}>LL-HLS experimental</option>
+                <option value="mse_next" ${liveConfig.engine === 'mse_next' ? 'selected' : ''}>MSE next</option>
+                <option value="webrtc" ${liveConfig.engine === 'webrtc' ? 'selected' : ''}>WebRTC (ultra-low latency, 4G-ready)</option>
               </select></label>
               <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label>
               <label>MJPEG FPS<input name="live-mjpeg-fps" type="number" min="1" max="15" value="${escapeHtml(text(liveConfig.mjpeg_fps, 5))}"></label>
@@ -2163,6 +2834,7 @@ INDEX_HTML = r"""<!doctype html>
             low_latency: get('low-latency').checked,
             snapshot_stream: get('snapshot-stream').value,
             live_stream: get('live-stream').value,
+            tile_stream: get('tile-stream').value,
             record_stream: get('record-stream').value
           };
         });
@@ -2178,6 +2850,7 @@ INDEX_HTML = r"""<!doctype html>
           rtsp_sub_channel: '102',
           snapshot_stream: 'sub',
           live_stream: 'sub',
+          tile_stream: 'sub',
           record_stream: 'main',
           enabled: false,
           record: true,
@@ -2255,6 +2928,10 @@ INDEX_HTML = r"""<!doctype html>
             mjpeg_fps: Number(get('live-mjpeg-fps').value || 5),
             mjpeg_quality: Number(get('live-mjpeg-quality').value || 8),
             mjpeg_max_width: Number(get('live-mjpeg-max-width').value || 1280)
+          },
+          nvr: {
+            segment_seconds: Number(get('nvr-segment-seconds').value || 10),
+            retention_days: Number(get('nvr-retention-days').value || get('storage-retention-days').value || 14)
           }
         };
       }
@@ -2287,7 +2964,7 @@ INDEX_HTML = r"""<!doctype html>
           const name = text(camera.name, camera.id || 'camera');
           const mainChannel = hikvisionChannelFromRtsp(camera.rtsp_main, '101');
           const subChannel = hikvisionChannelFromRtsp(camera.rtsp_sub, '102');
-          return `${name}: live=${text(camera.live_stream, 'sub')}, record=${text(camera.record_stream, 'main')}, snapshot=${text(camera.snapshot_stream, 'sub')}, main ch=${mainChannel}, sub ch=${subChannel}`;
+          return `${name}: tile=${text(camera.tile_stream, 'sub')}, live=${text(camera.live_stream, 'sub')}, record=${text(camera.record_stream, 'main')}, snapshot=${text(camera.snapshot_stream, 'sub')}, main ch=${mainChannel}, sub ch=${subChannel}`;
         });
         return parts.length ? parts.join(' | ') : 'no cameras';
       }
@@ -2310,6 +2987,7 @@ INDEX_HTML = r"""<!doctype html>
             key: camera.key,
             status: camera.status,
             live_stream: camera.live_stream,
+            tile_stream: camera.tile_stream,
             live_probe_status: camera.live_probe_status,
             video_codec: camera.video_codec || camera.codec,
             audio_codec: camera.audio_codec,
@@ -2651,10 +3329,71 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.8"
+    server_version = "EdgePanel/0.7.0"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
+
+    def handle_webrtc_offer(self) -> None:
+        """Handle WebRTC SDP offer from browser.
+
+        Flow (inspired by SharpRTSPtoWebRTC + go2rtc):
+        1. Browser sends SDP offer
+        2. We find camera, call create_webrtc_session()
+        3. Return SDP answer + session_id
+        """
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            camera_id = body.get("camera_id") or ""
+            offer_sdp = body.get("sdp") or ""
+            if not camera_id or not offer_sdp:
+                self.send_json({"error": "missing camera_id or sdp"}, HTTPStatus.BAD_REQUEST)
+                return
+            config = load_config()
+            cameras = config.get("cameras") or []
+            camera = next((c for c in cameras if c.get("id") == camera_id), None)
+            if not camera:
+                self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
+                return
+            cleanup_webrtc_sessions()
+            result = create_webrtc_session(camera, camera_id, offer_sdp)
+            self.send_json(result)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def handle_webrtc_keepalive(self) -> None:
+        """Keepalive ping to extend WebRTC session TTL."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            sid = body.get("session_id") or ""
+            with WEBRTC_LOCK:
+                if sid in WEBRTC_SESSIONS:
+                    WEBRTC_SESSIONS[sid]["created"] = time.time()
+                    self.send_json({"status": "ok"})
+                else:
+                    self.send_json({"error": "session_not_found"}, HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def handle_webrtc_close(self) -> None:
+        """Explicitly close a WebRTC session and free ffmpeg process."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            sid = body.get("session_id") or ""
+            with WEBRTC_LOCK:
+                session = WEBRTC_SESSIONS.pop(sid, None)
+            if session:
+                proc = session.get("process")
+                if proc and proc.poll() is None:
+                    proc.terminate()
+                self.send_json({"status": "closed"})
+            else:
+                self.send_json({"error": "session_not_found"}, HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def send_bytes(self, payload: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         self.send_response(status)
@@ -2670,16 +3409,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        path = parsed.path
-
-        # Strip Home Assistant Ingress prefix so routes work with and without Ingress.
-        # Ingress path looks like: /api/hassio_ingress/<token>/live/cam.mjpg
-        for _seg in ("/api/hassio_ingress/", "/api/hassio/ingress/"):
-            if _seg in path:
-                _after = path.split(_seg, 1)[1]
-                _stripped = "/" + (_after.split("/", 1)[-1] if "/" in _after else "")
-                path = _stripped if _stripped != "/" else path
-                break
+        path = route_path(parsed.path)
 
         if path in ("/", "/index.html"):
             self.send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
@@ -2696,6 +3426,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/recording/status":
             self.send_json(recording_status_payload())
             return
+        if path == "/api/stream/capabilities":
+            self.send_json(stream_capabilities())
+            return
         if path == "/cameras.json":
             payload = read_json(DATA_DIR / "cameras.json", {"cameras": []})
             self.send_json(payload)
@@ -2709,6 +3442,22 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path.startswith("/live/") and path.endswith(".mjpg"):
             self.serve_live(path, parse_qs(parsed.query))
             return
+        if path.startswith("/hls/"):
+            self.serve_hls(path)
+            return
+        if path.startswith("/webrtc/"):
+            camera_id = path.split("/", 2)[-1]
+            # Return WebRTC player page info (SDP exchange happens via POST /api/webrtc/offer)
+            self.send_json({
+                "camera_id": camera_id,
+                "engine": "webrtc",
+                "go2rtc_available": go2rtc_available(),
+                "stun_servers": STUN_SERVERS,
+                "offer_url": f"/api/webrtc/offer",
+                "keepalive_url": f"/api/webrtc/keepalive",
+                "status": "ready",
+            })
+            return
         if path.startswith("/recordings/") and path.endswith(".mp4"):
             self.serve_recording(path)
             return
@@ -2717,18 +3466,20 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        _post_path = parsed.path
-        for _seg in ("/api/hassio_ingress/", "/api/hassio/ingress/"):
-            if _seg in _post_path:
-                _after = _post_path.split(_seg, 1)[1]
-                _stripped = "/" + (_after.split("/", 1)[-1] if "/" in _after else "")
-                if _stripped != "/":
-                    _post_path = _stripped
-                break
+        _post_path = route_path(parsed.path)
         parsed = parsed._replace(path=_post_path)
         write_debug_event("api_post", {"path": parsed.path, "client": self.client_address[0]})
         if parsed.path == "/api/config":
             self.save_config()
+            return
+        if parsed.path == "/api/webrtc/offer":
+            self.handle_webrtc_offer()
+            return
+        if parsed.path == "/api/webrtc/keepalive":
+            self.handle_webrtc_keepalive()
+            return
+        if parsed.path == "/api/webrtc/close":
+            self.handle_webrtc_close()
             return
         if parsed.path == "/api/refresh":
             payload = refresh_status()
@@ -2954,9 +3705,77 @@ class EdgeHandler(BaseHTTPRequestHandler):
                     break
                 remaining -= len(chunk)
 
+    def serve_hls(self, request_path: str) -> None:
+        parts = request_path.removeprefix("/hls/").split("/", 1)
+        if len(parts) != 2:
+            self.send_json({"error": "hls_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+        camera_id, filename = parts
+        safe_name = Path(filename).name
+        if safe_name not in ("index.m3u8", "init.mp4") and not safe_name.endswith(".m4s"):
+            self.send_json({"error": "hls_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+
+        config = load_config()
+        camera = None
+        camera_index = 0
+        for index, item in enumerate(config.get("cameras", [])):
+            if item.get("id") == camera_id or safe_id(item.get("id") or f"camera_{index + 1}") == camera_id:
+                camera = item
+                camera_index = index
+                break
+        if camera is None:
+            self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+
+        directory = hls_base_dir(camera, camera_index)
+        key = hls_key(camera, camera_index)
+        log_path = directory / "ffmpeg-hls.log"
+        hls_result = {}
+        if safe_name == "index.m3u8":
+            try:
+                hls_result = start_hls(camera, camera_index)
+            except (OSError, ValueError) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+                return
+            playlist = directory / safe_name
+            for _ in range(80):
+                if playlist.exists() and playlist.stat().st_size > 0:
+                    break
+                process = HLS_PROCESSES.get(key)
+                if process and process.poll() is not None:
+                    break
+                time.sleep(0.1)
+
+        target = directory / safe_name
+        if not target.exists():
+            process = HLS_PROCESSES.get(key)
+            process_status = {
+                "running": bool(process and process.poll() is None),
+                "returncode": process.poll() if process else None,
+            }
+            payload = {
+                "error": "hls_not_ready",
+                "camera_id": camera.get("id") or camera_id,
+                "stream": camera.get("live_stream") or "sub",
+                "directory": str(directory),
+                "requested": safe_name,
+                "started": hls_result,
+                "process": process_status,
+                "files": sorted(path.name for path in directory.glob("*")) if directory.exists() else [],
+                "ffmpeg_tail": redact_rtsp(read_text_tail(log_path)),
+            }
+            write_debug_event("hls_not_ready", payload)
+            self.send_json(payload, HTTPStatus.NOT_FOUND)
+            return
+        content_type = "application/vnd.apple.mpegurl" if safe_name.endswith(".m3u8") else "video/mp4"
+        self.send_bytes(target.read_bytes(), content_type)
+
     def serve_live(self, path: str, query: dict[str, list[str]]) -> None:
         camera_id = path.removeprefix("/live/").removesuffix(".mjpg")
-        stream_name = (query.get("stream") or ["sub"])[0]
+        requested_stream = normalize_stream_name((query.get("stream") or [""])[0], "")
+        allow_stream_override = (query.get("override") or query.get("debug_stream") or ["0"])[0] in ("1", "true", "yes")
+        tile_mode = (query.get("tile") or ["0"])[0] in ("1", "true", "yes")
         config = load_config()
         cameras = config.get("cameras", [])
         camera = None
@@ -2972,6 +3791,22 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
             return
 
+        configured_stream = normalize_stream_name(camera.get("live_stream"), "sub")
+        configured_tile_stream = normalize_stream_name(camera.get("tile_stream"), "sub")
+        stream_name = requested_stream if requested_stream and allow_stream_override else configured_stream
+        if tile_mode:
+            if camera_stream(camera, configured_tile_stream):
+                stream_name = configured_tile_stream
+            elif camera_stream(camera, "sub"):
+                stream_name = "sub"
+        if requested_stream and requested_stream != configured_stream and not allow_stream_override:
+            write_debug_event("live_stream_override_ignored", {
+                "camera_id": camera.get("id") or camera_id,
+                "requested_stream": requested_stream,
+                "configured_live": configured_stream,
+                "path": self.path,
+            })
+
         stream = camera_stream(camera, stream_name)
         if not stream:
             write_debug_event("live_error", {"reason": "rtsp_not_configured", "camera_id": camera.get("id"), "stream": stream_name})
@@ -2984,6 +3819,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         mjpeg_fps = clamp_int(live_config.get("mjpeg_fps"), 5, 1, 15)
         mjpeg_quality = clamp_int(live_config.get("mjpeg_quality"), 8, 2, 31)
         mjpeg_max_width = clamp_int(live_config.get("mjpeg_max_width"), 1280, 320, 3840)
+        if tile_mode:
+            mjpeg_fps = min(mjpeg_fps, 5)
+            mjpeg_max_width = min(mjpeg_max_width, 960)
         vf = f"fps={mjpeg_fps},scale=w='min({mjpeg_max_width}\\,iw)':h=-2"
 
         command = [
@@ -2993,7 +3831,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "info",
             "-nostdin",
             "-fflags",
-            "nobuffer",
+            "nobuffer+discardcorrupt",
             "-flags",
             "low_delay",
             "-rtsp_transport",
@@ -3004,11 +3842,19 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "32768",
             "-analyzeduration",
             "0",
+            "-thread_queue_size",
+            "512",
             "-i",
             stream,
             "-an",
             "-vf",
             vf,
+            "-g",
+            "1",
+            "-vsync",
+            "0",
+            "-preset",
+            "ultrafast",
             "-vcodec",
             "mjpeg",
             "-q:v",
@@ -3032,6 +3878,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "camera": camera_profile,
             "command": redact_command(command),
             "mjpeg": {
+                "tile": tile_mode,
                 "fps": mjpeg_fps,
                 "quality": mjpeg_quality,
                 "max_width": mjpeg_max_width,
@@ -3044,7 +3891,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 f"client={self.client_address[0]} path={self.path}\n"
                 f"user_agent={self.headers.get('User-Agent', '')}\n"
                 f"camera={camera.get('id') or camera_id} index={camera_index or 'lookup'} "
-                f"stream={stream_name} configured_live={camera.get('live_stream') or 'sub'} "
+                f"tile_mode={tile_mode} requested_stream={requested_stream or 'none'} stream={stream_name} configured_live={configured_stream} "
                 f"status={camera.get('status', 'unknown')}\n"
                 f"rtsp={redact_rtsp(stream)}\n"
                 f"command={json.dumps(redact_command(command))}\n"
@@ -3139,7 +3986,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             stderr_text = ""
             try:
                 log_text = log_path.read_text(encoding="utf-8", errors="replace")
-                stderr_text = log_text.rsplit(begin_marker, 1)[-1][-12000:]
+                stderr_text = extract_ffmpeg_stderr(log_text, begin_marker)
             except OSError:
                 stderr_text = ""
             category, hints = classify_ffmpeg_error(stderr_text, frame_count, end_reason, bytes_sent)
@@ -3147,6 +3994,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "request_id": request_id,
                 "camera": camera_profile,
                 "mjpeg": {
+                    "tile": tile_mode,
                     "fps": mjpeg_fps,
                     "quality": mjpeg_quality,
                     "max_width": mjpeg_max_width,

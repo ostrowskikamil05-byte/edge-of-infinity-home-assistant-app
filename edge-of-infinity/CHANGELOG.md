@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.7.0 — WebRTC Engine + Low-Latency Core
+
+### Nowe funkcje
+
+- **WebRTC engine** — nowy silnik strumieniowania oparty na architekturze SharpRTSPtoWebRTC i go2rtc.
+  - Latencja 50-300ms (vs 200-600ms MJPEG, 1-3s HLS)
+  - Dziala na danych komorkowych (4G/5G) przez STUN (automatyczne przebijanie NAT)
+  - Zero transkodowania: H264/H265 przesylane natywnie bezposrednio do przegladarki (jak SharpRTSPtoWebRTC)
+  - Auto-reconnect po utracie polaczenia
+  - Keepalive co 20s, sesje wygasaja po 60s bezczynnosci
+
+- **Integracja z go2rtc** (opcjonalna)
+  - Jesli go2rtc dziala na porcie 1984 (standardowy addon HA), Edge of Infinity automatycznie
+    uzywa go przez WHIP/WebRTC API zamiast wlasnego RTP
+  - go2rtc path: ~50ms latencja, stream-sharing (wiele ogladajacych = jedno polaczenie RTSP)
+  - Fallback na wbudowany silnik RTP jesli go2rtc niedostepny
+
+- **Endpoint `/api/webrtc/offer`** (POST) — wymiana SDP offer/answer
+- **Endpoint `/api/webrtc/keepalive`** (POST) — przedluzenie sesji
+- **Endpoint `/api/webrtc/close`** (POST) — zamkniecie sesji i zwolnienie zasobow
+- **Endpoint `/webrtc/{camera_id}`** (GET) — info o sesji WebRTC
+
+- **EdgeWebRTC JS client** w panelu
+  - RTCPeerConnection z STUN
+  - ICE gathering z timeout 3s (lepsze dla 4G z wysokim RTT)
+  - Auto-fallback do informacji o bledzie z sugestia przelaczenia na MJPEG
+
+- **LL-HLS** jako nowy silnik w UI (dobry fallback dla urzadzen mobilnych)
+- **Silnik domyslny zmieniony z MJPEG na WebRTC**
+
+### Ulepszenia
+
+- `probe_rtsp_stream()` — `-probesize 32768 -analyzeduration 0` (czas probe <0.5s zamiast ~5s)
+- `capture_live_frame()` — te same flagi szybkiego startu
+- `start_hls()` — juz z low-latency flagami
+- MJPEG stream — `-g 1 -vsync 0 -thread_queue_size 512 -fflags discardcorrupt`
+- `/health` — zwraca `version` i `go2rtc` (true/false)
+- Stale serwery STUN: `stun.l.google.com:19302` i `stun1.l.google.com:19302`
+
+### Techniczne
+
+- Nowe zmienne srodowiskowe: `GO2RTC_HOST`, `GO2RTC_PORT`, `WEBRTC_UDP_PORT_MIN`, `WEBRTC_UDP_PORT_MAX`
+- `WEBRTC_SESSIONS` dict z thread-safe lock dla zarzadzania sesjami
+- Automatyczne czyszczenie wygaslych sesji przy kazdym nowym offerze
+
+## 0.6.1
+
+- Improve LL-HLS startup diagnostics so `hls_not_ready` returns ffmpeg status, generated files, working directory, and stderr tail.
+- Wait longer for the first HLS playlist and stop waiting early if ffmpeg exits.
+
+## 0.6.0
+
+- Split camera stream roles into `tile_stream`, `live_stream`, `record_stream`, and `snapshot_stream` so Home tiles no longer overwrite live or recording choices.
+- Add stream capability manifests with MJPEG, experimental LL-HLS, and planned MSE/WebRTC engine URLs per camera.
+- Add experimental `/hls/<camera>/index.m3u8` fMP4 HLS generation using ffmpeg stream copy.
+- Improve NVR recording with configurable short MP4 segments, stream-copy recording, retention cleanup, and richer recording debug logs.
+- Add NVR segment settings to Edge Settings.
+
+## 0.5.15
+
+- Load Home tile MJPEG images through the direct Edge port URL first, matching working manual links like `http://<host>:8088/live/hikvision_1.mjpg`.
+- Keep the Home Assistant Ingress live URL as an image fallback if direct access is unavailable.
+- Allow `server.public_url` to override the direct live base URL for custom network setups.
+
+## 0.5.14
+
+- Add a lightweight Home tile live mode that prefers the sub stream for camera cards while leaving direct `/live/<camera>.mjpg` and recording settings untouched.
+- Cap tile MJPEG previews to 5 FPS and 960 px width to reduce Ingress and mobile browser disconnects.
+- Include tile mode details in live debug logs.
+
+## 0.5.13
+
+- Capture Hikvision snapshots through ISAPI JPEG endpoints before falling back to ffmpeg.
+- Speed up RTSP probing with low-latency ffprobe analyze settings.
+- Add lower-latency MJPEG ffmpeg flags for corrupt packet discard, keyframe output, no PTS sync buffering, and larger input queue.
+- Auto-set Hikvision keyframe interval to roughly `fps * 4` when saving FPS through the stream editor.
+
+## 0.5.12
+
+- Normalize Home Assistant Ingress paths so doubled slashes like `//live/hikvision_1.mjpg` route to `/live/hikvision_1.mjpg`.
+- Share the same route normalization for GET and POST panel requests.
+
+## 0.5.11
+
+- Make Home live tiles call canonical camera IDs, for example `/live/hikvision_1.mjpg`, instead of generated keys like `/live/hikvision_1_0.mjpg`.
+- Make the live endpoint use the saved camera `live_stream` by default and ignore stale `stream=` query parameters unless explicit debug override is requested.
+- Improve live debug classification so ffmpeg command options do not create false RTSP timeout hints.
+- Send UI debug events with JSON fetch requests so `/homeassistant/edge/edge-debug.log` keeps useful payloads.
+
 ## 0.5.8
 
 - **Fix**: Snapshot (`async_camera_image`) zawsze zwracal `None` — `capture_snapshot()` nie byla wywolywana w `refresh_status()`. Naprawione.
@@ -7,7 +96,6 @@
 - **Fix**: Ustawienia `live_stream` / `snapshot_stream` / `record_stream` wracaly do wartosci domyslnych po zapisie — `preserve_submitted_stream_choices()` dopasowywala po `camera.id`, ktore nie istnieje dla nowych kamer. Naprawione: dopasowanie po indeksie jako priorytet.
 - **Fix**: Brakujacy naglowek `Access-Control-Allow-Origin` w odpowiedziach HTTP i strumieniu MJPEG — przeglądarka blokowała odpowiedzi w środowisku Ingress.
 - **Improvement**: Dockerfile — przypięta wersja base image (`3.20` zamiast `latest`), dodano `py3-pip`.
-
 ## 0.5.7
 
 - Move local Home Assistant file reads in the custom integration to the executor to avoid blocking the HA event loop.
