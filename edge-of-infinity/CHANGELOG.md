@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2
+
+- Rebuild Home as a clean live camera wall with compact video tiles and no RTSP/debug clutter.
+- Start MJPEG live previews automatically for online cameras and toggle live by clicking the video tile.
+- Remove snapshot fallback from the Home wall so live failures are visible instead of being hidden by still images.
+- Stop capturing status snapshots during RTSP refreshes to avoid competing with the live RTSP session.
+- Add a Home plus tile that opens Camera Settings and creates the next camera slot.
+- Preserve submitted `live_stream`, `record_stream`, and `snapshot_stream` values after server normalization.
+
 ## 0.5.1
 
 - Read Camera Settings values directly from each camera card before saving so `main`/`sub` selectors cannot fall back to stale form values.

@@ -210,6 +210,22 @@ def normalize_config(payload: dict) -> dict:
     }
 
 
+def preserve_submitted_stream_choices(payload: dict, raw_payload: dict) -> dict:
+    """Keep explicit UI stream choices after normalization builds RTSP URLs."""
+    raw_cameras = raw_payload.get("cameras") if isinstance(raw_payload, dict) else []
+    cameras = payload.get("cameras") if isinstance(payload, dict) else []
+    if not isinstance(raw_cameras, list) or not isinstance(cameras, list):
+        return payload
+    for index, raw_camera in enumerate(raw_cameras):
+        if index >= len(cameras) or not isinstance(raw_camera, dict):
+            continue
+        for field in ("snapshot_stream", "live_stream", "record_stream"):
+            value = raw_camera.get(field)
+            if value in ("main", "sub"):
+                cameras[index][field] = value
+    return payload
+
+
 def camera_from_payload(payload: dict) -> dict:
     raw_camera = payload.get("camera") if isinstance(payload.get("camera"), dict) else {}
     config = load_config()
@@ -996,7 +1012,6 @@ def refresh_status() -> dict:
                     audio_codec = str(audio_stream.get("codec_name") or "")
                     audio_sample_rate = str(audio_stream.get("sample_rate") or "")
                     audio_channels = str(audio_stream.get("channels") or "")
-                    snapshot_url, snapshot_path = capture_snapshot(camera, camera_id)
                 else:
                     status = "lost_connection" if previous.get("status") == "online" else "offline"
                     detail = "RTSP connection was lost." if status == "lost_connection" else "RTSP probe failed. Check IP, credentials, port 554, and camera stream path."
@@ -1186,16 +1201,62 @@ INDEX_HTML = r"""<!doctype html>
       button.primary { border-color: rgba(86,214,181,.65); color: var(--accent); }
       button.danger { color: var(--danger); }
       .toolbar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(285px, 100%), 1fr)); gap: 14px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 14px; align-items: start; }
       .camera, .settings, .panel {
         border: 1px solid var(--line);
         border-radius: 8px;
         background: linear-gradient(180deg, var(--panel-2), var(--panel));
         overflow: hidden;
       }
+      .video-tile { min-width: 0; }
+      .video-tile .body { padding: 10px 12px; }
+      .video-tile .row { min-height: 28px; }
+      .video-tile .vendor { font-size: 11px; padding: 3px 7px; }
       .preview { position: relative; aspect-ratio: 16 / 9; display: grid; place-items: center; background: #080d10; border-bottom: 1px solid var(--line); }
+      .video-tile .preview { cursor: pointer; }
+      .video-tile .preview:hover { outline: 1px solid rgba(86, 214, 181, .45); outline-offset: -1px; }
       .preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
       .preview span { color: var(--muted); font-size: 13px; padding: 12px; text-align: center; }
+      .tile-line {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 7px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .tile-line span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .add-camera-tile {
+        min-height: 224px;
+        display: grid;
+        place-items: center;
+        border-style: dashed;
+        cursor: pointer;
+        background: rgba(86, 214, 181, .05);
+      }
+      .add-camera-tile:hover {
+        border-color: rgba(86, 214, 181, .65);
+        background: rgba(86, 214, 181, .09);
+      }
+      .add-camera-content {
+        display: grid;
+        gap: 8px;
+        justify-items: center;
+        color: var(--accent);
+        font-weight: 750;
+      }
+      .add-camera-plus {
+        width: 54px;
+        height: 54px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(86, 214, 181, .55);
+        border-radius: 8px;
+        font-size: 38px;
+        line-height: 1;
+        background: rgba(86, 214, 181, .08);
+      }
       .connection-badge {
         position: absolute;
         top: 10px;
@@ -1587,46 +1648,39 @@ INDEX_HTML = r"""<!doctype html>
 
       function cameraCard(camera) {
         const online = camera.status === 'online';
-        const stateClass = online ? 'state-online' : `state-${text(camera.status)}`;
         const liveKey = camera.key || `${camera.id || 'camera'}_${camera.index ?? 0}`;
-        const resolution = camera.width && camera.height ? `${camera.width}x${camera.height}` : 'unknown';
         const videoCodec = camera.video_codec || camera.codec;
-        const audioCodec = camera.audio_codec
-          ? `${camera.audio_codec}${camera.audio_sample_rate ? ` ${camera.audio_sample_rate}Hz` : ''}${camera.audio_channels ? ` ${camera.audio_channels}ch` : ''}`
-          : 'none';
         const liveStream = camera.live_stream || 'sub';
         const liveResolution = camera.live_width && camera.live_height ? `${camera.live_width}x${camera.live_height}` : 'unknown';
-        const liveCodec = camera.live_video_codec ? `${camera.live_video_codec} ${liveResolution}` : `probe ${text(camera.live_probe_status, 'unknown')}`;
+        const liveCodec = camera.live_video_codec || videoCodec || 'video';
         const liveMjpegUrl = panelPath(`live/${encodeURIComponent(liveKey)}.mjpg?camera_index=${encodeURIComponent(camera.index ?? 0)}&stream=${encodeURIComponent(liveStream)}&t=${Date.now()}`);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
-        const effective = renderEffectiveStreams(camera.effective_streams);
         const preview = live[liveKey]
           ? `<img src="${liveMjpegUrl}" alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live" onerror="this.outerHTML='<span>MJPEG live failed. Check /homeassistant/edge/live-*.log.</span>'">`
-          : camera.snapshot_url
-            ? `<img src="${panelPath(`${camera.snapshot_url}?t=${Date.now()}`)}" alt="${escapeHtml(text(camera.name, camera.id))} snapshot">`
-            : `<span>${online ? 'RTSP reachable' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
+          : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         return `
-          <article class="camera">
-            <div class="preview">${preview}${statusBadge}</div>
+          <article class="camera video-tile">
+            <div class="preview" data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" title="Click to toggle live preview">${preview}${statusBadge}</div>
             <div class="body">
               <div class="row">
                 <div class="name">${escapeHtml(text(camera.name, camera.id))}</div>
                 <div class="vendor">${escapeHtml(text(camera.vendor))}</div>
               </div>
-              <div class="meta">
-                <div class="metric"><b>Host</b><span>${escapeHtml(text(camera.host))}</span></div>
-                <div class="metric"><b>Status</b><span class="${stateClass}">${escapeHtml(statusLabel(camera.status))}</span></div>
-                <div class="metric"><b>Video</b><span>${escapeHtml(text(videoCodec))} ${escapeHtml(resolution)}</span></div>
-                <div class="metric"><b>Audio</b><span>${escapeHtml(audioCodec)}</span></div>
-                <div class="metric"><b>Live</b><span>${escapeHtml(liveStream)} ${escapeHtml(liveCodec)}</span></div>
-                <div class="metric wide"><b>Live RTSP</b><span>${escapeHtml(text(camera.live_rtsp, 'missing'))}</span></div>
-                <div class="metric"><b>FPS</b><span>${escapeHtml(text(camera.fps))}</span></div>
-                <div class="metric"><b>Bitrate</b><span>${escapeHtml(bitrateText(camera.bitrate))}</span></div>
+              <div class="tile-line">
+                <span>${escapeHtml(liveStream)} ${escapeHtml(liveCodec)} ${escapeHtml(liveResolution)}</span>
+                <span>${escapeHtml(text(camera.fps, ''))}</span>
               </div>
-              <div class="actions">
-                <button data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" ${online ? '' : 'disabled'}>${live[liveKey] ? 'Stop live' : 'Start MJPEG live'}</button>
-              </div>
-              ${effective}
+            </div>
+          </article>
+        `;
+      }
+
+      function addCameraTile() {
+        return `
+          <article class="camera add-camera-tile" data-add-camera-tile title="Add camera">
+            <div class="add-camera-content">
+              <div class="add-camera-plus">+</div>
+              <div>Add camera</div>
             </div>
           </article>
         `;
@@ -2053,7 +2107,15 @@ INDEX_HTML = r"""<!doctype html>
         const response = await fetch(panelPath('cameras.json'), { cache: 'no-store' });
         const data = await response.json();
         const cameras = Array.isArray(data.cameras) ? data.cameras : [];
-        grid.innerHTML = cameras.length ? cameras.map(cameraCard).join('') : '<p>No cameras configured yet.</p>';
+        cameras.forEach((camera) => {
+          const liveKey = camera.key || `${camera.id || 'camera'}_${camera.index ?? 0}`;
+          if (camera.status === 'online' && live[liveKey] === undefined) {
+            live[liveKey] = true;
+          }
+        });
+        grid.innerHTML = cameras.length
+          ? `${cameras.map(cameraCard).join('')}${addCameraTile()}`
+          : `${addCameraTile()}`;
       }
 
       async function loadRecordingStatus() {
@@ -2290,7 +2352,14 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       grid.addEventListener('click', async (event) => {
-        const liveKey = event.target?.dataset?.liveKey;
+        const addTile = event.target.closest('[data-add-camera-tile]');
+        if (addTile) {
+          showPage('camera-settings');
+          addCamera();
+          return;
+        }
+        const liveTarget = event.target.closest('[data-live-key]');
+        const liveKey = liveTarget?.dataset?.liveKey;
         if (!liveKey) return;
         live[liveKey] = !live[liveKey];
         updateLiveTimer();
@@ -2342,7 +2411,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.1"
+    server_version = "EdgePanel/0.5.2"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -2435,6 +2504,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                     raw_payload = {**existing, **raw_payload, "cameras": existing["cameras"]}
             validate_config_for_save(raw_payload)
             payload = normalize_config(raw_payload)
+            payload = preserve_submitted_stream_choices(payload, raw_payload)
             validate_config_for_save(payload)
             backup_config()
             write_json(CONFIG_PATH, payload)
@@ -2607,12 +2677,19 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "-hide_banner",
             "-loglevel",
             "error",
+            "-nostdin",
             "-fflags",
             "nobuffer",
             "-flags",
             "low_delay",
             "-rtsp_transport",
             "tcp",
+            "-timeout",
+            "5000000",
+            "-probesize",
+            "32768",
+            "-analyzeduration",
+            "0",
             "-i",
             stream,
             "-an",
@@ -2651,6 +2728,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
+        frame_count = 0
         try:
             assert process.stdout is not None
             buffer = b""
@@ -2674,6 +2752,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                     self.wfile.write(frame)
                     self.wfile.write(b"\r\n")
                     self.wfile.flush()
+                    frame_count += 1
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
@@ -2682,6 +2761,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait(timeout=2)
+            try:
+                with log_path.open("ab") as live_log:
+                    live_log.write(f"frames={frame_count} exit={process.returncode}\n".encode("utf-8"))
+            except OSError:
+                pass
 
 
 def main() -> None:
