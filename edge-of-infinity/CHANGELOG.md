@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.6
+
+- Add tunable MJPEG preview shaping: FPS, JPEG quality, and max preview width.
+- Default browser MJPEG preview to 5 FPS, quality 8, and max width 1280 so 4K main streams do not create multi-megabyte JPEG frames.
+- Add debug hints for oversized MJPEG frames that cause browser broken-pipe disconnects.
+
 ## 0.5.5
 
 - Remove unsupported live ffmpeg `-rw_timeout` option that stopped MJPEG before opening RTSP.

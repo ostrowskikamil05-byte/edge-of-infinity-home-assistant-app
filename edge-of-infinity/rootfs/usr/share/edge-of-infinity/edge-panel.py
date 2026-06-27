@@ -52,6 +52,10 @@ def safe_int(value, fallback: int) -> int:
         return fallback
 
 
+def clamp_int(value, fallback: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, safe_int(value, fallback)))
+
+
 def read_json(path: Path, fallback):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -98,7 +102,7 @@ def write_debug_event(event: str, payload: dict | None = None) -> None:
         print(f"[edge-panel] debug log write failed: {error}")
 
 
-def classify_ffmpeg_error(stderr_text: str, frame_count: int, end_reason: str) -> tuple[str, list[str]]:
+def classify_ffmpeg_error(stderr_text: str, frame_count: int, end_reason: str, bytes_sent: int = 0) -> tuple[str, list[str]]:
     text_lower = stderr_text.lower()
     hints = []
     if "option" in text_lower and "not found" in text_lower:
@@ -119,6 +123,8 @@ def classify_ffmpeg_error(stderr_text: str, frame_count: int, end_reason: str) -
         hints.append("decoder_error")
     if frame_count == 0:
         hints.append("no_mjpeg_frames_sent")
+    if frame_count > 0 and bytes_sent // frame_count > 750_000:
+        hints.append("mjpeg_frames_too_large")
     if end_reason.startswith("client_") and frame_count > 0:
         hints.append("browser_closed_stream_after_frames")
     if not hints and frame_count > 0:
@@ -323,6 +329,9 @@ def normalize_config(payload: dict) -> dict:
         "live": {
             "engine": live.get("engine") if live.get("engine") in ("mjpeg", "webrtc_next") else "mjpeg",
             "frame_interval_ms": safe_int(live.get("frame_interval_ms"), 1200),
+            "mjpeg_fps": clamp_int(live.get("mjpeg_fps"), 5, 1, 15),
+            "mjpeg_quality": clamp_int(live.get("mjpeg_quality"), 8, 2, 31),
+            "mjpeg_max_width": clamp_int(live.get("mjpeg_max_width"), 1280, 320, 3840),
         },
         "cameras": normalized,
         "future_vendors": payload.get("future_vendors") or ["dahua", "onvif", "rtsp"],
@@ -2071,8 +2080,11 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="webrtc_next" ${liveConfig.engine === 'webrtc_next' ? 'selected' : ''}>WebRTC next</option>
               </select></label>
               <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label>
+              <label>MJPEG FPS<input name="live-mjpeg-fps" type="number" min="1" max="15" value="${escapeHtml(text(liveConfig.mjpeg_fps, 5))}"></label>
+              <label>MJPEG quality<input name="live-mjpeg-quality" type="number" min="2" max="31" value="${escapeHtml(text(liveConfig.mjpeg_quality, 8))}"></label>
+              <label>MJPEG max width<input name="live-mjpeg-max-width" type="number" min="320" max="3840" value="${escapeHtml(text(liveConfig.mjpeg_max_width, 1280))}"></label>
             </div>
-            <p class="notice">JPEG remains for snapshots. Active live uses the MJPEG stream endpoint.</p>
+            <p class="notice">These settings only shape the browser MJPEG preview. Camera resolution and recording streams stay unchanged.</p>
           </section>
         `;
       }
@@ -2224,7 +2236,10 @@ INDEX_HTML = r"""<!doctype html>
           },
           live: {
             engine: get('live-engine').value,
-            frame_interval_ms: Number(get('live-frame-interval-ms').value || 1200)
+            frame_interval_ms: Number(get('live-frame-interval-ms').value || 1200),
+            mjpeg_fps: Number(get('live-mjpeg-fps').value || 5),
+            mjpeg_quality: Number(get('live-mjpeg-quality').value || 8),
+            mjpeg_max_width: Number(get('live-mjpeg-max-width').value || 1280)
           }
         };
       }
@@ -2621,7 +2636,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.5"
+    server_version = "EdgePanel/0.5.6"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -2931,6 +2946,11 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
         probe = probe_rtsp_stream(stream, timeout=5)
         camera_profile = camera_debug_profile(camera, stream_name, probe)
+        live_config = config.get("live") if isinstance(config.get("live"), dict) else {}
+        mjpeg_fps = clamp_int(live_config.get("mjpeg_fps"), 5, 1, 15)
+        mjpeg_quality = clamp_int(live_config.get("mjpeg_quality"), 8, 2, 31)
+        mjpeg_max_width = clamp_int(live_config.get("mjpeg_max_width"), 1280, 320, 3840)
+        vf = f"fps={mjpeg_fps},scale=w='min({mjpeg_max_width}\\,iw)':h=-2"
 
         command = [
             "ffmpeg",
@@ -2954,11 +2974,11 @@ class EdgeHandler(BaseHTTPRequestHandler):
             stream,
             "-an",
             "-vf",
-            "fps=10",
+            vf,
             "-vcodec",
             "mjpeg",
             "-q:v",
-            "5",
+            str(mjpeg_quality),
             "-flush_packets",
             "1",
             "-f",
@@ -2977,6 +2997,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "user_agent": self.headers.get("User-Agent", ""),
             "camera": camera_profile,
             "command": redact_command(command),
+            "mjpeg": {
+                "fps": mjpeg_fps,
+                "quality": mjpeg_quality,
+                "max_width": mjpeg_max_width,
+                "vf": vf,
+            },
         })
         log_file.write(
             (
@@ -3081,10 +3107,16 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 stderr_text = log_text.rsplit(begin_marker, 1)[-1][-12000:]
             except OSError:
                 stderr_text = ""
-            category, hints = classify_ffmpeg_error(stderr_text, frame_count, end_reason)
+            category, hints = classify_ffmpeg_error(stderr_text, frame_count, end_reason, bytes_sent)
             write_debug_event("live_end", {
                 "request_id": request_id,
                 "camera": camera_profile,
+                "mjpeg": {
+                    "fps": mjpeg_fps,
+                    "quality": mjpeg_quality,
+                    "max_width": mjpeg_max_width,
+                    "vf": vf,
+                },
                 "reason": end_reason,
                 "category": category,
                 "hints": hints,
