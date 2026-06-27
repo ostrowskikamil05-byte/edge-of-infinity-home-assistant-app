@@ -15,11 +15,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-import base64
-import hashlib
 import secrets
 import socket
-import struct
 
 
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
@@ -37,20 +34,14 @@ DEBUG_LOCK = threading.Lock()
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
 STREAM_FALLBACK_CHANNELS = {"main": HIKVISION_MAIN_CHANNEL, "sub": HIKVISION_SUB_CHANNEL}
-STREAM_ENGINES = ("mjpeg", "webrtc", "ll_hls")
-# go2rtc rebroadcast address (same host, port 1984 = go2rtc default HA addon port)
+STREAM_ENGINES = ("mjpeg", "mse_next", "webrtc_next", "ll_hls")
+# go2rtc integration (optional — auto-detected at runtime)
 GO2RTC_HOST = os.environ.get("GO2RTC_HOST", "localhost")
 GO2RTC_PORT = int(os.environ.get("GO2RTC_PORT", "1984"))
 GO2RTC_BASE = f"http://{GO2RTC_HOST}:{GO2RTC_PORT}"
-# WebRTC STUN server list (used in SDP offer to browser)
-STUN_SERVERS = [
-    "stun:stun.l.google.com:19302",
-    "stun:stun1.l.google.com:19302",
-]
-# ICE UDP port range for WebRTC (must match router port-forward if using 4G/remote)
+STUN_SERVERS = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
 WEBRTC_UDP_PORT_MIN = int(os.environ.get("WEBRTC_UDP_PORT_MIN", "50000"))
 WEBRTC_UDP_PORT_MAX = int(os.environ.get("WEBRTC_UDP_PORT_MAX", "50100"))
-# Active WebRTC sessions: session_id -> {offer_sdp, answer_sdp, camera_id, created}
 WEBRTC_SESSIONS: dict[str, dict] = {}
 WEBRTC_LOCK = threading.Lock()
 
@@ -388,7 +379,7 @@ def normalize_config(payload: dict) -> dict:
             "retention_days": safe_int(storage.get("retention_days"), 14),
         },
         "live": {
-            "engine": live.get("engine") if live.get("engine") in STREAM_ENGINES else "webrtc",
+            "engine": live.get("engine") if live.get("engine") in STREAM_ENGINES else "mjpeg",
             "frame_interval_ms": safe_int(live.get("frame_interval_ms"), 1200),
             "mjpeg_fps": clamp_int(live.get("mjpeg_fps"), 5, 1, 15),
             "mjpeg_quality": clamp_int(live.get("mjpeg_quality"), 8, 2, 31),
@@ -809,7 +800,7 @@ def stream_urls(camera: dict, index: int) -> dict:
         "tile_mjpeg": f"live/{camera_id}.mjpg?tile=1",
         "ll_hls": f"hls/{camera_id}/index.m3u8",
         "mse_next": f"mse/{camera_id}",
-        "webrtc": f"webrtc/{camera_id}",
+        "webrtc_next": f"webrtc/{camera_id}",
         "rtsp_main": redact_rtsp(camera.get("rtsp_main") or ""),
         "rtsp_sub": redact_rtsp(camera.get("rtsp_sub") or ""),
     }
@@ -850,25 +841,12 @@ def cleanup_hls_processes() -> None:
         if process.poll() is not None:
             HLS_PROCESSES.pop(key, None)
 
-
-def cleanup_webrtc_sessions_safe() -> None:
-    """Cleanup expired WebRTC sessions (called from periodic maintenance)."""
-    cleanup_webrtc_sessions()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# WebRTC engine — RTSP→WebRTC via SDP offer/answer over HTTP (no go2rtc needed)
-# Architecture inspired by SharpRTSPtoWebRTC + go2rtc signaling pattern:
-#   1. Browser sends SDP offer (via POST /api/webrtc/offer)
-#   2. Server answers with SDP + ICE candidates  (via GET /api/webrtc/answer)
-#   3. ffmpeg pushes RTP to a local UDP socket which forwards to browser
-#   4. Browser receives via WebRTC DataChannel / RTP directly
-# For 4G/remote: STUN resolves public ICE candidates automatically.
-# For NAT-heavy setups: add TURN server via GO2RTC_TURN env var.
-# ═══════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# WebRTC backend — RTSP→WebRTC engine (go2rtc-first, native RTP fallback)
+# UI unchanged — engine wybierany przez istniejący dropdown webrtc_next
+# ─────────────────────────────────────────────────────────────────────────────
 
 def go2rtc_available() -> bool:
-    """Check if go2rtc is running on the configured address."""
     try:
         import urllib.request
         urllib.request.urlopen(f"{GO2RTC_BASE}/api/streams", timeout=1)
@@ -877,42 +855,31 @@ def go2rtc_available() -> bool:
         return False
 
 
-def go2rtc_register_stream(camera: dict, camera_id: str) -> bool:
-    """Register or update a camera RTSP stream in go2rtc.
-
-    go2rtc accepts: PUT /api/streams?src=rtsp://...&name=camera_id
-    This is the go2rtc API style from AlexxIT/go2rtc.
-    """
+def go2rtc_register_stream(camera: dict, camera_id: str) -> None:
     import urllib.request
-    stream_name_main = camera.get("rtsp_main") or camera_stream(camera, "main")
-    stream_name_sub  = camera.get("rtsp_sub")  or camera_stream(camera, "sub")
-    registered = False
-    for stream_rtsp, stream_id in ((stream_name_main, f"{camera_id}_main"), (stream_name_sub, f"{camera_id}_sub")):
-        if not stream_rtsp:
+    for stream, sid in (
+        (camera_stream(camera, "main"), f"{camera_id}_main"),
+        (camera_stream(camera, "sub"),  f"{camera_id}_sub"),
+    ):
+        if not stream:
             continue
         try:
-            url = f"{GO2RTC_BASE}/api/streams?name={stream_id}&src={stream_rtsp}"
-            req = urllib.request.Request(url, method="PUT")
+            req = urllib.request.Request(
+                f"{GO2RTC_BASE}/api/streams?name={sid}&src={stream}", method="PUT"
+            )
             urllib.request.urlopen(req, timeout=3)
-            registered = True
         except Exception:
             pass
-    return registered
 
 
-def go2rtc_webrtc_offer(camera_id: str, offer_sdp: str, stream_variant: str = "sub") -> str | None:
-    """Exchange SDP with go2rtc WebRTC endpoint (WHIP/go2rtc-native).
-
-    go2rtc endpoint: POST /api/webrtc?src=<stream_id>
-    Body: SDP offer  →  Response: SDP answer
-    """
+def go2rtc_webrtc_offer(camera_id: str, offer_sdp: str, variant: str = "sub") -> str | None:
     import urllib.request
-    stream_id = f"{camera_id}_{stream_variant}"
-    url = f"{GO2RTC_BASE}/api/webrtc?src={stream_id}"
+    url = f"{GO2RTC_BASE}/api/webrtc?src={camera_id}_{variant}"
     try:
-        data = offer_sdp.encode()
-        req = urllib.request.Request(url, data=data, method="POST",
-                                     headers={"Content-Type": "application/sdp"})
+        req = urllib.request.Request(
+            url, data=offer_sdp.encode(),
+            method="POST", headers={"Content-Type": "application/sdp"},
+        )
         with urllib.request.urlopen(req, timeout=8) as resp:
             return resp.read().decode()
     except Exception:
@@ -920,7 +887,6 @@ def go2rtc_webrtc_offer(camera_id: str, offer_sdp: str, stream_variant: str = "s
 
 
 def _local_ip() -> str:
-    """Best-effort local IP (used in SDP o= and c= lines)."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -929,138 +895,98 @@ def _local_ip() -> str:
         return "127.0.0.1"
 
 
-def _make_sdp_answer(offer_sdp: str, rtp_port: int, local_ip: str, codec: str = "H264") -> str:
-    """Build a minimal SDP answer for RTSP→WebRTC fallback (no go2rtc).
-
-    Inspired by SharpRTSPtoWebRTC: re-stream H264/H265 RTP without transcoding.
-    The browser decodes natively — zero transcoding CPU cost.
-    """
+def _make_sdp_answer(rtp_port: int, local_ip: str, codec: str = "H264") -> str:
     payload = 96
     rtpmap = f"rtpmap:{payload} {codec}/90000"
-    fmtp   = f"fmtp:{payload} packetization-mode=1" if codec == "H264" else f"fmtp:{payload} sprop-vps=...; sprop-sps=...; sprop-pps=..."
-    session_id = str(int(time.time()))
-    sdp = (
-        f"v=0\r\n"
-        f"o=- {session_id} {session_id} IN IP4 {local_ip}\r\n"
-        f"s=Edge of Infinity Stream\r\n"
-        f"c=IN IP4 {local_ip}\r\n"
-        f"t=0 0\r\n"
-        f"a=group:BUNDLE 0\r\n"
-        f"m=video {rtp_port} RTP/AVP {payload}\r\n"
-        f"a={rtpmap}\r\n"
-        f"a={fmtp}\r\n"
-        f"a=recvonly\r\n"
-        f"a=rtcp-mux\r\n"
+    fmtp = (
+        f"fmtp:{payload} packetization-mode=1"
+        if codec == "H264"
+        else f"fmtp:{payload} profile-id=1"
     )
-    for stun in STUN_SERVERS:
-        sdp += f"a=ice-options:trickle\r\na=candidate:0 1 UDP 2122260223 {local_ip} {rtp_port} typ host\r\n"
-    return sdp
+    sid = str(int(time.time()))
+    lines = [
+        "v=0",
+        f"o=- {sid} {sid} IN IP4 {local_ip}",
+        "s=Edge of Infinity",
+        f"c=IN IP4 {local_ip}",
+        "t=0 0",
+        f"m=video {rtp_port} RTP/AVP {payload}",
+        f"a={rtpmap}",
+        f"a={fmtp}",
+        "a=recvonly",
+        "a=rtcp-mux",
+        f"a=candidate:0 1 UDP 2122260223 {local_ip} {rtp_port} typ host",
+    ]
+    return "\r\n".join(lines) + "\r\n"
 
 
-def start_webrtc_ffmpeg(camera: dict, camera_id: str, rtp_port: int) -> subprocess.Popen | None:
-    """Start ffmpeg pushing RTP to localhost:{rtp_port} for a WebRTC session.
-
-    Key args (Scrypted + go2rtc inspired):
-    - -c:v copy   → zero transcoding, just repackage (H264/H265 native passthrough)
-    - -f rtp      → RTP output for WebRTC ingestion
-    - -probesize/analyzeduration → fast startup
-    - -fflags nobuffer → minimal buffering = lowest latency
-    This mirrors SharpRTSPtoWebRTC's no-transcode philosophy.
-    """
-    stream_name = camera.get("live_stream") or "sub"
-    stream = camera_stream(camera, stream_name)
+def _start_webrtc_ffmpeg(camera: dict, rtp_port: int) -> subprocess.Popen | None:
+    stream = camera_stream(camera, camera.get("live_stream") or "sub")
     if not stream:
         return None
-    command = [
-        "ffmpeg",
-        "-hide_banner", "-loglevel", "warning",
-        "-fflags", "nobuffer+discardcorrupt",
-        "-flags", "low_delay",
-        "-rtsp_transport", "tcp",
-        "-probesize", "32768",
-        "-analyzeduration", "0",
-        "-thread_queue_size", "512",
-        "-i", stream,
-        "-map", "0:v:0",
-        "-c:v", "copy",
-        "-f", "rtp",
-        f"rtp://127.0.0.1:{rtp_port}?pkt_size=1200",
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-fflags", "nobuffer+discardcorrupt", "-flags", "low_delay",
+        "-rtsp_transport", "tcp", "-probesize", "32768", "-analyzeduration", "0",
+        "-thread_queue_size", "512", "-i", stream,
+        "-map", "0:v:0", "-c:v", "copy",
+        "-f", "rtp", f"rtp://127.0.0.1:{rtp_port}?pkt_size=1200",
     ]
     try:
-        return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         return None
 
 
 def create_webrtc_session(camera: dict, camera_id: str, offer_sdp: str) -> dict:
-    """Create a WebRTC session. Tries go2rtc first, falls back to native RTP.
-
-    Returns: {session_id, answer_sdp, engine, status}
-    """
     session_id = secrets.token_hex(8)
-
-    # ── Path A: go2rtc available (lowest latency, ~50ms, works great on 4G) ──
+    # Ścieżka A: go2rtc (~50ms latencja)
     if go2rtc_available():
         go2rtc_register_stream(camera, camera_id)
-        variant = camera.get("live_stream") or "sub"
-        answer = go2rtc_webrtc_offer(camera_id, offer_sdp, variant)
+        answer = go2rtc_webrtc_offer(camera_id, offer_sdp, camera.get("live_stream") or "sub")
         if answer:
             with WEBRTC_LOCK:
                 WEBRTC_SESSIONS[session_id] = {
-                    "camera_id": camera_id,
-                    "engine": "go2rtc",
-                    "answer_sdp": answer,
-                    "created": time.time(),
-                    "process": None,
+                    "camera_id": camera_id, "engine": "go2rtc",
+                    "answer_sdp": answer, "created": time.time(), "process": None,
                 }
             return {"session_id": session_id, "answer_sdp": answer, "engine": "go2rtc", "status": "ok"}
-
-    # ── Path B: native RTP fallback (ffmpeg → RTP → browser via WebRTC) ───────
-    # Find a free UDP port in configured range
-    rtp_port = WEBRTC_UDP_PORT_MIN
-    for port in range(WEBRTC_UDP_PORT_MIN, WEBRTC_UDP_PORT_MAX, 2):
-        with WEBRTC_LOCK:
-            used = {s.get("rtp_port") for s in WEBRTC_SESSIONS.values()}
-        if port not in used:
-            rtp_port = port
-            break
-
+    # Ścieżka B: native RTP fallback
+    used = set()
+    with WEBRTC_LOCK:
+        used = {s.get("rtp_port") for s in WEBRTC_SESSIONS.values()}
+    rtp_port = next(
+        (p for p in range(WEBRTC_UDP_PORT_MIN, WEBRTC_UDP_PORT_MAX, 2) if p not in used),
+        WEBRTC_UDP_PORT_MIN,
+    )
     local_ip = _local_ip()
-    # Detect codec from camera config
     probe = probe_rtsp_stream(camera_stream(camera, camera.get("live_stream") or "sub"), timeout=4)
     codec = "H264"
-    for stream_info in (probe.get("streams") or []):
-        if stream_info.get("codec_type") == "video":
-            cn = (stream_info.get("codec_name") or "").upper()
-            if cn in ("H265", "HEVC"):
-                codec = "H265"
+    for st in (probe.get("streams") or []):
+        if st.get("codec_type") == "video" and (st.get("codec_name") or "").upper() in ("H265", "HEVC"):
+            codec = "H265"
             break
-
-    answer_sdp = _make_sdp_answer(offer_sdp, rtp_port, local_ip, codec)
-    process = start_webrtc_ffmpeg(camera, camera_id, rtp_port)
+    answer_sdp = _make_sdp_answer(rtp_port, local_ip, codec)
+    process = _start_webrtc_ffmpeg(camera, rtp_port)
     with WEBRTC_LOCK:
         WEBRTC_SESSIONS[session_id] = {
-            "camera_id": camera_id,
-            "engine": "native_rtp",
-            "answer_sdp": answer_sdp,
-            "rtp_port": rtp_port,
-            "created": time.time(),
-            "process": process,
+            "camera_id": camera_id, "engine": "native_rtp", "answer_sdp": answer_sdp,
+            "rtp_port": rtp_port, "created": time.time(), "process": process,
         }
-    write_debug_event("webrtc_session_created", {"session_id": session_id, "engine": "native_rtp", "port": rtp_port, "codec": codec})
     return {"session_id": session_id, "answer_sdp": answer_sdp, "engine": "native_rtp", "status": "ok"}
 
 
 def cleanup_webrtc_sessions() -> None:
-    """Remove expired WebRTC sessions (older than 60s without keepalive)."""
     now = time.time()
     with WEBRTC_LOCK:
         expired = [sid for sid, s in WEBRTC_SESSIONS.items() if now - s["created"] > 60]
         for sid in expired:
-            session = WEBRTC_SESSIONS.pop(sid)
-            proc = session.get("process")
+            proc = WEBRTC_SESSIONS.pop(sid).get("process")
             if proc and proc.poll() is None:
                 proc.terminate()
+
+
+
 
 def start_hls(camera: dict, index: int) -> dict:
     cleanup_hls_processes()
@@ -1810,7 +1736,7 @@ def refresh_status() -> dict:
 
 
 def health_payload() -> dict:
-    return {"status": "ok", "product": "Edge of Infinity", "version": "0.7.0", "go2rtc": go2rtc_available(), "mode": "panel-live-mjpeg"}
+    return {"status": "ok", "product": "Edge of Infinity", "mode": "panel-live-mjpeg"}
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -2283,71 +2209,6 @@ INDEX_HTML = r"""<!doctype html>
         ? window.location.pathname
         : `${window.location.pathname}/`;
 
-      // ── EdgeWebRTC: WebRTC client (SharpRTSPtoWebRTC + go2rtc inspired) ─────────
-      // Handles SDP offer/answer, ICE, keepalive, auto-reconnect.
-      // Works on 4G via STUN. go2rtc path: zero-transcode H264/H265 passthrough.
-      const EdgeWebRTC = (() => {
-        const sessions = {};
-        async function start(cameraId) {
-          if (sessions[cameraId]?.pc) stop(cameraId);
-          const video = document.getElementById('webrtc-' + cameraId);
-          if (!video) return;
-          const pc = new RTCPeerConnection({
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' },
-            ],
-            iceCandidatePoolSize: 2,
-          });
-          pc.ontrack = (e) => { if (e.streams?.[0]) video.srcObject = e.streams[0]; };
-          pc.addTransceiver('video', { direction: 'recvonly' });
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          // Wait for ICE (max 3s) — important for 4G NAT traversal
-          await new Promise((res) => {
-            if (pc.iceGatheringState === 'complete') { res(); return; }
-            const t = setTimeout(res, 3000);
-            pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } };
-          });
-          let answerData;
-          try {
-            const resp = await fetch(panelPath('api/webrtc/offer'), {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ camera_id: cameraId, sdp: pc.localDescription.sdp }),
-            });
-            answerData = await resp.json();
-          } catch (err) {
-            video.replaceWith(Object.assign(document.createElement('span'), { textContent: 'WebRTC failed — try MJPEG engine' }));
-            pc.close(); return;
-          }
-          if (!answerData.answer_sdp) {
-            video.replaceWith(Object.assign(document.createElement('span'), { textContent: 'WebRTC error: ' + (answerData.error || 'no answer') }));
-            pc.close(); return;
-          }
-          await pc.setRemoteDescription({ type: 'answer', sdp: answerData.answer_sdp });
-          const sessionId = answerData.session_id;
-          const keepalive = setInterval(async () => {
-            if (!sessions[cameraId]) { clearInterval(keepalive); return; }
-            try { await fetch(panelPath('api/webrtc/keepalive'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ session_id: sessionId }) }); } catch (_) {}
-          }, 20000);
-          sessions[cameraId] = { pc, sessionId, keepalive, engine: answerData.engine };
-          pc.onconnectionstatechange = () => {
-            if (['failed','disconnected','closed'].includes(pc.connectionState)) {
-              clearInterval(keepalive); delete sessions[cameraId];
-              setTimeout(() => start(cameraId), 3000);
-            }
-          };
-        }
-        function stop(cameraId) {
-          const s = sessions[cameraId]; if (!s) return;
-          clearInterval(s.keepalive);
-          if (s.sessionId) fetch(panelPath('api/webrtc/close'), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({session_id: s.sessionId}) }).catch(()=>{});
-          s.pc?.close(); delete sessions[cameraId];
-        }
-        return { start, stop };
-      })();
-
       function panelPath(path) {
         return `${panelBase}${String(path).replace(/^\/+/, '')}`;
       }
@@ -2478,29 +2339,9 @@ INDEX_HTML = r"""<!doctype html>
         const liveMjpegUrl = directPanelPath(livePath);
         const liveMjpegFallbackUrl = panelPath(livePath);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
-        const liveEngine = (window._edgeConfig?.live?.engine) || 'webrtc';
-        let preview;
-        if (!live[liveKey]) {
-          preview = `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
-        } else if (liveEngine === 'webrtc') {
-          // WebRTC player: ultra-low latency (50-300ms), 4G-ready
-          preview = `<video id="webrtc-${escapeHtml(liveId)}" class="webrtc-player" autoplay muted playsinline
-            data-camera-id="${escapeHtml(liveId)}"
-            style="width:100%;height:100%;object-fit:contain;background:#000"></video>
-            <script>EdgeWebRTC.start("${escapeHtml(liveId)}");</script>`;
-        } else if (liveEngine === 'll_hls') {
-          // LL-HLS player: good for 4G fallback when WebRTC not available
-          const hlsUrl = panelPath('hls/' + encodeURIComponent(liveId) + '/index.m3u8');
-          preview = `<video class="hls-player" autoplay muted playsinline
-            style="width:100%;height:100%;object-fit:contain;background:#000"
-            onerror="this.outerHTML='<span>HLS failed</span>'"
-            src="${escapeHtml(hlsUrl)}"></video>`;
-        } else {
-          // MJPEG fallback
-          preview = `<img src="${escapeHtml(liveMjpegUrl)}" data-fallback-src="${escapeHtml(liveMjpegFallbackUrl)}"
-            alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live"
-            onerror="if (this.dataset.fallbackSrc) { this.src = this.dataset.fallbackSrc; this.dataset.fallbackSrc = ''; } else { this.outerHTML='<span>MJPEG failed</span>'; }">`;
-        }
+        const preview = live[liveKey]
+          ? `<img src="${escapeHtml(liveMjpegUrl)}" data-fallback-src="${escapeHtml(liveMjpegFallbackUrl)}" alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live" onerror="if (this.dataset.fallbackSrc) { this.src = this.dataset.fallbackSrc; this.dataset.fallbackSrc = ''; } else { this.outerHTML='<span>MJPEG live failed. Check /homeassistant/edge/live-*.log.</span>'; }">`
+          : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         return `
           <article class="camera video-tile">
             <div class="preview" data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" title="Click to toggle live preview">${preview}${statusBadge}</div>
@@ -2762,7 +2603,7 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="mjpeg" ${liveConfig.engine === 'mjpeg' ? 'selected' : ''}>MJPEG preview</option>
                 <option value="ll_hls" ${liveConfig.engine === 'll_hls' ? 'selected' : ''}>LL-HLS experimental</option>
                 <option value="mse_next" ${liveConfig.engine === 'mse_next' ? 'selected' : ''}>MSE next</option>
-                <option value="webrtc" ${liveConfig.engine === 'webrtc' ? 'selected' : ''}>WebRTC (ultra-low latency, 4G-ready)</option>
+                <option value="webrtc_next" ${liveConfig.engine === 'webrtc_next' ? 'selected' : ''}>WebRTC next</option>
               </select></label>
               <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label>
               <label>MJPEG FPS<input name="live-mjpeg-fps" type="number" min="1" max="15" value="${escapeHtml(text(liveConfig.mjpeg_fps, 5))}"></label>
@@ -3328,19 +3169,12 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.7.0"
+    server_version = "EdgePanel/0.7.1"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
 
-    def handle_webrtc_offer(self) -> None:
-        """Handle WebRTC SDP offer from browser.
-
-        Flow (inspired by SharpRTSPtoWebRTC + go2rtc):
-        1. Browser sends SDP offer
-        2. We find camera, call create_webrtc_session()
-        3. Return SDP answer + session_id
-        """
+    def _handle_webrtc_offer(self) -> None:
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
@@ -3350,19 +3184,16 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "missing camera_id or sdp"}, HTTPStatus.BAD_REQUEST)
                 return
             config = load_config()
-            cameras = config.get("cameras") or []
-            camera = next((c for c in cameras if c.get("id") == camera_id), None)
+            camera = next((c for c in (config.get("cameras") or []) if c.get("id") == camera_id), None)
             if not camera:
                 self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
                 return
             cleanup_webrtc_sessions()
-            result = create_webrtc_session(camera, camera_id, offer_sdp)
-            self.send_json(result)
+            self.send_json(create_webrtc_session(camera, camera_id, offer_sdp))
         except Exception as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
-    def handle_webrtc_keepalive(self) -> None:
-        """Keepalive ping to extend WebRTC session TTL."""
+    def _handle_webrtc_keepalive(self) -> None:
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
@@ -3372,12 +3203,11 @@ class EdgeHandler(BaseHTTPRequestHandler):
                     WEBRTC_SESSIONS[sid]["created"] = time.time()
                     self.send_json({"status": "ok"})
                 else:
-                    self.send_json({"error": "session_not_found"}, HTTPStatus.NOT_FOUND)
+                    self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
-    def handle_webrtc_close(self) -> None:
-        """Explicitly close a WebRTC session and free ffmpeg process."""
+    def _handle_webrtc_close(self) -> None:
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
@@ -3390,7 +3220,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                     proc.terminate()
                 self.send_json({"status": "closed"})
             else:
-                self.send_json({"error": "session_not_found"}, HTTPStatus.NOT_FOUND)
+                self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -3444,16 +3274,18 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path.startswith("/hls/"):
             self.serve_hls(path)
             return
+        if path.startswith("/mse/"):
+            camera_id = path.split("/", 2)[-1]
+            self.send_json({"engine": "mse_next", "camera_id": camera_id, "status": "planned"}, HTTPStatus.NOT_IMPLEMENTED)
+            return
         if path.startswith("/webrtc/"):
             camera_id = path.split("/", 2)[-1]
-            # Return WebRTC player page info (SDP exchange happens via POST /api/webrtc/offer)
             self.send_json({
+                "engine": "webrtc_next",
                 "camera_id": camera_id,
-                "engine": "webrtc",
                 "go2rtc_available": go2rtc_available(),
                 "stun_servers": STUN_SERVERS,
-                "offer_url": f"/api/webrtc/offer",
-                "keepalive_url": f"/api/webrtc/keepalive",
+                "offer_url": "/api/webrtc/offer",
                 "status": "ready",
             })
             return
@@ -3472,13 +3304,13 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.save_config()
             return
         if parsed.path == "/api/webrtc/offer":
-            self.handle_webrtc_offer()
+            self._handle_webrtc_offer()
             return
         if parsed.path == "/api/webrtc/keepalive":
-            self.handle_webrtc_keepalive()
+            self._handle_webrtc_keepalive()
             return
         if parsed.path == "/api/webrtc/close":
-            self.handle_webrtc_close()
+            self._handle_webrtc_close()
             return
         if parsed.path == "/api/refresh":
             payload = refresh_status()
