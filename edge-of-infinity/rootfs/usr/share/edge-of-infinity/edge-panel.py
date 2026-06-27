@@ -72,6 +72,18 @@ def write_json(path: Path, payload) -> None:
     tmp.replace(path)
 
 
+def read_text_tail(path: Path, limit: int = 4000) -> str:
+    try:
+        if not path.exists():
+            return ""
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(max(0, size - limit))
+            return handle.read(limit).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def redact_for_log(value):
     if isinstance(value, dict):
         redacted = {}
@@ -3000,7 +3012,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.6.0"
+    server_version = "EdgePanel/0.6.1"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -3328,21 +3340,44 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
 
         directory = hls_base_dir(camera, camera_index)
+        key = hls_key(camera, camera_index)
+        log_path = directory / "ffmpeg-hls.log"
+        hls_result = {}
         if safe_name == "index.m3u8":
             try:
-                start_hls(camera, camera_index)
+                hls_result = start_hls(camera, camera_index)
             except (OSError, ValueError) as error:
                 self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
                 return
             playlist = directory / safe_name
-            for _ in range(20):
+            for _ in range(80):
                 if playlist.exists() and playlist.stat().st_size > 0:
+                    break
+                process = HLS_PROCESSES.get(key)
+                if process and process.poll() is not None:
                     break
                 time.sleep(0.1)
 
         target = directory / safe_name
         if not target.exists():
-            self.send_json({"error": "hls_not_ready"}, HTTPStatus.NOT_FOUND)
+            process = HLS_PROCESSES.get(key)
+            process_status = {
+                "running": bool(process and process.poll() is None),
+                "returncode": process.poll() if process else None,
+            }
+            payload = {
+                "error": "hls_not_ready",
+                "camera_id": camera.get("id") or camera_id,
+                "stream": camera.get("live_stream") or "sub",
+                "directory": str(directory),
+                "requested": safe_name,
+                "started": hls_result,
+                "process": process_status,
+                "files": sorted(path.name for path in directory.glob("*")) if directory.exists() else [],
+                "ffmpeg_tail": redact_rtsp(read_text_tail(log_path)),
+            }
+            write_debug_event("hls_not_ready", payload)
+            self.send_json(payload, HTTPStatus.NOT_FOUND)
             return
         content_type = "application/vnd.apple.mpegurl" if safe_name.endswith(".m3u8") else "video/mp4"
         self.send_bytes(target.read_bytes(), content_type)

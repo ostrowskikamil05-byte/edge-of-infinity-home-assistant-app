@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1
+
+- Improve LL-HLS startup diagnostics so `hls_not_ready` returns ffmpeg status, generated files, working directory, and stderr tail.
+- Wait longer for the first HLS playlist and stop waiting early if ffmpeg exits.
+
 ## 0.6.0
 
 - Split camera stream roles into `tile_stream`, `live_stream`, `record_stream`, and `snapshot_stream` so Home tiles no longer overwrite live or recording choices.
