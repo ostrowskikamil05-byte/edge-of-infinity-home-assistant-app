@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.5
+
+- Remove unsupported live ffmpeg `-rw_timeout` option that stopped MJPEG before opening RTSP.
+- Add `/homeassistant/edge/edge-debug.log` as a central JSONL diagnostic log for boot, UI events, saves, refreshes, live sessions, ffmpeg, codec probes, NVR actions, and errors.
+- Add diagnostic hints for common live failures such as unsupported ffmpeg options, auth failures, RTSP timeouts, decoder errors, missing frames, and browser disconnects.
+
 ## 0.5.4
 
 - Preserve camera stream selectors by camera ID and index when saving from the panel.

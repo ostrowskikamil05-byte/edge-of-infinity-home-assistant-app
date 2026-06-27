@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import xml.etree.ElementTree as ET
 from http import HTTPStatus
@@ -21,10 +22,12 @@ DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
 CONFIG_PATH = Path(os.environ.get("EDGE_HOME_CONFIG", "/homeassistant/edge/edge.json"))
 CONFIG_BACKUP_PATH = HOME_DIR / "edge.backup.json"
 PRESETS_PATH = HOME_DIR / "camera-presets.json"
+DEBUG_LOG_PATH = HOME_DIR / "edge-debug.log"
 PORT = int(os.environ.get("API_PORT", "8088"))
 SNAPSHOT_DIR = HOME_DIR / "snapshots"
 DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
+DEBUG_LOCK = threading.Lock()
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
 STREAM_FALLBACK_CHANNELS = {"main": HIKVISION_MAIN_CHANNEL, "sub": HIKVISION_SUB_CHANNEL}
@@ -61,6 +64,95 @@ def write_json(path: Path, payload) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def redact_for_log(value):
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if any(secret in lowered for secret in ("password", "token", "authorization", "secret")):
+                redacted[key] = "***"
+            else:
+                redacted[key] = redact_for_log(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_for_log(item) for item in value]
+    if isinstance(value, str):
+        return redact_rtsp(value)
+    return value
+
+
+def write_debug_event(event: str, payload: dict | None = None) -> None:
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "event": event,
+        **redact_for_log(payload or {}),
+    }
+    try:
+        DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with DEBUG_LOCK:
+            with DEBUG_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except OSError as error:
+        print(f"[edge-panel] debug log write failed: {error}")
+
+
+def classify_ffmpeg_error(stderr_text: str, frame_count: int, end_reason: str) -> tuple[str, list[str]]:
+    text_lower = stderr_text.lower()
+    hints = []
+    if "option" in text_lower and "not found" in text_lower:
+        hints.append("ffmpeg_option_unsupported")
+    if "401" in text_lower or "unauthorized" in text_lower:
+        hints.append("camera_auth_failed")
+    if "connection refused" in text_lower:
+        hints.append("rtsp_port_refused")
+    if "timed out" in text_lower or "timeout" in text_lower:
+        hints.append("rtsp_timeout")
+    if "could not find codec parameters" in text_lower:
+        hints.append("probe_needs_more_data")
+    if "invalid data" in text_lower:
+        hints.append("invalid_rtsp_or_codec_data")
+    if "hevc" in text_lower or "h265" in text_lower:
+        hints.append("hevc_decode_path")
+    if "error while decoding" in text_lower or "error constructing the frame" in text_lower:
+        hints.append("decoder_error")
+    if frame_count == 0:
+        hints.append("no_mjpeg_frames_sent")
+    if end_reason.startswith("client_") and frame_count > 0:
+        hints.append("browser_closed_stream_after_frames")
+    if not hints and frame_count > 0:
+        hints.append("mjpeg_frames_sent")
+    category = hints[0] if hints else "unknown"
+    return category, hints
+
+
+def camera_debug_profile(camera: dict, stream_name: str, probe: dict | None = None) -> dict:
+    probe = probe or {}
+    video = probe.get("video") or {}
+    audio = probe.get("audio") or {}
+    stream = camera_stream(camera, stream_name)
+    return {
+        "camera_id": camera.get("id"),
+        "name": camera.get("name"),
+        "vendor": camera.get("vendor"),
+        "host": camera.get("host"),
+        "stream_name": stream_name,
+        "rtsp": redact_rtsp(stream),
+        "channel": hikvision_channel_from_rtsp(stream, ""),
+        "configured_live": camera.get("live_stream"),
+        "configured_record": camera.get("record_stream"),
+        "configured_snapshot": camera.get("snapshot_stream"),
+        "video_codec": video.get("codec_name") or camera.get("video_codec") or camera.get("codec"),
+        "video_width": video.get("width") or camera.get("width"),
+        "video_height": video.get("height") or camera.get("height"),
+        "video_fps": video.get("r_frame_rate") or camera.get("fps"),
+        "video_bitrate": video.get("bit_rate") or camera.get("bitrate"),
+        "audio_codec": audio.get("codec_name") or camera.get("audio_codec"),
+        "audio_sample_rate": audio.get("sample_rate") or camera.get("audio_sample_rate"),
+        "audio_channels": audio.get("channels") or camera.get("audio_channels"),
+        "effective_streams": effective_streams(camera),
+    }
 
 
 def backup_config() -> None:
@@ -1612,9 +1704,32 @@ INDEX_HTML = r"""<!doctype html>
         return `${panelBase}${String(path).replace(/^\/+/, '')}`;
       }
 
+      function debugEvent(event, payload = {}) {
+        const body = JSON.stringify({
+          event,
+          page: document.querySelector('[data-page]:not([hidden])')?.dataset?.page || 'unknown',
+          location: window.location.pathname,
+          payload
+        });
+        try {
+          if (navigator.sendBeacon) {
+            const blob = new Blob([body], { type: 'application/json' });
+            navigator.sendBeacon(panelPath('api/debug'), blob);
+            return;
+          }
+        } catch (_) {}
+        fetch(panelPath('api/debug'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          keepalive: true
+        }).catch(() => {});
+      }
+
       function setNavCollapsed(collapsed, persist = true) {
         document.body.classList.toggle('nav-collapsed', collapsed);
         menuToggle.setAttribute('aria-expanded', String(!collapsed));
+        debugEvent('ui_nav_collapse', { collapsed });
         if (persist) {
           try {
             window.localStorage.setItem('edge-nav-collapsed', collapsed ? 'true' : 'false');
@@ -2150,6 +2265,7 @@ INDEX_HTML = r"""<!doctype html>
       async function loadConfig() {
         const response = await fetch(panelPath('api/config'), { cache: 'no-store' });
         config = await response.json();
+        debugEvent('ui_config_loaded', { summary: saveSummary(config) });
         renderConfig();
       }
 
@@ -2157,6 +2273,22 @@ INDEX_HTML = r"""<!doctype html>
         const response = await fetch(panelPath('cameras.json'), { cache: 'no-store' });
         const data = await response.json();
         const cameras = Array.isArray(data.cameras) ? data.cameras : [];
+        debugEvent('ui_cameras_loaded', {
+          count: cameras.length,
+          cameras: cameras.map((camera) => ({
+            id: camera.id,
+            key: camera.key,
+            status: camera.status,
+            live_stream: camera.live_stream,
+            live_probe_status: camera.live_probe_status,
+            video_codec: camera.video_codec || camera.codec,
+            audio_codec: camera.audio_codec,
+            width: camera.live_width || camera.width,
+            height: camera.live_height || camera.height,
+            fps: camera.live_fps || camera.fps,
+            bitrate: camera.live_bitrate || camera.bitrate
+          }))
+        });
         cameras.forEach((camera) => {
           const liveKey = camera.key || `${camera.id || 'camera'}_${camera.index ?? 0}`;
           if (camera.status === 'online' && live[liveKey] === undefined) {
@@ -2171,6 +2303,16 @@ INDEX_HTML = r"""<!doctype html>
       async function loadRecordingStatus() {
         const response = await fetch(panelPath('api/recording/status'), { cache: 'no-store' });
         const data = await response.json();
+        debugEvent('ui_recording_status_loaded', {
+          count: Array.isArray(data.cameras) ? data.cameras.length : 0,
+          cameras: (Array.isArray(data.cameras) ? data.cameras : []).map((item) => ({
+            index: item.index,
+            id: item.id,
+            recording: item.recording,
+            segments: item.segments,
+            record_stream: item.record_stream
+          }))
+        });
         recordingStatus = {};
         (Array.isArray(data.cameras) ? data.cameras : []).forEach((item) => {
           recordingStatus[item.index] = item;
@@ -2269,6 +2411,7 @@ INDEX_HTML = r"""<!doctype html>
         document.querySelectorAll('[data-page-target]').forEach((button) => {
           button.classList.toggle('active', button.dataset.pageTarget === pageName);
         });
+        debugEvent('ui_page_change', { page: pageName });
       }
 
       function updateLiveTimer() {
@@ -2303,20 +2446,27 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       document.getElementById('refresh').addEventListener('click', async () => {
+        debugEvent('ui_refresh_status_click');
         await fetch(panelPath('api/refresh'), { method: 'POST' });
         await loadCameras();
       });
 
       document.getElementById('refresh-nvr').addEventListener('click', async () => {
+        debugEvent('ui_refresh_nvr_click');
         await loadRecordingStatus();
       });
 
-      document.getElementById('add-camera').addEventListener('click', addCamera);
+      document.getElementById('add-camera').addEventListener('click', () => {
+        debugEvent('ui_add_camera_click');
+        addCamera();
+      });
 
       document.getElementById('save-config').addEventListener('click', async () => {
         const payload = collectConfig();
+        debugEvent('ui_save_config_click', { summary: saveSummary(payload), cameras: payload.cameras });
         if (!hasMeaningfulCameras(payload)) {
           saveState.textContent = 'Save blocked: at least one camera needs host/IP or RTSP, so existing configuration was not overwritten.';
+          debugEvent('ui_save_config_blocked', { reason: 'empty_camera_configuration' });
           return;
         }
         saveState.textContent = `Saving cameras... ${saveSummary(payload)}`;
@@ -2328,6 +2478,7 @@ INDEX_HTML = r"""<!doctype html>
         const data = await response.json();
         if (!response.ok) {
           saveState.textContent = data.error || 'Could not save configuration.';
+          debugEvent('ui_save_config_error', { status: response.status, data });
           return;
         }
         config = data;
@@ -2340,6 +2491,7 @@ INDEX_HTML = r"""<!doctype html>
         saveState.textContent = sentSummary === savedSummary
           ? `Saved. ${savedSummary}`
           : `Saved, but server normalized values. Sent: ${sentSummary} | Server: ${savedSummary}`;
+        debugEvent('ui_save_config_done', { sentSummary, savedSummary, normalized: sentSummary !== savedSummary });
       });
 
       document.getElementById('save-edge-settings').addEventListener('click', async () => {
@@ -2404,6 +2556,7 @@ INDEX_HTML = r"""<!doctype html>
       grid.addEventListener('click', async (event) => {
         const addTile = event.target.closest('[data-add-camera-tile]');
         if (addTile) {
+          debugEvent('ui_add_camera_tile_click');
           showPage('camera-settings');
           addCamera();
           return;
@@ -2411,7 +2564,13 @@ INDEX_HTML = r"""<!doctype html>
         const liveTarget = event.target.closest('[data-live-key]');
         const liveKey = liveTarget?.dataset?.liveKey;
         if (!liveKey) return;
-        live[liveKey] = !live[liveKey];
+        const nextLive = !live[liveKey];
+        debugEvent('ui_live_toggle', {
+          liveKey,
+          cameraIndex: liveTarget?.dataset?.liveIndex,
+          enabled: nextLive
+        });
+        live[liveKey] = nextLive;
         updateLiveTimer();
         await loadCameras();
       });
@@ -2452,6 +2611,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       boot().catch((error) => {
+        debugEvent('ui_boot_error', { message: error.message, stack: error.stack });
         grid.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
       });
     </script>
@@ -2461,7 +2621,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.4"
+    server_version = "EdgePanel/0.5.5"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -2517,11 +2677,17 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        write_debug_event("api_post", {"path": parsed.path, "client": self.client_address[0]})
         if parsed.path == "/api/config":
             self.save_config()
             return
         if parsed.path == "/api/refresh":
-            self.send_json(refresh_status())
+            payload = refresh_status()
+            write_debug_event("api_refresh_done", {"camera_summary": config_summary(payload)})
+            self.send_json(payload)
+            return
+        if parsed.path == "/api/debug":
+            self.ui_debug()
             return
         if parsed.path == "/api/camera-autoconfig":
             self.camera_autoconfig()
@@ -2542,6 +2708,20 @@ class EdgeHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length)
         return json.loads(body.decode("utf-8")) if body else {}
 
+    def ui_debug(self) -> None:
+        try:
+            payload = self.read_body_json()
+            event = payload.get("event") if isinstance(payload, dict) else "ui_debug"
+            write_debug_event(str(event or "ui_debug"), {
+                "client": self.client_address[0],
+                "user_agent": self.headers.get("User-Agent", ""),
+                "ui": payload,
+            })
+            self.send_json({"ok": True})
+        except (json.JSONDecodeError, OSError) as error:
+            write_debug_event("ui_debug_error", {"error": str(error)})
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+
     def save_config(self) -> None:
         try:
             raw_payload = self.read_body_json()
@@ -2560,19 +2740,34 @@ class EdgeHandler(BaseHTTPRequestHandler):
             backup_config()
             write_json(CONFIG_PATH, payload)
             save_debug_payload(raw_payload, normalized_payload, payload)
+            write_debug_event("config_save", {
+                "raw_summary": config_summary(raw_payload),
+                "normalized_summary": config_summary(normalized_payload),
+                "final_summary": config_summary(payload),
+                "changed_by": self.client_address[0],
+            })
             stop_orphan_recordings(payload)
             remember_camera_presets(payload.get("cameras", []))
             refresh_status()
             self.send_json(payload)
         except (json.JSONDecodeError, OSError, ValueError) as error:
+            write_debug_event("config_save_error", {"error": str(error)})
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
 
     def camera_autoconfig(self) -> None:
         try:
             payload = self.read_body_json()
             camera = camera_from_payload(payload)
-            self.send_json(fetch_camera_autoconfig(camera))
+            write_debug_event("camera_autoconfig_start", {"camera": camera_debug_profile(camera, camera.get("live_stream") or "sub")})
+            result = fetch_camera_autoconfig(camera)
+            write_debug_event("camera_autoconfig_done", {
+                "camera_id": camera.get("id"),
+                "sections": result.get("sections") if isinstance(result, dict) else None,
+                "effective_streams": result.get("effective_streams") if isinstance(result, dict) else None,
+            })
+            self.send_json(result)
         except (json.JSONDecodeError, ET.ParseError, RuntimeError, ValueError) as error:
+            write_debug_event("camera_autoconfig_error", {"error": str(error)})
             self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
 
     def camera_stream_config(self) -> None:
@@ -2581,11 +2776,19 @@ class EdgeHandler(BaseHTTPRequestHandler):
             camera = camera_from_payload(payload)
             stream_name = payload.get("stream") if payload.get("stream") in ("main", "sub") else "sub"
             settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
+            write_debug_event("camera_stream_config_start", {
+                "camera": camera_debug_profile(camera, stream_name),
+                "stream": stream_name,
+                "settings": settings,
+            })
             stream = update_stream_config(camera, stream_name, settings)
+            write_debug_event("camera_stream_config_done", {"camera_id": camera.get("id"), "stream": stream_name, "result": stream})
             self.send_json({"stream": stream})
         except ValueError as error:
+            write_debug_event("camera_stream_config_error", {"error": str(error)})
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         except (json.JSONDecodeError, ET.ParseError, RuntimeError) as error:
+            write_debug_event("camera_stream_config_error", {"error": str(error)})
             self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
 
     def recording_action(self, action: str) -> None:
@@ -2716,13 +2919,18 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if camera is None:
             camera = next((item for item in cameras if item.get("id") == camera_id), None)
         if not camera:
+            write_debug_event("live_error", {"reason": "camera_not_found", "path": path, "query": query})
             self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
             return
 
         stream = camera_stream(camera, stream_name)
         if not stream:
+            write_debug_event("live_error", {"reason": "rtsp_not_configured", "camera_id": camera.get("id"), "stream": stream_name})
             self.send_json({"error": "rtsp_not_configured"}, HTTPStatus.BAD_REQUEST)
             return
+
+        probe = probe_rtsp_stream(stream, timeout=5)
+        camera_profile = camera_debug_profile(camera, stream_name, probe)
 
         command = [
             "ffmpeg",
@@ -2737,8 +2945,6 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "-rtsp_transport",
             "tcp",
             "-timeout",
-            "5000000",
-            "-rw_timeout",
             "5000000",
             "-probesize",
             "32768",
@@ -2762,7 +2968,16 @@ class EdgeHandler(BaseHTTPRequestHandler):
         log_path = HOME_DIR / f"live-{safe_id(camera.get('id') or camera_id)}.log"
         log_file = log_path.open("ab")
         request_id = f"{int(time.time())}-{safe_id(stream_name)}"
+        begin_marker = f"=== live request {request_id} begin"
         started_at = time.monotonic()
+        write_debug_event("live_start", {
+            "request_id": request_id,
+            "client": self.client_address[0],
+            "path": self.path,
+            "user_agent": self.headers.get("User-Agent", ""),
+            "camera": camera_profile,
+            "command": redact_command(command),
+        })
         log_file.write(
             (
                 f"\n=== live request {request_id} begin {time.strftime('%Y-%m-%dT%H:%M:%S%z')} ===\n"
@@ -2781,6 +2996,11 @@ class EdgeHandler(BaseHTTPRequestHandler):
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log_file)
         except OSError as error:
             log_file.close()
+            write_debug_event("live_process_start_error", {
+                "request_id": request_id,
+                "camera": camera_profile,
+                "error": str(error),
+            })
             self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         finally:
@@ -2855,6 +3075,28 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 process.kill()
                 exit_after_cleanup = process.wait(timeout=2)
             duration_ms = int((time.monotonic() - started_at) * 1000)
+            stderr_text = ""
+            try:
+                log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                stderr_text = log_text.rsplit(begin_marker, 1)[-1][-12000:]
+            except OSError:
+                stderr_text = ""
+            category, hints = classify_ffmpeg_error(stderr_text, frame_count, end_reason)
+            write_debug_event("live_end", {
+                "request_id": request_id,
+                "camera": camera_profile,
+                "reason": end_reason,
+                "category": category,
+                "hints": hints,
+                "frames": frame_count,
+                "bytes": bytes_sent,
+                "first_frame_ms": first_frame_ms,
+                "duration_ms": duration_ms,
+                "exit_before_cleanup": exit_before_cleanup,
+                "exit_after_cleanup": exit_after_cleanup,
+                "cleanup": cleanup,
+                "ffmpeg_tail": stderr_text[-3000:],
+            })
             try:
                 with log_path.open("ab") as live_log:
                     live_log.write(
@@ -2879,11 +3121,24 @@ def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     DATA_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    write_debug_event("boot_start", {
+        "server_version": EdgeHandler.server_version,
+        "home_dir": str(HOME_DIR),
+        "data_dir": str(DATA_DIR),
+        "config_path": str(CONFIG_PATH),
+        "port": PORT,
+    })
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
-    refresh_status()
+    try:
+        status_payload = refresh_status()
+        write_debug_event("boot_refresh_status_done", {"camera_summary": config_summary(status_payload)})
+    except Exception as error:
+        write_debug_event("boot_refresh_status_error", {"error": str(error), "type": type(error).__name__})
+        raise
     server = ThreadingHTTPServer(("0.0.0.0", PORT), EdgeHandler)
     print(f"[edge-panel] listening on 0.0.0.0:{PORT}")
+    write_debug_event("boot_server_listening", {"listen": f"0.0.0.0:{PORT}"})
     server.serve_forever()
 
 
