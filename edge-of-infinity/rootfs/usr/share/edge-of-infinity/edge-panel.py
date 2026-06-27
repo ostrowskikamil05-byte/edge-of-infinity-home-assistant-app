@@ -38,6 +38,10 @@ def redact_rtsp(value: str) -> str:
     return re.sub(r"(rtsp://[^:/@]+:)[^@]+@", r"\1***@", value or "")
 
 
+def redact_command(command: list[str]) -> list[str]:
+    return [redact_rtsp(item) if isinstance(item, str) else item for item in command]
+
+
 def safe_int(value, fallback: int) -> int:
     try:
         return int(value)
@@ -2411,7 +2415,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.2"
+    server_version = "EdgePanel/0.5.3"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -2676,7 +2680,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "ffmpeg",
             "-hide_banner",
             "-loglevel",
-            "error",
+            "info",
             "-nostdin",
             "-fflags",
             "nobuffer",
@@ -2685,6 +2689,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "-rtsp_transport",
             "tcp",
             "-timeout",
+            "5000000",
+            "-rw_timeout",
             "5000000",
             "-probesize",
             "32768",
@@ -2707,10 +2713,19 @@ class EdgeHandler(BaseHTTPRequestHandler):
         ]
         log_path = HOME_DIR / f"live-{safe_id(camera.get('id') or camera_id)}.log"
         log_file = log_path.open("ab")
+        request_id = f"{int(time.time())}-{safe_id(stream_name)}"
+        started_at = time.monotonic()
         log_file.write(
             (
-                f"\n[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] "
-                f"camera={camera.get('id') or camera_id} stream={stream_name} rtsp={redact_rtsp(stream)}\n"
+                f"\n=== live request {request_id} begin {time.strftime('%Y-%m-%dT%H:%M:%S%z')} ===\n"
+                f"client={self.client_address[0]} path={self.path}\n"
+                f"user_agent={self.headers.get('User-Agent', '')}\n"
+                f"camera={camera.get('id') or camera_id} index={camera_index or 'lookup'} "
+                f"stream={stream_name} configured_live={camera.get('live_stream') or 'sub'} "
+                f"status={camera.get('status', 'unknown')}\n"
+                f"rtsp={redact_rtsp(stream)}\n"
+                f"command={json.dumps(redact_command(command))}\n"
+                "--- ffmpeg stderr begin ---\n"
             ).encode("utf-8")
         )
         log_file.flush()
@@ -2729,6 +2744,10 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         frame_count = 0
+        bytes_sent = 0
+        first_frame_ms = None
+        end_reason = "ffmpeg_stdout_closed"
+        cleanup = "none"
         try:
             assert process.stdout is not None
             buffer = b""
@@ -2753,18 +2772,56 @@ class EdgeHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b"\r\n")
                     self.wfile.flush()
                     frame_count += 1
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+                    bytes_sent += len(frame)
+                    if first_frame_ms is None:
+                        first_frame_ms = int((time.monotonic() - started_at) * 1000)
+                        try:
+                            with log_path.open("ab") as live_log:
+                                live_log.write(f"\n--- first_frame_ms={first_frame_ms} ---\n".encode("utf-8"))
+                        except OSError:
+                            pass
+        except BrokenPipeError:
+            end_reason = "client_broken_pipe"
+        except ConnectionResetError:
+            end_reason = "client_connection_reset"
+        except OSError as error:
+            end_reason = f"stream_write_oserror:{error}"
         finally:
-            process.terminate()
+            if frame_count == 0 and end_reason == "ffmpeg_stdout_closed":
+                end_reason = "ffmpeg_ended_before_first_frame"
             try:
-                process.wait(timeout=2)
+                if process.stdout is not None:
+                    process.stdout.close()
+            except OSError:
+                pass
+            exit_before_cleanup = process.poll()
+            if exit_before_cleanup is None:
+                cleanup = "terminate"
+                process.terminate()
+            exit_after_cleanup = process.poll()
+            try:
+                if exit_after_cleanup is None:
+                    exit_after_cleanup = process.wait(timeout=5)
             except subprocess.TimeoutExpired:
+                cleanup = "kill_after_terminate_timeout"
                 process.kill()
-                process.wait(timeout=2)
+                exit_after_cleanup = process.wait(timeout=2)
+            duration_ms = int((time.monotonic() - started_at) * 1000)
             try:
                 with log_path.open("ab") as live_log:
-                    live_log.write(f"frames={frame_count} exit={process.returncode}\n".encode("utf-8"))
+                    live_log.write(
+                        (
+                            "\n--- ffmpeg stderr end ---\n"
+                            f"summary request={request_id} reason={end_reason} "
+                            f"frames={frame_count} bytes={bytes_sent} "
+                            f"first_frame_ms={first_frame_ms if first_frame_ms is not None else 'none'} "
+                            f"duration_ms={duration_ms} "
+                            f"exit_before_cleanup={exit_before_cleanup} "
+                            f"exit_after_cleanup={exit_after_cleanup} "
+                            f"cleanup={cleanup}\n"
+                            f"=== live request {request_id} end {time.strftime('%Y-%m-%dT%H:%M:%S%z')} ===\n"
+                        ).encode("utf-8")
+                    )
             except OSError:
                 pass
 

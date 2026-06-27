@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.3
+
+- Expand MJPEG live logs with the redacted ffmpeg command, request context, first-frame timing, bytes sent, cleanup reason, and ffmpeg stderr.
+- Distinguish browser disconnects from ffmpeg failures so `exit=-9` is no longer treated as the whole diagnosis.
+- Add RTSP read timeout logging support for live ffmpeg sessions.
+
 ## 0.5.2
 
 - Rebuild Home as a clean live camera wall with compact video tiles and no RTSP/debug clutter.
