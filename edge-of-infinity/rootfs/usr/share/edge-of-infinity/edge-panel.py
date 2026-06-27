@@ -110,6 +110,29 @@ def stream_profile(camera: dict, stream_name: str) -> dict:
     }
 
 
+def config_summary(payload: dict) -> list[dict]:
+    cameras = payload.get("cameras") if isinstance(payload, dict) else []
+    if not isinstance(cameras, list):
+        return []
+    summary = []
+    for index, camera in enumerate(cameras):
+        if not isinstance(camera, dict):
+            continue
+        summary.append(
+            {
+                "index": index,
+                "id": camera.get("id"),
+                "name": camera.get("name"),
+                "live_stream": camera.get("live_stream"),
+                "record_stream": camera.get("record_stream"),
+                "snapshot_stream": camera.get("snapshot_stream"),
+                "rtsp_main_channel": hikvision_channel_from_rtsp(camera.get("rtsp_main") or "", ""),
+                "rtsp_sub_channel": hikvision_channel_from_rtsp(camera.get("rtsp_sub") or "", ""),
+            }
+        )
+    return summary
+
+
 def effective_streams(camera: dict) -> dict:
     snapshot_stream = normalize_stream_name(camera.get("snapshot_stream"), "sub")
     live_stream = normalize_stream_name(camera.get("live_stream"), "sub")
@@ -220,14 +243,37 @@ def preserve_submitted_stream_choices(payload: dict, raw_payload: dict) -> dict:
     cameras = payload.get("cameras") if isinstance(payload, dict) else []
     if not isinstance(raw_cameras, list) or not isinstance(cameras, list):
         return payload
+    cameras_by_id = {
+        str(camera.get("id")): camera
+        for camera in cameras
+        if isinstance(camera, dict) and camera.get("id")
+    }
     for index, raw_camera in enumerate(raw_cameras):
-        if index >= len(cameras) or not isinstance(raw_camera, dict):
+        if not isinstance(raw_camera, dict):
+            continue
+        target = cameras_by_id.get(str(raw_camera.get("id"))) if raw_camera.get("id") else None
+        if target is None and index < len(cameras):
+            target = cameras[index]
+        if not isinstance(target, dict):
             continue
         for field in ("snapshot_stream", "live_stream", "record_stream"):
             value = raw_camera.get(field)
             if value in ("main", "sub"):
-                cameras[index][field] = value
+                target[field] = value
     return payload
+
+
+def save_debug_payload(raw_payload: dict, normalized_payload: dict, final_payload: dict) -> None:
+    debug_payload = {
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "raw_summary": config_summary(raw_payload),
+        "normalized_summary": config_summary(normalized_payload),
+        "final_summary": config_summary(final_payload),
+        "raw": raw_payload,
+        "normalized": normalized_payload,
+        "final": final_payload,
+    }
+    write_json(HOME_DIR / "last-save-debug.json", debug_payload)
 
 
 def camera_from_payload(payload: dict) -> dict:
@@ -1819,7 +1865,7 @@ INDEX_HTML = r"""<!doctype html>
       function cameraForm(camera, index) {
         const prefix = `camera-${index}`;
         return `
-          <div class="camera-form" data-index="${index}">
+          <div class="camera-form" data-camera-form data-index="${index}">
             <div class="row">
               <h2>${escapeHtml(text(camera.name, `Camera ${index + 1}`))}</h2>
               <button class="danger" type="button" data-remove-camera="${index}" ${config.cameras.length <= 1 ? 'disabled' : ''}>Remove</button>
@@ -1945,7 +1991,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function collectConfig() {
-        const cameras = Array.from(form.querySelectorAll('.camera-form')).map((section, index) => {
+        const cameras = Array.from(form.querySelectorAll('[data-camera-form]')).map((section, index) => {
           const prefix = `camera-${index}`;
           const get = (name) => {
             const element = section.querySelector(`[name="${prefix}-${name}"]`);
@@ -2415,7 +2461,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.3"
+    server_version = "EdgePanel/0.5.4"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -2507,11 +2553,13 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 if existing.get("cameras"):
                     raw_payload = {**existing, **raw_payload, "cameras": existing["cameras"]}
             validate_config_for_save(raw_payload)
-            payload = normalize_config(raw_payload)
+            normalized_payload = normalize_config(raw_payload)
+            payload = json.loads(json.dumps(normalized_payload))
             payload = preserve_submitted_stream_choices(payload, raw_payload)
             validate_config_for_save(payload)
             backup_config()
             write_json(CONFIG_PATH, payload)
+            save_debug_payload(raw_payload, normalized_payload, payload)
             stop_orphan_recordings(payload)
             remember_camera_presets(payload.get("cameras", []))
             refresh_status()

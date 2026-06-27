@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4
+
+- Preserve camera stream selectors by camera ID and index when saving from the panel.
+- Restrict panel camera collection to explicit camera form sections only.
+- Write `/homeassistant/edge/last-save-debug.json` with raw, normalized, and final save summaries for diagnosing panel save mismatches.
+
 ## 0.5.3
 
 - Expand MJPEG live logs with the redacted ffmpeg command, request context, first-frame timing, bytes sent, cleanup reason, and ffmpeg stderr.
