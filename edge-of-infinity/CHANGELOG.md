@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.13
+
+- Capture Hikvision snapshots through ISAPI JPEG endpoints before falling back to ffmpeg.
+- Speed up RTSP probing with low-latency ffprobe analyze settings.
+- Add lower-latency MJPEG ffmpeg flags for corrupt packet discard, keyframe output, no PTS sync buffering, and larger input queue.
+- Auto-set Hikvision keyframe interval to roughly `fps * 4` when saving FPS through the stream editor.
+
 ## 0.5.12
 
 - Normalize Home Assistant Ingress paths so doubled slashes like `//live/hikvision_1.mjpg` route to `/live/hikvision_1.mjpg`.

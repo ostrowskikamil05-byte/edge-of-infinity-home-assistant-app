@@ -550,6 +550,10 @@ def probe_rtsp_stream(stream: str, timeout: int = 8) -> dict:
             "ffprobe",
             "-rtsp_transport",
             "tcp",
+            "-probesize",
+            "32768",
+            "-analyzeduration",
+            "0",
             "-v",
             "error",
             "-show_entries",
@@ -569,19 +573,103 @@ def probe_rtsp_stream(stream: str, timeout: int = 8) -> dict:
     }
 
 
-def capture_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
+def snapshot_paths(target_id: str) -> tuple[Path, Path]:
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    return SNAPSHOT_DIR / f"{target_id}.jpg", DATA_SNAPSHOT_DIR / f"{target_id}.jpg"
+
+
+def capture_isapi_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
+    if (camera.get("vendor") or "").lower() != "hikvision":
+        return "", ""
+    base = isapi_base(camera)
+    username = camera.get("username") or ""
+    password = camera.get("password") or ""
+    if not base or not username:
+        return "", ""
+
+    snapshot_stream = normalize_stream_name(camera.get("snapshot_stream"), "sub")
+    channel = stream_channel(camera, snapshot_stream)
+    home_path, data_path = snapshot_paths(target_id)
+    tmp_path = data_path.with_suffix(".jpg.tmp")
+    command = [
+        "curl",
+        "--silent",
+        "--show-error",
+        "--anyauth",
+        "--user",
+        f"{username}:{password}",
+        "--connect-timeout",
+        "2",
+        "--max-time",
+        "4",
+        "--output",
+        str(tmp_path),
+        "--write-out",
+        "%{http_code}",
+        f"{base}/ISAPI/Streaming/channels/{channel}/picture?snapShotImageType=JPEG",
+    ]
+    started_at = time.monotonic()
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=6, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        write_debug_event("snapshot_isapi_error", {
+            "camera_id": camera.get("id"),
+            "target": target_id,
+            "channel": channel,
+            "error": str(error),
+        })
+        return "", ""
+
+    status_text = result.stdout.decode("utf-8", errors="replace").strip()
+    try:
+        status = int(status_text)
+    except ValueError:
+        status = 0
+    if result.returncode != 0 or status < 200 or status >= 300 or not tmp_path.exists() or tmp_path.stat().st_size < 100:
+        write_debug_event("snapshot_isapi_error", {
+            "camera_id": camera.get("id"),
+            "target": target_id,
+            "channel": channel,
+            "status": status,
+            "returncode": result.returncode,
+            "stderr": result.stderr.decode("utf-8", errors="replace")[-400:],
+        })
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return "", ""
+
+    tmp_path.replace(data_path)
+    shutil.copyfile(data_path, home_path)
+    write_debug_event("snapshot_isapi_done", {
+        "camera_id": camera.get("id"),
+        "target": target_id,
+        "channel": channel,
+        "bytes": data_path.stat().st_size,
+        "duration_ms": int((time.monotonic() - started_at) * 1000),
+    })
+    return f"snapshots/{target_id}.jpg", f"snapshots/{target_id}.jpg"
+
+
+def capture_ffmpeg_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
     stream = camera_stream(camera, camera.get("snapshot_stream") or "sub")
     if not stream:
         return "", ""
 
-    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    DATA_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    home_path = SNAPSHOT_DIR / f"{target_id}.jpg"
-    data_path = DATA_SNAPSHOT_DIR / f"{target_id}.jpg"
+    home_path, data_path = snapshot_paths(target_id)
     command = [
         "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
         "-rtsp_transport",
         "tcp",
+        "-probesize",
+        "32768",
+        "-analyzeduration",
+        "0",
         "-y",
         "-i",
         stream,
@@ -599,6 +687,13 @@ def capture_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
         return "", ""
     shutil.copyfile(data_path, home_path)
     return f"snapshots/{target_id}.jpg", f"snapshots/{target_id}.jpg"
+
+
+def capture_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
+    snapshot_path, snapshot_url = capture_isapi_snapshot(camera, target_id)
+    if snapshot_path and snapshot_url:
+        return snapshot_path, snapshot_url
+    return capture_ffmpeg_snapshot(camera, target_id)
 
 
 def camera_stream(camera: dict, stream_name: str) -> str:
@@ -920,6 +1015,20 @@ def hik_raw_fps(value: str) -> str:
     return str(int(number))
 
 
+def keyframe_interval_from_fps(value: str) -> str:
+    try:
+        if "/" in str(value):
+            numerator, denominator = str(value).split("/", 1)
+            fps = float(numerator) / max(float(denominator), 1.0)
+        else:
+            fps = float(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return ""
+    if fps > 100:
+        fps = fps / 100
+    return str(max(1, int(round(fps * 4))))
+
+
 def parse_xml(payload: str) -> ET.Element:
     return ET.fromstring(payload.encode("utf-8"))
 
@@ -1116,6 +1225,10 @@ def update_stream_config(camera: dict, stream_name: str, settings: dict) -> dict
             changed = set_child_text(video, target, str(video_settings[source])) or changed
     if "fps" in video_settings:
         changed = set_child_text(video, "maxFrameRate", hik_raw_fps(str(video_settings["fps"]))) or changed
+        if "keyframe_interval" not in video_settings:
+            keyframe_interval = keyframe_interval_from_fps(str(video_settings["fps"]))
+            if keyframe_interval:
+                changed = set_child_text(video, "keyFrameInterval", keyframe_interval) or changed
     for source, target in audio_map.items():
         if source in audio_settings:
             changed = set_child_text(audio, target, str(audio_settings[source])) or changed
@@ -2666,7 +2779,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.5.12"
+    server_version = "EdgePanel/0.5.13"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -3003,7 +3116,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "info",
             "-nostdin",
             "-fflags",
-            "nobuffer",
+            "nobuffer+discardcorrupt",
             "-flags",
             "low_delay",
             "-rtsp_transport",
@@ -3014,11 +3127,19 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "32768",
             "-analyzeduration",
             "0",
+            "-thread_queue_size",
+            "512",
             "-i",
             stream,
             "-an",
             "-vf",
             vf,
+            "-g",
+            "1",
+            "-vsync",
+            "0",
+            "-preset",
+            "ultrafast",
             "-vcodec",
             "mjpeg",
             "-q:v",
