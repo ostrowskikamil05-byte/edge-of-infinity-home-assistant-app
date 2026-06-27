@@ -1062,7 +1062,6 @@ def cleanup_webrtc_sessions() -> None:
             if proc and proc.poll() is None:
                 proc.terminate()
 
-
 def start_hls(camera: dict, index: int) -> dict:
     cleanup_hls_processes()
     key = hls_key(camera, index)
