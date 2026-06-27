@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.7
+
+- Move local Home Assistant file reads in the custom integration to the executor to avoid blocking the HA event loop.
+- Fix local `health.json`, `cameras.json`, and camera image reads that triggered `homeassistant.util.loop` warnings.
+
 ## 0.5.6
 
 - Add tunable MJPEG preview shaping: FPS, JPEG quality, and max preview width.

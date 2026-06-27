@@ -5,9 +5,12 @@ from __future__ import annotations
 import json as json_lib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiohttp import ClientError, ClientResponseError, ClientSession
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
@@ -32,6 +35,7 @@ class EdgeClient:
     base_url: str
     session: ClientSession
     api_key: str | None = None
+    hass: "HomeAssistant | None" = None
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
@@ -41,7 +45,8 @@ class EdgeClient:
         """Return true when reading mirrored files from Home Assistant config."""
         return self.base_url.lower() in ("", "local", "file", "filesystem")
 
-    def _read_local_json(self, filename: str) -> Any:
+    @staticmethod
+    def _read_local_json_sync(filename: str) -> Any:
         """Read a JSON file mirrored by the Edge add-on."""
         paths = (
             Path("/config/edge") / filename,
@@ -54,7 +59,14 @@ class EdgeClient:
             "Local Edge files were not found. Start the Edge of Infinity add-on first."
         )
 
-    def _read_local_bytes(self, filename: str) -> bytes:
+    async def _read_local_json(self, filename: str) -> Any:
+        """Read a local JSON file without blocking Home Assistant's event loop."""
+        if self.hass is None:
+            return self._read_local_json_sync(filename)
+        return await self.hass.async_add_executor_job(self._read_local_json_sync, filename)
+
+    @staticmethod
+    def _read_local_bytes_sync(filename: str) -> bytes:
         """Read a binary file mirrored by the Edge add-on."""
         relative_path = Path(filename)
         if relative_path.is_absolute() or ".." in relative_path.parts:
@@ -68,6 +80,12 @@ class EdgeClient:
             if path.exists():
                 return path.read_bytes()
         raise EdgeConnectionError("Local Edge snapshot was not found.")
+
+    async def _read_local_bytes(self, filename: str) -> bytes:
+        """Read a local binary file without blocking Home Assistant's event loop."""
+        if self.hass is None:
+            return self._read_local_bytes_sync(filename)
+        return await self.hass.async_add_executor_job(self._read_local_bytes_sync, filename)
 
     async def _request(
         self,
@@ -101,13 +119,13 @@ class EdgeClient:
     async def health(self) -> dict[str, Any]:
         """Return Edge health."""
         if self.is_local:
-            return self._read_local_json("health.json")
+            return await self._read_local_json("health.json")
         return await self._request("GET", "/health")
 
     async def cameras(self) -> list[dict[str, Any]]:
         """Return cameras from core API or the current add-on shell."""
         if self.is_local:
-            payload = self._read_local_json("cameras.json")
+            payload = await self._read_local_json("cameras.json")
             cameras = payload.get("cameras") if isinstance(payload, dict) else payload
             return _normalize_cameras(cameras if isinstance(cameras, list) else [])
 
@@ -132,7 +150,7 @@ class EdgeClient:
         if self.is_local:
             if not snapshot_path:
                 return None
-            return self._read_local_bytes(snapshot_path)
+            return await self._read_local_bytes(snapshot_path)
 
         if not snapshot_url:
             return None

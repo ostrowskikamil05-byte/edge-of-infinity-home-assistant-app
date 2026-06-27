@@ -19,6 +19,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         base_url=entry.data[CONF_URL],
         api_key=entry.data.get(CONF_API_KEY),
         session=session,
+        hass=hass,
     )
     coordinator = EdgeCoordinator(hass, client, entry)
     await coordinator.async_config_entry_first_refresh()

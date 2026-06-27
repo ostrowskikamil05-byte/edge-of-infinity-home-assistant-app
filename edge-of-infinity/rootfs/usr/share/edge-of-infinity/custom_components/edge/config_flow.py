@@ -37,6 +37,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
             base_url=url,
             api_key=data.get(CONF_API_KEY),
             session=session,
+            hass=hass,
         )
         try:
             health = await client.health()
