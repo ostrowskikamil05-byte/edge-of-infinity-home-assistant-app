@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+- Add MediaMTX as the live core and RTSP rebroadcast layer for every configured camera stream.
+- Add Janus WebRTC Gateway configuration generated from MediaMTX RTSP proxy paths so browsers use Janus instead of direct camera pulls.
+- Expose MediaMTX RTSP, WHEP/WebRTC, low-latency HLS, SRT, API, and Janus HTTP/WebSocket ports through the Home Assistant add-on.
+- Switch the default live engine to `janus_webrtc`; MJPEG remains only as a hidden diagnostic endpoint.
+- Generate `/tmp/edge-runtime/mediamtx.yml` and `/tmp/edge-runtime/janus/janus.plugin.streaming.jcfg` on every add-on start from `/homeassistant/edge/edge.json`.
+- Add `/api/core/status`, `/api/core/mediamtx.yml`, and `/api/core/janus-streaming.jcfg` diagnostics with RTSP credentials redacted.
+- Preserve H.265/HEVC for MediaMTX proxying, SRT, LL-HLS, and recordings while keeping browser WebRTC codec limitations explicit.
+
 ## 0.7.2
 
 - Fix camera settings being overwritten by background NVR refreshes while editing.

@@ -23,6 +23,18 @@ DATABASE_PATH="$(read_option 'database_path' '/homeassistant/edge/edge.db')"
 RETENTION_DAYS="$(read_option 'retention_days' '14')"
 INSTALL_CUSTOM_COMPONENT="$(read_option 'install_custom_component' 'true')"
 SYNC_ADDON_OPTIONS="$(read_option 'sync_addon_options' 'false')"
+CORE_ENGINE="$(read_option 'core_engine' 'mediamtx_janus')"
+MEDIAMTX_ENABLED="$(read_option 'mediamtx_enabled' 'true')"
+MEDIAMTX_RTSP_PORT="$(read_option 'mediamtx_rtsp_port' '8554')"
+MEDIAMTX_HLS_PORT="$(read_option 'mediamtx_hls_port' '8888')"
+MEDIAMTX_WEBRTC_PORT="$(read_option 'mediamtx_webrtc_port' '8889')"
+MEDIAMTX_WEBRTC_UDP_PORT="$(read_option 'mediamtx_webrtc_udp_port' '8189')"
+MEDIAMTX_SRT_PORT="$(read_option 'mediamtx_srt_port' '8890')"
+MEDIAMTX_API_PORT="$(read_option 'mediamtx_api_port' '9997')"
+MEDIAMTX_RECORD="$(read_option 'mediamtx_record' 'true')"
+JANUS_ENABLED="$(read_option 'janus_enabled' 'true')"
+JANUS_HTTP_PORT="$(read_option 'janus_http_port' '8188')"
+JANUS_WS_PORT="$(read_option 'janus_ws_port' '8190')"
 
 LOG_LEVEL="${LOG_LEVEL:-info}"
 API_PORT="${API_PORT:-8088}"
@@ -31,6 +43,18 @@ DATABASE_PATH="${DATABASE_PATH:-/homeassistant/edge/edge.db}"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
 INSTALL_CUSTOM_COMPONENT="${INSTALL_CUSTOM_COMPONENT:-true}"
 SYNC_ADDON_OPTIONS="${SYNC_ADDON_OPTIONS:-false}"
+CORE_ENGINE="${CORE_ENGINE:-mediamtx_janus}"
+MEDIAMTX_ENABLED="${MEDIAMTX_ENABLED:-true}"
+MEDIAMTX_RTSP_PORT="${MEDIAMTX_RTSP_PORT:-8554}"
+MEDIAMTX_HLS_PORT="${MEDIAMTX_HLS_PORT:-8888}"
+MEDIAMTX_WEBRTC_PORT="${MEDIAMTX_WEBRTC_PORT:-8889}"
+MEDIAMTX_WEBRTC_UDP_PORT="${MEDIAMTX_WEBRTC_UDP_PORT:-8189}"
+MEDIAMTX_SRT_PORT="${MEDIAMTX_SRT_PORT:-8890}"
+MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT:-9997}"
+MEDIAMTX_RECORD="${MEDIAMTX_RECORD:-true}"
+JANUS_ENABLED="${JANUS_ENABLED:-true}"
+JANUS_HTTP_PORT="${JANUS_HTTP_PORT:-8188}"
+JANUS_WS_PORT="${JANUS_WS_PORT:-8190}"
 
 if [[ "${DATABASE_PATH}" == "/config/edge.db" ]]; then
   DATABASE_PATH="/homeassistant/edge/edge.db"
@@ -42,6 +66,8 @@ mkdir -p /config
 mkdir -p /homeassistant/edge
 mkdir -p /homeassistant/edge/snapshots
 mkdir -p /tmp/edge-runtime
+mkdir -p /tmp/edge-runtime/janus
+mkdir -p /media/edge-of-infinity/recordings
 
 install_custom_component() {
   local source_dir="/usr/share/edge-of-infinity/custom_components/edge"
@@ -160,6 +186,211 @@ hikvision_channel_from_rtsp() {
     echo "${BASH_REMATCH[1]}"
   else
     echo "${fallback}"
+  fi
+}
+
+safe_path_id() {
+  local value="$1"
+  value="${value:-camera}"
+  printf '%s' "${value}" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+write_mediamtx_path() {
+  local output="$1"
+  local path_name="$2"
+  local source_url="$3"
+  local should_record="$4"
+
+  if [[ -z "${source_url}" || "${source_url}" == "null" ]]; then
+    return
+  fi
+
+  {
+    printf '  %s:\n' "${path_name}"
+    printf '    source: "%s"\n' "${source_url}"
+    printf '    rtspTransport: tcp\n'
+    if [[ "${should_record}" == "true" && "${MEDIAMTX_RECORD}" == "true" ]]; then
+      printf '    sourceOnDemand: no\n'
+      printf '    record: yes\n'
+      printf '    recordPath: "%s/%s/%%Y-%%m-%%d_%%H-%%M-%%S-%%f"\n' "${RECORDINGS_DIR}" "${path_name}"
+    else
+      printf '    sourceOnDemand: yes\n'
+      printf '    record: no\n'
+    fi
+  } >> "${output}"
+}
+
+generate_mediamtx_config() {
+  local output="$1"
+  cat > "${output}" <<EOF
+logLevel: ${LOG_LEVEL}
+logDestinations: [stdout]
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 512
+udpMaxPayloadSize: 1452
+
+api: yes
+apiAddress: :${MEDIAMTX_API_PORT}
+
+metrics: no
+pprof: no
+playback: yes
+playbackAddress: :9996
+
+rtsp: yes
+rtspTransports: [tcp]
+rtspEncryption: "no"
+rtspAddress: :${MEDIAMTX_RTSP_PORT}
+
+rtmp: no
+
+hls: yes
+hlsAddress: :${MEDIAMTX_HLS_PORT}
+hlsAllowOrigins: ["*"]
+hlsAlwaysRemux: false
+hlsVariant: lowLatency
+hlsSegmentCount: 4
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 50M
+
+webrtc: yes
+webrtcAddress: :${MEDIAMTX_WEBRTC_PORT}
+webrtcAllowOrigins: ["*"]
+webrtcLocalUDPAddress: :${MEDIAMTX_WEBRTC_UDP_PORT}
+webrtcIPsFromInterfaces: yes
+webrtcAdditionalHosts: []
+
+srt: yes
+srtAddress: :${MEDIAMTX_SRT_PORT}
+
+pathDefaults:
+  sourceOnDemand: yes
+  rtspTransport: tcp
+  recordFormat: fmp4
+  recordPartDuration: 1s
+  recordSegmentDuration: 10s
+  recordDeleteAfter: ${RETENTION_DAYS}d
+
+paths:
+EOF
+
+  if jq -e '.cameras' "${EDGE_CONFIG}" >/dev/null 2>&1; then
+    while IFS= read -r camera; do
+      local id safe_id rtsp_main rtsp_sub record record_stream
+      id="$(jq -r '.id // "camera"' <<< "${camera}")"
+      safe_id="$(safe_path_id "${id}")"
+      rtsp_main="$(jq -r '.rtsp_main // ""' <<< "${camera}")"
+      rtsp_sub="$(jq -r '.rtsp_sub // ""' <<< "${camera}")"
+      record="$(jq -r '.record // false' <<< "${camera}")"
+      record_stream="$(jq -r '.record_stream // "main"' <<< "${camera}")"
+      write_mediamtx_path "${output}" "${safe_id}_main" "${rtsp_main}" "$([[ "${record}" == "true" && "${record_stream}" != "sub" ]] && echo true || echo false)"
+      write_mediamtx_path "${output}" "${safe_id}_sub" "${rtsp_sub}" "$([[ "${record}" == "true" && "${record_stream}" == "sub" ]] && echo true || echo false)"
+    done < <(jq -c '.cameras[]?' "${EDGE_CONFIG}")
+  fi
+}
+
+generate_janus_config() {
+  local config_dir="$1"
+  local streaming_config="${config_dir}/janus.plugin.streaming.jcfg"
+
+  mkdir -p "${config_dir}"
+  cat > "${config_dir}/janus.jcfg" <<EOF
+general: {
+  configs_folder = "${config_dir}"
+  plugins_folder = "/usr/lib/janus/plugins"
+  transports_folder = "/usr/lib/janus/transports"
+  events_folder = "/usr/lib/janus/events"
+  log_to_stdout = true
+  debug_level = 4
+  daemonize = false
+}
+nat: {
+  stun_server = "stun.l.google.com"
+  stun_port = 19302
+  nice_debug = false
+}
+media: {
+  rtp_port_range = "20000-20100"
+}
+EOF
+
+  cat > "${config_dir}/janus.transport.http.jcfg" <<EOF
+general: {
+  base_path = "/janus"
+  http = true
+  port = ${JANUS_HTTP_PORT}
+  https = false
+}
+admin: {
+  admin_base_path = "/admin"
+  admin_http = true
+  admin_port = 7188
+  admin_https = false
+}
+EOF
+
+  cat > "${config_dir}/janus.transport.websockets.jcfg" <<EOF
+general: {
+  ws = true
+  ws_port = ${JANUS_WS_PORT}
+  wss = false
+}
+admin: {
+  admin_ws = false
+}
+EOF
+
+  cat > "${streaming_config}" <<'EOF'
+general: {
+  admin_key = "edge-local"
+}
+EOF
+
+  if jq -e '.cameras' "${EDGE_CONFIG}" >/dev/null 2>&1; then
+    local index=0
+    while IFS= read -r camera; do
+      local id name safe_id rtsp_main rtsp_sub main_id sub_id
+      id="$(jq -r '.id // "camera"' <<< "${camera}")"
+      name="$(jq -r '.name // .id // "Camera"' <<< "${camera}")"
+      safe_id="$(safe_path_id "${id}")"
+      rtsp_main="rtsp://127.0.0.1:${MEDIAMTX_RTSP_PORT}/${safe_id}_main"
+      rtsp_sub="rtsp://127.0.0.1:${MEDIAMTX_RTSP_PORT}/${safe_id}_sub"
+      main_id=$((10000 + (index * 10) + 1))
+      sub_id=$((10000 + (index * 10) + 2))
+      cat >> "${streaming_config}" <<EOF
+
+${safe_id}_main: {
+  type = "rtsp"
+  id = ${main_id}
+  description = "${name} main via MediaMTX"
+  audio = false
+  video = true
+  url = "${rtsp_main}"
+  rtsp_reconnect_delay = 3
+  rtsp_timeout = 5
+  rtsp_conn_timeout = 3
+  rtsp_notify_changes = true
+  bufferkf_ms = 500
+}
+
+${safe_id}_sub: {
+  type = "rtsp"
+  id = ${sub_id}
+  description = "${name} sub via MediaMTX"
+  audio = false
+  video = true
+  url = "${rtsp_sub}"
+  rtsp_reconnect_delay = 3
+  rtsp_timeout = 5
+  rtsp_conn_timeout = 3
+  rtsp_notify_changes = true
+  bufferkf_ms = 500
+}
+EOF
+      index=$((index + 1))
+    done < <(jq -c '.cameras[]?' "${EDGE_CONFIG}")
   fi
 }
 
@@ -420,7 +651,22 @@ else
   cp "${EDGE_HOME_EXAMPLE_CONFIG}" "${EDGE_CONFIG}"
 fi
 
-if command -v edge-core >/dev/null 2>&1; then
+MEDIAMTX_CONFIG=/tmp/edge-runtime/mediamtx.yml
+JANUS_CONFIG_DIR=/tmp/edge-runtime/janus
+MEDIAMTX_PID=""
+JANUS_PID=""
+
+cleanup_children() {
+  if [[ -n "${JANUS_PID}" ]] && kill -0 "${JANUS_PID}" >/dev/null 2>&1; then
+    kill "${JANUS_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${MEDIAMTX_PID}" ]] && kill -0 "${MEDIAMTX_PID}" >/dev/null 2>&1; then
+    kill "${MEDIAMTX_PID}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_children EXIT TERM INT
+
+if [[ "${CORE_ENGINE}" == "edge-core" ]] && command -v edge-core >/dev/null 2>&1; then
   exec edge-core \
     -config "${EDGE_CONFIG}" \
     -listen "0.0.0.0:${API_PORT}" \
@@ -430,8 +676,33 @@ if command -v edge-core >/dev/null 2>&1; then
     -log-level "${LOG_LEVEL}"
 fi
 
-bashio::log.warning "edge-core binary is not bundled yet."
-bashio::log.warning "Running Python panel with RTSP probe and MJPEG live until the native video engine is bundled."
+if [[ "${MEDIAMTX_ENABLED}" == "true" ]]; then
+  if command -v mediamtx >/dev/null 2>&1; then
+    generate_mediamtx_config "${MEDIAMTX_CONFIG}"
+    bashio::log.info "Starting MediaMTX core on RTSP:${MEDIAMTX_RTSP_PORT}, LL-HLS:${MEDIAMTX_HLS_PORT}, WHEP:${MEDIAMTX_WEBRTC_PORT}, SRT:${MEDIAMTX_SRT_PORT}, API:${MEDIAMTX_API_PORT}"
+    mediamtx "${MEDIAMTX_CONFIG}" &
+    MEDIAMTX_PID="$!"
+  else
+    bashio::log.error "MediaMTX binary is missing. Live core will not start."
+  fi
+else
+  bashio::log.warning "MediaMTX core is disabled in add-on options."
+fi
+
+if [[ "${JANUS_ENABLED}" == "true" ]]; then
+  if command -v janus >/dev/null 2>&1; then
+    generate_janus_config "${JANUS_CONFIG_DIR}"
+    bashio::log.info "Starting Janus WebRTC gateway on HTTP:${JANUS_HTTP_PORT}, WS:${JANUS_WS_PORT}; streams are sourced from MediaMTX RTSP paths."
+    janus --configs-folder="${JANUS_CONFIG_DIR}" --disable-colors &
+    JANUS_PID="$!"
+  else
+    bashio::log.error "Janus binary is missing. WebRTC gateway will not start."
+  fi
+else
+  bashio::log.warning "Janus WebRTC gateway is disabled in add-on options."
+fi
+
+bashio::log.info "Running Edge panel as controller for MediaMTX + Janus."
 
 mkdir -p /tmp/edge-placeholder
 mkdir -p /tmp/edge-placeholder/snapshots
@@ -589,6 +860,20 @@ export EDGE_HOME_CONFIG
 export EDGE_HOME_DIR=/homeassistant/edge
 export EDGE_DATA_DIR=/tmp/edge-placeholder
 export API_PORT
+export EDGE_MEDIAMTX_ENABLED="${MEDIAMTX_ENABLED}"
+export EDGE_MEDIAMTX_CONFIG="${MEDIAMTX_CONFIG}"
+export EDGE_MEDIAMTX_HOST="127.0.0.1"
+export EDGE_MEDIAMTX_RTSP_PORT="${MEDIAMTX_RTSP_PORT}"
+export EDGE_MEDIAMTX_HLS_PORT="${MEDIAMTX_HLS_PORT}"
+export EDGE_MEDIAMTX_WEBRTC_PORT="${MEDIAMTX_WEBRTC_PORT}"
+export EDGE_MEDIAMTX_WEBRTC_UDP_PORT="${MEDIAMTX_WEBRTC_UDP_PORT}"
+export EDGE_MEDIAMTX_SRT_PORT="${MEDIAMTX_SRT_PORT}"
+export EDGE_MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT}"
+export EDGE_JANUS_ENABLED="${JANUS_ENABLED}"
+export EDGE_JANUS_CONFIG_DIR="${JANUS_CONFIG_DIR}"
+export EDGE_JANUS_HOST="127.0.0.1"
+export EDGE_JANUS_HTTP_PORT="${JANUS_HTTP_PORT}"
+export EDGE_JANUS_WS_PORT="${JANUS_WS_PORT}"
 
 exec python3 /usr/share/edge-of-infinity/edge-panel.py
 

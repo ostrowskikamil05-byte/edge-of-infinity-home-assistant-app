@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Edge of Infinity panel server."""
 
 from __future__ import annotations
@@ -15,8 +15,6 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-import secrets
-import socket
 
 
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
@@ -29,21 +27,26 @@ PORT = int(os.environ.get("API_PORT", "8088"))
 SNAPSHOT_DIR = HOME_DIR / "snapshots"
 DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
-HLS_PROCESSES: dict[str, subprocess.Popen] = {}
 DEBUG_LOCK = threading.Lock()
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
 STREAM_FALLBACK_CHANNELS = {"main": HIKVISION_MAIN_CHANNEL, "sub": HIKVISION_SUB_CHANNEL}
-STREAM_ENGINES = ("mjpeg", "mse_next", "webrtc_next", "ll_hls")
-# go2rtc integration (optional — auto-detected at runtime)
-GO2RTC_HOST = os.environ.get("GO2RTC_HOST", "localhost")
-GO2RTC_PORT = int(os.environ.get("GO2RTC_PORT", "1984"))
-GO2RTC_BASE = f"http://{GO2RTC_HOST}:{GO2RTC_PORT}"
+STREAM_ENGINES = ("janus_webrtc", "mediamtx", "ll_hls", "srt")
+MEDIAMTX_ENABLED = os.environ.get("EDGE_MEDIAMTX_ENABLED", "true").lower() == "true"
+MEDIAMTX_HOST = os.environ.get("EDGE_MEDIAMTX_HOST", "127.0.0.1")
+MEDIAMTX_RTSP_PORT = int(os.environ.get("EDGE_MEDIAMTX_RTSP_PORT", "8554"))
+MEDIAMTX_HLS_PORT = int(os.environ.get("EDGE_MEDIAMTX_HLS_PORT", "8888"))
+MEDIAMTX_WEBRTC_PORT = int(os.environ.get("EDGE_MEDIAMTX_WEBRTC_PORT", "8889"))
+MEDIAMTX_WEBRTC_UDP_PORT = int(os.environ.get("EDGE_MEDIAMTX_WEBRTC_UDP_PORT", "8189"))
+MEDIAMTX_SRT_PORT = int(os.environ.get("EDGE_MEDIAMTX_SRT_PORT", "8890"))
+MEDIAMTX_API_PORT = int(os.environ.get("EDGE_MEDIAMTX_API_PORT", "9997"))
+MEDIAMTX_CONFIG_PATH = Path(os.environ.get("EDGE_MEDIAMTX_CONFIG", "/tmp/edge-runtime/mediamtx.yml"))
+JANUS_ENABLED = os.environ.get("EDGE_JANUS_ENABLED", "true").lower() == "true"
+JANUS_HOST = os.environ.get("EDGE_JANUS_HOST", "127.0.0.1")
+JANUS_HTTP_PORT = int(os.environ.get("EDGE_JANUS_HTTP_PORT", "8188"))
+JANUS_WS_PORT = int(os.environ.get("EDGE_JANUS_WS_PORT", "8190"))
+JANUS_CONFIG_DIR = Path(os.environ.get("EDGE_JANUS_CONFIG_DIR", "/tmp/edge-runtime/janus"))
 STUN_SERVERS = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
-WEBRTC_UDP_PORT_MIN = int(os.environ.get("WEBRTC_UDP_PORT_MIN", "50000"))
-WEBRTC_UDP_PORT_MAX = int(os.environ.get("WEBRTC_UDP_PORT_MAX", "50100"))
-WEBRTC_SESSIONS: dict[str, dict] = {}
-WEBRTC_LOCK = threading.Lock()
 
 
 def safe_id(value: str) -> str:
@@ -125,46 +128,6 @@ def write_debug_event(event: str, payload: dict | None = None) -> None:
                 handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
     except OSError as error:
         print(f"[edge-panel] debug log write failed: {error}")
-
-
-def classify_ffmpeg_error(stderr_text: str, frame_count: int, end_reason: str, bytes_sent: int = 0) -> tuple[str, list[str]]:
-    text_lower = stderr_text.lower()
-    hints = []
-    if "option" in text_lower and "not found" in text_lower:
-        hints.append("ffmpeg_option_unsupported")
-    if "401" in text_lower or "unauthorized" in text_lower:
-        hints.append("camera_auth_failed")
-    if "connection refused" in text_lower:
-        hints.append("rtsp_port_refused")
-    if "timed out" in text_lower or "connection timed out" in text_lower or "i/o timeout" in text_lower:
-        hints.append("rtsp_timeout")
-    if "could not find codec parameters" in text_lower:
-        hints.append("probe_needs_more_data")
-    if "invalid data" in text_lower:
-        hints.append("invalid_rtsp_or_codec_data")
-    if "hevc" in text_lower or "h265" in text_lower:
-        hints.append("hevc_decode_path")
-    if "error while decoding" in text_lower or "error constructing the frame" in text_lower:
-        hints.append("decoder_error")
-    if frame_count == 0:
-        hints.append("no_mjpeg_frames_sent")
-    if frame_count > 0 and bytes_sent // frame_count > 750_000:
-        hints.append("mjpeg_frames_too_large")
-    if end_reason.startswith("client_") and frame_count > 0:
-        hints.append("browser_closed_stream_after_frames")
-    if not hints and frame_count > 0:
-        hints.append("mjpeg_frames_sent")
-    category = hints[0] if hints else "unknown"
-    return category, hints
-
-
-def extract_ffmpeg_stderr(log_text: str, begin_marker: str) -> str:
-    request_text = log_text.rsplit(begin_marker, 1)[-1]
-    if "--- ffmpeg stderr begin ---" in request_text:
-        request_text = request_text.split("--- ffmpeg stderr begin ---", 1)[1]
-    if "--- ffmpeg stderr end ---" in request_text:
-        request_text = request_text.split("--- ffmpeg stderr end ---", 1)[0]
-    return request_text[-12000:]
 
 
 def route_path(raw_path: str) -> str:
@@ -379,11 +342,8 @@ def normalize_config(payload: dict) -> dict:
             "retention_days": safe_int(storage.get("retention_days"), 14),
         },
         "live": {
-            "engine": live.get("engine") if live.get("engine") in STREAM_ENGINES else "mjpeg",
+            "engine": live.get("engine") if live.get("engine") in STREAM_ENGINES else "janus_webrtc",
             "frame_interval_ms": safe_int(live.get("frame_interval_ms"), 1200),
-            "mjpeg_fps": clamp_int(live.get("mjpeg_fps"), 5, 1, 15),
-            "mjpeg_quality": clamp_int(live.get("mjpeg_quality"), 8, 2, 31),
-            "mjpeg_max_width": clamp_int(live.get("mjpeg_max_width"), 1280, 320, 3840),
             "tile_fps": clamp_int(live.get("tile_fps"), 5, 1, 10),
             "tile_max_width": clamp_int(live.get("tile_max_width"), 960, 320, 1920),
         },
@@ -739,68 +699,117 @@ def camera_stream(camera: dict, stream_name: str) -> str:
     return stream or camera.get("rtsp_main") or ""
 
 
-def capture_live_frame(camera: dict, stream_name: str) -> bytes:
-    stream = camera_stream(camera, stream_name)
-    if not stream:
-        raise ValueError("rtsp_not_configured")
-
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-fflags",
-        "nobuffer",
-        "-flags",
-        "low_delay",
-        "-rtsp_transport",
-        "tcp",
-        "-i",
-        stream,
-        "-an",
-        "-frames:v",
-        "1",
-        "-q:v",
-        "5",
-        "-f",
-        "image2pipe",
-        "-vcodec",
-        "mjpeg",
-        "-",
-    ]
-    try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8, check=False)
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError("live_frame_timeout") from error
-    except OSError as error:
-        raise RuntimeError(str(error)) from error
-
-    if result.returncode != 0 or not result.stdout:
-        detail = result.stderr.decode("utf-8", errors="replace").strip() or "live_frame_failed"
-        raise RuntimeError(detail[-500:])
-    return result.stdout
-
-
 def recording_key(camera: dict, index: int) -> str:
     return f"{safe_id(camera.get('id') or 'camera')}_{index}"
 
 
-def hls_key(camera: dict, index: int) -> str:
-    return f"{safe_id(camera.get('id') or 'camera')}_{index}"
+def mediamtx_path(camera: dict, index: int, stream_name: str) -> str:
+    camera_id = safe_id(camera.get("id") or f"camera_{index + 1}")
+    stream_name = normalize_stream_name(stream_name, "sub")
+    return f"{camera_id}_{stream_name}"
 
 
-def hls_base_dir(camera: dict, index: int) -> Path:
-    return DATA_DIR / "hls" / hls_key(camera, index)
+def janus_mount_id(index: int, stream_name: str) -> int:
+    stream_offset = 1 if normalize_stream_name(stream_name, "sub") == "main" else 2
+    return 10000 + (index * 10) + stream_offset
+
+
+def mediamtx_api_url(path: str) -> str:
+    return f"http://127.0.0.1:{MEDIAMTX_API_PORT}{path}"
+
+
+def mediamtx_status() -> dict:
+    api_reachable = False
+    api_error = ""
+    if MEDIAMTX_ENABLED:
+        try:
+            import urllib.request
+
+            with urllib.request.urlopen(mediamtx_api_url("/v3/config/global/get"), timeout=1) as response:
+                api_reachable = 200 <= response.status < 500
+        except Exception as error:
+            api_error = str(error)
+    return {
+        "enabled": MEDIAMTX_ENABLED,
+        "binary": bool(shutil.which("mediamtx")),
+        "config_path": str(MEDIAMTX_CONFIG_PATH),
+        "config_exists": MEDIAMTX_CONFIG_PATH.exists(),
+        "api_reachable": api_reachable,
+        "api_error": api_error,
+        "ports": {
+            "rtsp": MEDIAMTX_RTSP_PORT,
+            "ll_hls": MEDIAMTX_HLS_PORT,
+            "webrtc_whep": MEDIAMTX_WEBRTC_PORT,
+            "webrtc_ice_udp": MEDIAMTX_WEBRTC_UDP_PORT,
+            "srt": MEDIAMTX_SRT_PORT,
+            "api": MEDIAMTX_API_PORT,
+        },
+    }
+
+
+def janus_status() -> dict:
+    api_reachable = False
+    api_error = ""
+    if JANUS_ENABLED:
+        try:
+            import urllib.request
+
+            payload = json.dumps({"janus": "info", "transaction": "edge"}).encode("utf-8")
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{JANUS_HTTP_PORT}/janus",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=1) as response:
+                api_reachable = 200 <= response.status < 500
+        except Exception as error:
+            api_error = str(error)
+    streaming_config = JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg"
+    return {
+        "enabled": JANUS_ENABLED,
+        "binary": bool(shutil.which("janus")),
+        "config_dir": str(JANUS_CONFIG_DIR),
+        "streaming_config": str(streaming_config),
+        "streaming_config_exists": streaming_config.exists(),
+        "api_reachable": api_reachable,
+        "api_error": api_error,
+        "ports": {
+            "http": JANUS_HTTP_PORT,
+            "websocket": JANUS_WS_PORT,
+        },
+    }
+
+
+def engine_runtime_status() -> dict:
+    return {
+        "architecture": "camera RTSP -> MediaMTX core -> Janus Streaming Plugin -> browser WebRTC. MediaMTX also exposes LL-HLS, WHEP, SRT, RTSP proxy, and fMP4 recording paths.",
+        "mediamtx": mediamtx_status(),
+        "janus": janus_status(),
+        "codec_notes": {
+            "h264": "Best browser/WebRTC compatibility.",
+            "h265": "Kept for MediaMTX proxying, SRT, recording, and compatible players; browser WebRTC support is still client-dependent.",
+            "pcm_alaw": "Camera audio can be proxied/recorded; WebRTC browsers usually prefer Opus, so audio may need a later transcode path.",
+        },
+    }
 
 
 def stream_urls(camera: dict, index: int) -> dict:
     camera_id = safe_id(camera.get("id") or f"camera_{index + 1}")
+    main_path = mediamtx_path(camera, index, "main")
+    sub_path = mediamtx_path(camera, index, "sub")
     return {
-        "mjpeg": f"live/{camera_id}.mjpg",
-        "tile_mjpeg": f"live/{camera_id}.mjpg?tile=1",
-        "ll_hls": f"hls/{camera_id}/index.m3u8",
-        "mse_next": f"mse/{camera_id}",
-        "webrtc_next": f"webrtc/{camera_id}",
+        "ll_hls": f"http://{MEDIAMTX_HOST}:{MEDIAMTX_HLS_PORT}/{main_path}/index.m3u8",
+        "mediamtx_ll_hls_main": f"http://{MEDIAMTX_HOST}:{MEDIAMTX_HLS_PORT}/{main_path}/index.m3u8",
+        "mediamtx_ll_hls_sub": f"http://{MEDIAMTX_HOST}:{MEDIAMTX_HLS_PORT}/{sub_path}/index.m3u8",
+        "mediamtx_webrtc_main": f"http://{MEDIAMTX_HOST}:{MEDIAMTX_WEBRTC_PORT}/{main_path}/whep",
+        "mediamtx_webrtc_sub": f"http://{MEDIAMTX_HOST}:{MEDIAMTX_WEBRTC_PORT}/{sub_path}/whep",
+        "mediamtx_rtsp_main": f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}/{main_path}",
+        "mediamtx_rtsp_sub": f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}/{sub_path}",
+        "srt_main": f"srt://{MEDIAMTX_HOST}:{MEDIAMTX_SRT_PORT}?streamid=read:{main_path}",
+        "srt_sub": f"srt://{MEDIAMTX_HOST}:{MEDIAMTX_SRT_PORT}?streamid=read:{sub_path}",
+        "janus_main": f"http://{JANUS_HOST}:{JANUS_HTTP_PORT}/janus/streaming/{janus_mount_id(index, 'main')}",
+        "janus_sub": f"http://{JANUS_HOST}:{JANUS_HTTP_PORT}/janus/streaming/{janus_mount_id(index, 'sub')}",
         "rtsp_main": redact_rtsp(camera.get("rtsp_main") or ""),
         "rtsp_sub": redact_rtsp(camera.get("rtsp_sub") or ""),
     }
@@ -808,13 +817,17 @@ def stream_urls(camera: dict, index: int) -> dict:
 
 def stream_capabilities(config: dict | None = None) -> dict:
     config = config or load_config()
+    runtime = engine_runtime_status()
+    mediamtx_ready = runtime["mediamtx"]["api_reachable"] or runtime["mediamtx"]["config_exists"]
+    janus_ready = runtime["janus"]["api_reachable"] or runtime["janus"]["streaming_config_exists"]
     return {
         "engines": {
-            "mjpeg": {"status": "active", "transport": "multipart-jpeg"},
-            "ll_hls": {"status": "experimental", "transport": "hls-fmp4", "note": "ffmpeg generated local HLS playlist"},
-            "mse_next": {"status": "planned", "transport": "fmp4/websocket", "note": "prepared for rebroadcast engine"},
-            "webrtc_next": {"status": "planned", "transport": "webrtc", "note": "use go2rtc-style signaling/rebroadcast in the next engine step"},
+            "mediamtx": {"status": "active" if mediamtx_ready else "starting", "transport": "rtsp-proxy/webrtc-whep/ll-hls/srt"},
+            "janus_webrtc": {"status": "active" if janus_ready else "starting", "transport": "janus-streaming-plugin-over-mediamtx-rtsp"},
+            "ll_hls": {"status": "active" if mediamtx_ready else "starting", "transport": "hls-fmp4", "note": "MediaMTX low-latency HLS path."},
+            "srt": {"status": "active" if mediamtx_ready else "starting", "transport": "srt"},
         },
+        "runtime": runtime,
         "cameras": [
             {
                 "index": index,
@@ -834,230 +847,6 @@ def cleanup_recording_processes() -> None:
     for key, process in list(RECORDING_PROCESSES.items()):
         if process.poll() is not None:
             RECORDING_PROCESSES.pop(key, None)
-
-
-def cleanup_hls_processes() -> None:
-    for key, process in list(HLS_PROCESSES.items()):
-        if process.poll() is not None:
-            HLS_PROCESSES.pop(key, None)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# WebRTC backend — RTSP→WebRTC engine (go2rtc-first, native RTP fallback)
-# UI unchanged — engine wybierany przez istniejący dropdown webrtc_next
-# ─────────────────────────────────────────────────────────────────────────────
-
-def go2rtc_available() -> bool:
-    try:
-        import urllib.request
-        urllib.request.urlopen(f"{GO2RTC_BASE}/api/streams", timeout=1)
-        return True
-    except Exception:
-        return False
-
-
-def go2rtc_register_stream(camera: dict, camera_id: str) -> None:
-    import urllib.request
-    for stream, sid in (
-        (camera_stream(camera, "main"), f"{camera_id}_main"),
-        (camera_stream(camera, "sub"),  f"{camera_id}_sub"),
-    ):
-        if not stream:
-            continue
-        try:
-            req = urllib.request.Request(
-                f"{GO2RTC_BASE}/api/streams?name={sid}&src={stream}", method="PUT"
-            )
-            urllib.request.urlopen(req, timeout=3)
-        except Exception:
-            pass
-
-
-def go2rtc_webrtc_offer(camera_id: str, offer_sdp: str, variant: str = "sub") -> str | None:
-    import urllib.request
-    url = f"{GO2RTC_BASE}/api/webrtc?src={camera_id}_{variant}"
-    try:
-        req = urllib.request.Request(
-            url, data=offer_sdp.encode(),
-            method="POST", headers={"Content-Type": "application/sdp"},
-        )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return resp.read().decode()
-    except Exception:
-        return None
-
-
-def _local_ip() -> str:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except Exception:
-        return "127.0.0.1"
-
-
-def _make_sdp_answer(rtp_port: int, local_ip: str, codec: str = "H264") -> str:
-    payload = 96
-    rtpmap = f"rtpmap:{payload} {codec}/90000"
-    fmtp = (
-        f"fmtp:{payload} packetization-mode=1"
-        if codec == "H264"
-        else f"fmtp:{payload} profile-id=1"
-    )
-    sid = str(int(time.time()))
-    lines = [
-        "v=0",
-        f"o=- {sid} {sid} IN IP4 {local_ip}",
-        "s=Edge of Infinity",
-        f"c=IN IP4 {local_ip}",
-        "t=0 0",
-        f"m=video {rtp_port} RTP/AVP {payload}",
-        f"a={rtpmap}",
-        f"a={fmtp}",
-        "a=recvonly",
-        "a=rtcp-mux",
-        f"a=candidate:0 1 UDP 2122260223 {local_ip} {rtp_port} typ host",
-    ]
-    return "\r\n".join(lines) + "\r\n"
-
-
-def _start_webrtc_ffmpeg(camera: dict, rtp_port: int) -> subprocess.Popen | None:
-    stream = camera_stream(camera, camera.get("live_stream") or "sub")
-    if not stream:
-        return None
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning",
-        "-fflags", "nobuffer+discardcorrupt", "-flags", "low_delay",
-        "-rtsp_transport", "tcp", "-probesize", "32768", "-analyzeduration", "0",
-        "-thread_queue_size", "512", "-i", stream,
-        "-map", "0:v:0", "-c:v", "copy",
-        "-f", "rtp", f"rtp://127.0.0.1:{rtp_port}?pkt_size=1200",
-    ]
-    try:
-        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        return None
-
-
-def create_webrtc_session(camera: dict, camera_id: str, offer_sdp: str) -> dict:
-    session_id = secrets.token_hex(8)
-    # Ścieżka A: go2rtc (~50ms latencja)
-    if go2rtc_available():
-        go2rtc_register_stream(camera, camera_id)
-        answer = go2rtc_webrtc_offer(camera_id, offer_sdp, camera.get("live_stream") or "sub")
-        if answer:
-            with WEBRTC_LOCK:
-                WEBRTC_SESSIONS[session_id] = {
-                    "camera_id": camera_id, "engine": "go2rtc",
-                    "answer_sdp": answer, "created": time.time(), "process": None,
-                }
-            return {"session_id": session_id, "answer_sdp": answer, "engine": "go2rtc", "status": "ok"}
-    # Ścieżka B: native RTP fallback
-    used = set()
-    with WEBRTC_LOCK:
-        used = {s.get("rtp_port") for s in WEBRTC_SESSIONS.values()}
-    rtp_port = next(
-        (p for p in range(WEBRTC_UDP_PORT_MIN, WEBRTC_UDP_PORT_MAX, 2) if p not in used),
-        WEBRTC_UDP_PORT_MIN,
-    )
-    local_ip = _local_ip()
-    probe = probe_rtsp_stream(camera_stream(camera, camera.get("live_stream") or "sub"), timeout=4)
-    codec = "H264"
-    for st in (probe.get("streams") or []):
-        if st.get("codec_type") == "video" and (st.get("codec_name") or "").upper() in ("H265", "HEVC"):
-            codec = "H265"
-            break
-    answer_sdp = _make_sdp_answer(rtp_port, local_ip, codec)
-    process = _start_webrtc_ffmpeg(camera, rtp_port)
-    with WEBRTC_LOCK:
-        WEBRTC_SESSIONS[session_id] = {
-            "camera_id": camera_id, "engine": "native_rtp", "answer_sdp": answer_sdp,
-            "rtp_port": rtp_port, "created": time.time(), "process": process,
-        }
-    return {"session_id": session_id, "answer_sdp": answer_sdp, "engine": "native_rtp", "status": "ok"}
-
-
-def cleanup_webrtc_sessions() -> None:
-    now = time.time()
-    with WEBRTC_LOCK:
-        expired = [sid for sid, s in WEBRTC_SESSIONS.items() if now - s["created"] > 60]
-        for sid in expired:
-            proc = WEBRTC_SESSIONS.pop(sid).get("process")
-            if proc and proc.poll() is None:
-                proc.terminate()
-
-
-
-
-def start_hls(camera: dict, index: int) -> dict:
-    cleanup_hls_processes()
-    key = hls_key(camera, index)
-    process = HLS_PROCESSES.get(key)
-    directory = hls_base_dir(camera, index)
-    playlist = directory / "index.m3u8"
-    if process and process.poll() is None and playlist.exists():
-        return {"started": False, "status": "already_running", "directory": str(directory)}
-
-    stream_name = normalize_stream_name(camera.get("live_stream"), "sub")
-    stream = camera_stream(camera, stream_name)
-    if not stream:
-        raise ValueError("rtsp_not_configured")
-
-    if directory.exists():
-        for path in directory.glob("*"):
-            try:
-                path.unlink()
-            except OSError:
-                pass
-    directory.mkdir(parents=True, exist_ok=True)
-    log_path = directory / "ffmpeg-hls.log"
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-fflags",
-        "nobuffer+discardcorrupt",
-        "-rtsp_transport",
-        "tcp",
-        "-probesize",
-        "32768",
-        "-analyzeduration",
-        "0",
-        "-i",
-        stream,
-        "-map",
-        "0:v:0",
-        "-an",
-        "-c:v",
-        "copy",
-        "-f",
-        "hls",
-        "-hls_time",
-        "1",
-        "-hls_list_size",
-        "6",
-        "-hls_segment_type",
-        "fmp4",
-        "-hls_fmp4_init_filename",
-        "init.mp4",
-        "-hls_flags",
-        "delete_segments+omit_endlist+independent_segments",
-        playlist.name,
-    ]
-    log_file = log_path.open("ab")
-    try:
-        process = subprocess.Popen(command, cwd=directory, stdout=subprocess.DEVNULL, stderr=log_file)
-    finally:
-        log_file.close()
-    HLS_PROCESSES[key] = process
-    write_debug_event("hls_start", {
-        "key": key,
-        "camera_id": camera.get("id"),
-        "stream": stream_name,
-        "directory": str(directory),
-        "command": redact_command(command),
-    })
-    return {"started": True, "status": "running", "directory": str(directory), "pid": process.pid}
 
 
 def stop_orphan_recordings(config: dict) -> None:
@@ -1736,7 +1525,12 @@ def refresh_status() -> dict:
 
 
 def health_payload() -> dict:
-    return {"status": "ok", "product": "Edge of Infinity", "mode": "panel-live-mjpeg"}
+    return {
+        "status": "ok",
+        "product": "Edge of Infinity",
+        "mode": "mediamtx-janus-webrtc-core",
+        "core": engine_runtime_status(),
+    }
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -1867,6 +1661,7 @@ INDEX_HTML = r"""<!doctype html>
       .video-tile .preview { cursor: pointer; }
       .video-tile .preview:hover { outline: 1px solid rgba(86, 214, 181, .45); outline-offset: -1px; }
       .preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .preview iframe.live-frame { width: 100%; height: 100%; border: 0; display: block; background: #05080a; }
       .preview span { color: var(--muted); font-size: 13px; padding: 12px; text-align: center; }
       .tile-line {
         display: flex;
@@ -2223,6 +2018,14 @@ INDEX_HTML = r"""<!doctype html>
         return panelPath(clean);
       }
 
+      function directMediaMtxPath(path) {
+        const clean = String(path).replace(/^\/+/, '');
+        if (window.location.hostname) {
+          return `${window.location.protocol}//${window.location.hostname}:8889/${clean}`;
+        }
+        return `http://127.0.0.1:8889/${clean}`;
+      }
+
       function debugEvent(event, payload = {}) {
         const body = JSON.stringify({
           event,
@@ -2335,12 +2138,11 @@ INDEX_HTML = r"""<!doctype html>
         const liveResolution = camera.live_width && camera.live_height ? `${camera.live_width}x${camera.live_height}` : 'unknown';
         const previewResolution = previewStream === liveStream ? liveResolution : 'tile';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
-        const livePath = `live/${encodeURIComponent(liveId)}.mjpg?tile=1&t=${Date.now()}`;
-        const liveMjpegUrl = directPanelPath(livePath);
-        const liveMjpegFallbackUrl = panelPath(livePath);
+        const mediamtxPath = `${encodeURIComponent(liveId)}_${encodeURIComponent(previewStream)}/`;
+        const mediamtxUrl = directMediaMtxPath(mediamtxPath);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         const preview = live[liveKey]
-          ? `<img src="${escapeHtml(liveMjpegUrl)}" data-fallback-src="${escapeHtml(liveMjpegFallbackUrl)}" alt="${escapeHtml(text(camera.name, camera.id))} MJPEG live" onerror="if (this.dataset.fallbackSrc) { this.src = this.dataset.fallbackSrc; this.dataset.fallbackSrc = ''; } else { this.outerHTML='<span>MJPEG live failed. Check /homeassistant/edge/live-*.log.</span>'; }">`
+          ? `<iframe class="live-frame" src="${escapeHtml(mediamtxUrl)}" title="${escapeHtml(text(camera.name, camera.id))} WebRTC live" loading="lazy" allow="autoplay; fullscreen; encrypted-media"></iframe>`
           : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         return `
           <article class="camera video-tile">
@@ -2605,17 +2407,14 @@ INDEX_HTML = r"""<!doctype html>
             <h2>Live Preview</h2>
             <div class="form-grid">
               <label>Engine<select name="live-engine">
-                <option value="mjpeg" ${liveConfig.engine === 'mjpeg' ? 'selected' : ''}>MJPEG preview</option>
+                <option value="janus_webrtc" ${liveConfig.engine === 'janus_webrtc' ? 'selected' : ''}>Janus WebRTC core</option>
+                <option value="mediamtx" ${liveConfig.engine === 'mediamtx' ? 'selected' : ''}>MediaMTX WHEP core</option>
                 <option value="ll_hls" ${liveConfig.engine === 'll_hls' ? 'selected' : ''}>LL-HLS experimental</option>
-                <option value="mse_next" ${liveConfig.engine === 'mse_next' ? 'selected' : ''}>MSE next</option>
-                <option value="webrtc_next" ${liveConfig.engine === 'webrtc_next' ? 'selected' : ''}>WebRTC next</option>
+                <option value="srt" ${liveConfig.engine === 'srt' ? 'selected' : ''}>SRT relay</option>
               </select></label>
               <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label>
-              <label>MJPEG FPS<input name="live-mjpeg-fps" type="number" min="1" max="15" value="${escapeHtml(text(liveConfig.mjpeg_fps, 5))}"></label>
-              <label>MJPEG quality<input name="live-mjpeg-quality" type="number" min="2" max="31" value="${escapeHtml(text(liveConfig.mjpeg_quality, 8))}"></label>
-              <label>MJPEG max width<input name="live-mjpeg-max-width" type="number" min="320" max="3840" value="${escapeHtml(text(liveConfig.mjpeg_max_width, 1280))}"></label>
             </div>
-            <p class="notice">These settings only shape the browser MJPEG preview. Camera resolution and recording streams stay unchanged.</p>
+            <p class="notice">MediaMTX is the RTSP rebroadcast core. Janus WebRTC consumes the MediaMTX RTSP proxy so camera connections stay centralized.</p>
           </section>
         `;
       }
@@ -2770,10 +2569,7 @@ INDEX_HTML = r"""<!doctype html>
           },
           live: {
             engine: get('live-engine').value,
-            frame_interval_ms: Number(get('live-frame-interval-ms').value || 1200),
-            mjpeg_fps: Number(get('live-mjpeg-fps').value || 5),
-            mjpeg_quality: Number(get('live-mjpeg-quality').value || 8),
-            mjpeg_max_width: Number(get('live-mjpeg-max-width').value || 1280)
+            frame_interval_ms: Number(get('live-frame-interval-ms').value || 1200)
           },
           nvr: {
             segment_seconds: Number(get('nvr-segment-seconds').value || 10),
@@ -3184,60 +2980,10 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.7.2"
+    server_version = "EdgePanel/0.8.0"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
-
-    def _handle_webrtc_offer(self) -> None:
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            camera_id = body.get("camera_id") or ""
-            offer_sdp = body.get("sdp") or ""
-            if not camera_id or not offer_sdp:
-                self.send_json({"error": "missing camera_id or sdp"}, HTTPStatus.BAD_REQUEST)
-                return
-            config = load_config()
-            camera = next((c for c in (config.get("cameras") or []) if c.get("id") == camera_id), None)
-            if not camera:
-                self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
-                return
-            cleanup_webrtc_sessions()
-            self.send_json(create_webrtc_session(camera, camera_id, offer_sdp))
-        except Exception as exc:
-            self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
-
-    def _handle_webrtc_keepalive(self) -> None:
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            sid = body.get("session_id") or ""
-            with WEBRTC_LOCK:
-                if sid in WEBRTC_SESSIONS:
-                    WEBRTC_SESSIONS[sid]["created"] = time.time()
-                    self.send_json({"status": "ok"})
-                else:
-                    self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
-        except Exception as exc:
-            self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
-
-    def _handle_webrtc_close(self) -> None:
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            sid = body.get("session_id") or ""
-            with WEBRTC_LOCK:
-                session = WEBRTC_SESSIONS.pop(sid, None)
-            if session:
-                proc = session.get("process")
-                if proc and proc.poll() is None:
-                    proc.terminate()
-                self.send_json({"status": "closed"})
-            else:
-                self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
-        except Exception as exc:
-            self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def send_bytes(self, payload: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         self.send_response(status)
@@ -3273,36 +3019,28 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/stream/capabilities":
             self.send_json(stream_capabilities())
             return
+        if path == "/api/core/status":
+            self.send_json(engine_runtime_status())
+            return
+        if path == "/api/core/mediamtx.yml":
+            if not MEDIAMTX_CONFIG_PATH.exists():
+                self.send_json({"error": "mediamtx_config_not_found"}, HTTPStatus.NOT_FOUND)
+                return
+            self.send_bytes(redact_rtsp(MEDIAMTX_CONFIG_PATH.read_text(encoding="utf-8", errors="replace")).encode("utf-8"), "text/plain; charset=utf-8")
+            return
+        if path == "/api/core/janus-streaming.jcfg":
+            streaming_config = JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg"
+            if not streaming_config.exists():
+                self.send_json({"error": "janus_streaming_config_not_found"}, HTTPStatus.NOT_FOUND)
+                return
+            self.send_bytes(redact_rtsp(streaming_config.read_text(encoding="utf-8", errors="replace")).encode("utf-8"), "text/plain; charset=utf-8")
+            return
         if path == "/cameras.json":
             payload = read_json(DATA_DIR / "cameras.json", {"cameras": []})
             self.send_json(payload)
             return
         if path.startswith("/snapshots/"):
             self.serve_snapshot(path.removeprefix("/snapshots/"))
-            return
-        if path.startswith("/live-frame/") and path.endswith(".jpg"):
-            self.serve_live_frame(path, parse_qs(parsed.query))
-            return
-        if path.startswith("/live/") and path.endswith(".mjpg"):
-            self.serve_live(path, parse_qs(parsed.query))
-            return
-        if path.startswith("/hls/"):
-            self.serve_hls(path)
-            return
-        if path.startswith("/mse/"):
-            camera_id = path.split("/", 2)[-1]
-            self.send_json({"engine": "mse_next", "camera_id": camera_id, "status": "planned"}, HTTPStatus.NOT_IMPLEMENTED)
-            return
-        if path.startswith("/webrtc/"):
-            camera_id = path.split("/", 2)[-1]
-            self.send_json({
-                "engine": "webrtc_next",
-                "camera_id": camera_id,
-                "go2rtc_available": go2rtc_available(),
-                "stun_servers": STUN_SERVERS,
-                "offer_url": "/api/webrtc/offer",
-                "status": "ready",
-            })
             return
         if path.startswith("/recordings/") and path.endswith(".mp4"):
             self.serve_recording(path)
@@ -3317,15 +3055,6 @@ class EdgeHandler(BaseHTTPRequestHandler):
         write_debug_event("api_post", {"path": parsed.path, "client": self.client_address[0]})
         if parsed.path == "/api/config":
             self.save_config()
-            return
-        if parsed.path == "/api/webrtc/offer":
-            self._handle_webrtc_offer()
-            return
-        if parsed.path == "/api/webrtc/keepalive":
-            self._handle_webrtc_keepalive()
-            return
-        if parsed.path == "/api/webrtc/close":
-            self._handle_webrtc_close()
             return
         if parsed.path == "/api/refresh":
             payload = refresh_status()
@@ -3464,29 +3193,6 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         self.send_bytes(path.read_bytes(), "image/jpeg")
 
-    def serve_live_frame(self, path: str, query: dict[str, list[str]]) -> None:
-        camera_id = path.removeprefix("/live-frame/").removesuffix(".jpg")
-        stream_name = (query.get("stream") or ["sub"])[0]
-        config = load_config()
-        cameras = config.get("cameras", [])
-        camera = None
-        camera_index = (query.get("camera_index") or [""])[0]
-        if str(camera_index).isdigit():
-            index = int(camera_index)
-            if 0 <= index < len(cameras):
-                camera = cameras[index]
-        if camera is None:
-            camera = next((item for item in cameras if item.get("id") == camera_id), None)
-        if not camera:
-            self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
-            return
-        try:
-            self.send_bytes(capture_live_frame(camera, stream_name), "image/jpeg")
-        except ValueError as error:
-            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
-        except RuntimeError as error:
-            self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
-
     def serve_recording(self, request_path: str) -> None:
         parts = request_path.removeprefix("/recordings/").split("/", 1)
         if len(parts) != 2:
@@ -3553,332 +3259,6 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     break
                 remaining -= len(chunk)
-
-    def serve_hls(self, request_path: str) -> None:
-        parts = request_path.removeprefix("/hls/").split("/", 1)
-        if len(parts) != 2:
-            self.send_json({"error": "hls_not_found"}, HTTPStatus.NOT_FOUND)
-            return
-        camera_id, filename = parts
-        safe_name = Path(filename).name
-        if safe_name not in ("index.m3u8", "init.mp4") and not safe_name.endswith(".m4s"):
-            self.send_json({"error": "hls_not_found"}, HTTPStatus.NOT_FOUND)
-            return
-
-        config = load_config()
-        camera = None
-        camera_index = 0
-        for index, item in enumerate(config.get("cameras", [])):
-            if item.get("id") == camera_id or safe_id(item.get("id") or f"camera_{index + 1}") == camera_id:
-                camera = item
-                camera_index = index
-                break
-        if camera is None:
-            self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
-            return
-
-        directory = hls_base_dir(camera, camera_index)
-        key = hls_key(camera, camera_index)
-        log_path = directory / "ffmpeg-hls.log"
-        hls_result = {}
-        if safe_name == "index.m3u8":
-            try:
-                hls_result = start_hls(camera, camera_index)
-            except (OSError, ValueError) as error:
-                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
-                return
-            playlist = directory / safe_name
-            for _ in range(80):
-                if playlist.exists() and playlist.stat().st_size > 0:
-                    break
-                process = HLS_PROCESSES.get(key)
-                if process and process.poll() is not None:
-                    break
-                time.sleep(0.1)
-
-        target = directory / safe_name
-        if not target.exists():
-            process = HLS_PROCESSES.get(key)
-            process_status = {
-                "running": bool(process and process.poll() is None),
-                "returncode": process.poll() if process else None,
-            }
-            payload = {
-                "error": "hls_not_ready",
-                "camera_id": camera.get("id") or camera_id,
-                "stream": camera.get("live_stream") or "sub",
-                "directory": str(directory),
-                "requested": safe_name,
-                "started": hls_result,
-                "process": process_status,
-                "files": sorted(path.name for path in directory.glob("*")) if directory.exists() else [],
-                "ffmpeg_tail": redact_rtsp(read_text_tail(log_path)),
-            }
-            write_debug_event("hls_not_ready", payload)
-            self.send_json(payload, HTTPStatus.NOT_FOUND)
-            return
-        content_type = "application/vnd.apple.mpegurl" if safe_name.endswith(".m3u8") else "video/mp4"
-        self.send_bytes(target.read_bytes(), content_type)
-
-    def serve_live(self, path: str, query: dict[str, list[str]]) -> None:
-        camera_id = path.removeprefix("/live/").removesuffix(".mjpg")
-        requested_stream = normalize_stream_name((query.get("stream") or [""])[0], "")
-        allow_stream_override = (query.get("override") or query.get("debug_stream") or ["0"])[0] in ("1", "true", "yes")
-        tile_mode = (query.get("tile") or ["0"])[0] in ("1", "true", "yes")
-        config = load_config()
-        cameras = config.get("cameras", [])
-        camera = None
-        camera_index = (query.get("camera_index") or [""])[0]
-        if str(camera_index).isdigit():
-            index = int(camera_index)
-            if 0 <= index < len(cameras):
-                camera = cameras[index]
-        if camera is None:
-            camera = next((item for item in cameras if item.get("id") == camera_id), None)
-        if not camera:
-            write_debug_event("live_error", {"reason": "camera_not_found", "path": path, "query": query})
-            self.send_json({"error": "camera_not_found"}, HTTPStatus.NOT_FOUND)
-            return
-
-        configured_stream = normalize_stream_name(camera.get("live_stream"), "sub")
-        configured_tile_stream = normalize_stream_name(camera.get("tile_stream"), "sub")
-        stream_name = requested_stream if requested_stream and allow_stream_override else configured_stream
-        if tile_mode:
-            if camera_stream(camera, configured_tile_stream):
-                stream_name = configured_tile_stream
-            elif camera_stream(camera, "sub"):
-                stream_name = "sub"
-        if requested_stream and requested_stream != configured_stream and not allow_stream_override:
-            write_debug_event("live_stream_override_ignored", {
-                "camera_id": camera.get("id") or camera_id,
-                "requested_stream": requested_stream,
-                "configured_live": configured_stream,
-                "path": self.path,
-            })
-
-        stream = camera_stream(camera, stream_name)
-        if not stream:
-            write_debug_event("live_error", {"reason": "rtsp_not_configured", "camera_id": camera.get("id"), "stream": stream_name})
-            self.send_json({"error": "rtsp_not_configured"}, HTTPStatus.BAD_REQUEST)
-            return
-
-        probe = probe_rtsp_stream(stream, timeout=5)
-        camera_profile = camera_debug_profile(camera, stream_name, probe)
-        live_config = config.get("live") if isinstance(config.get("live"), dict) else {}
-        mjpeg_fps = clamp_int(live_config.get("mjpeg_fps"), 5, 1, 15)
-        mjpeg_quality = clamp_int(live_config.get("mjpeg_quality"), 8, 2, 31)
-        mjpeg_max_width = clamp_int(live_config.get("mjpeg_max_width"), 1280, 320, 3840)
-        if tile_mode:
-            mjpeg_fps = min(mjpeg_fps, 5)
-            mjpeg_max_width = min(mjpeg_max_width, 960)
-        vf = f"fps={mjpeg_fps},scale=w='min({mjpeg_max_width}\\,iw)':h=-2"
-
-        command = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "info",
-            "-nostdin",
-            "-fflags",
-            "nobuffer+discardcorrupt",
-            "-flags",
-            "low_delay",
-            "-rtsp_transport",
-            "tcp",
-            "-timeout",
-            "5000000",
-            "-probesize",
-            "32768",
-            "-analyzeduration",
-            "0",
-            "-thread_queue_size",
-            "512",
-            "-i",
-            stream,
-            "-an",
-            "-vf",
-            vf,
-            "-g",
-            "1",
-            "-vsync",
-            "0",
-            "-preset",
-            "ultrafast",
-            "-vcodec",
-            "mjpeg",
-            "-q:v",
-            str(mjpeg_quality),
-            "-flush_packets",
-            "1",
-            "-f",
-            "image2pipe",
-            "-",
-        ]
-        log_path = HOME_DIR / f"live-{safe_id(camera.get('id') or camera_id)}.log"
-        log_file = log_path.open("ab")
-        request_id = f"{int(time.time())}-{safe_id(stream_name)}"
-        begin_marker = f"=== live request {request_id} begin"
-        started_at = time.monotonic()
-        write_debug_event("live_start", {
-            "request_id": request_id,
-            "client": self.client_address[0],
-            "path": self.path,
-            "user_agent": self.headers.get("User-Agent", ""),
-            "camera": camera_profile,
-            "command": redact_command(command),
-            "mjpeg": {
-                "tile": tile_mode,
-                "fps": mjpeg_fps,
-                "quality": mjpeg_quality,
-                "max_width": mjpeg_max_width,
-                "vf": vf,
-            },
-        })
-        log_file.write(
-            (
-                f"\n=== live request {request_id} begin {time.strftime('%Y-%m-%dT%H:%M:%S%z')} ===\n"
-                f"client={self.client_address[0]} path={self.path}\n"
-                f"user_agent={self.headers.get('User-Agent', '')}\n"
-                f"camera={camera.get('id') or camera_id} index={camera_index or 'lookup'} "
-                f"tile_mode={tile_mode} requested_stream={requested_stream or 'none'} stream={stream_name} configured_live={configured_stream} "
-                f"status={camera.get('status', 'unknown')}\n"
-                f"rtsp={redact_rtsp(stream)}\n"
-                f"command={json.dumps(redact_command(command))}\n"
-                "--- ffmpeg stderr begin ---\n"
-            ).encode("utf-8")
-        )
-        log_file.flush()
-        try:
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log_file)
-        except OSError as error:
-            log_file.close()
-            write_debug_event("live_process_start_error", {
-                "request_id": request_id,
-                "camera": camera_profile,
-                "error": str(error),
-            })
-            self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
-            return
-        finally:
-            log_file.close()
-
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=edgeframe")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-
-        frame_count = 0
-        bytes_sent = 0
-        first_frame_ms = None
-        end_reason = "ffmpeg_stdout_closed"
-        cleanup = "none"
-        try:
-            assert process.stdout is not None
-            buffer = b""
-            while True:
-                chunk = process.stdout.read(16384)
-                if not chunk:
-                    break
-                buffer += chunk
-                while True:
-                    start = buffer.find(b"\xff\xd8")
-                    if start > 0:
-                        buffer = buffer[start:]
-                    end = buffer.find(b"\xff\xd9")
-                    if start == -1 or end == -1:
-                        break
-                    frame = buffer[: end + 2]
-                    buffer = buffer[end + 2 :]
-                    self.wfile.write(b"--edgeframe\r\n")
-                    self.wfile.write(b"Content-Type: image/jpeg\r\n")
-                    self.wfile.write(f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii"))
-                    self.wfile.write(frame)
-                    self.wfile.write(b"\r\n")
-                    self.wfile.flush()
-                    frame_count += 1
-                    bytes_sent += len(frame)
-                    if first_frame_ms is None:
-                        first_frame_ms = int((time.monotonic() - started_at) * 1000)
-                        try:
-                            with log_path.open("ab") as live_log:
-                                live_log.write(f"\n--- first_frame_ms={first_frame_ms} ---\n".encode("utf-8"))
-                        except OSError:
-                            pass
-        except BrokenPipeError:
-            end_reason = "client_broken_pipe"
-        except ConnectionResetError:
-            end_reason = "client_connection_reset"
-        except OSError as error:
-            end_reason = f"stream_write_oserror:{error}"
-        finally:
-            if frame_count == 0 and end_reason == "ffmpeg_stdout_closed":
-                end_reason = "ffmpeg_ended_before_first_frame"
-            try:
-                if process.stdout is not None:
-                    process.stdout.close()
-            except OSError:
-                pass
-            exit_before_cleanup = process.poll()
-            if exit_before_cleanup is None:
-                cleanup = "terminate"
-                process.terminate()
-            exit_after_cleanup = process.poll()
-            try:
-                if exit_after_cleanup is None:
-                    exit_after_cleanup = process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                cleanup = "kill_after_terminate_timeout"
-                process.kill()
-                exit_after_cleanup = process.wait(timeout=2)
-            duration_ms = int((time.monotonic() - started_at) * 1000)
-            stderr_text = ""
-            try:
-                log_text = log_path.read_text(encoding="utf-8", errors="replace")
-                stderr_text = extract_ffmpeg_stderr(log_text, begin_marker)
-            except OSError:
-                stderr_text = ""
-            category, hints = classify_ffmpeg_error(stderr_text, frame_count, end_reason, bytes_sent)
-            write_debug_event("live_end", {
-                "request_id": request_id,
-                "camera": camera_profile,
-                "mjpeg": {
-                    "tile": tile_mode,
-                    "fps": mjpeg_fps,
-                    "quality": mjpeg_quality,
-                    "max_width": mjpeg_max_width,
-                    "vf": vf,
-                },
-                "reason": end_reason,
-                "category": category,
-                "hints": hints,
-                "frames": frame_count,
-                "bytes": bytes_sent,
-                "first_frame_ms": first_frame_ms,
-                "duration_ms": duration_ms,
-                "exit_before_cleanup": exit_before_cleanup,
-                "exit_after_cleanup": exit_after_cleanup,
-                "cleanup": cleanup,
-                "ffmpeg_tail": stderr_text[-3000:],
-            })
-            try:
-                with log_path.open("ab") as live_log:
-                    live_log.write(
-                        (
-                            "\n--- ffmpeg stderr end ---\n"
-                            f"summary request={request_id} reason={end_reason} "
-                            f"frames={frame_count} bytes={bytes_sent} "
-                            f"first_frame_ms={first_frame_ms if first_frame_ms is not None else 'none'} "
-                            f"duration_ms={duration_ms} "
-                            f"exit_before_cleanup={exit_before_cleanup} "
-                            f"exit_after_cleanup={exit_after_cleanup} "
-                            f"cleanup={cleanup}\n"
-                            f"=== live request {request_id} end {time.strftime('%Y-%m-%dT%H:%M:%S%z')} ===\n"
-                        ).encode("utf-8")
-                    )
-            except OSError:
-                pass
-
 
 def main() -> None:
     HOME_DIR.mkdir(parents=True, exist_ok=True)
