@@ -212,7 +212,7 @@ write_mediamtx_path() {
     if [[ "${should_record}" == "true" && "${MEDIAMTX_RECORD}" == "true" ]]; then
       printf '    sourceOnDemand: no\n'
       printf '    record: yes\n'
-      printf '    recordPath: "%s/%s/%%Y-%%m-%%d_%%H-%%M-%%S-%%f"\n' "${RECORDINGS_DIR}" "${path_name}"
+      printf '    recordPath: "%s/%%path/%%Y-%%m-%%d_%%H-%%M-%%S-%%f"\n' "${RECORDINGS_DIR}"
     else
       printf '    sourceOnDemand: yes\n'
       printf '    record: no\n'
@@ -303,7 +303,7 @@ general: {
   transports_folder = "/usr/lib/janus/transports"
   events_folder = "/usr/lib/janus/events"
   log_to_stdout = true
-  debug_level = 4
+  debug_level = 2
   daemonize = false
 }
 nat: {
@@ -347,6 +347,14 @@ general: {
   admin_key = "edge-local"
 }
 EOF
+
+  # recordplay plugin - needs recordings path or it will fail to init
+  cat > "${config_dir}/janus.plugin.recordplay.jcfg" <<EOF
+general: {
+  path = "/tmp/edge-runtime/janus/recordings"
+}
+EOF
+  mkdir -p /tmp/edge-runtime/janus/recordings
 
   if jq -e '.cameras' "${EDGE_CONFIG}" >/dev/null 2>&1; then
     local index=0
@@ -692,6 +700,18 @@ fi
 if [[ "${JANUS_ENABLED}" == "true" ]]; then
   if command -v janus >/dev/null 2>&1; then
     generate_janus_config "${JANUS_CONFIG_DIR}"
+    # Wait for MediaMTX RTSP to be ready before starting Janus streaming plugin
+    # Janus streaming plugin tries to connect to RTSP at init time
+    if [[ "${MEDIAMTX_ENABLED}" == "true" ]]; then
+      bashio::log.info "Waiting for MediaMTX RTSP to be ready on port ${MEDIAMTX_RTSP_PORT}..."
+      for _i in $(seq 1 15); do
+        if nc -z 127.0.0.1 "${MEDIAMTX_RTSP_PORT}" 2>/dev/null; then
+          bashio::log.info "MediaMTX RTSP is ready."
+          break
+        fi
+        sleep 1
+      done
+    fi
     bashio::log.info "Starting Janus WebRTC gateway on HTTP:${JANUS_HTTP_PORT}, WS:${JANUS_WS_PORT}; streams are sourced from MediaMTX RTSP paths."
     janus --configs-folder="${JANUS_CONFIG_DIR}" --disable-colors &
     JANUS_PID="$!"
