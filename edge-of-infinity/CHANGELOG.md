@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.3
+
+- Stop exposing MediaMTX RTSP port `8554` on the Home Assistant host by default so the add-on can start when another RTSP service already uses that port.
+- Keep MediaMTX RTSP available inside the add-on for Janus and internal rebroadcasting.
+- Disable default host mappings for SRT `8890` and MediaMTX API `9997` to reduce startup port conflicts.
+- Harden Camera Settings save: selected `main`/`sub` values now win, while empty technical fields no longer wipe saved RTSP, credentials, ONVIF, or ISAPI values.
+- Remove the old unreachable shell placeholder page and MJPEG status generator from the add-on runner so MediaMTX + Janus is the only live core path.
+- Point live tiles at direct MediaMTX WebRTC pages without legacy MJPEG path suffixes.
+- Hide raw stream URLs from Home Assistant entity attributes to keep the integration focused on status and useful camera metadata.
+
 ## 0.8.0
 
 - Add MediaMTX as the live core and RTSP rebroadcast layer for every configured camera stream.

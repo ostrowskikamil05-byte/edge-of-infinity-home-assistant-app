@@ -34,7 +34,7 @@ STREAM_FALLBACK_CHANNELS = {"main": HIKVISION_MAIN_CHANNEL, "sub": HIKVISION_SUB
 STREAM_ENGINES = ("janus_webrtc", "mediamtx", "ll_hls", "srt")
 MEDIAMTX_ENABLED = os.environ.get("EDGE_MEDIAMTX_ENABLED", "true").lower() == "true"
 MEDIAMTX_HOST = os.environ.get("EDGE_MEDIAMTX_HOST", "127.0.0.1")
-MEDIAMTX_RTSP_PORT = int(os.environ.get("EDGE_MEDIAMTX_RTSP_PORT", "8554"))
+MEDIAMTX_RTSP_PORT = int(os.environ.get("EDGE_MEDIAMTX_RTSP_PORT", "8556"))
 MEDIAMTX_HLS_PORT = int(os.environ.get("EDGE_MEDIAMTX_HLS_PORT", "8888"))
 MEDIAMTX_WEBRTC_PORT = int(os.environ.get("EDGE_MEDIAMTX_WEBRTC_PORT", "8889"))
 MEDIAMTX_WEBRTC_UDP_PORT = int(os.environ.get("EDGE_MEDIAMTX_WEBRTC_UDP_PORT", "8189"))
@@ -391,15 +391,84 @@ def preserve_submitted_stream_choices(payload: dict, raw_payload: dict) -> dict:
     return payload
 
 
-def save_debug_payload(raw_payload: dict, normalized_payload: dict, final_payload: dict) -> None:
+def merge_existing_camera_values(raw_payload: dict) -> dict:
+    """Preserve saved connection fields when the UI posts blanks."""
+    if not isinstance(raw_payload, dict):
+        return {}
+    raw_cameras = raw_payload.get("cameras")
+    if not isinstance(raw_cameras, list):
+        return raw_payload
+
+    existing = load_config()
+    existing_cameras = existing.get("cameras") if isinstance(existing.get("cameras"), list) else []
+    existing_by_id = {
+        str(camera.get("id")): camera
+        for camera in existing_cameras
+        if isinstance(camera, dict) and camera.get("id")
+    }
+    preserve_if_blank = (
+        "id",
+        "name",
+        "vendor",
+        "host",
+        "username",
+        "password",
+        "rtsp_main",
+        "rtsp_sub",
+        "rtsp_sub_channel",
+        "onvif_url",
+        "isapi_base_url",
+    )
+    merged_cameras = []
+    for index, raw_camera in enumerate(raw_cameras):
+        if not isinstance(raw_camera, dict):
+            continue
+        existing_camera = {}
+        if index < len(existing_cameras) and isinstance(existing_cameras[index], dict):
+            existing_camera = existing_cameras[index]
+        if raw_camera.get("id"):
+            existing_camera = existing_by_id.get(str(raw_camera.get("id")), existing_camera)
+
+        merged_camera = dict(raw_camera)
+        for field in preserve_if_blank:
+            if merged_camera.get(field) in ("", None) and existing_camera.get(field) not in ("", None):
+                merged_camera[field] = existing_camera[field]
+        for field in ("snapshot_stream", "live_stream", "record_stream", "tile_stream"):
+            value = raw_camera.get(field)
+            if value in ("main", "sub"):
+                merged_camera[field] = value
+        merged_cameras.append(merged_camera)
+
+    return {**existing, **raw_payload, "cameras": merged_cameras}
+
+
+def redact_config(value):
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if key in ("password", "api_key"):
+                result[key] = "***" if item else ""
+            elif key.startswith("rtsp_") or key.endswith("_rtsp"):
+                result[key] = redact_rtsp(str(item or ""))
+            else:
+                result[key] = redact_config(item)
+        return result
+    if isinstance(value, list):
+        return [redact_config(item) for item in value]
+    return value
+
+
+def save_debug_payload(raw_payload: dict, merged_payload: dict, normalized_payload: dict, final_payload: dict) -> None:
     debug_payload = {
         "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "raw_summary": config_summary(raw_payload),
+        "merged_summary": config_summary(merged_payload),
         "normalized_summary": config_summary(normalized_payload),
         "final_summary": config_summary(final_payload),
-        "raw": raw_payload,
-        "normalized": normalized_payload,
-        "final": final_payload,
+        "raw": redact_config(raw_payload),
+        "merged": redact_config(merged_payload),
+        "normalized": redact_config(normalized_payload),
+        "final": redact_config(final_payload),
     }
     write_json(HOME_DIR / "last-save-debug.json", debug_payload)
 
@@ -2021,7 +2090,7 @@ INDEX_HTML = r"""<!doctype html>
       function directMediaMtxPath(path) {
         const clean = String(path).replace(/^\/+/, '');
         if (window.location.hostname) {
-          return `${window.location.protocol}//${window.location.hostname}:8889/${clean}`;
+          return `http://${window.location.hostname}:8889/${clean}`;
         }
         return `http://127.0.0.1:8889/${clean}`;
       }
@@ -2138,7 +2207,7 @@ INDEX_HTML = r"""<!doctype html>
         const liveResolution = camera.live_width && camera.live_height ? `${camera.live_width}x${camera.live_height}` : 'unknown';
         const previewResolution = previewStream === liveStream ? liveResolution : 'tile';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
-        const mediamtxPath = `${encodeURIComponent(liveId)}_${encodeURIComponent(previewStream)}/`;
+        const mediamtxPath = `${encodeURIComponent(liveId)}_${encodeURIComponent(previewStream)}`;
         const mediamtxUrl = directMediaMtxPath(mediamtxPath);
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         const preview = live[liveKey]
@@ -2980,7 +3049,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.8.2"
+    server_version = "EdgePanel/0.8.3"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -3107,17 +3176,20 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 existing = load_config()
                 if existing.get("cameras"):
                     raw_payload = {**existing, **raw_payload, "cameras": existing["cameras"]}
-            validate_config_for_save(raw_payload)
-            normalized_payload = normalize_config(raw_payload)
+            merged_payload = merge_existing_camera_values(raw_payload)
+            validate_config_for_save(merged_payload)
+            normalized_payload = normalize_config(merged_payload)
             payload = json.loads(json.dumps(normalized_payload))
-            payload = preserve_submitted_stream_choices(payload, raw_payload)
+            payload = preserve_submitted_stream_choices(payload, merged_payload)
             validate_config_for_save(payload)
             backup_config()
             write_json(CONFIG_PATH, payload)
             saved_payload = load_config()
-            save_debug_payload(raw_payload, normalized_payload, saved_payload)
+            write_json(HOME_DIR / "edge.last-saved.json", payload)
+            save_debug_payload(raw_payload, merged_payload, normalized_payload, saved_payload)
             write_debug_event("config_save", {
                 "raw_summary": config_summary(raw_payload),
+                "merged_summary": config_summary(merged_payload),
                 "normalized_summary": config_summary(normalized_payload),
                 "final_summary": config_summary(payload),
                 "saved_summary": config_summary(saved_payload),

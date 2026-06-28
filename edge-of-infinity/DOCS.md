@@ -112,7 +112,7 @@ Edit the IP address, username, password, RTSP URLs, ONVIF URL, and ISAPI base UR
 "enabled": true
 ```
 
-Restart the app to refresh the current shell panel. The real video engine will use the same effective camera config once `edge-core` is bundled.
+Restart the app to refresh the current panel. MediaMTX and Janus use the same effective camera config generated from these fields.
 
 ## RTSP Probe Shell
 
@@ -141,25 +141,19 @@ Use `sub` for a lighter panel or `main` for a full-quality snapshot. `rtsp_main`
 
 This is not live video yet. It is the first real camera connectivity test before WebRTC live is added. Restart the add-on when you want to rerun the temporary probe.
 
-## Experimental Live Preview
+## Live Preview Core
 
-Starting with version `0.4.6`, the panel uses refreshed JPEG live frames by default:
-
-```text
-/live-frame/<camera_id>.jpg
-```
-
-This avoids browser and Home Assistant Ingress problems with multipart MJPEG. When `Start live` is enabled, the panel keeps requesting fresh frames from the selected `sub` or `main` RTSP stream.
-
-The older diagnostic MJPEG path is still available:
+Starting with version `0.8.0`, the panel uses MediaMTX and Janus as the live core. Camera RTSP streams are rebroadcast inside the add-on, and the browser opens the MediaMTX WebRTC page directly:
 
 ```text
-/live/<camera_id>.mjpg
+http://<home-assistant-host>:8889/<camera_id>_<main-or-sub>
 ```
 
-Both paths use FFmpeg and are stepping stones for testing the live pipeline from the Edge panel. The final low-latency engine should use WebRTC.
+The add-on keeps MediaMTX RTSP internal by default so it does not conflict with other Home Assistant add-ons on port `8554`. External browser playback uses WebRTC/WHEP on port `8889`, LL-HLS on `8888`, and Janus HTTP/WebSocket on `8188`/`8190`.
 
-Starting with version `0.4.8`, live preview targeting uses the camera slot index in addition to the camera id. This prevents a duplicated or stale camera id from opening the wrong stream. Camera cards also show a small rounded status badge:
+Starting with version `0.8.3`, the old shell placeholder page and MJPEG status generator were removed from the runner. The Edge panel is the controller, while MediaMTX + Janus is the live path.
+
+Camera cards show a small rounded status badge:
 
 ```text
 online

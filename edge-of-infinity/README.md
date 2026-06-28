@@ -11,7 +11,8 @@ This app runs Edge Core and exposes the Edge web UI through Home Assistant Ingre
 - Watchdog health endpoint.
 - Persistent config and media mounts.
 - Optional public API port.
-- Multi-camera shell with two Hikvision slots.
+- MediaMTX + Janus WebRTC live core.
+- Multi-camera configuration with Hikvision-first defaults.
 - RTSP reachability checks for enabled cameras.
 
 ## First Configuration
@@ -46,10 +47,8 @@ Recordings default to:
 
 ## Notes
 
-This package currently contains the Home Assistant app shell. The actual Edge Core binary will be bundled once the RTSP/WebRTC MVP is implemented.
+This package now runs the Edge panel as the controller and MediaMTX + Janus as the live core. MediaMTX rebroadcasts configured RTSP streams inside the add-on; Janus is prepared for WebRTC gateway workflows.
 
-The shell creates `/homeassistant/edge/edge.json` with two Hikvision camera slots so the app can be configured for multiple cameras before the real engine is bundled.
+The add-on creates `/homeassistant/edge/edge.json` with starter Hikvision camera slots. Camera Settings in the panel is the preferred editor and preserves saved connection fields when a form submits blank technical values.
 
-Enabled cameras are probed through `rtsp_main` once when the add-on starts. The shell also captures one JPEG snapshot through the per-camera `snapshot_stream` setting, either `sub` or `main`. This verifies camera connectivity before WebRTC live is implemented without refreshing the sidebar page.
-
-From version `0.4.2`, the panel also includes an experimental MJPEG live preview. It is a stepping stone for testing the live path before the low-latency WebRTC engine is bundled.
+Enabled cameras are probed through the configured stream. Browser live preview should use MediaMTX WebRTC on port `8889`; the old MJPEG/JPEG preview paths are no longer the panel's primary live route.

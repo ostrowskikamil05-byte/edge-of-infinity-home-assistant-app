@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.8.2"
+version: "0.8.3"
 slug: edge_of_infinity
 description: Private low-latency live NVR core for Hikvision and ONVIF cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -21,24 +21,24 @@ watchdog: http://[HOST]:[PORT:8088]/health
 webui: http://[HOST]:[PORT:8088]/
 ports:
   8088/tcp: 8088
-  8556/tcp: 8556
+  8556/tcp: null
   8888/tcp: 8888
   8889/tcp: 8889
   8189/udp: 8189
   8192/tcp: 8192
   8193/tcp: 8193
-  8890/udp: 8890
-  9997/tcp: 9997
+  8890/udp: null
+  9997/tcp: null
 ports_description:
   8088/tcp: Edge Core API and web interface
-  8556/tcp: MediaMTX RTSP proxy (changed from 8554 to avoid conflict with go2rtc/Frigate)
+  8556/tcp: MediaMTX RTSP proxy disabled by default to avoid host port conflicts
   8888/tcp: MediaMTX low-latency HLS
   8889/tcp: MediaMTX WebRTC WHEP/WHIP
   8189/udp: MediaMTX WebRTC ICE UDP
   8192/tcp: Janus HTTP API (changed from 8188 to avoid conflict)
   8193/tcp: Janus WebSocket API (changed from 8190 to avoid conflict)
-  8890/udp: MediaMTX SRT relay
-  9997/tcp: MediaMTX local API
+  8890/udp: MediaMTX SRT relay disabled by default
+  9997/tcp: MediaMTX local API disabled by default
 map:
   - type: homeassistant_config
     read_only: false
@@ -105,7 +105,7 @@ schema:
   retention_days: int(1,365)
   install_custom_component: bool
   sync_addon_options: bool
-  core_engine: list(mediamtx_janus|mediamtx|edge-core|python)
+  core_engine: list(mediamtx_janus|mediamtx)
   mediamtx_enabled: bool
   mediamtx_rtsp_port: port
   mediamtx_hls_port: port
