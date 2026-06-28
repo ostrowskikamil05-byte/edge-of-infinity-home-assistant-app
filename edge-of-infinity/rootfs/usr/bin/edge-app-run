@@ -29,6 +29,7 @@ MEDIAMTX_RTSP_PORT="$(read_option 'mediamtx_rtsp_port' '8556')"
 MEDIAMTX_HLS_PORT="$(read_option 'mediamtx_hls_port' '8888')"
 MEDIAMTX_WEBRTC_PORT="$(read_option 'mediamtx_webrtc_port' '8889')"
 MEDIAMTX_WEBRTC_UDP_PORT="$(read_option 'mediamtx_webrtc_udp_port' '8189')"
+MEDIAMTX_WEBRTC_PUBLIC_HOSTS="$(read_option 'mediamtx_webrtc_public_hosts' 'homeassistant.local,192.168.33.17')"
 MEDIAMTX_SRT_PORT="$(read_option 'mediamtx_srt_port' '8890')"
 MEDIAMTX_API_PORT="$(read_option 'mediamtx_api_port' '9997')"
 MEDIAMTX_RECORD="$(read_option 'mediamtx_record' 'true')"
@@ -49,6 +50,7 @@ MEDIAMTX_RTSP_PORT="${MEDIAMTX_RTSP_PORT:-8556}"
 MEDIAMTX_HLS_PORT="${MEDIAMTX_HLS_PORT:-8888}"
 MEDIAMTX_WEBRTC_PORT="${MEDIAMTX_WEBRTC_PORT:-8889}"
 MEDIAMTX_WEBRTC_UDP_PORT="${MEDIAMTX_WEBRTC_UDP_PORT:-8189}"
+MEDIAMTX_WEBRTC_PUBLIC_HOSTS="${MEDIAMTX_WEBRTC_PUBLIC_HOSTS:-homeassistant.local,192.168.33.17}"
 MEDIAMTX_SRT_PORT="${MEDIAMTX_SRT_PORT:-8890}"
 MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT:-9997}"
 MEDIAMTX_RECORD="${MEDIAMTX_RECORD:-true}"
@@ -195,6 +197,20 @@ safe_path_id() {
   printf '%s' "${value}" | tr -c 'A-Za-z0-9_.-' '_'
 }
 
+csv_to_json_array() {
+  local csv="$1"
+  local result="[]"
+  local item trimmed
+  IFS=',' read -r -a items <<< "${csv}"
+  for item in "${items[@]}"; do
+    trimmed="$(printf '%s' "${item}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [[ -n "${trimmed}" ]]; then
+      result="$(jq -c --arg value "${trimmed}" '. + [$value]' <<< "${result}")"
+    fi
+  done
+  printf '%s' "${result}"
+}
+
 write_mediamtx_path() {
   local output="$1"
   local path_name="$2"
@@ -222,6 +238,8 @@ write_mediamtx_path() {
 
 generate_mediamtx_config() {
   local output="$1"
+  local webrtc_public_hosts
+  webrtc_public_hosts="$(csv_to_json_array "${MEDIAMTX_WEBRTC_PUBLIC_HOSTS}")"
   cat > "${output}" <<EOF
 logLevel: ${LOG_LEVEL}
 logDestinations: [stdout]
@@ -260,7 +278,7 @@ webrtcAddress: :${MEDIAMTX_WEBRTC_PORT}
 webrtcAllowOrigins: ["*"]
 webrtcLocalUDPAddress: :${MEDIAMTX_WEBRTC_UDP_PORT}
 webrtcIPsFromInterfaces: yes
-webrtcAdditionalHosts: []
+webrtcAdditionalHosts: ${webrtc_public_hosts}
 
 srt: yes
 srtAddress: :${MEDIAMTX_SRT_PORT}
@@ -728,6 +746,7 @@ export EDGE_MEDIAMTX_RTSP_PORT="${MEDIAMTX_RTSP_PORT}"
 export EDGE_MEDIAMTX_HLS_PORT="${MEDIAMTX_HLS_PORT}"
 export EDGE_MEDIAMTX_WEBRTC_PORT="${MEDIAMTX_WEBRTC_PORT}"
 export EDGE_MEDIAMTX_WEBRTC_UDP_PORT="${MEDIAMTX_WEBRTC_UDP_PORT}"
+export EDGE_MEDIAMTX_WEBRTC_PUBLIC_HOSTS="${MEDIAMTX_WEBRTC_PUBLIC_HOSTS}"
 export EDGE_MEDIAMTX_SRT_PORT="${MEDIAMTX_SRT_PORT}"
 export EDGE_MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT}"
 export EDGE_JANUS_ENABLED="${JANUS_ENABLED}"

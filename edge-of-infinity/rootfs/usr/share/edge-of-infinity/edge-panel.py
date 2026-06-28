@@ -38,6 +38,11 @@ MEDIAMTX_RTSP_PORT = int(os.environ.get("EDGE_MEDIAMTX_RTSP_PORT", "8556"))
 MEDIAMTX_HLS_PORT = int(os.environ.get("EDGE_MEDIAMTX_HLS_PORT", "8888"))
 MEDIAMTX_WEBRTC_PORT = int(os.environ.get("EDGE_MEDIAMTX_WEBRTC_PORT", "8889"))
 MEDIAMTX_WEBRTC_UDP_PORT = int(os.environ.get("EDGE_MEDIAMTX_WEBRTC_UDP_PORT", "8189"))
+MEDIAMTX_WEBRTC_PUBLIC_HOSTS = [
+    item.strip()
+    for item in os.environ.get("EDGE_MEDIAMTX_WEBRTC_PUBLIC_HOSTS", "homeassistant.local,192.168.33.17").split(",")
+    if item.strip()
+]
 MEDIAMTX_SRT_PORT = int(os.environ.get("EDGE_MEDIAMTX_SRT_PORT", "8890"))
 MEDIAMTX_API_PORT = int(os.environ.get("EDGE_MEDIAMTX_API_PORT", "9997"))
 MEDIAMTX_CONFIG_PATH = Path(os.environ.get("EDGE_MEDIAMTX_CONFIG", "/tmp/edge-runtime/mediamtx.yml"))
@@ -810,6 +815,7 @@ def mediamtx_status() -> dict:
             "ll_hls": MEDIAMTX_HLS_PORT,
             "webrtc_whep": MEDIAMTX_WEBRTC_PORT,
             "webrtc_ice_udp": MEDIAMTX_WEBRTC_UDP_PORT,
+            "webrtc_public_hosts": MEDIAMTX_WEBRTC_PUBLIC_HOSTS,
             "srt": MEDIAMTX_SRT_PORT,
             "api": MEDIAMTX_API_PORT,
         },
@@ -3049,7 +3055,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.8.3"
+    server_version = "EdgePanel/0.8.4"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

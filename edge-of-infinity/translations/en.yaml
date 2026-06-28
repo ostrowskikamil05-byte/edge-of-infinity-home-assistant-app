@@ -17,6 +17,9 @@ configuration:
   install_custom_component:
     name: Install custom component
     description: Automatically install or update /homeassistant/custom_components/edge when the app starts.
+  mediamtx_webrtc_public_hosts:
+    name: WebRTC public hosts
+    description: Comma-separated hostnames or LAN IP addresses advertised by MediaMTX for WebRTC ICE.
   hikvision_1_enabled:
     name: Camera 1 enabled
     description: Enables the first Hikvision camera in Edge.

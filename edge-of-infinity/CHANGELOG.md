@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.4
+
+- Add explicit MediaMTX WebRTC public ICE hosts so browser WHEP sessions can reach the add-on over `homeassistant.local` or the LAN IP instead of timing out during ICE setup.
+- Keep MediaMTX RTSP/SRT/API internal while preserving direct browser WebRTC on `8889` and UDP ICE on `8189`.
+- Include configured WebRTC public hosts in core diagnostics.
+
 ## 0.8.3
 
 - Stop exposing MediaMTX RTSP port `8554` on the Home Assistant host by default so the add-on can start when another RTSP service already uses that port.
