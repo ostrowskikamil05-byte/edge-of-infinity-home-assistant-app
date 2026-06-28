@@ -277,7 +277,8 @@ webrtc: yes
 webrtcAddress: :${MEDIAMTX_WEBRTC_PORT}
 webrtcAllowOrigins: ["*"]
 webrtcLocalUDPAddress: :${MEDIAMTX_WEBRTC_UDP_PORT}
-webrtcIPsFromInterfaces: yes
+webrtcLocalTCPAddress: :${MEDIAMTX_WEBRTC_UDP_PORT}
+webrtcIPsFromInterfaces: no
 webrtcAdditionalHosts: ${webrtc_public_hosts}
 
 srt: yes

@@ -362,37 +362,36 @@ def normalize_config(payload: dict) -> dict:
     }
 
 
-def preserve_submitted_stream_choices(payload: dict, raw_payload: dict) -> dict:
-    """Keep explicit UI stream choices after normalization builds RTSP URLs.
+def preserve_submitted_stream_choices(payload: dict, *source_payloads: dict) -> dict:
+    """Keep explicit UI stream choices after normalization and persistence.
 
-    FIX 0.5.8: always use index as primary match (not id) so new cameras
-    without a stable id still get their stream choices preserved correctly.
+    Index is the authoritative match because the settings form is ordered.
+    ID is only a fallback for future API callers that may omit indexes.
     """
-    raw_cameras = raw_payload.get("cameras") if isinstance(raw_payload, dict) else []
     cameras = payload.get("cameras") if isinstance(payload, dict) else []
-    if not isinstance(raw_cameras, list) or not isinstance(cameras, list):
+    if not isinstance(cameras, list):
         return payload
     cameras_by_id = {
         str(camera.get("id")): camera
         for camera in cameras
         if isinstance(camera, dict) and camera.get("id")
     }
-    for index, raw_camera in enumerate(raw_cameras):
-        if not isinstance(raw_camera, dict):
+    for source_payload in source_payloads:
+        raw_cameras = source_payload.get("cameras") if isinstance(source_payload, dict) else []
+        if not isinstance(raw_cameras, list):
             continue
-        # FIX: prefer index-based match first (reliable), then id-based fallback
-        if index < len(cameras):
-            target = cameras[index]
-        elif raw_camera.get("id"):
-            target = cameras_by_id.get(str(raw_camera.get("id")))
-        else:
-            target = None
-        if not isinstance(target, dict):
-            continue
-        for field in ("snapshot_stream", "live_stream", "record_stream", "tile_stream"):
-            value = raw_camera.get(field)
-            if value in ("main", "sub"):
-                target[field] = value
+        for index, raw_camera in enumerate(raw_cameras):
+            if not isinstance(raw_camera, dict):
+                continue
+            target = cameras[index] if index < len(cameras) else None
+            if target is None and raw_camera.get("id"):
+                target = cameras_by_id.get(str(raw_camera.get("id")))
+            if not isinstance(target, dict):
+                continue
+            for field in ("snapshot_stream", "live_stream", "record_stream", "tile_stream"):
+                value = raw_camera.get(field)
+                if value in ("main", "sub"):
+                    target[field] = value
     return payload
 
 
@@ -1544,12 +1543,8 @@ def refresh_status() -> dict:
             else:
                 live_probe_status = "missing_rtsp"
 
-        # FIX 0.5.8: capture snapshot when camera is online
-        if status == "online":
-            try:
-                snapshot_path, snapshot_url = capture_snapshot(camera, camera_key)
-            except Exception:
-                snapshot_path, snapshot_url = "", ""
+        # Live is now served by MediaMTX/Janus. Status refresh intentionally does
+        # not capture JPEG snapshots, so old fallback work cannot block live.
 
         camera_status = {
             "id": camera.get("id"),
@@ -3055,7 +3050,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.8.4"
+    server_version = "EdgePanel/0.8.5"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -3186,11 +3181,19 @@ class EdgeHandler(BaseHTTPRequestHandler):
             validate_config_for_save(merged_payload)
             normalized_payload = normalize_config(merged_payload)
             payload = json.loads(json.dumps(normalized_payload))
-            payload = preserve_submitted_stream_choices(payload, merged_payload)
+            payload = preserve_submitted_stream_choices(payload, merged_payload, raw_payload)
             validate_config_for_save(payload)
             backup_config()
             write_json(CONFIG_PATH, payload)
-            saved_payload = load_config()
+            loaded_payload = load_config()
+            if config_summary(loaded_payload) != config_summary(payload):
+                write_debug_event("config_save_rewrite_after_verify", {
+                    "expected_summary": config_summary(payload),
+                    "loaded_summary": config_summary(loaded_payload),
+                })
+                write_json(CONFIG_PATH, payload)
+                loaded_payload = load_config()
+            saved_payload = preserve_submitted_stream_choices(loaded_payload, merged_payload, raw_payload)
             write_json(HOME_DIR / "edge.last-saved.json", payload)
             save_debug_payload(raw_payload, merged_payload, normalized_payload, saved_payload)
             write_debug_event("config_save", {

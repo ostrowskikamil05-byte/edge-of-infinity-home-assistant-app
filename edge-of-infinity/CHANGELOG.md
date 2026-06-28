@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.5
+
+- Fix Camera Settings save verification so explicit `tile`, `live`, `record`, and `snapshot` stream choices from the panel are enforced after backend normalization and after the persisted config is read back.
+- Stop automatic snapshot capture during status refresh so old JPEG fallback work cannot interfere with the MediaMTX/Janus live core.
+- Tighten MediaMTX WebRTC ICE candidates: do not advertise Docker interface IPs, advertise configured LAN/public hosts, and enable TCP fallback on the ICE port.
+- Remove tracked Python bytecode from the add-on payload and ignore future `__pycache__` files.
+
 ## 0.8.4
 
 - Add explicit MediaMTX WebRTC public ICE hosts so browser WHEP sessions can reach the add-on over `homeassistant.local` or the LAN IP instead of timing out during ICE setup.

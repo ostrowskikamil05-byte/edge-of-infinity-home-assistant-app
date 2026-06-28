@@ -51,4 +51,4 @@ This package now runs the Edge panel as the controller and MediaMTX + Janus as t
 
 The add-on creates `/homeassistant/edge/edge.json` with starter Hikvision camera slots. Camera Settings in the panel is the preferred editor and preserves saved connection fields when a form submits blank technical values.
 
-Enabled cameras are probed through the configured stream. Browser live preview should use MediaMTX WebRTC on port `8889`; the old MJPEG/JPEG preview paths are no longer the panel's primary live route.
+Enabled cameras are probed through the configured stream. Browser live preview should use MediaMTX WebRTC on port `8889`; the old MJPEG/JPEG preview paths are no longer the panel's live route.

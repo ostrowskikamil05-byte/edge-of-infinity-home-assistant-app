@@ -2,7 +2,7 @@
 
 ## Sidebar
 
-The app enables Home Assistant Ingress and adds an Edge Infinity item to the sidebar for administrators. The sidebar panel can edit Hikvision camera settings, refresh RTSP status, and open an experimental MJPEG live preview.
+The app enables Home Assistant Ingress and adds an Edge Infinity item to the sidebar for administrators. The sidebar panel can edit Hikvision camera settings, refresh RTSP status, and open MediaMTX/Janus live preview paths.
 
 ## Logs
 
@@ -149,7 +149,7 @@ Starting with version `0.8.0`, the panel uses MediaMTX and Janus as the live cor
 http://<home-assistant-host>:8889/<camera_id>_<main-or-sub>
 ```
 
-The add-on keeps MediaMTX RTSP internal by default so it does not conflict with other Home Assistant add-ons. The internal RTSP port defaults to `8556`. External browser playback uses WebRTC/WHEP on port `8889`, LL-HLS on `8888`, UDP ICE on `8189`, and Janus HTTP/WebSocket on `8192`/`8193`.
+The add-on keeps MediaMTX RTSP internal by default so it does not conflict with other Home Assistant add-ons. The internal RTSP port defaults to `8556`. External browser playback uses WebRTC/WHEP on port `8889`, LL-HLS on `8888`, UDP/TCP ICE on `8189`, and Janus HTTP/WebSocket on `8192`/`8193`.
 
 Starting with version `0.8.4`, MediaMTX also receives explicit WebRTC public hosts through:
 
@@ -158,6 +158,8 @@ mediamtx_webrtc_public_hosts: homeassistant.local,192.168.33.17
 ```
 
 These hosts are advertised as ICE candidates so the browser can connect to the add-on instead of waiting until the WebRTC session times out.
+
+Starting with version `0.8.5`, MediaMTX no longer advertises Docker bridge interface IPs as WebRTC ICE candidates. It uses the configured public hosts and exposes the ICE port over UDP and TCP so browsers on the LAN are not offered unreachable `172.30.x.x` candidates first.
 
 Starting with version `0.8.3`, the old shell placeholder page and MJPEG status generator were removed from the runner. The Edge panel is the controller, while MediaMTX + Janus is the live path.
 
