@@ -2555,9 +2555,14 @@ INDEX_HTML = r"""<!doctype html>
         ];
         config = { ...config, cameras };
         form.innerHTML = cameras.map(cameraForm).join('');
-        nvrGrid.innerHTML = cameras.map(nvrCard).join('');
+        renderNvrGrid();
         renderPresetSlots(cameras);
         renderEdgeSettings();
+      }
+
+      function renderNvrGrid() {
+        const cameras = config.cameras && config.cameras.length ? config.cameras : [];
+        nvrGrid.innerHTML = cameras.map(nvrCard).join('');
       }
 
       function renderPresetSlots(cameras) {
@@ -2751,8 +2756,9 @@ INDEX_HTML = r"""<!doctype html>
 
       function collectEdgeSettings() {
         const get = (name) => edgeForm.elements[name];
+        const cameraConfig = collectConfig();
         return {
-          ...config,
+          ...cameraConfig,
           server: {
             listen: get('server-listen').value.trim() || '0.0.0.0:8088',
             public_url: get('server-public-url').value.trim()
@@ -2816,6 +2822,14 @@ INDEX_HTML = r"""<!doctype html>
         renderConfig();
       }
 
+      async function fetchSavedConfig() {
+        const response = await fetch(panelPath('api/config'), { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`Could not verify saved config: ${response.status}`);
+        }
+        return response.json();
+      }
+
       async function loadCameras() {
         const response = await fetch(panelPath('cameras.json'), { cache: 'no-store' });
         const data = await response.json();
@@ -2873,12 +2887,7 @@ INDEX_HTML = r"""<!doctype html>
             delete selectedRecording[item.index];
           }
         });
-        if (configDirty) {
-          const cameras = config.cameras && config.cameras.length ? config.cameras : [];
-          nvrGrid.innerHTML = cameras.map(nvrCard).join('');
-        } else {
-          renderConfig();
-        }
+        renderNvrGrid();
       }
 
       function moveRecording(index, direction) {
@@ -2889,7 +2898,7 @@ INDEX_HTML = r"""<!doctype html>
           ? Math.min(files.length - 1, current + 1)
           : Math.max(0, current - 1);
         selectedRecording[index] = files[next].url;
-        renderConfig();
+        renderNvrGrid();
       }
 
       function streamSettingsFromEditor(editor) {
@@ -3029,17 +3038,23 @@ INDEX_HTML = r"""<!doctype html>
           debugEvent('ui_save_config_error', { status: response.status, data });
           return;
         }
-        config = data;
+        const verified = await fetchSavedConfig();
+        config = verified;
         renderConfig();
         configDirty = false;
         await loadPresets();
         await loadCameras();
         const sentSummary = saveSummary(payload);
-        const savedSummary = saveSummary(data);
+        const savedSummary = saveSummary(verified);
         saveState.textContent = sentSummary === savedSummary
           ? `Saved. ${savedSummary}`
           : `Saved, but server normalized values. Sent: ${sentSummary} | Server: ${savedSummary}`;
-        debugEvent('ui_save_config_done', { sentSummary, savedSummary, normalized: sentSummary !== savedSummary });
+        debugEvent('ui_save_config_done', {
+          sentSummary,
+          serverSummary: saveSummary(data),
+          savedSummary,
+          normalized: sentSummary !== savedSummary
+        });
       });
 
       document.getElementById('save-edge-settings').addEventListener('click', async () => {
@@ -3059,7 +3074,7 @@ INDEX_HTML = r"""<!doctype html>
           edgeSaveState.textContent = data.error || 'Could not save Edge settings.';
           return;
         }
-        config = data;
+        config = await fetchSavedConfig();
         renderConfig();
         if (liveTimer) {
           window.clearInterval(liveTimer);
@@ -3128,7 +3143,7 @@ INDEX_HTML = r"""<!doctype html>
         const playRecording = event.target?.dataset?.playRecording;
         if (index !== undefined && playRecording) {
           selectedRecording[index] = playRecording;
-          renderConfig();
+          renderNvrGrid();
           return;
         }
         const playbackStep = event.target?.dataset?.playbackStep;
@@ -3169,7 +3184,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.7.1"
+    server_version = "EdgePanel/0.7.2"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -3370,17 +3385,20 @@ class EdgeHandler(BaseHTTPRequestHandler):
             validate_config_for_save(payload)
             backup_config()
             write_json(CONFIG_PATH, payload)
-            save_debug_payload(raw_payload, normalized_payload, payload)
+            saved_payload = load_config()
+            save_debug_payload(raw_payload, normalized_payload, saved_payload)
             write_debug_event("config_save", {
                 "raw_summary": config_summary(raw_payload),
                 "normalized_summary": config_summary(normalized_payload),
                 "final_summary": config_summary(payload),
+                "saved_summary": config_summary(saved_payload),
+                "verified": config_summary(payload) == config_summary(saved_payload),
                 "changed_by": self.client_address[0],
             })
-            stop_orphan_recordings(payload)
-            remember_camera_presets(payload.get("cameras", []))
+            stop_orphan_recordings(saved_payload)
+            remember_camera_presets(saved_payload.get("cameras", []))
             refresh_status()
-            self.send_json(payload)
+            self.send_json(saved_payload)
         except (json.JSONDecodeError, OSError, ValueError) as error:
             write_debug_event("config_save_error", {"error": str(error)})
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)

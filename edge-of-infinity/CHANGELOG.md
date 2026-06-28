@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.2
+
+- Fix camera settings being overwritten by background NVR refreshes while editing.
+- Verify camera saves by reading `/homeassistant/edge/edge.json` back after write and returning the persisted config to the UI.
+- Make Edge settings save use the current camera form values instead of stale in-memory config.
+
 ## 0.6.1
 
 - Improve LL-HLS startup diagnostics so `hls_not_ready` returns ffmpeg status, generated files, working directory, and stderr tail.
