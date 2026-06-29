@@ -2427,6 +2427,27 @@ INDEX_HTML = r"""<!doctype html>
       .preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
       .preview iframe.live-frame { width: 100%; height: 100%; border: 0; display: block; background: #05080a; }
       .preview span { color: var(--muted); font-size: 13px; padding: 12px; text-align: center; }
+      .live-blocked {
+        width: 100%;
+        height: 100%;
+        display: grid;
+        place-items: center;
+        padding: 14px;
+        text-align: center;
+        color: var(--muted);
+        background: linear-gradient(180deg, rgba(250,110,126,.08), rgba(0,0,0,.1));
+      }
+      .live-blocked b {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--danger);
+      }
+      .live-blocked code {
+        display: block;
+        margin-top: 7px;
+        font-size: 11px;
+        color: #b9d6d3;
+      }
       .tile-line {
         display: flex;
         align-items: center;
@@ -2546,6 +2567,13 @@ INDEX_HTML = r"""<!doctype html>
       .stream-pill code { overflow-wrap: anywhere; }
       .section-status { margin-top: 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
       .notice { margin-top: 10px; color: var(--muted); font-size: 13px; }
+      .notice.warning {
+        border: 1px solid rgba(250,110,126,.36);
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: rgba(250,110,126,.08);
+        color: var(--text);
+      }
       .preset-bar {
         display: grid;
         grid-template-columns: minmax(180px, 1fr) 120px auto;
@@ -2824,6 +2852,7 @@ INDEX_HTML = r"""<!doctype html>
       let panelLogs = null;
       let activePage = 'home';
       let nvrLoading = false;
+      const liveFrameTimers = new Map();
 
       const panelBase = window.location.pathname.endsWith('/')
         ? window.location.pathname
@@ -2853,26 +2882,138 @@ INDEX_HTML = r"""<!doctype html>
         return `http://127.0.0.1:8889/${clean}`;
       }
 
+      function parseUrl(value) {
+        try {
+          return new URL(value, window.location.href);
+        } catch (_) {
+          return null;
+        }
+      }
+
       function isLanHost(hostname) {
         const host = String(hostname || '').toLowerCase();
         return host === 'localhost'
+          || host === '127.0.0.1'
+          || host === '::1'
           || host.endsWith('.local')
           || host.startsWith('192.168.')
           || host.startsWith('10.')
           || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
       }
 
+      function liveConnectionPlan(path) {
+        const publicUrl = String(config?.live?.mobile_webrtc_public_url || '').trim().replace(/\/+$/, '');
+        const mediaUrl = directMediaMtxPath(path);
+        const parsedMediaUrl = parseUrl(mediaUrl);
+        const pageHost = window.location.hostname || '';
+        const mediaHost = parsedMediaUrl?.hostname || '';
+        const pageIsLan = isLanHost(pageHost);
+        const mediaIsLan = isLanHost(mediaHost);
+        const pageIsHttps = window.location.protocol === 'https:';
+        const mediaIsHttp = parsedMediaUrl?.protocol === 'http:';
+        const publicUrlConfigured = Boolean(publicUrl);
+        const remotePage = !pageIsLan;
+        const iceTransport = String(config?.live?.mobile_webrtc_ice_transport || 'auto');
+        const diagnostics = {
+          page_protocol: window.location.protocol,
+          page_host: pageHost,
+          page_is_lan: pageIsLan,
+          media_url: mediaUrl,
+          media_protocol: parsedMediaUrl?.protocol || 'invalid',
+          media_host: mediaHost || 'invalid',
+          media_is_lan: mediaIsLan,
+          public_url_configured: publicUrlConfigured,
+          mobile_webrtc_public_url: publicUrl || '',
+          ice_transport: iceTransport,
+          user_agent: navigator.userAgent,
+          viewport: `${window.innerWidth}x${window.innerHeight}`,
+        };
+        if (publicUrlConfigured && !/^https?:\/\//i.test(publicUrl)) {
+          return {
+            url: mediaUrl,
+            canEmbed: false,
+            reason: 'public_webrtc_url_missing_scheme',
+            message: 'WebRTC public URL must start with http:// or https://.',
+            diagnostics,
+          };
+        }
+        if (remotePage && !publicUrlConfigured) {
+          return {
+            url: mediaUrl,
+            canEmbed: false,
+            reason: 'public_webrtc_url_missing',
+            message: 'Remote live needs Edge Settings -> WebRTC public URL. A LAN fallback cannot work on LTE or another Wi-Fi.',
+            diagnostics,
+          };
+        }
+        if (!parsedMediaUrl) {
+          return {
+            url: mediaUrl,
+            canEmbed: false,
+            reason: 'invalid_media_url',
+            message: 'WebRTC URL is invalid. Check Edge Settings -> WebRTC public URL.',
+            diagnostics,
+          };
+        }
+        if (pageIsHttps && mediaIsHttp) {
+          return {
+            url: mediaUrl,
+            canEmbed: false,
+            reason: 'mixed_content_blocked',
+            message: 'This Home Assistant page is HTTPS, but WebRTC URL is HTTP. Use HTTPS reverse proxy for MediaMTX or open the panel over HTTP on LAN.',
+            diagnostics,
+          };
+        }
+        if (remotePage && publicUrlConfigured && mediaIsLan) {
+          return {
+            url: mediaUrl,
+            canEmbed: false,
+            reason: 'public_webrtc_url_is_lan',
+            message: 'WebRTC public URL points to a private LAN address. LTE cannot reach 192.168/10/172.16 addresses without VPN, TURN, or a public reverse proxy.',
+            diagnostics,
+          };
+        }
+        return {
+          url: mediaUrl,
+          canEmbed: true,
+          reason: 'ok',
+          message: 'WebRTC URL can be embedded from this browser context.',
+          diagnostics,
+        };
+      }
+
       function remoteLiveNotice() {
         const publicUrl = String(config?.live?.mobile_webrtc_public_url || '').trim();
-        if (publicUrl || isLanHost(window.location.hostname)) return '';
-        return '<p class="notice">Remote live needs Edge Settings -> WebRTC public URL, plus reachable TCP 8889 and ICE TCP/UDP 8189 or a TURN/VPS relay.</p>';
+        const plan = liveConnectionPlan('diagnostic');
+        if (plan.canEmbed || isLanHost(window.location.hostname)) return '';
+        return `<p class="notice warning">${escapeHtml(plan.message)} MediaMTX handshake must be reachable on TCP 8889 and ICE TCP/UDP 8189, or through TURN/VPS. Current public URL: ${escapeHtml(publicUrl || 'not set')}.</p>`;
+      }
+
+      function liveBlockedPreview(plan) {
+        return `
+          <div class="live-blocked" data-live-blocked="${escapeHtml(plan.reason)}">
+            <div>
+              <b>Remote live blocked</b>
+              <div>${escapeHtml(plan.message)}</div>
+              <code>${escapeHtml(plan.url)}</code>
+            </div>
+          </div>
+        `;
       }
 
       function debugEvent(event, payload = {}) {
         const body = JSON.stringify({
           event,
+          timestamp: new Date().toISOString(),
           page: document.querySelector('[data-page]:not([hidden])')?.dataset?.page || 'unknown',
           location: window.location.pathname,
+          client: {
+            protocol: window.location.protocol,
+            host: window.location.hostname,
+            href: window.location.href,
+            user_agent: navigator.userAgent,
+            viewport: `${window.innerWidth}x${window.innerHeight}`,
+          },
           payload
         });
         fetch(panelPath('api/debug'), {
@@ -3037,14 +3178,28 @@ INDEX_HTML = r"""<!doctype html>
         const previewResolution = previewStream === liveStream ? liveResolution : 'tile';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
         const mediamtxPath = `${encodeURIComponent(liveId)}_${encodeURIComponent(previewStream)}`;
-        const mediamtxUrl = directMediaMtxPath(mediamtxPath);
+        const plan = liveConnectionPlan(mediamtxPath);
+        const mediamtxUrl = plan.url;
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
+        if (live[liveKey]) {
+          debugEvent('ui_live_plan', {
+            liveKey,
+            cameraIndex: camera.index,
+            cameraId: camera.id,
+            stream: previewStream,
+            can_embed: plan.canEmbed,
+            reason: plan.reason,
+            diagnostics: plan.diagnostics,
+          });
+        }
         const preview = live[liveKey]
-          ? `<iframe class="live-frame" src="${escapeHtml(mediamtxUrl)}" title="${escapeHtml(text(camera.name, camera.id))} WebRTC live" loading="lazy" allow="autoplay; fullscreen; encrypted-media"></iframe>`
+          ? (plan.canEmbed
+            ? `<iframe class="live-frame" src="${escapeHtml(mediamtxUrl)}" data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} WebRTC live" loading="lazy" allow="autoplay; fullscreen; encrypted-media" onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)"></iframe>`
+            : liveBlockedPreview(plan))
           : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         return `
           <article class="camera video-tile">
-            <div class="preview" data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" title="Click to toggle live preview">${preview}${statusBadge}</div>
+            <div class="preview" data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" data-live-path="${escapeHtml(mediamtxPath)}" title="Click to toggle live preview">${preview}${statusBadge}</div>
             <div class="body">
               <div class="row">
                 <div class="name">${escapeHtml(text(camera.name, camera.id))}</div>
@@ -3057,6 +3212,55 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </article>
         `;
+      }
+
+      window.edgeFrameLoaded = function edgeFrameLoaded(frame) {
+        const liveKey = frame?.dataset?.liveKey || 'unknown';
+        const timer = liveFrameTimers.get(liveKey);
+        if (timer) {
+          clearTimeout(timer);
+          liveFrameTimers.delete(liveKey);
+        }
+        debugEvent('ui_live_frame_load', {
+          liveKey,
+          url: frame?.dataset?.liveUrl || '',
+          path: frame?.dataset?.livePath || '',
+        });
+      };
+
+      function monitorLiveFrames() {
+        document.querySelectorAll('iframe.live-frame[data-live-key]').forEach((frame) => {
+          const liveKey = frame.dataset.liveKey || 'unknown';
+          const url = frame.dataset.liveUrl || frame.src || '';
+          if (liveFrameTimers.has(liveKey)) {
+            clearTimeout(liveFrameTimers.get(liveKey));
+          }
+          debugEvent('ui_live_frame_rendered', {
+            liveKey,
+            url,
+            path: frame.dataset.livePath || '',
+          });
+          const timer = setTimeout(() => {
+            debugEvent('ui_live_frame_timeout', {
+              liveKey,
+              url,
+              path: frame.dataset.livePath || '',
+              timeout_ms: 12000,
+              hint: 'If this happens only on LTE or another Wi-Fi, check WebRTC public URL, ICE candidates, TCP 8889, and ICE TCP/UDP 8189.',
+            });
+          }, 12000);
+          liveFrameTimers.set(liveKey, timer);
+        });
+        document.querySelectorAll('[data-live-blocked]').forEach((node) => {
+          const preview = node.closest('[data-live-key]');
+          const livePath = preview?.dataset?.livePath || 'diagnostic';
+          const plan = liveConnectionPlan(livePath);
+          debugEvent('ui_live_blocked', {
+            liveKey: preview?.dataset?.liveKey || 'unknown',
+            reason: node.dataset.liveBlocked || plan.reason,
+            diagnostics: plan.diagnostics,
+          });
+        });
       }
 
       function addCameraTile() {
@@ -3657,6 +3861,7 @@ INDEX_HTML = r"""<!doctype html>
         grid.innerHTML = cameras.length
           ? `${remoteLiveNotice()}${cameras.map(cameraCard).join('')}${addCameraTile()}`
           : `${remoteLiveNotice()}${addCameraTile()}`;
+        monitorLiveFrames();
       }
 
       async function loadRecordingStatus() {
@@ -3961,10 +4166,14 @@ INDEX_HTML = r"""<!doctype html>
         const liveKey = liveTarget?.dataset?.liveKey;
         if (!liveKey) return;
         const nextLive = !live[liveKey];
+        const plan = liveConnectionPlan(liveTarget?.dataset?.livePath || 'diagnostic');
         debugEvent('ui_live_toggle', {
           liveKey,
           cameraIndex: liveTarget?.dataset?.liveIndex,
-          enabled: nextLive
+          enabled: nextLive,
+          can_embed: plan.canEmbed,
+          reason: plan.reason,
+          diagnostics: plan.diagnostics,
         });
         live[liveKey] = nextLive;
         updateLiveTimer();
@@ -4022,7 +4231,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.3"
+    server_version = "EdgePanel/0.10.4"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

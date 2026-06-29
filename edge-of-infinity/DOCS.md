@@ -196,6 +196,8 @@ http://PUBLIC-IP:8889
 
 Do not use the internal Docker `172.30.x.x` address or a LAN-only `192.168.x.x` address for LTE/mobile playback.
 
+Starting with version `0.10.4`, the panel refuses to embed WebRTC when the browser context proves the URL cannot work: missing public WebRTC URL on a remote host, LAN-only public URL, missing `http://` or `https://`, or an HTTPS Home Assistant page trying to embed an HTTP MediaMTX URL. The tile shows the reason and the Logs page records `ui_live_plan`, `ui_live_blocked`, `ui_live_frame_rendered`, `ui_live_frame_load`, and `ui_live_frame_timeout` events with browser host/protocol, MediaMTX URL, ICE transport, and viewport. If RTSP recording continues while WebRTC fails, the problem is reachability/ICE rather than camera Digest authentication.
+
 For LL-HLS mobile tests, `mediamtx_hls_always_remux` can be enabled in the add-on options. Keep it off unless you are testing HLS startup time, because always-remux keeps HLS work active even without a viewer.
 
 Starting with version `0.8.6`, `/homeassistant/edge/edge.json` remains the source of truth after it exists. Add-on options are copied only to `/tmp/edge-runtime/edge.options.json` for diagnostics and no longer overwrite panel changes on restart. Stream role choices are also persisted in:

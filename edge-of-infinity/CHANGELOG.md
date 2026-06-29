@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.4
+
+- Detect remote WebRTC paths that cannot work on LTE, including missing public URL, LAN-only public URL, invalid URL scheme, and HTTPS pages trying to embed HTTP MediaMTX.
+- Replace silent black live tiles with a clear per-camera reason so remote failures are visible in the panel instead of looking like a camera/auth problem.
+- Add detailed UI live diagnostics for iframe render, load, timeout, blocked state, browser host/protocol, MediaMTX URL, ICE transport, and viewport.
+- Expand UI debug events with timestamp and browser context so the Logs page can separate camera/RTSP problems from WebRTC/ICE reachability problems.
+
 ## 0.10.3
 
 - Start configured NVR recordings automatically on add-on boot and after saving camera settings when a camera is enabled and `record` is true.
