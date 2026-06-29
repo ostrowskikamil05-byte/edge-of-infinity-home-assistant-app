@@ -56,6 +56,9 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         raw_payload = json.loads(json.dumps(existing))
         raw_payload["cameras"][0]["snapshot_stream"] = "sub"
+        raw_payload["cameras"][0]["live_stream"] = "sub"
+        raw_payload["cameras"][0]["tile_stream"] = "sub"
+        raw_payload["cameras"][0]["record_stream"] = "sub"
         raw_payload["cameras"][1]["snapshot_stream"] = "main"
 
         merged_payload = panel.merge_existing_camera_values(raw_payload)
@@ -66,16 +69,17 @@ class EdgePanelConfigTests(unittest.TestCase):
             raw_payload,
         )
         panel.write_json(panel.CONFIG_PATH, saved_payload)
+        panel.save_panel_camera_overrides(saved_payload)
         panel.save_stream_overrides(saved_payload)
         loaded_payload = panel.preserve_submitted_stream_choices(panel.load_config(), merged_payload, raw_payload)
 
         self.assertEqual(loaded_payload["cameras"][0]["snapshot_stream"], "sub")
-        self.assertEqual(loaded_payload["cameras"][0]["live_stream"], "main")
+        self.assertEqual(loaded_payload["cameras"][0]["live_stream"], "sub")
         self.assertEqual(loaded_payload["cameras"][0]["tile_stream"], "sub")
-        self.assertEqual(loaded_payload["cameras"][0]["record_stream"], "main")
+        self.assertEqual(loaded_payload["cameras"][0]["record_stream"], "sub")
         self.assertEqual(loaded_payload["cameras"][1]["snapshot_stream"], "main")
 
-    def test_stream_overrides_win_after_external_config_rewrite(self):
+    def test_panel_camera_overrides_win_after_external_config_rewrite(self):
         panel = load_panel_module()
         existing = {
             "server": {},
@@ -86,9 +90,20 @@ class EdgePanelConfigTests(unittest.TestCase):
             ],
         }
         panel.write_json(panel.CONFIG_PATH, existing)
+        panel.save_panel_camera_overrides(existing)
         panel.save_stream_overrides(existing)
 
         rewritten = json.loads(json.dumps(existing))
+        rewritten["cameras"][0]["host"] = "192.168.1.64"
+        rewritten["cameras"][0]["username"] = "old-admin"
+        rewritten["cameras"][0]["password"] = "old-secret"
+        rewritten["cameras"][0]["rtsp_main"] = "rtsp://old-admin:old-secret@192.168.1.64:554/Streaming/Channels/101"
+        rewritten["cameras"][0]["rtsp_sub"] = "rtsp://old-admin:old-secret@192.168.1.64:554/Streaming/Channels/102"
+        rewritten["cameras"][0]["onvif_url"] = "http://192.168.1.64:80/onvif/device_service"
+        rewritten["cameras"][0]["isapi_base_url"] = "http://192.168.1.64"
+        rewritten["cameras"][0]["enabled"] = False
+        rewritten["cameras"][0]["record"] = False
+        rewritten["cameras"][0]["low_latency"] = False
         rewritten["cameras"][0]["snapshot_stream"] = "main"
         rewritten["cameras"][0]["live_stream"] = "sub"
         rewritten["cameras"][0]["tile_stream"] = "main"
@@ -97,6 +112,16 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         loaded = panel.load_config()
 
+        self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.21")
+        self.assertEqual(loaded["cameras"][0]["username"], "admin")
+        self.assertEqual(loaded["cameras"][0]["password"], "secret")
+        self.assertEqual(loaded["cameras"][0]["rtsp_main"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/101")
+        self.assertEqual(loaded["cameras"][0]["rtsp_sub"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/102")
+        self.assertEqual(loaded["cameras"][0]["onvif_url"], "http://192.168.33.21:80/onvif/device_service")
+        self.assertEqual(loaded["cameras"][0]["isapi_base_url"], "http://192.168.33.21")
+        self.assertTrue(loaded["cameras"][0]["enabled"])
+        self.assertTrue(loaded["cameras"][0]["record"])
+        self.assertTrue(loaded["cameras"][0]["low_latency"])
         self.assertEqual(loaded["cameras"][0]["snapshot_stream"], "sub")
         self.assertEqual(loaded["cameras"][0]["live_stream"], "main")
         self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")

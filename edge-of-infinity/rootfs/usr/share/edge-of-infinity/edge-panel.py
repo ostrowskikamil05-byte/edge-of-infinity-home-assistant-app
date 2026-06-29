@@ -22,6 +22,7 @@ DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
 CONFIG_PATH = Path(os.environ.get("EDGE_HOME_CONFIG", "/homeassistant/edge/edge.json"))
 CONFIG_BACKUP_PATH = HOME_DIR / "edge.backup.json"
 PRESETS_PATH = HOME_DIR / "camera-presets.json"
+PANEL_CAMERA_OVERRIDES_PATH = HOME_DIR / "panel-camera-overrides.json"
 STREAM_OVERRIDES_PATH = HOME_DIR / "stream-overrides.json"
 DEBUG_LOG_PATH = HOME_DIR / "edge-debug.log"
 PORT = int(os.environ.get("API_PORT", "8088"))
@@ -33,6 +34,23 @@ HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
 STREAM_FALLBACK_CHANNELS = {"main": HIKVISION_MAIN_CHANNEL, "sub": HIKVISION_SUB_CHANNEL}
 STREAM_ROLE_FIELDS = ("snapshot_stream", "live_stream", "record_stream", "tile_stream")
+CAMERA_OVERRIDE_FIELDS = (
+    "id",
+    "name",
+    "vendor",
+    "host",
+    "username",
+    "password",
+    "rtsp_main",
+    "rtsp_sub",
+    "rtsp_sub_channel",
+    "onvif_url",
+    "isapi_base_url",
+    "enabled",
+    "record",
+    "low_latency",
+    *STREAM_ROLE_FIELDS,
+)
 STREAM_ENGINES = ("janus_webrtc", "mediamtx", "ll_hls", "srt")
 MEDIAMTX_ENABLED = os.environ.get("EDGE_MEDIAMTX_ENABLED", "true").lower() == "true"
 MEDIAMTX_HOST = os.environ.get("EDGE_MEDIAMTX_HOST", "127.0.0.1")
@@ -237,12 +255,18 @@ def config_summary(payload: dict) -> list[dict]:
                 "index": index,
                 "id": camera.get("id"),
                 "name": camera.get("name"),
+                "host": camera.get("host"),
+                "enabled": camera.get("enabled"),
+                "record": camera.get("record"),
+                "low_latency": camera.get("low_latency"),
                 "live_stream": camera.get("live_stream"),
                 "tile_stream": camera.get("tile_stream"),
                 "record_stream": camera.get("record_stream"),
                 "snapshot_stream": camera.get("snapshot_stream"),
                 "rtsp_main_channel": hikvision_channel_from_rtsp(camera.get("rtsp_main") or "", ""),
                 "rtsp_sub_channel": hikvision_channel_from_rtsp(camera.get("rtsp_sub") or "", ""),
+                "rtsp_main": redact_rtsp(camera.get("rtsp_main") or ""),
+                "rtsp_sub": redact_rtsp(camera.get("rtsp_sub") or ""),
             }
         )
     return summary
@@ -251,6 +275,73 @@ def config_summary(payload: dict) -> list[dict]:
 def stream_override_key(camera: dict, index: int) -> str:
     camera_id = str(camera.get("id") or "").strip()
     return camera_id or f"index:{index}"
+
+
+def clean_camera_override(camera: dict) -> dict:
+    clean = {}
+    for field in CAMERA_OVERRIDE_FIELDS:
+        if field not in camera:
+            continue
+        value = camera.get(field)
+        if field in STREAM_ROLE_FIELDS:
+            if value in ("main", "sub"):
+                clean[field] = value
+        elif field in ("enabled", "record", "low_latency"):
+            clean[field] = bool(value)
+        elif value is not None:
+            clean[field] = value
+    return clean
+
+
+def load_panel_camera_overrides() -> dict:
+    payload = read_json(PANEL_CAMERA_OVERRIDES_PATH, {})
+    if not isinstance(payload, dict):
+        return {}
+    cameras = payload.get("cameras") if isinstance(payload.get("cameras"), dict) else payload
+    if not isinstance(cameras, dict):
+        return {}
+    overrides = {}
+    for key, values in cameras.items():
+        if not isinstance(values, dict):
+            continue
+        clean = clean_camera_override(values)
+        if clean:
+            overrides[str(key)] = clean
+    return overrides
+
+
+def save_panel_camera_overrides(config: dict) -> None:
+    cameras = config.get("cameras") if isinstance(config, dict) else []
+    if not isinstance(cameras, list):
+        return
+    overrides = {}
+    for index, camera in enumerate(cameras):
+        if not isinstance(camera, dict):
+            continue
+        values = clean_camera_override(normalize_camera(camera, index + 1))
+        if values:
+            overrides[stream_override_key(camera, index)] = values
+            overrides[f"index:{index}"] = values
+    write_json(PANEL_CAMERA_OVERRIDES_PATH, {"cameras": overrides})
+
+
+def apply_panel_camera_overrides(raw_payload: dict) -> dict:
+    if not isinstance(raw_payload, dict):
+        return raw_payload
+    overrides = load_panel_camera_overrides()
+    if not overrides:
+        return raw_payload
+    payload = json.loads(json.dumps(raw_payload))
+    cameras = payload.get("cameras")
+    if not isinstance(cameras, list):
+        return payload
+    for index, camera in enumerate(cameras):
+        if not isinstance(camera, dict):
+            continue
+        values = overrides.get(stream_override_key(camera, index)) or overrides.get(f"index:{index}") or {}
+        if values:
+            camera.update(values)
+    return payload
 
 
 def load_stream_overrides() -> dict:
@@ -649,9 +740,11 @@ def validate_config_for_save(payload: dict) -> None:
 
 
 def load_config() -> dict:
-    config = apply_stream_overrides(normalize_config(read_json(CONFIG_PATH, {"cameras": []})))
+    raw_config = apply_panel_camera_overrides(read_json(CONFIG_PATH, {"cameras": []}))
+    config = apply_stream_overrides(normalize_config(raw_config))
     if not config.get("cameras") and CONFIG_BACKUP_PATH.exists():
-        backup = apply_stream_overrides(normalize_config(read_json(CONFIG_BACKUP_PATH, {"cameras": []})))
+        raw_backup = apply_panel_camera_overrides(read_json(CONFIG_BACKUP_PATH, {"cameras": []}))
+        backup = apply_stream_overrides(normalize_config(raw_backup))
         if backup.get("cameras"):
             write_json(CONFIG_PATH, backup)
             return backup
@@ -3115,7 +3208,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.8.6"
+    server_version = "EdgePanel/0.8.7"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -3250,6 +3343,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             validate_config_for_save(payload)
             backup_config()
             write_json(CONFIG_PATH, payload)
+            save_panel_camera_overrides(payload)
             save_stream_overrides(payload)
             loaded_payload = load_config()
             if config_summary(loaded_payload) != config_summary(payload):
@@ -3258,6 +3352,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                     "loaded_summary": config_summary(loaded_payload),
                 })
                 write_json(CONFIG_PATH, payload)
+                save_panel_camera_overrides(payload)
                 save_stream_overrides(payload)
                 loaded_payload = load_config()
             saved_payload = preserve_submitted_stream_choices(loaded_payload, merged_payload, raw_payload)

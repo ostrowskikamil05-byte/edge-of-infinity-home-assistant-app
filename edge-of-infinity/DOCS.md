@@ -169,6 +169,14 @@ Starting with version `0.8.6`, `/homeassistant/edge/edge.json` remains the sourc
 
 Those overrides are applied on every config load so `tile`, `live`, `record`, and `snapshot` selections cannot bounce back when another source rewrites `edge.json`.
 
+Starting with version `0.8.7`, the panel also persists the full submitted camera form in:
+
+```text
+/homeassistant/edge/panel-camera-overrides.json
+```
+
+This includes host, login, RTSP, ONVIF, ISAPI, enable flags, and all stream role choices. The panel applies this file before config normalization, so a stale add-on option file or old `edge.json` contents cannot silently force saved camera fields back to previous values.
+
 Starting with version `0.8.3`, the old shell placeholder page and MJPEG status generator were removed from the runner. The Edge panel is the controller, while MediaMTX + Janus is the live path.
 
 Camera cards show a small rounded status badge:

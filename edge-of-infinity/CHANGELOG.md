@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.7
+
+- Persist the full camera form payload in `/homeassistant/edge/panel-camera-overrides.json`, not only stream roles.
+- Apply panel camera overrides before normalization on every config load so host, credentials, RTSP, ISAPI/ONVIF, enable flags, and stream selections cannot bounce back after another source rewrites `edge.json`.
+- Extend regression tests to prove all camera fields survive an external config rewrite.
+
 ## 0.8.6
 
 - Make the panel-owned `/homeassistant/edge/edge.json` authoritative once it exists; add-on options are no longer allowed to rewrite it on restart.
