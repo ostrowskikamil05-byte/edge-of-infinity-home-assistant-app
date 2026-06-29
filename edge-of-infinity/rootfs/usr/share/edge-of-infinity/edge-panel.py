@@ -22,6 +22,7 @@ DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
 CONFIG_PATH = Path(os.environ.get("EDGE_HOME_CONFIG", "/homeassistant/edge/edge.json"))
 CONFIG_BACKUP_PATH = HOME_DIR / "edge.backup.json"
 PRESETS_PATH = HOME_DIR / "camera-presets.json"
+PANEL_CONFIG_PATH = HOME_DIR / "panel-config.json"
 PANEL_CAMERA_OVERRIDES_PATH = HOME_DIR / "panel-camera-overrides.json"
 STREAM_OVERRIDES_PATH = HOME_DIR / "stream-overrides.json"
 DEBUG_LOG_PATH = HOME_DIR / "edge-debug.log"
@@ -198,6 +199,11 @@ def camera_debug_profile(camera: dict, stream_name: str, probe: dict | None = No
 def backup_config() -> None:
     if CONFIG_PATH.exists():
         shutil.copyfile(CONFIG_PATH, CONFIG_BACKUP_PATH)
+
+
+def backup_panel_config() -> None:
+    if PANEL_CONFIG_PATH.exists():
+        shutil.copyfile(PANEL_CONFIG_PATH, HOME_DIR / "panel-config.backup.json")
 
 
 def build_rtsp(explicit: str, host: str, username: str, password: str, channel: str) -> str:
@@ -633,6 +639,41 @@ def save_debug_payload(raw_payload: dict, merged_payload: dict, normalized_paylo
     write_json(HOME_DIR / "last-save-debug.json", debug_payload)
 
 
+def safe_json_file(path: Path) -> dict:
+    payload = read_json(path, {})
+    if isinstance(payload, dict):
+        return redact_config(payload)
+    return {"value": redact_config(payload)}
+
+
+def collect_panel_logs() -> dict:
+    config = load_config()
+    storage = config.get("storage") if isinstance(config.get("storage"), dict) else {}
+    recordings_dir = Path(storage.get("recordings_dir") or "/media/edge-of-infinity/recordings")
+    recording_logs = []
+    try:
+        for log_path in sorted(recordings_dir.glob("**/ffmpeg.log"), key=lambda item: item.stat().st_mtime, reverse=True)[:8]:
+            recording_logs.append({
+                "path": str(log_path),
+                "tail": redact_rtsp(read_text_tail(log_path, 8000)),
+            })
+    except OSError as error:
+        recording_logs.append({"path": str(recordings_dir), "tail": f"recording_log_scan_error: {error}"})
+
+    return {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "authoritative_config": str(PANEL_CONFIG_PATH),
+        "runtime_config": str(CONFIG_PATH),
+        "config_summary": config_summary(config),
+        "edge_debug": redact_rtsp(read_text_tail(DEBUG_LOG_PATH, 16000)),
+        "last_save_debug": safe_json_file(HOME_DIR / "last-save-debug.json"),
+        "last_saved_config": safe_json_file(HOME_DIR / "edge.last-saved.json"),
+        "panel_config": safe_json_file(PANEL_CONFIG_PATH),
+        "runtime_config_file": safe_json_file(CONFIG_PATH),
+        "recording_logs": recording_logs,
+    }
+
+
 def camera_from_payload(payload: dict) -> dict:
     raw_camera = payload.get("camera") if isinstance(payload.get("camera"), dict) else {}
     config = load_config()
@@ -675,6 +716,7 @@ def preset_camera(camera: dict) -> dict:
             "low_latency",
             "snapshot_stream",
             "live_stream",
+            "tile_stream",
             "record_stream",
         )
     }
@@ -739,16 +781,38 @@ def validate_config_for_save(payload: dict) -> None:
         raise ValueError("Live frame interval must be between 250 and 10000 ms.")
 
 
+def effective_config_from_payload(raw_payload: dict) -> dict:
+    raw_config = apply_panel_camera_overrides(raw_payload if isinstance(raw_payload, dict) else {"cameras": []})
+    return apply_stream_overrides(normalize_config(raw_config))
+
+
+def authoritative_config_from_payload(raw_payload: dict) -> dict:
+    return normalize_config(raw_payload if isinstance(raw_payload, dict) else {"cameras": []})
+
+
 def load_config() -> dict:
-    raw_config = apply_panel_camera_overrides(read_json(CONFIG_PATH, {"cameras": []}))
-    config = apply_stream_overrides(normalize_config(raw_config))
+    if PANEL_CONFIG_PATH.exists():
+        panel_config = authoritative_config_from_payload(read_json(PANEL_CONFIG_PATH, {"cameras": []}))
+        if panel_config.get("cameras"):
+            return panel_config
+
+    config = effective_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
     if not config.get("cameras") and CONFIG_BACKUP_PATH.exists():
-        raw_backup = apply_panel_camera_overrides(read_json(CONFIG_BACKUP_PATH, {"cameras": []}))
-        backup = apply_stream_overrides(normalize_config(raw_backup))
+        backup = effective_config_from_payload(read_json(CONFIG_BACKUP_PATH, {"cameras": []}))
         if backup.get("cameras"):
             write_json(CONFIG_PATH, backup)
+            write_json(PANEL_CONFIG_PATH, backup)
             return backup
     return config
+
+
+def commit_panel_config(payload: dict) -> dict:
+    committed = authoritative_config_from_payload(payload)
+    write_json(PANEL_CONFIG_PATH, committed)
+    write_json(CONFIG_PATH, committed)
+    save_panel_camera_overrides(committed)
+    save_stream_overrides(committed)
+    return committed
 
 
 def run_json(command: list[str], timeout: int) -> dict | None:
@@ -2062,6 +2126,32 @@ INDEX_HTML = r"""<!doctype html>
         font-size: 12px;
         white-space: nowrap;
       }
+      .log-grid {
+        display: grid;
+        gap: 12px;
+      }
+      .log-block {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(0,0,0,.16);
+        overflow: hidden;
+      }
+      .log-block h2 {
+        margin: 0;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+        font-size: 15px;
+      }
+      .log-output {
+        margin: 0;
+        max-height: 340px;
+        overflow: auto;
+        padding: 12px;
+        color: #b9d6d3;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
       code { color: var(--accent); overflow-wrap: anywhere; }
       @media (max-width: 820px) {
         .app { grid-template-columns: 1fr; }
@@ -2109,6 +2199,7 @@ INDEX_HTML = r"""<!doctype html>
           <button data-page-target="nvr"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/></svg></span><span class="nav-label">NVR</span></button>
           <button data-page-target="camera-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h11l5 4-5 4H4z"/><circle cx="9" cy="12" r="2"/></svg></span><span class="nav-label">Camera Settings</span></button>
           <button data-page-target="edge-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a8 8 0 0 0 .1-6"/><path d="M4.5 9a8 8 0 0 0 .1 6"/><path d="M15 4.6a8 8 0 0 0-6 0"/><path d="M9 19.4a8 8 0 0 0 6 0"/></svg></span><span class="nav-label">Edge Settings</span></button>
+          <button data-page-target="logs"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h9l3 3v15H6z"/><path d="M14 3v4h4"/><path d="M9 12h6"/><path d="M9 16h6"/><path d="M9 8h2"/></svg></span><span class="nav-label">Logs</span></button>
           <button data-page-target="account"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c1.8-4 14.2-4 16 0"/></svg></span><span class="nav-label">Account</span></button>
         </nav>
       </aside>
@@ -2169,7 +2260,7 @@ INDEX_HTML = r"""<!doctype html>
               <button id="add-camera" type="button">Add camera</button>
               <button class="primary" id="save-config" type="button">Save cameras</button>
             </div>
-            <p class="notice" id="save-state">Changes are saved to <code>/homeassistant/edge/edge.json</code>.</p>
+            <p class="notice" id="save-state">Changes are saved to <code>/homeassistant/edge/panel-config.json</code> and mirrored to runtime <code>edge.json</code>.</p>
           </section>
         </section>
 
@@ -2185,7 +2276,22 @@ INDEX_HTML = r"""<!doctype html>
             <div class="actions">
               <button class="primary" id="save-edge-settings" type="button">Save Edge settings</button>
             </div>
-            <p class="notice" id="edge-save-state">Core settings are saved to <code>/homeassistant/edge/edge.json</code>. Some runtime changes may need an add-on restart.</p>
+            <p class="notice" id="edge-save-state">Core settings are saved to <code>/homeassistant/edge/panel-config.json</code> and mirrored to runtime <code>edge.json</code>. Some runtime changes may need an add-on restart.</p>
+          </section>
+        </section>
+
+        <section class="page" data-page="logs" hidden>
+          <header>
+            <div>
+              <h1>Logs</h1>
+              <p>Runtime diagnostics, save verification, and ffmpeg recording tails.</p>
+            </div>
+            <div class="toolbar">
+              <button class="primary" id="refresh-logs">Refresh logs</button>
+            </div>
+          </header>
+          <section class="panel">
+            <div id="logs-view" class="log-grid"></div>
           </section>
         </section>
 
@@ -2214,6 +2320,7 @@ INDEX_HTML = r"""<!doctype html>
       const nvrGrid = document.getElementById('nvr-grid');
       const form = document.getElementById('config-form');
       const edgeForm = document.getElementById('edge-settings-form');
+      const logsView = document.getElementById('logs-view');
       const presetSelect = document.getElementById('preset-select');
       const presetSlot = document.getElementById('preset-slot');
       const saveState = document.getElementById('save-state');
@@ -2227,6 +2334,7 @@ INDEX_HTML = r"""<!doctype html>
       let recordingStatus = {};
       let selectedRecording = {};
       let configDirty = false;
+      let panelLogs = null;
 
       const panelBase = window.location.pathname.endsWith('/')
         ? window.location.pathname
@@ -2334,6 +2442,62 @@ INDEX_HTML = r"""<!doctype html>
         const date = new Date(value);
         if (Number.isNaN(date.getTime())) return value;
         return date.toLocaleString();
+      }
+
+      function pretty(value) {
+        if (typeof value === 'string') return value || 'empty';
+        try {
+          return JSON.stringify(value ?? {}, null, 2);
+        } catch (_) {
+          return String(value ?? '');
+        }
+      }
+
+      function logBlock(title, value) {
+        return `
+          <div class="log-block">
+            <h2>${escapeHtml(title)}</h2>
+            <pre class="log-output">${escapeHtml(pretty(value))}</pre>
+          </div>
+        `;
+      }
+
+      function renderLogs() {
+        if (!panelLogs) {
+          logsView.innerHTML = '<p class="notice">Click Refresh logs to load diagnostics.</p>';
+          return;
+        }
+        const recordingLogs = Array.isArray(panelLogs.recording_logs) ? panelLogs.recording_logs : [];
+        logsView.innerHTML = [
+          logBlock('Runtime summary', {
+            generated_at: panelLogs.generated_at,
+            authoritative_config: panelLogs.authoritative_config,
+            runtime_config: panelLogs.runtime_config,
+            config_summary: panelLogs.config_summary
+          }),
+          logBlock('Edge debug', panelLogs.edge_debug || 'No debug log yet.'),
+          logBlock('Last save debug', panelLogs.last_save_debug || {}),
+          logBlock('Panel config', panelLogs.panel_config || {}),
+          logBlock('Runtime edge.json', panelLogs.runtime_config_file || {}),
+          logBlock('Last saved response', panelLogs.last_saved_config || {}),
+          ...recordingLogs.map((item) => logBlock(`Recording ffmpeg: ${item.path}`, item.tail || 'empty'))
+        ].join('');
+      }
+
+      async function loadLogs() {
+        logsView.innerHTML = '<p class="notice">Loading logs...</p>';
+        const response = await fetch(panelPath('api/logs'), { cache: 'no-store' });
+        panelLogs = await response.json();
+        if (!response.ok) {
+          logsView.innerHTML = `<p class="notice">${escapeHtml(panelLogs.error || 'Could not load logs.')}</p>`;
+          return;
+        }
+        debugEvent('ui_logs_loaded', {
+          generated_at: panelLogs.generated_at,
+          config_summary: panelLogs.config_summary,
+          recording_logs: Array.isArray(panelLogs.recording_logs) ? panelLogs.recording_logs.length : 0
+        });
+        renderLogs();
       }
 
       function renderEffectiveStreams(streams) {
@@ -2993,6 +3157,11 @@ INDEX_HTML = r"""<!doctype html>
           button.classList.toggle('active', button.dataset.pageTarget === pageName);
         });
         debugEvent('ui_page_change', { page: pageName });
+        if (pageName === 'logs') {
+          loadLogs().catch((error) => {
+            logsView.innerHTML = `<p class="notice">${escapeHtml(error.message)}</p>`;
+          });
+        }
       }
 
       function updateLiveTimer() {
@@ -3037,6 +3206,11 @@ INDEX_HTML = r"""<!doctype html>
         await loadRecordingStatus();
       });
 
+      document.getElementById('refresh-logs').addEventListener('click', async () => {
+        debugEvent('ui_refresh_logs_click');
+        await loadLogs();
+      });
+
       document.getElementById('add-camera').addEventListener('click', () => {
         debugEvent('ui_add_camera_click');
         addCamera();
@@ -3068,6 +3242,7 @@ INDEX_HTML = r"""<!doctype html>
         configDirty = false;
         await loadPresets();
         await loadCameras();
+        if (panelLogs) await loadLogs();
         const sentSummary = saveSummary(payload);
         const savedSummary = saveSummary(verified);
         saveState.textContent = sentSummary === savedSummary
@@ -3105,7 +3280,8 @@ INDEX_HTML = r"""<!doctype html>
           liveTimer = null;
           updateLiveTimer();
         }
-        edgeSaveState.textContent = 'Saved. Edge settings are stored in /homeassistant/edge/edge.json.';
+        if (panelLogs) await loadLogs();
+        edgeSaveState.textContent = 'Saved. Edge settings are stored in /homeassistant/edge/panel-config.json and mirrored to edge.json.';
       });
 
       document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);
@@ -3208,7 +3384,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.8.7"
+    server_version = "EdgePanel/0.8.8"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -3243,6 +3419,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/recording/status":
             self.send_json(recording_status_payload())
+            return
+        if path == "/api/logs":
+            self.send_json(collect_panel_logs())
             return
         if path == "/api/stream/capabilities":
             self.send_json(stream_capabilities())
@@ -3342,30 +3521,29 @@ class EdgeHandler(BaseHTTPRequestHandler):
             payload = preserve_submitted_stream_choices(payload, merged_payload, raw_payload)
             validate_config_for_save(payload)
             backup_config()
-            write_json(CONFIG_PATH, payload)
-            save_panel_camera_overrides(payload)
-            save_stream_overrides(payload)
+            backup_panel_config()
+            committed_payload = commit_panel_config(payload)
             loaded_payload = load_config()
-            if config_summary(loaded_payload) != config_summary(payload):
+            if config_summary(loaded_payload) != config_summary(committed_payload):
                 write_debug_event("config_save_rewrite_after_verify", {
-                    "expected_summary": config_summary(payload),
+                    "expected_summary": config_summary(committed_payload),
                     "loaded_summary": config_summary(loaded_payload),
                 })
-                write_json(CONFIG_PATH, payload)
-                save_panel_camera_overrides(payload)
-                save_stream_overrides(payload)
+                committed_payload = commit_panel_config(committed_payload)
                 loaded_payload = load_config()
-            saved_payload = preserve_submitted_stream_choices(loaded_payload, merged_payload, raw_payload)
-            write_json(HOME_DIR / "edge.last-saved.json", payload)
+            saved_payload = preserve_submitted_stream_choices(loaded_payload, committed_payload, merged_payload, raw_payload)
+            saved_payload = commit_panel_config(saved_payload)
+            write_json(HOME_DIR / "edge.last-saved.json", saved_payload)
             save_debug_payload(raw_payload, merged_payload, normalized_payload, saved_payload)
             write_debug_event("config_save", {
                 "raw_summary": config_summary(raw_payload),
                 "merged_summary": config_summary(merged_payload),
                 "normalized_summary": config_summary(normalized_payload),
-                "final_summary": config_summary(payload),
+                "final_summary": config_summary(committed_payload),
                 "saved_summary": config_summary(saved_payload),
-                "verified": config_summary(payload) == config_summary(saved_payload),
+                "verified": config_summary(committed_payload) == config_summary(saved_payload),
                 "changed_by": self.client_address[0],
+                "authoritative_path": str(PANEL_CONFIG_PATH),
             })
             stop_orphan_recordings(saved_payload)
             remember_camera_presets(saved_payload.get("cameras", []))

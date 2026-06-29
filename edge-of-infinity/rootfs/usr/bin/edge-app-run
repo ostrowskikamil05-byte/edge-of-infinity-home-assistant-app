@@ -574,6 +574,7 @@ bashio::log.info "Install custom component: ${INSTALL_CUSTOM_COMPONENT}"
 install_custom_component
 
 EDGE_HOME_CONFIG=/homeassistant/edge/edge.json
+EDGE_PANEL_CONFIG=/homeassistant/edge/panel-config.json
 EDGE_HOME_EXAMPLE_CONFIG=/homeassistant/edge/edge.example.json
 EDGE_ADDON_CONFIG=/config/edge.json
 EDGE_ADDON_EXAMPLE_CONFIG=/config/edge.example.json
@@ -646,7 +647,11 @@ if [[ -f "${ADDON_OPTIONS_HASH_PATH}" ]]; then
   PREVIOUS_ADDON_OPTIONS_HASH="$(cat "${ADDON_OPTIONS_HASH_PATH}")"
 fi
 
-if has_addon_camera_options && [[ ! -f "${EDGE_HOME_CONFIG}" ]]; then
+if [[ -f "${EDGE_PANEL_CONFIG}" ]] && jq -e '.cameras | type == "array" and length > 0' "${EDGE_PANEL_CONFIG}" >/dev/null 2>&1; then
+  EDGE_CONFIG="${EDGE_HOME_CONFIG}"
+  cp "${EDGE_PANEL_CONFIG}" "${EDGE_HOME_CONFIG}"
+  bashio::log.info "Using panel-authoritative camera config from ${EDGE_PANEL_CONFIG}."
+elif has_addon_camera_options && [[ ! -f "${EDGE_HOME_CONFIG}" ]]; then
   EDGE_CONFIG="${EDGE_HOME_CONFIG}"
   write_addon_options_config "${EDGE_CONFIG}"
   echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"

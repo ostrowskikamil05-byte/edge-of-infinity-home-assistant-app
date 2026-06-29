@@ -127,6 +127,34 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
         self.assertEqual(loaded["cameras"][0]["record_stream"], "main")
 
+    def test_panel_config_wins_over_stale_runtime_and_override_files(self):
+        panel = load_panel_module()
+        runtime = {
+            "server": {},
+            "storage": {},
+            "cameras": [
+                camera("hikvision_1", "192.168.33.21", "main"),
+                camera("hikvision_2", "192.168.33.135", "main"),
+            ],
+        }
+        panel.write_json(panel.CONFIG_PATH, runtime)
+        panel.save_panel_camera_overrides(runtime)
+        panel.save_stream_overrides(runtime)
+
+        authoritative = json.loads(json.dumps(runtime))
+        authoritative["cameras"][0]["snapshot_stream"] = "sub"
+        authoritative["cameras"][0]["live_stream"] = "sub"
+        authoritative["cameras"][0]["tile_stream"] = "sub"
+        authoritative["cameras"][0]["record_stream"] = "sub"
+        panel.write_json(panel.PANEL_CONFIG_PATH, authoritative)
+
+        loaded = panel.load_config()
+
+        self.assertEqual(loaded["cameras"][0]["snapshot_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["live_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
+
 
 if __name__ == "__main__":
     unittest.main()

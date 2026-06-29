@@ -6,7 +6,7 @@ The app enables Home Assistant Ingress and adds an Edge Infinity item to the sid
 
 ## Logs
 
-Open the app page in Home Assistant and use the Logs tab. Edge Core should write all logs to stdout/stderr so Supervisor can capture them.
+Open the app page in Home Assistant and use the Logs tab. It shows the panel debug tail, last save diagnostics, active config summaries, and ffmpeg recording log tails. Edge Core should also write all logs to stdout/stderr so Supervisor can capture them.
 
 ## Watchdog
 
@@ -75,7 +75,13 @@ When `host`, `username`, and `password` are set but RTSP fields are empty, Edge 
 /Streaming/Channels/102
 ```
 
-The JSON file below stores panel changes and is still useful for manual recovery.
+Starting with version `0.8.8`, the sidebar panel stores the authoritative camera state here:
+
+```text
+/homeassistant/edge/panel-config.json
+```
+
+The JSON file below is the mirrored runtime config used by MediaMTX, Janus, and older tooling.
 
 On first start, the app creates:
 
@@ -95,9 +101,9 @@ The app also writes a template:
 /homeassistant/edge/edge.example.json
 ```
 
-`edge.example.json` may be refreshed by the app. Your real camera settings belong in `/homeassistant/edge/edge.json`, visible in File Editor as `/config/edge/edge.json`.
+`edge.example.json` may be refreshed by the app. Your real camera settings belong in the sidebar panel, which writes `/homeassistant/edge/panel-config.json` and mirrors it to `/homeassistant/edge/edge.json`, visible in File Editor as `/config/edge/edge.json`.
 
-The app must not overwrite an existing `edge.json`.
+The app must not overwrite an existing panel config. When `panel-config.json` exists, add-on startup copies it to `edge.json` before generating MediaMTX and Janus runtime config.
 
 The initial file contains two Hikvision camera slots:
 
@@ -176,6 +182,8 @@ Starting with version `0.8.7`, the panel also persists the full submitted camera
 ```
 
 This includes host, login, RTSP, ONVIF, ISAPI, enable flags, and all stream role choices. The panel applies this file before config normalization, so a stale add-on option file or old `edge.json` contents cannot silently force saved camera fields back to previous values.
+
+Starting with version `0.8.8`, `/homeassistant/edge/panel-config.json` is the primary source of truth. Legacy override files are still written for recovery and older installs, but they do not override values already stored in `panel-config.json`.
 
 Starting with version `0.8.3`, the old shell placeholder page and MJPEG status generator were removed from the runner. The Edge panel is the controller, while MediaMTX + Janus is the live path.
 

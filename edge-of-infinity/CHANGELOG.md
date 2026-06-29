@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.8
+
+- Add `/homeassistant/edge/panel-config.json` as the authoritative panel-owned camera configuration, then mirror it to runtime `edge.json`.
+- Make add-on startup prefer `panel-config.json` when it exists so MediaMTX and Janus are generated from the same state the panel saved.
+- Stop stale override files from changing values stored in the authoritative panel config.
+- Add a Logs page in the Edge panel with save diagnostics, runtime config summaries, debug tail, and ffmpeg recording log tails.
+- Add regression coverage proving panel config wins over stale runtime config and stale override files.
+
 ## 0.8.7
 
 - Persist the full camera form payload in `/homeassistant/edge/panel-camera-overrides.json`, not only stream roles.
