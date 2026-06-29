@@ -202,7 +202,7 @@ Starting with version `0.8.7`, the panel also persists the full submitted camera
 
 This includes host, login, RTSP, ONVIF, ISAPI, enable flags, and all stream role choices. The panel applies this file before config normalization, so a stale add-on option file or old `edge.json` contents cannot silently force saved camera fields back to previous values.
 
-Starting with version `0.8.8`, `/homeassistant/edge/panel-config.json` is the primary source of truth. Starting with version `0.10.0`, successful panel saves clear legacy `panel-camera-overrides.json` and `stream-overrides.json` files so old values cannot force stream roles back to previous settings.
+Starting with version `0.8.8`, `/homeassistant/edge/panel-config.json` is the primary source of truth. Starting with version `0.10.0`, successful panel saves clear legacy `panel-camera-overrides.json` and `stream-overrides.json` files. Starting with version `0.10.1`, those legacy files are no longer applied while loading fallback runtime config, so stale values cannot force stream roles back to previous settings.
 
 ## HEVC / H265
 

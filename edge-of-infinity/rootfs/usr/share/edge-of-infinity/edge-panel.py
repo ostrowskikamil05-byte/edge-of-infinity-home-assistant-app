@@ -44,6 +44,7 @@ CAMERA_OVERRIDE_FIELDS = (
     "password",
     "rtsp_main",
     "rtsp_sub",
+    "rtsp_main_channel",
     "rtsp_sub_channel",
     "onvif_url",
     "isapi_base_url",
@@ -237,6 +238,11 @@ def hikvision_channel_from_rtsp(value: str, fallback: str) -> str:
     if match:
         return match.group(1)
     return fallback
+
+
+def normalize_hikvision_channel(value: str | int | None, fallback: str) -> str:
+    channel = str(value or "").strip()
+    return channel if re.fullmatch(r"\d{3}", channel) else fallback
 
 
 def normalize_stream_name(value: str | None, fallback: str) -> str:
@@ -477,14 +483,25 @@ def normalize_camera(raw: dict, index: int) -> dict:
     password = raw.get("password") or ""
     rtsp_main = raw.get("rtsp_main") or ""
     rtsp_sub = raw.get("rtsp_sub") or ""
-    rtsp_sub_channel = hikvision_channel_from_rtsp(rtsp_sub, HIKVISION_SUB_CHANNEL)
+    rtsp_main_channel = normalize_hikvision_channel(
+        raw.get("rtsp_main_channel") or hikvision_channel_from_rtsp(rtsp_main, HIKVISION_MAIN_CHANNEL),
+        HIKVISION_MAIN_CHANNEL,
+    )
+    rtsp_sub_channel = normalize_hikvision_channel(
+        raw.get("rtsp_sub_channel") or hikvision_channel_from_rtsp(rtsp_sub, HIKVISION_SUB_CHANNEL),
+        HIKVISION_SUB_CHANNEL,
+    )
     if vendor == "hikvision":
-        rtsp_main = build_rtsp(rtsp_main, host, username, password, HIKVISION_MAIN_CHANNEL)
-        rtsp_sub = build_rtsp(rtsp_sub, host, username, password, HIKVISION_SUB_CHANNEL)
-        rtsp_sub_channel = hikvision_channel_from_rtsp(rtsp_sub, HIKVISION_SUB_CHANNEL)
+        rtsp_main = hikvision_rtsp_with_channel(rtsp_main, rtsp_main_channel)
+        rtsp_sub = hikvision_rtsp_with_channel(rtsp_sub, rtsp_sub_channel)
+        rtsp_main = build_rtsp(rtsp_main, host, username, password, rtsp_main_channel)
+        rtsp_sub = build_rtsp(rtsp_sub, host, username, password, rtsp_sub_channel)
+        rtsp_main_channel = hikvision_channel_from_rtsp(rtsp_main, rtsp_main_channel)
+        rtsp_sub_channel = hikvision_channel_from_rtsp(rtsp_sub, rtsp_sub_channel)
     elif vendor == "dahua":
         rtsp_main = build_dahua_rtsp(rtsp_main, host, username, password, 0)
         rtsp_sub = build_dahua_rtsp(rtsp_sub, host, username, password, 1)
+        rtsp_main_channel = ""
         rtsp_sub_channel = ""
     snapshot_stream = normalize_stream_name(raw.get("snapshot_stream"), "sub")
     live_stream = normalize_stream_name(raw.get("live_stream"), "sub")
@@ -503,6 +520,7 @@ def normalize_camera(raw: dict, index: int) -> dict:
         "password": password,
         "rtsp_main": rtsp_main,
         "rtsp_sub": rtsp_sub,
+        "rtsp_main_channel": rtsp_main_channel,
         "rtsp_sub_channel": rtsp_sub_channel,
         "onvif_url": onvif_url,
         "isapi_base_url": isapi_base_url,
@@ -618,6 +636,7 @@ def merge_existing_camera_values(raw_payload: dict) -> dict:
         "password",
         "rtsp_main",
         "rtsp_sub",
+        "rtsp_main_channel",
         "rtsp_sub_channel",
         "onvif_url",
         "isapi_base_url",
@@ -745,6 +764,7 @@ def preset_camera(camera: dict) -> dict:
             "password",
             "rtsp_main",
             "rtsp_sub",
+            "rtsp_main_channel",
             "rtsp_sub_channel",
             "onvif_url",
             "isapi_base_url",
@@ -819,8 +839,7 @@ def validate_config_for_save(payload: dict) -> None:
 
 
 def effective_config_from_payload(raw_payload: dict) -> dict:
-    raw_config = apply_panel_camera_overrides(raw_payload if isinstance(raw_payload, dict) else {"cameras": []})
-    return apply_stream_overrides(normalize_config(raw_config))
+    return normalize_config(raw_payload if isinstance(raw_payload, dict) else {"cameras": []})
 
 
 def authoritative_config_from_payload(raw_payload: dict) -> dict:
@@ -1248,6 +1267,50 @@ def recording_segments(camera: dict, index: int, limit: int = 24) -> list[dict]:
     return segments
 
 
+def recording_log_path(camera: dict, index: int) -> Path:
+    return recording_base_dir(camera, index) / "ffmpeg.log"
+
+
+def recording_log_tail(camera: dict, index: int, limit: int = 6000) -> str:
+    return redact_rtsp(read_text_tail(recording_log_path(camera, index), limit))
+
+
+def recording_health(camera: dict, index: int) -> dict:
+    tail = recording_log_tail(camera, index, 5000)
+    lower_tail = tail.lower()
+    error_lines = [
+        line.strip()
+        for line in tail.splitlines()
+        if any(token in line.lower() for token in ("error", "failed", "invalid", "not found", "unable", "permission denied"))
+    ]
+    last_error = error_lines[-1] if error_lines else ""
+    return {
+        "log_path": str(recording_log_path(camera, index)),
+        "log_tail": tail,
+        "last_error": last_error,
+        "ffmpeg_present": shutil.which("ffmpeg") is not None,
+        "ffprobe_present": shutil.which("ffprobe") is not None,
+        "has_recent_errors": bool(last_error) or "no such file" in lower_tail,
+    }
+
+
+def recording_preflight_error(camera: dict, stream_name: str) -> str:
+    stream = camera_stream(camera, stream_name)
+    if stream:
+        return ""
+    vendor = camera.get("vendor") or "hikvision"
+    host = camera.get("host") or ""
+    username = camera.get("username") or ""
+    password = camera.get("password") or ""
+    if not host:
+        return "recording_host_missing"
+    if vendor in ("hikvision", "dahua") and not username:
+        return "recording_username_missing"
+    if vendor in ("hikvision", "dahua") and not password:
+        return "recording_password_missing"
+    return "recording_rtsp_not_configured"
+
+
 def recording_codec_mode(stream: str, nvr: dict) -> tuple[str, str, str, dict]:
     probe = probe_rtsp_stream(stream, timeout=6)
     video = probe.get("video") or {}
@@ -1282,14 +1345,24 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
         "-hide_banner",
         "-loglevel",
         "info",
+        "-nostdin",
+        "-y",
         "-fflags",
         "+genpts",
+        "-flags",
+        "low_delay",
         "-rtsp_transport",
         "tcp",
+        "-rtsp_flags",
+        "prefer_tcp",
+        "-thread_queue_size",
+        "512",
         "-probesize",
         "32768",
         "-analyzeduration",
         "0",
+        "-use_wallclock_as_timestamps",
+        "1",
         "-i",
         stream,
         "-map",
@@ -1340,8 +1413,12 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
         "movflags=+faststart",
         "-segment_time",
         str(segment_seconds),
+        "-segment_time_delta",
+        "0.05",
         "-reset_timestamps",
         "1",
+        "-avoid_negative_ts",
+        "make_zero",
         "-strftime",
         "1",
         output_pattern,
@@ -1377,8 +1454,10 @@ def recording_status_payload(config: dict | None = None) -> dict:
         segment_files = recording_segments(camera, index, limit=72)
         record_stream = camera.get("record_stream") or "main"
         record_rtsp = camera_stream(camera, record_stream)
+        preflight_error = recording_preflight_error(camera, record_stream)
         video_codec = camera.get("record_video_codec") or camera.get("live_video_codec") or camera.get("video_codec") or camera.get("codec") or ""
         nvr_mode = recording_mode_from_codec(video_codec, nvr)
+        health = recording_health(camera, index)
         cameras.append(
             {
                 "index": index,
@@ -1388,12 +1467,20 @@ def recording_status_payload(config: dict | None = None) -> dict:
                 "record_rtsp": redact_rtsp(record_rtsp),
                 "record_mode": nvr_mode,
                 "video_codec": video_codec,
+                "can_record": not preflight_error and bool(record_rtsp),
+                "record_error": preflight_error,
                 "recording": bool(process and process.poll() is None),
                 "pid": process.pid if process and process.poll() is None else None,
                 "directory": str(directory),
+                "directory_exists": directory.exists(),
                 "segments": segment_count,
                 "files": segment_files,
                 "segment_seconds": nvr.get("segment_seconds", 10),
+                "last_error": health["last_error"],
+                "log_path": health["log_path"],
+                "log_tail": health["log_tail"],
+                "ffmpeg_present": health["ffmpeg_present"],
+                "ffprobe_present": health["ffprobe_present"],
             }
         )
     return {"cameras": cameras}
@@ -1406,13 +1493,23 @@ def start_recording(camera: dict, index: int) -> dict:
     if existing and existing.poll() is None:
         return {"started": False, "status": "already_recording", "key": key, "pid": existing.pid}
 
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg_not_installed_in_addon")
+
     record_stream = camera.get("record_stream") or "main"
     stream = camera_stream(camera, record_stream)
     if not stream:
-        raise ValueError("rtsp_not_configured")
+        raise ValueError(recording_preflight_error(camera, record_stream) or "recording_rtsp_not_configured")
 
     directory = recording_base_dir(camera, index)
     directory.mkdir(parents=True, exist_ok=True)
+    probe_file = directory / ".write-test"
+    try:
+        probe_file.write_text("ok", encoding="utf-8")
+        probe_file.unlink(missing_ok=True)
+    except OSError as error:
+        raise RuntimeError(f"recording_directory_not_writable: {directory}: {error}") from error
+
     config = load_config()
     nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
     segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
@@ -1422,6 +1519,21 @@ def start_recording(camera: dict, index: int) -> dict:
     output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
     mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr)
     command = build_recording_command(stream, output_pattern, segment_seconds, mode)
+    log_header = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "event": "recording_start_command",
+        "key": key,
+        "camera_id": camera.get("id"),
+        "record_stream": record_stream,
+        "directory": str(directory),
+        "output_pattern": output_pattern,
+        "mode": mode,
+        "video_codec": video_codec,
+        "audio_codec": audio_codec,
+        "command": redact_command(command),
+    }
+    with log_path.open("ab") as header_file:
+        header_file.write(("\n=== Edge recording start ===\n" + json.dumps(log_header, indent=2) + "\n").encode("utf-8"))
     log_file = log_path.open("ab")
     try:
         process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=log_file)
@@ -1430,6 +1542,20 @@ def start_recording(camera: dict, index: int) -> dict:
     finally:
         log_file.close()
     RECORDING_PROCESSES[key] = process
+    time.sleep(1.2)
+    early_exit = process.poll()
+    if early_exit is not None:
+        RECORDING_PROCESSES.pop(key, None)
+        tail = recording_log_tail(camera, index, 6000)
+        write_debug_event("recording_start_failed", {
+            "key": key,
+            "camera_id": camera.get("id"),
+            "record_stream": record_stream,
+            "exit_code": early_exit,
+            "log_tail": tail,
+            "command": redact_command(command),
+        })
+        raise RuntimeError(f"ffmpeg_exited_immediately exit={early_exit}: {tail[-1200:]}")
     write_debug_event("recording_start", {
         "key": key,
         "camera_id": camera.get("id"),
@@ -2548,11 +2674,14 @@ INDEX_HTML = r"""<!doctype html>
       let live = {};
       let presets = [];
       let liveTimer = null;
+      let nvrTimer = null;
       let cameraAuto = {};
       let recordingStatus = {};
       let selectedRecording = {};
       let configDirty = false;
       let panelLogs = null;
+      let activePage = 'home';
+      let nvrLoading = false;
 
       const panelBase = window.location.pathname.endsWith('/')
         ? window.location.pathname
@@ -2782,9 +2911,22 @@ INDEX_HTML = r"""<!doctype html>
         `;
       }
 
+      function recordErrorText(code) {
+        const messages = {
+          recording_host_missing: 'Cannot record: camera host/IP is missing.',
+          recording_username_missing: 'Cannot record: camera username is missing.',
+          recording_password_missing: 'Cannot record: camera password is missing. Fill it in Camera settings and save.',
+          recording_rtsp_not_configured: 'Cannot record: RTSP URL is not configured.',
+          ffmpeg_not_installed_in_addon: 'Cannot record: FFmpeg is not available inside the add-on.',
+        };
+        return messages[code] || code || '';
+      }
+
       function nvrCard(camera, index) {
         const status = recordingStatus[index] || {};
         const isRecording = Boolean(status.recording);
+        const canRecord = status.can_record !== false;
+        const recordError = status.record_error || status.last_error || '';
         const files = Array.isArray(status.files) ? status.files : [];
         const selected = selectedRecording[index] || '';
         const selectedIndex = files.findIndex((file) => file.url === selected);
@@ -2799,6 +2941,9 @@ INDEX_HTML = r"""<!doctype html>
               </button>
             `).join('')}</div>`
           : `<p class="notice">Start recording. The first video appears after the first ${escapeHtml(text(status.segment_seconds, 10))}-second segment closes.</p>`;
+        const diagnostics = recordError
+          ? `<p class="section-status state-offline">${escapeHtml(recordErrorText(recordError))}</p>`
+          : `<p class="section-status">${escapeHtml(text(status.record_rtsp, 'Record RTSP not ready'))}</p>`;
         return `
           <article class="camera nvr-card">
             <div class="body">
@@ -2807,8 +2952,9 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="rec-badge ${isRecording ? '' : 'off'}">${isRecording ? 'RECORDING' : 'STOPPED'}</div>
               </div>
               ${player}
+              ${diagnostics}
               <div class="actions">
-                <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}">${isRecording ? 'Stop' : 'Record'}</button>
+                <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}" ${!isRecording && !canRecord ? 'disabled' : ''}>${isRecording ? 'Stop' : 'Record'}</button>
                 <button data-playback-step="older" data-record-index="${index}" ${selectedIndex >= 0 && selectedIndex < files.length - 1 ? '' : 'disabled'}>Back</button>
                 <button data-playback-step="newer" data-record-index="${index}" ${selectedIndex > 0 ? '' : 'disabled'}>Forward</button>
               </div>
@@ -2907,6 +3053,8 @@ INDEX_HTML = r"""<!doctype html>
 
       function cameraForm(camera, index) {
         const prefix = `camera-${index}`;
+        const mainChannel = camera.rtsp_main_channel || hikvisionChannelFromRtsp(camera.rtsp_main, '101');
+        const subChannel = camera.rtsp_sub_channel || hikvisionChannelFromRtsp(camera.rtsp_sub, '102');
         return `
           <div class="camera-form" data-camera-form data-index="${index}">
             <div class="row">
@@ -2924,6 +3072,8 @@ INDEX_HTML = r"""<!doctype html>
               <label>Host/IP<input name="${prefix}-host" value="${escapeHtml(camera.host || '')}"></label>
               <label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label>
               <label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label>
+              <label>Main channel<input name="${prefix}-rtsp-main-channel" value="${escapeHtml(mainChannel)}"></label>
+              <label>Sub channel<input name="${prefix}-rtsp-sub-channel" value="${escapeHtml(subChannel)}"></label>
               <label>RTSP main<input name="${prefix}-rtsp-main" value="${escapeHtml(camera.rtsp_main || '')}"></label>
               <label>RTSP sub<input name="${prefix}-rtsp-sub" value="${escapeHtml(camera.rtsp_sub || '')}"></label>
               <label>ONVIF URL<input name="${prefix}-onvif" value="${escapeHtml(camera.onvif_url || '')}"></label>
@@ -2958,8 +3108,8 @@ INDEX_HTML = r"""<!doctype html>
       function renderConfig() {
         configDirty = false;
         const cameras = config.cameras && config.cameras.length ? config.cameras : [
-          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true },
-          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true }
+          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', rtsp_main_channel: '101', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true },
+          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', rtsp_main_channel: '101', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true }
         ];
         config = { ...config, cameras };
         form.innerHTML = cameras.map(cameraForm).join('');
@@ -3079,9 +3229,12 @@ INDEX_HTML = r"""<!doctype html>
             return element;
           };
           const vendor = get('vendor').value;
-          const rtspMain = get('rtsp-main').value.trim();
-          const rtspSub = get('rtsp-sub').value.trim();
-          const rtspSubChannel = vendor === 'hikvision' ? hikvisionChannelFromRtsp(rtspSub, '102') : '';
+          const rtspMainChannel = vendor === 'hikvision' ? (get('rtsp-main-channel').value.trim() || '101') : '';
+          const rtspSubChannel = vendor === 'hikvision' ? (get('rtsp-sub-channel').value.trim() || '102') : '';
+          const rtspMainRaw = get('rtsp-main').value.trim();
+          const rtspSubRaw = get('rtsp-sub').value.trim();
+          const rtspMain = vendor === 'hikvision' ? rtspWithHikvisionChannel(rtspMainRaw, rtspMainChannel) : rtspMainRaw;
+          const rtspSub = vendor === 'hikvision' ? rtspWithHikvisionChannel(rtspSubRaw, rtspSubChannel) : rtspSubRaw;
           return {
             id: config.cameras[index]?.id || `${get('vendor').value}_${index + 1}`,
             name: get('name').value,
@@ -3091,6 +3244,7 @@ INDEX_HTML = r"""<!doctype html>
             password: get('password').value,
             rtsp_main: rtspMain,
             rtsp_sub: rtspSub,
+            rtsp_main_channel: rtspMainChannel,
             rtsp_sub_channel: rtspSubChannel,
             onvif_url: get('onvif').value.trim(),
             isapi_base_url: get('isapi').value.trim(),
@@ -3112,6 +3266,7 @@ INDEX_HTML = r"""<!doctype html>
           name: `Hikvision ${index + 1}`,
           vendor: 'hikvision',
           username: 'admin',
+          rtsp_main_channel: '101',
           rtsp_sub_channel: '102',
           snapshot_stream: 'sub',
           live_stream: 'sub',
@@ -3152,13 +3307,15 @@ INDEX_HTML = r"""<!doctype html>
         const host = get('host').value.trim();
         const username = get('username').value.trim();
         const password = get('password').value;
+        const mainChannel = get('rtsp-main-channel').value.trim() || '101';
+        const subChannel = get('rtsp-sub-channel').value.trim() || '102';
         if (!host || !username || !password) {
           saveState.textContent = 'Host, username, and password are required to build RTSP URLs.';
           return;
         }
         if (vendor === 'hikvision') {
-          get('rtsp-main').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/101`;
-          get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/102`;
+          get('rtsp-main').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/${mainChannel}`;
+          get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/${subChannel}`;
           get('onvif').value = get('onvif').value || `http://${host}:80/onvif/device_service`;
           get('isapi').value = get('isapi').value || `http://${host}`;
           saveState.textContent = 'Hikvision RTSP URLs prepared. Click Save cameras to write them.';
@@ -3291,31 +3448,38 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       async function loadRecordingStatus() {
-        const response = await fetch(panelPath('api/recording/status'), { cache: 'no-store' });
-        const data = await response.json();
-        debugEvent('ui_recording_status_loaded', {
-          count: Array.isArray(data.cameras) ? data.cameras.length : 0,
-          cameras: (Array.isArray(data.cameras) ? data.cameras : []).map((item) => ({
-            index: item.index,
-            id: item.id,
-            recording: item.recording,
-            segments: item.segments,
-            record_stream: item.record_stream
-          }))
-        });
-        recordingStatus = {};
-        (Array.isArray(data.cameras) ? data.cameras : []).forEach((item) => {
-          recordingStatus[item.index] = item;
-          const files = Array.isArray(item.files) ? item.files : [];
-          const selected = selectedRecording[item.index];
-          if (files.length && !files.some((file) => file.url === selected)) {
-            selectedRecording[item.index] = files[0].url;
-          }
-          if (!files.length) {
-            delete selectedRecording[item.index];
-          }
-        });
-        renderNvrGrid();
+        if (nvrLoading) return;
+        nvrLoading = true;
+        try {
+          const response = await fetch(panelPath('api/recording/status'), { cache: 'no-store' });
+          const data = await response.json();
+          debugEvent('ui_recording_status_loaded', {
+            count: Array.isArray(data.cameras) ? data.cameras.length : 0,
+            cameras: (Array.isArray(data.cameras) ? data.cameras : []).map((item) => ({
+              index: item.index,
+              id: item.id,
+              recording: item.recording,
+              segments: item.segments,
+              record_stream: item.record_stream,
+              record_error: item.record_error || item.last_error || ''
+            }))
+          });
+          recordingStatus = {};
+          (Array.isArray(data.cameras) ? data.cameras : []).forEach((item) => {
+            recordingStatus[item.index] = item;
+            const files = Array.isArray(item.files) ? item.files : [];
+            const selected = selectedRecording[item.index];
+            if (files.length && !files.some((file) => file.url === selected)) {
+              selectedRecording[item.index] = files[0].url;
+            }
+            if (!files.length) {
+              delete selectedRecording[item.index];
+            }
+          });
+          renderNvrGrid();
+        } finally {
+          nvrLoading = false;
+        }
       }
 
       function moveRecording(index, direction) {
@@ -3390,6 +3554,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function showPage(pageName) {
+        activePage = pageName;
         document.querySelectorAll('[data-page]').forEach((page) => {
           page.hidden = page.dataset.page !== pageName;
         });
@@ -3402,6 +3567,7 @@ INDEX_HTML = r"""<!doctype html>
             logsView.innerHTML = `<p class="notice">${escapeHtml(error.message)}</p>`;
           });
         }
+        updateNvrTimer();
       }
 
       function updateLiveTimer() {
@@ -3409,6 +3575,19 @@ INDEX_HTML = r"""<!doctype html>
           window.clearInterval(liveTimer);
           liveTimer = null;
         }
+      }
+
+      function updateNvrTimer() {
+        if (nvrTimer) {
+          window.clearInterval(nvrTimer);
+          nvrTimer = null;
+        }
+        if (activePage !== 'nvr') return;
+        nvrTimer = window.setInterval(() => {
+          loadRecordingStatus().catch((error) => {
+            debugEvent('ui_recording_status_error', { message: error.message });
+          });
+        }, 5000);
       }
 
       document.querySelectorAll('[data-page-target]').forEach((button) => {
@@ -3629,7 +3808,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.0"
+    server_version = "EdgePanel/0.10.1"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

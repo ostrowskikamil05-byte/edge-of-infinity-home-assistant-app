@@ -79,7 +79,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(loaded_payload["cameras"][0]["record_stream"], "sub")
         self.assertEqual(loaded_payload["cameras"][1]["snapshot_stream"], "main")
 
-    def test_panel_camera_overrides_win_after_external_config_rewrite(self):
+    def test_runtime_config_wins_over_stale_override_files(self):
         panel = load_panel_module()
         existing = {
             "server": {},
@@ -112,20 +112,20 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         loaded = panel.load_config()
 
-        self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.21")
-        self.assertEqual(loaded["cameras"][0]["username"], "admin")
-        self.assertEqual(loaded["cameras"][0]["password"], "secret")
-        self.assertEqual(loaded["cameras"][0]["rtsp_main"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/101")
-        self.assertEqual(loaded["cameras"][0]["rtsp_sub"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/102")
-        self.assertEqual(loaded["cameras"][0]["onvif_url"], "http://192.168.33.21:80/onvif/device_service")
-        self.assertEqual(loaded["cameras"][0]["isapi_base_url"], "http://192.168.33.21")
-        self.assertTrue(loaded["cameras"][0]["enabled"])
-        self.assertTrue(loaded["cameras"][0]["record"])
-        self.assertTrue(loaded["cameras"][0]["low_latency"])
-        self.assertEqual(loaded["cameras"][0]["snapshot_stream"], "sub")
-        self.assertEqual(loaded["cameras"][0]["live_stream"], "main")
-        self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
-        self.assertEqual(loaded["cameras"][0]["record_stream"], "main")
+        self.assertEqual(loaded["cameras"][0]["host"], "192.168.1.64")
+        self.assertEqual(loaded["cameras"][0]["username"], "old-admin")
+        self.assertEqual(loaded["cameras"][0]["password"], "old-secret")
+        self.assertEqual(loaded["cameras"][0]["rtsp_main"], "rtsp://old-admin:old-secret@192.168.1.64:554/Streaming/Channels/101")
+        self.assertEqual(loaded["cameras"][0]["rtsp_sub"], "rtsp://old-admin:old-secret@192.168.1.64:554/Streaming/Channels/102")
+        self.assertEqual(loaded["cameras"][0]["onvif_url"], "http://192.168.1.64:80/onvif/device_service")
+        self.assertEqual(loaded["cameras"][0]["isapi_base_url"], "http://192.168.1.64")
+        self.assertFalse(loaded["cameras"][0]["enabled"])
+        self.assertFalse(loaded["cameras"][0]["record"])
+        self.assertFalse(loaded["cameras"][0]["low_latency"])
+        self.assertEqual(loaded["cameras"][0]["snapshot_stream"], "main")
+        self.assertEqual(loaded["cameras"][0]["live_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["tile_stream"], "main")
+        self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
 
     def test_panel_config_wins_over_stale_runtime_and_override_files(self):
         panel = load_panel_module()
@@ -199,6 +199,78 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(normalized["live"]["mobile_webrtc_public_hosts"], "edge.example.com,192.168.33.17")
         self.assertEqual(normalized["live"]["mobile_webrtc_turn_url"], "turns:turn.example.com:443")
         self.assertEqual(normalized["live"]["mobile_webrtc_turn_password"], "secret")
+
+    def test_hikvision_channels_are_saved_and_build_rtsp_urls(self):
+        panel = load_panel_module()
+        payload = {
+            "server": {},
+            "storage": {},
+            "cameras": [
+                {
+                    "id": "hikvision_1",
+                    "vendor": "hikvision",
+                    "host": "192.168.33.21",
+                    "username": "admin",
+                    "password": "secret",
+                    "rtsp_main_channel": "201",
+                    "rtsp_sub_channel": "202",
+                    "enabled": True,
+                    "record": True,
+                }
+            ],
+        }
+
+        normalized = panel.normalize_config(payload)
+        camera_config = normalized["cameras"][0]
+
+        self.assertEqual(camera_config["rtsp_main_channel"], "201")
+        self.assertEqual(camera_config["rtsp_sub_channel"], "202")
+        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/201")
+        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/202")
+
+    def test_recording_preflight_reports_missing_password(self):
+        panel = load_panel_module()
+        normalized = panel.normalize_camera(
+            {
+                "id": "hikvision_1",
+                "vendor": "hikvision",
+                "host": "192.168.33.21",
+                "username": "admin",
+                "password": "",
+                "record_stream": "main",
+                "enabled": True,
+                "record": True,
+            },
+            1,
+        )
+
+        self.assertEqual(panel.recording_preflight_error(normalized, "main"), "recording_password_missing")
+
+    def test_recording_status_exposes_preflight_error(self):
+        panel = load_panel_module()
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+
+        status = panel.recording_status_payload(payload)["cameras"][0]
+
+        self.assertFalse(status["can_record"])
+        self.assertEqual(status["record_error"], "recording_password_missing")
 
     def test_autoconfig_recommends_keyframe_and_substream_tuning(self):
         panel = load_panel_module()

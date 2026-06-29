@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.1
+
+- Fix Camera Settings persistence by making the saved panel config the only active source of stream roles, so stale override files can no longer force `tile`, `live`, `record`, or `snapshot` back to old values.
+- Add explicit Hikvision main/sub channel fields and build RTSP URLs from those saved channels instead of hard-coded defaults.
+- Harden NVR recording startup with preflight checks for missing host, username, password, RTSP, FFmpeg, and recording directory write access.
+- Add per-camera FFmpeg recording logs and NVR card diagnostics so failed recordings show the real reason instead of silently doing nothing.
+- Refresh NVR recording status while the NVR page is open, so new MP4 segments appear without manual page refresh.
+
 ## 0.10.0
 
 - Add mobile WebRTC controls for public ICE hosts, STUN, and optional TURN fallback so LTE/5G failures can be fixed without editing generated runtime files.
