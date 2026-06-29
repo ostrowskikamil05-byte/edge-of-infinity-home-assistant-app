@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Edge of Infinity panel server."""
 
 from __future__ import annotations
@@ -1323,6 +1323,10 @@ def stop_orphan_recordings(config: dict) -> None:
             process.kill()
 
 
+def camera_should_record(camera: dict) -> bool:
+    return bool(camera.get("enabled")) and bool(camera.get("record"))
+
+
 def recording_base_dir(camera: dict, index: int) -> Path:
     config = load_config()
     storage = config.get("storage") or {}
@@ -1538,6 +1542,16 @@ def recording_status_payload(config: dict | None = None) -> dict:
         record_stream = camera.get("record_stream") or "main"
         record_rtsp = camera_stream(camera, record_stream)
         preflight_error = recording_preflight_error(camera, record_stream)
+        desired_recording = camera_should_record(camera)
+        is_recording = bool(process and process.poll() is None)
+        if is_recording:
+            recording_status = "recording"
+        elif preflight_error:
+            recording_status = "blocked"
+        elif desired_recording:
+            recording_status = "scheduled_stopped"
+        else:
+            recording_status = "disabled"
         video_codec = camera.get("record_video_codec") or camera.get("live_video_codec") or camera.get("video_codec") or camera.get("codec") or ""
         nvr_mode = recording_mode_from_codec(video_codec, nvr)
         health = recording_health(camera, index)
@@ -1550,10 +1564,12 @@ def recording_status_payload(config: dict | None = None) -> dict:
                 "record_rtsp": redact_rtsp(record_rtsp),
                 "record_mode": nvr_mode,
                 "video_codec": video_codec,
+                "desired_recording": desired_recording,
                 "can_record": not preflight_error and bool(record_rtsp),
                 "record_error": preflight_error,
-                "recording": bool(process and process.poll() is None),
-                "pid": process.pid if process and process.poll() is None else None,
+                "recording": is_recording,
+                "recording_status": recording_status,
+                "pid": process.pid if is_recording else None,
                 "directory": str(directory),
                 "directory_exists": directory.exists(),
                 "segments": segment_count,
@@ -1567,6 +1583,49 @@ def recording_status_payload(config: dict | None = None) -> dict:
             }
         )
     return {"cameras": cameras}
+
+
+def ensure_configured_recordings(config: dict, reason: str) -> list[dict]:
+    cleanup_recording_processes()
+    results = []
+    for index, camera in enumerate(config.get("cameras", [])):
+        key = recording_key(camera, index)
+        process = RECORDING_PROCESSES.get(key)
+        running = bool(process and process.poll() is None)
+        should_record = camera_should_record(camera)
+        if should_record and not running:
+            try:
+                result = start_recording(camera, index)
+                results.append({"index": index, "id": camera.get("id"), "action": "started", "result": result})
+            except Exception as error:  # noqa: BLE001
+                error_payload = {
+                    "index": index,
+                    "id": camera.get("id"),
+                    "action": "start_failed",
+                    "error": str(error),
+                    "type": type(error).__name__,
+                    "log_tail": recording_log_tail(camera, index, 4000),
+                }
+                results.append(error_payload)
+                write_debug_event("recording_autostart_failed", {**error_payload, "reason": reason})
+        elif not should_record and running:
+            result = stop_recording(camera, index)
+            results.append({"index": index, "id": camera.get("id"), "action": "stopped_disabled", "result": result})
+        else:
+            results.append({
+                "index": index,
+                "id": camera.get("id"),
+                "action": "kept_running" if running else "kept_stopped",
+                "desired_recording": should_record,
+            })
+    write_debug_event("recording_ensure_done", {"reason": reason, "results": results})
+    return results
+
+
+def schedule_recording_ensure(config: dict, reason: str) -> None:
+    snapshot = json.loads(json.dumps(config))
+    thread = threading.Thread(target=ensure_configured_recordings, args=(snapshot, reason), daemon=True)
+    thread.start()
 
 
 def start_recording(camera: dict, index: int) -> dict:
@@ -3025,6 +3084,15 @@ INDEX_HTML = r"""<!doctype html>
       function nvrCard(camera, index) {
         const status = recordingStatus[index] || {};
         const isRecording = Boolean(status.recording);
+        const desiredRecording = Boolean(status.desired_recording);
+        const recordingState = status.recording_status || (isRecording ? 'recording' : desiredRecording ? 'scheduled_stopped' : 'disabled');
+        const badgeText = isRecording
+          ? 'RECORDING'
+          : recordingState === 'blocked'
+            ? 'BLOCKED'
+            : desiredRecording
+              ? 'SCHEDULED'
+              : 'OFF';
         const canRecord = status.can_record !== false;
         const recordError = status.record_error || status.last_error || '';
         const files = Array.isArray(status.files) ? status.files : [];
@@ -3040,7 +3108,7 @@ INDEX_HTML = r"""<!doctype html>
                 <span class="recording-meta">${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatDate(file.modified_at))}</span>
               </button>
             `).join('')}</div>`
-          : `<p class="notice">Start recording. The first video appears after the first ${escapeHtml(text(status.segment_seconds, 10))}-second segment closes.</p>`;
+          : `<p class="notice">${desiredRecording ? 'Recording is scheduled. The first video appears after the first' : 'Start recording. The first video appears after the first'} ${escapeHtml(text(status.segment_seconds, 10))}-second segment closes.</p>`;
         const diagnostics = recordError
           ? `<p class="section-status state-offline">${escapeHtml(recordErrorText(recordError))}</p>`
           : `<p class="section-status">${escapeHtml(text(status.record_rtsp, 'Record RTSP not ready'))}</p>`;
@@ -3049,7 +3117,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="body">
               <div class="nvr-head">
                 <div class="name">${escapeHtml(text(camera.name, `Camera ${index + 1}`))}</div>
-                <div class="rec-badge ${isRecording ? '' : 'off'}">${isRecording ? 'RECORDING' : 'STOPPED'}</div>
+                <div class="rec-badge ${isRecording ? '' : 'off'}">${badgeText}</div>
               </div>
               ${player}
               ${diagnostics}
@@ -3603,6 +3671,8 @@ INDEX_HTML = r"""<!doctype html>
               index: item.index,
               id: item.id,
               recording: item.recording,
+              desired_recording: item.desired_recording,
+              recording_status: item.recording_status,
               segments: item.segments,
               record_stream: item.record_stream,
               record_error: item.record_error || item.last_error || ''
@@ -3952,7 +4022,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.2"
+    server_version = "EdgePanel/0.10.3"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -4114,6 +4184,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "authoritative_path": str(PANEL_CONFIG_PATH),
             })
             stop_orphan_recordings(saved_payload)
+            schedule_recording_ensure(saved_payload, "config_save")
             remember_camera_presets(saved_payload.get("cameras", []))
             refresh_status()
             self.send_json(saved_payload)
@@ -4266,6 +4337,7 @@ def main() -> None:
     try:
         status_payload = refresh_status()
         write_debug_event("boot_refresh_status_done", {"camera_summary": config_summary(status_payload)})
+        schedule_recording_ensure(load_config(), "boot")
     except Exception as error:
         write_debug_event("boot_refresh_status_error", {"error": str(error), "type": type(error).__name__})
         raise

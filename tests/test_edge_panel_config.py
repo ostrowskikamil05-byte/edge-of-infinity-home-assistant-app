@@ -318,6 +318,69 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         self.assertFalse(status["can_record"])
         self.assertEqual(status["record_error"], "recording_password_missing")
+        self.assertEqual(status["recording_status"], "blocked")
+
+    def test_recording_status_marks_enabled_record_camera_as_scheduled(self):
+        panel = load_panel_module()
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+
+        status = panel.recording_status_payload(payload)["cameras"][0]
+
+        self.assertTrue(status["desired_recording"])
+        self.assertEqual(status["recording_status"], "scheduled_stopped")
+
+    def test_ensure_configured_recordings_starts_enabled_record_camera(self):
+        panel = load_panel_module()
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+        calls = []
+        original = panel.start_recording
+
+        def fake_start(camera_config, index):
+            calls.append((camera_config["id"], index))
+            return {"started": True, "status": "recording"}
+
+        panel.start_recording = fake_start
+        try:
+            results = panel.ensure_configured_recordings(payload, "test")
+        finally:
+            panel.start_recording = original
+
+        self.assertEqual(calls, [("hikvision_1", 0)])
+        self.assertEqual(results[0]["action"], "started")
 
     def test_autoconfig_recommends_keyframe_and_substream_tuning(self):
         panel = load_panel_module()

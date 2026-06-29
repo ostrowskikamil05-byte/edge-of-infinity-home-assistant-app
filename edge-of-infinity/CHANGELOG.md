@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.3
+
+- Start configured NVR recordings automatically on add-on boot and after saving camera settings when a camera is enabled and `record` is true.
+- Add NVR status states for `recording`, `scheduled`, `blocked`, and `off` so the panel no longer hides preflight errors behind a generic stopped state.
+- Log autostart failures with camera id, error type, and FFmpeg log tail to make broken recording setup visible in the Logs page.
+- Add regression tests for scheduled recording status and NVR autostart.
+
 ## 0.10.2
 
 - Add WebRTC ICE transport selection: auto UDP+TCP, UDP only, or TCP only for LTE, strict Wi-Fi, and public relay testing.
