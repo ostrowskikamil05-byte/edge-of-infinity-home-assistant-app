@@ -44,6 +44,9 @@ CAMERA_OVERRIDE_FIELDS = (
     "password",
     "rtsp_main",
     "rtsp_sub",
+    "camera_number",
+    "access_protocol",
+    "rtsp_transport",
     "rtsp_main_channel",
     "rtsp_sub_channel",
     "onvif_url",
@@ -65,9 +68,16 @@ MEDIAMTX_WEBRTC_PUBLIC_HOSTS = [
     for item in os.environ.get("EDGE_MEDIAMTX_WEBRTC_PUBLIC_HOSTS", "homeassistant.local,192.168.33.17").split(",")
     if item.strip()
 ]
+MEDIAMTX_WEBRTC_PUBLIC_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_PUBLIC_URL", "")
 MEDIAMTX_WEBRTC_STUN_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_STUN_URL", "stun:stun.l.google.com:19302")
 MEDIAMTX_WEBRTC_TURN_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TURN_URL", "")
 MEDIAMTX_WEBRTC_TURN_USERNAME = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TURN_USERNAME", "")
+MEDIAMTX_WEBRTC_TURN_PASSWORD = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TURN_PASSWORD", "")
+MEDIAMTX_WEBRTC_TCP_ONLY = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TCP_ONLY", "false").lower() == "true"
+MEDIAMTX_WEBRTC_ICE_TRANSPORT = os.environ.get(
+    "EDGE_MEDIAMTX_WEBRTC_ICE_TRANSPORT",
+    "tcp" if MEDIAMTX_WEBRTC_TCP_ONLY else "auto",
+)
 MEDIAMTX_SRT_PORT = int(os.environ.get("EDGE_MEDIAMTX_SRT_PORT", "8890"))
 MEDIAMTX_API_PORT = int(os.environ.get("EDGE_MEDIAMTX_API_PORT", "9997"))
 MEDIAMTX_CONFIG_PATH = Path(os.environ.get("EDGE_MEDIAMTX_CONFIG", "/tmp/edge-runtime/mediamtx.yml"))
@@ -250,9 +260,39 @@ def normalize_stream_name(value: str | None, fallback: str) -> str:
 
 
 def hikvision_camera_number_from_channel(channel: str) -> str:
-    if not channel or len(channel) <= 2:
-        return "1"
+    if not channel:
+        return ""
+    if len(channel) <= 2:
+        return channel
     return channel[:-2] or "1"
+
+
+def normalize_camera_number(value: str | int | None, fallback: str = "1") -> str:
+    number = str(value or "").strip()
+    return number if re.fullmatch(r"\d{1,2}", number) else fallback
+
+
+def hikvision_channel_for_camera_number(camera_number: str, stream_name: str) -> str:
+    suffix = "01" if normalize_stream_name(stream_name, "sub") == "main" else "02"
+    return f"{normalize_camera_number(camera_number)}{suffix}"
+
+
+def normalize_access_protocol(value: str | None) -> str:
+    return value if value in ("rtsp", "isapi", "onvif", "unicast", "multicast") else "rtsp"
+
+
+def normalize_rtsp_transport(value: str | None) -> str:
+    return value if value in ("tcp", "udp", "auto") else "tcp"
+
+
+def normalize_webrtc_ice_transport(value: str | None, tcp_only: object = None) -> str:
+    if value in ("auto", "udp", "tcp"):
+        return value
+    if safe_bool(tcp_only, False):
+        return "tcp"
+    if MEDIAMTX_WEBRTC_ICE_TRANSPORT in ("auto", "udp", "tcp"):
+        return MEDIAMTX_WEBRTC_ICE_TRANSPORT
+    return "auto"
 
 
 def stream_channel(camera: dict, stream_name: str) -> str:
@@ -289,6 +329,9 @@ def config_summary(payload: dict) -> list[dict]:
                 "enabled": camera.get("enabled"),
                 "record": camera.get("record"),
                 "low_latency": camera.get("low_latency"),
+                "camera_number": camera.get("camera_number"),
+                "access_protocol": camera.get("access_protocol"),
+                "rtsp_transport": camera.get("rtsp_transport"),
                 "live_stream": camera.get("live_stream"),
                 "tile_stream": camera.get("tile_stream"),
                 "record_stream": camera.get("record_stream"),
@@ -483,13 +526,28 @@ def normalize_camera(raw: dict, index: int) -> dict:
     password = raw.get("password") or ""
     rtsp_main = raw.get("rtsp_main") or ""
     rtsp_sub = raw.get("rtsp_sub") or ""
+    camera_number = normalize_camera_number(
+        raw.get("camera_number")
+        or hikvision_camera_number_from_channel(hikvision_channel_from_rtsp(rtsp_main, ""))
+        or hikvision_camera_number_from_channel(hikvision_channel_from_rtsp(rtsp_sub, "")),
+        str(index),
+    )
+    access_protocol = normalize_access_protocol(raw.get("access_protocol"))
+    rtsp_transport = normalize_rtsp_transport(raw.get("rtsp_transport"))
+    default_main_channel = hikvision_channel_for_camera_number(camera_number, "main")
+    default_sub_channel = hikvision_channel_for_camera_number(camera_number, "sub")
+    raw_main_channel = raw.get("rtsp_main_channel") or hikvision_channel_from_rtsp(rtsp_main, default_main_channel)
+    raw_sub_channel = raw.get("rtsp_sub_channel") or hikvision_channel_from_rtsp(rtsp_sub, default_sub_channel)
+    if raw.get("camera_number"):
+        raw_main_channel = raw_main_channel if str(raw_main_channel).startswith(camera_number) else default_main_channel
+        raw_sub_channel = raw_sub_channel if str(raw_sub_channel).startswith(camera_number) else default_sub_channel
     rtsp_main_channel = normalize_hikvision_channel(
-        raw.get("rtsp_main_channel") or hikvision_channel_from_rtsp(rtsp_main, HIKVISION_MAIN_CHANNEL),
-        HIKVISION_MAIN_CHANNEL,
+        raw_main_channel,
+        default_main_channel,
     )
     rtsp_sub_channel = normalize_hikvision_channel(
-        raw.get("rtsp_sub_channel") or hikvision_channel_from_rtsp(rtsp_sub, HIKVISION_SUB_CHANNEL),
-        HIKVISION_SUB_CHANNEL,
+        raw_sub_channel,
+        default_sub_channel,
     )
     if vendor == "hikvision":
         rtsp_main = hikvision_rtsp_with_channel(rtsp_main, rtsp_main_channel)
@@ -520,6 +578,9 @@ def normalize_camera(raw: dict, index: int) -> dict:
         "password": password,
         "rtsp_main": rtsp_main,
         "rtsp_sub": rtsp_sub,
+        "camera_number": camera_number,
+        "access_protocol": access_protocol,
+        "rtsp_transport": rtsp_transport,
         "rtsp_main_channel": rtsp_main_channel,
         "rtsp_sub_channel": rtsp_sub_channel,
         "onvif_url": onvif_url,
@@ -544,6 +605,10 @@ def normalize_config(payload: dict) -> dict:
     storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
     live = payload.get("live") if isinstance(payload.get("live"), dict) else {}
     nvr = payload.get("nvr") if isinstance(payload.get("nvr"), dict) else {}
+    webrtc_ice_transport = normalize_webrtc_ice_transport(
+        live.get("mobile_webrtc_ice_transport"),
+        live.get("mobile_webrtc_tcp_only"),
+    )
     return {
         "server": {
             "listen": server.get("listen") or "0.0.0.0:8088",
@@ -563,10 +628,13 @@ def normalize_config(payload: dict) -> dict:
             "prebuffer_local_ms": clamp_int(live.get("prebuffer_local_ms"), 4000, 0, 10000),
             "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
             "mobile_webrtc_public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
+            "mobile_webrtc_public_url": (live.get("mobile_webrtc_public_url") or MEDIAMTX_WEBRTC_PUBLIC_URL).rstrip("/"),
             "mobile_webrtc_stun_url": live.get("mobile_webrtc_stun_url") if live.get("mobile_webrtc_stun_url") is not None else MEDIAMTX_WEBRTC_STUN_URL,
             "mobile_webrtc_turn_url": live.get("mobile_webrtc_turn_url") or MEDIAMTX_WEBRTC_TURN_URL,
             "mobile_webrtc_turn_username": live.get("mobile_webrtc_turn_username") or MEDIAMTX_WEBRTC_TURN_USERNAME,
-            "mobile_webrtc_turn_password": live.get("mobile_webrtc_turn_password") or "",
+            "mobile_webrtc_turn_password": live.get("mobile_webrtc_turn_password") or MEDIAMTX_WEBRTC_TURN_PASSWORD,
+            "mobile_webrtc_ice_transport": webrtc_ice_transport,
+            "mobile_webrtc_tcp_only": webrtc_ice_transport == "tcp",
         },
         "nvr": {
             "segment_seconds": clamp_int(nvr.get("segment_seconds"), 10, 2, 300),
@@ -636,6 +704,9 @@ def merge_existing_camera_values(raw_payload: dict) -> dict:
         "password",
         "rtsp_main",
         "rtsp_sub",
+        "camera_number",
+        "access_protocol",
+        "rtsp_transport",
         "rtsp_main_channel",
         "rtsp_sub_channel",
         "onvif_url",
@@ -764,6 +835,9 @@ def preset_camera(camera: dict) -> dict:
             "password",
             "rtsp_main",
             "rtsp_sub",
+            "camera_number",
+            "access_protocol",
+            "rtsp_transport",
             "rtsp_main_channel",
             "rtsp_sub_channel",
             "onvif_url",
@@ -1192,8 +1266,17 @@ def stream_capabilities(config: dict | None = None) -> dict:
         },
         "mobile_webrtc": {
             "public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
+            "public_url": live.get("mobile_webrtc_public_url") or "",
             "stun_url": live.get("mobile_webrtc_stun_url") if live.get("mobile_webrtc_stun_url") is not None else MEDIAMTX_WEBRTC_STUN_URL,
             "turn_configured": bool(live.get("mobile_webrtc_turn_url") or MEDIAMTX_WEBRTC_TURN_URL),
+            "ice_transport": normalize_webrtc_ice_transport(
+                live.get("mobile_webrtc_ice_transport"),
+                live.get("mobile_webrtc_tcp_only"),
+            ),
+            "tcp_only": normalize_webrtc_ice_transport(
+                live.get("mobile_webrtc_ice_transport"),
+                live.get("mobile_webrtc_tcp_only"),
+            ) == "tcp",
             "ice_udp_port": MEDIAMTX_WEBRTC_UDP_PORT,
             "whep_port": MEDIAMTX_WEBRTC_PORT,
             "prebuffer_enabled": safe_bool(live.get("prebuffer_enabled"), True),
@@ -2703,10 +2786,27 @@ INDEX_HTML = r"""<!doctype html>
 
       function directMediaMtxPath(path) {
         const clean = String(path).replace(/^\/+/, '');
+        const publicUrl = String(config?.live?.mobile_webrtc_public_url || '').trim().replace(/\/+$/, '');
+        if (publicUrl) return `${publicUrl}/${clean}`;
         if (window.location.hostname) {
           return `http://${window.location.hostname}:8889/${clean}`;
         }
         return `http://127.0.0.1:8889/${clean}`;
+      }
+
+      function isLanHost(hostname) {
+        const host = String(hostname || '').toLowerCase();
+        return host === 'localhost'
+          || host.endsWith('.local')
+          || host.startsWith('192.168.')
+          || host.startsWith('10.')
+          || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+      }
+
+      function remoteLiveNotice() {
+        const publicUrl = String(config?.live?.mobile_webrtc_public_url || '').trim();
+        if (publicUrl || isLanHost(window.location.hostname)) return '';
+        return '<p class="notice">Remote live needs Edge Settings -> WebRTC public URL, plus reachable TCP 8889 and ICE TCP/UDP 8189 or a TURN/VPS relay.</p>';
       }
 
       function debugEvent(event, payload = {}) {
@@ -3053,6 +3153,9 @@ INDEX_HTML = r"""<!doctype html>
 
       function cameraForm(camera, index) {
         const prefix = `camera-${index}`;
+        const cameraNumber = camera.camera_number || String(index + 1);
+        const accessProtocol = camera.access_protocol || 'rtsp';
+        const rtspTransport = camera.rtsp_transport || 'tcp';
         const mainChannel = camera.rtsp_main_channel || hikvisionChannelFromRtsp(camera.rtsp_main, '101');
         const subChannel = camera.rtsp_sub_channel || hikvisionChannelFromRtsp(camera.rtsp_sub, '102');
         return `
@@ -3072,6 +3175,19 @@ INDEX_HTML = r"""<!doctype html>
               <label>Host/IP<input name="${prefix}-host" value="${escapeHtml(camera.host || '')}"></label>
               <label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label>
               <label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label>
+              <label>Camera number<input name="${prefix}-camera-number" value="${escapeHtml(cameraNumber)}"></label>
+              <label>Connection<select name="${prefix}-access-protocol">
+                ${option('rtsp', accessProtocol, 'RTSP')}
+                ${option('isapi', accessProtocol, 'ISAPI')}
+                ${option('onvif', accessProtocol, 'ONVIF')}
+                ${option('unicast', accessProtocol, 'Unicast')}
+                ${option('multicast', accessProtocol, 'Multicast')}
+              </select></label>
+              <label>RTSP transport<select name="${prefix}-rtsp-transport">
+                ${option('tcp', rtspTransport, 'TCP stable')}
+                ${option('udp', rtspTransport, 'UDP low latency')}
+                ${option('auto', rtspTransport, 'Auto')}
+              </select></label>
               <label>Main channel<input name="${prefix}-rtsp-main-channel" value="${escapeHtml(mainChannel)}"></label>
               <label>Sub channel<input name="${prefix}-rtsp-sub-channel" value="${escapeHtml(subChannel)}"></label>
               <label>RTSP main<input name="${prefix}-rtsp-main" value="${escapeHtml(camera.rtsp_main || '')}"></label>
@@ -3108,8 +3224,8 @@ INDEX_HTML = r"""<!doctype html>
       function renderConfig() {
         configDirty = false;
         const cameras = config.cameras && config.cameras.length ? config.cameras : [
-          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', rtsp_main_channel: '101', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true },
-          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', rtsp_main_channel: '101', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true }
+          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', camera_number: '1', access_protocol: 'rtsp', rtsp_transport: 'tcp', rtsp_main_channel: '101', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true },
+          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', camera_number: '2', access_protocol: 'rtsp', rtsp_transport: 'tcp', rtsp_main_channel: '201', rtsp_sub_channel: '202', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true }
         ];
         config = { ...config, cameras };
         form.innerHTML = cameras.map(cameraForm).join('');
@@ -3176,6 +3292,7 @@ INDEX_HTML = r"""<!doctype html>
               <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label>
               <label>Tile FPS<input name="live-tile-fps" type="number" min="1" max="10" value="${escapeHtml(text(liveConfig.tile_fps, 5))}"></label>
               <label>Tile max width<input name="live-tile-max-width" type="number" min="320" max="1920" value="${escapeHtml(text(liveConfig.tile_max_width, 960))}"></label>
+              <label>WebRTC public URL<input name="live-mobile-public-url" value="${escapeHtml(liveConfig.mobile_webrtc_public_url || '')}" placeholder="http://PUBLIC-IP:8889 or https://edge.example.com"></label>
               <label>Mobile public hosts<input name="live-mobile-public-hosts" value="${escapeHtml(text(liveConfig.mobile_webrtc_public_hosts, 'homeassistant.local,192.168.33.17'))}" placeholder="homeassistant.local,public.example.com"></label>
               <label>STUN URL<input name="live-mobile-stun-url" value="${escapeHtml(text(liveConfig.mobile_webrtc_stun_url, 'stun:stun.l.google.com:19302'))}"></label>
               <label>TURN URL<input name="live-mobile-turn-url" value="${escapeHtml(liveConfig.mobile_webrtc_turn_url || '')}" placeholder="turns:turn.example.com:443"></label>
@@ -3184,8 +3301,13 @@ INDEX_HTML = r"""<!doctype html>
               <label>Local prebuffer ms<input name="live-prebuffer-local-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_local_ms, 4000))}"></label>
               <label>Remote prebuffer ms<input name="live-prebuffer-remote-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_remote_ms, 2000))}"></label>
               <label class="check-row"><input name="live-prebuffer-enabled" type="checkbox" ${liveConfig.prebuffer_enabled !== false ? 'checked' : ''}> Keep selected low-latency streams warm</label>
+              <label>WebRTC ICE transport<select name="live-mobile-ice-transport">
+                <option value="auto" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'auto' ? 'selected' : ''}>Auto UDP + TCP</option>
+                <option value="udp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'udp' ? 'selected' : ''}>UDP only</option>
+                <option value="tcp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'tcp' ? 'selected' : ''}>TCP only</option>
+              </select></label>
             </div>
-            <p class="notice">MediaMTX is the RTSP rebroadcast core. For LTE, public hosts must be reachable from the phone. STUN is the fast discovery path; TURN is a fallback when CGNAT or a firewall blocks direct ICE.</p>
+            <p class="notice">Remote LTE or another Wi-Fi cannot use a LAN-only 192.168 address. Set WebRTC public URL to a reachable MediaMTX address and expose TCP 8889 plus ICE 8189. Use Auto first, TCP only for strict mobile networks, and TURN/VPS when the home network cannot expose ports.</p>
           </section>
         `;
       }
@@ -3229,8 +3351,17 @@ INDEX_HTML = r"""<!doctype html>
             return element;
           };
           const vendor = get('vendor').value;
-          const rtspMainChannel = vendor === 'hikvision' ? (get('rtsp-main-channel').value.trim() || '101') : '';
-          const rtspSubChannel = vendor === 'hikvision' ? (get('rtsp-sub-channel').value.trim() || '102') : '';
+          const cameraNumber = get('camera-number').value.trim() || '1';
+          const defaultMainChannel = `${cameraNumber}01`;
+          const defaultSubChannel = `${cameraNumber}02`;
+          const mainInput = get('rtsp-main-channel').value.trim();
+          const subInput = get('rtsp-sub-channel').value.trim();
+          const rtspMainChannel = vendor === 'hikvision'
+            ? (mainInput && mainInput.startsWith(cameraNumber) ? mainInput : defaultMainChannel)
+            : '';
+          const rtspSubChannel = vendor === 'hikvision'
+            ? (subInput && subInput.startsWith(cameraNumber) ? subInput : defaultSubChannel)
+            : '';
           const rtspMainRaw = get('rtsp-main').value.trim();
           const rtspSubRaw = get('rtsp-sub').value.trim();
           const rtspMain = vendor === 'hikvision' ? rtspWithHikvisionChannel(rtspMainRaw, rtspMainChannel) : rtspMainRaw;
@@ -3244,6 +3375,9 @@ INDEX_HTML = r"""<!doctype html>
             password: get('password').value,
             rtsp_main: rtspMain,
             rtsp_sub: rtspSub,
+            camera_number: cameraNumber,
+            access_protocol: get('access-protocol').value,
+            rtsp_transport: get('rtsp-transport').value,
             rtsp_main_channel: rtspMainChannel,
             rtsp_sub_channel: rtspSubChannel,
             onvif_url: get('onvif').value.trim(),
@@ -3261,13 +3395,17 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function newCamera(index) {
+        const cameraNumber = String(index + 1);
         return {
           id: `hikvision_${index + 1}`,
           name: `Hikvision ${index + 1}`,
           vendor: 'hikvision',
           username: 'admin',
-          rtsp_main_channel: '101',
-          rtsp_sub_channel: '102',
+          camera_number: cameraNumber,
+          access_protocol: 'rtsp',
+          rtsp_transport: 'tcp',
+          rtsp_main_channel: `${cameraNumber}01`,
+          rtsp_sub_channel: `${cameraNumber}02`,
           snapshot_stream: 'sub',
           live_stream: 'sub',
           tile_stream: 'sub',
@@ -3307,13 +3445,16 @@ INDEX_HTML = r"""<!doctype html>
         const host = get('host').value.trim();
         const username = get('username').value.trim();
         const password = get('password').value;
-        const mainChannel = get('rtsp-main-channel').value.trim() || '101';
-        const subChannel = get('rtsp-sub-channel').value.trim() || '102';
+        const cameraNumber = get('camera-number').value.trim() || '1';
+        const mainChannel = `${cameraNumber}01`;
+        const subChannel = `${cameraNumber}02`;
         if (!host || !username || !password) {
           saveState.textContent = 'Host, username, and password are required to build RTSP URLs.';
           return;
         }
         if (vendor === 'hikvision') {
+          get('rtsp-main-channel').value = mainChannel;
+          get('rtsp-sub-channel').value = subChannel;
           get('rtsp-main').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/${mainChannel}`;
           get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/${subChannel}`;
           get('onvif').value = get('onvif').value || `http://${host}:80/onvif/device_service`;
@@ -3353,11 +3494,14 @@ INDEX_HTML = r"""<!doctype html>
             prebuffer_enabled: get('live-prebuffer-enabled').checked,
             prebuffer_local_ms: Number(get('live-prebuffer-local-ms').value || 4000),
             prebuffer_remote_ms: Number(get('live-prebuffer-remote-ms').value || 2000),
+            mobile_webrtc_public_url: get('live-mobile-public-url').value.trim(),
             mobile_webrtc_public_hosts: get('live-mobile-public-hosts').value.trim(),
             mobile_webrtc_stun_url: get('live-mobile-stun-url').value.trim(),
             mobile_webrtc_turn_url: get('live-mobile-turn-url').value.trim(),
             mobile_webrtc_turn_username: get('live-mobile-turn-username').value.trim(),
-            mobile_webrtc_turn_password: get('live-mobile-turn-password').value
+            mobile_webrtc_turn_password: get('live-mobile-turn-password').value,
+            mobile_webrtc_ice_transport: get('live-mobile-ice-transport').value,
+            mobile_webrtc_tcp_only: get('live-mobile-ice-transport').value === 'tcp'
           },
           nvr: {
             segment_seconds: Number(get('nvr-segment-seconds').value || 10),
@@ -3443,8 +3587,8 @@ INDEX_HTML = r"""<!doctype html>
           }
         });
         grid.innerHTML = cameras.length
-          ? `${cameras.map(cameraCard).join('')}${addCameraTile()}`
-          : `${addCameraTile()}`;
+          ? `${remoteLiveNotice()}${cameras.map(cameraCard).join('')}${addCameraTile()}`
+          : `${remoteLiveNotice()}${addCameraTile()}`;
       }
 
       async function loadRecordingStatus() {
@@ -3808,7 +3952,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.1"
+    server_version = "EdgePanel/0.10.2"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

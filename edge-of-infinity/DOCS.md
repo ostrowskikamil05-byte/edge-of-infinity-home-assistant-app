@@ -177,12 +177,24 @@ mobile_webrtc_stun_url
 mobile_webrtc_turn_url
 mobile_webrtc_turn_username
 mobile_webrtc_turn_password
+mobile_webrtc_ice_transport
 prebuffer_enabled
 prebuffer_local_ms
 prebuffer_remote_ms
 ```
 
 On restart, the add-on generates MediaMTX and Janus configs from those values. The fastest LTE path is still direct ICE through a reachable public host/DDNS and open WebRTC/ICE ports. TURN is only the fallback when CGNAT or a carrier firewall prevents direct ICE. A VPS can be used as that public host, TURN server, or future relay bridge when the home network cannot expose ports.
+
+Starting with version `0.10.2`, `mobile_webrtc_ice_transport` can be `auto`, `udp`, or `tcp`. Use `auto` first because it exposes both UDP and TCP ICE on port `8189`. Use `udp` when everything is local and you want the simplest low-latency path. Use `tcp` when LTE, hotel Wi-Fi, or a friend's Wi-Fi blocks UDP, but remember that the public MediaMTX WebRTC address on `8889` and ICE port `8189` must still be reachable from that network. If the home network is behind CGNAT or cannot forward those ports, use a VPS or TURN relay instead of a LAN-only `192.168.x.x` address.
+
+The `WebRTC public URL` field must point to the public MediaMTX WHEP/WebRTC endpoint, for example:
+
+```text
+https://edge.example.com
+http://PUBLIC-IP:8889
+```
+
+Do not use the internal Docker `172.30.x.x` address or a LAN-only `192.168.x.x` address for LTE/mobile playback.
 
 For LL-HLS mobile tests, `mediamtx_hls_always_remux` can be enabled in the add-on options. Keep it off unless you are testing HLS startup time, because always-remux keeps HLS work active even without a viewer.
 
@@ -203,6 +215,8 @@ Starting with version `0.8.7`, the panel also persists the full submitted camera
 This includes host, login, RTSP, ONVIF, ISAPI, enable flags, and all stream role choices. The panel applies this file before config normalization, so a stale add-on option file or old `edge.json` contents cannot silently force saved camera fields back to previous values.
 
 Starting with version `0.8.8`, `/homeassistant/edge/panel-config.json` is the primary source of truth. Starting with version `0.10.0`, successful panel saves clear legacy `panel-camera-overrides.json` and `stream-overrides.json` files. Starting with version `0.10.1`, those legacy files are no longer applied while loading fallback runtime config, so stale values cannot force stream roles back to previous settings.
+
+Starting with version `0.10.2`, Hikvision setup can use `camera_number` as the simple source of truth for stream URLs. Camera number `1` maps to `101/102`, camera number `2` maps to `201/202`, and so on. This lets the panel rebuild RTSP URLs from host, username, password, and camera number without manually editing every RTSP path. The saved `access_protocol` and `rtsp_transport` fields are also preserved so the panel and generated runtime config stay aligned.
 
 ## HEVC / H265
 

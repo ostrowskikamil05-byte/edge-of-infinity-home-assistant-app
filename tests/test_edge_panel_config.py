@@ -188,6 +188,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                 "mobile_webrtc_turn_url": "turns:turn.example.com:443",
                 "mobile_webrtc_turn_username": "edge",
                 "mobile_webrtc_turn_password": "secret",
+                "mobile_webrtc_ice_transport": "tcp",
             },
             "cameras": [camera("hikvision_1", "192.168.33.21", "sub")],
         }
@@ -199,6 +200,52 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(normalized["live"]["mobile_webrtc_public_hosts"], "edge.example.com,192.168.33.17")
         self.assertEqual(normalized["live"]["mobile_webrtc_turn_url"], "turns:turn.example.com:443")
         self.assertEqual(normalized["live"]["mobile_webrtc_turn_password"], "secret")
+        self.assertEqual(normalized["live"]["mobile_webrtc_ice_transport"], "tcp")
+        self.assertTrue(normalized["live"]["mobile_webrtc_tcp_only"])
+
+    def test_legacy_tcp_only_selects_tcp_ice_transport(self):
+        panel = load_panel_module()
+        normalized = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {},
+                "live": {"mobile_webrtc_tcp_only": True},
+                "cameras": [camera("hikvision_1", "192.168.33.21", "sub")],
+            }
+        )
+
+        self.assertEqual(normalized["live"]["mobile_webrtc_ice_transport"], "tcp")
+        self.assertTrue(normalized["live"]["mobile_webrtc_tcp_only"])
+
+    def test_camera_number_builds_hikvision_channels_and_rtsp_urls(self):
+        panel = load_panel_module()
+        payload = {
+            "server": {},
+            "storage": {},
+            "cameras": [
+                {
+                    "id": "hikvision_2",
+                    "vendor": "hikvision",
+                    "host": "192.168.33.135",
+                    "username": "admin",
+                    "password": "secret",
+                    "camera_number": "2",
+                    "rtsp_main_channel": "101",
+                    "rtsp_sub_channel": "102",
+                    "enabled": True,
+                    "record": True,
+                }
+            ],
+        }
+
+        normalized = panel.normalize_config(payload)
+        camera_config = normalized["cameras"][0]
+
+        self.assertEqual(camera_config["camera_number"], "2")
+        self.assertEqual(camera_config["rtsp_main_channel"], "201")
+        self.assertEqual(camera_config["rtsp_sub_channel"], "202")
+        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.168.33.135:554/Streaming/Channels/201")
+        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.168.33.135:554/Streaming/Channels/202")
 
     def test_hikvision_channels_are_saved_and_build_rtsp_urls(self):
         panel = load_panel_module()

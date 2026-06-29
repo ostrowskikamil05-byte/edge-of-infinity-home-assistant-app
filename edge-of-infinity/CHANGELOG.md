@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.2
+
+- Add WebRTC ICE transport selection: auto UDP+TCP, UDP only, or TCP only for LTE, strict Wi-Fi, and public relay testing.
+- Add `mediamtx_webrtc_public_url` support to the panel path selection, so remote viewers can use a reachable MediaMTX WHEP address instead of the LAN-only Home Assistant host.
+- Make Hikvision `camera_number` authoritative when building channels, so camera number `2` generates `201/202` and cannot be silently normalized back to `101/102`.
+- Preserve camera number, access protocol, RTSP transport, and stream role values in save diagnostics and presets for easier debugging.
+- Keep backward compatibility with the old `tcp_only` setting while moving the UI to the clearer transport selector.
+
 ## 0.10.1
 
 - Fix Camera Settings persistence by making the saved panel config the only active source of stream roles, so stale override files can no longer force `tile`, `live`, `record`, or `snapshot` back to old values.

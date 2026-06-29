@@ -30,11 +30,14 @@ MEDIAMTX_HLS_PORT="$(read_option 'mediamtx_hls_port' '8888')"
 MEDIAMTX_HLS_ALWAYS_REMUX="$(read_option 'mediamtx_hls_always_remux' 'false')"
 MEDIAMTX_WEBRTC_PORT="$(read_option 'mediamtx_webrtc_port' '8889')"
 MEDIAMTX_WEBRTC_UDP_PORT="$(read_option 'mediamtx_webrtc_udp_port' '8189')"
+MEDIAMTX_WEBRTC_PUBLIC_URL="$(read_option 'mediamtx_webrtc_public_url' '')"
 MEDIAMTX_WEBRTC_PUBLIC_HOSTS="$(read_option 'mediamtx_webrtc_public_hosts' 'homeassistant.local,192.168.33.17')"
 MEDIAMTX_WEBRTC_STUN_URL="$(read_option 'mediamtx_webrtc_stun_url' 'stun:stun.l.google.com:19302')"
 MEDIAMTX_WEBRTC_TURN_URL="$(read_option 'mediamtx_webrtc_turn_url' '')"
 MEDIAMTX_WEBRTC_TURN_USERNAME="$(read_option 'mediamtx_webrtc_turn_username' '')"
 MEDIAMTX_WEBRTC_TURN_PASSWORD="$(read_option 'mediamtx_webrtc_turn_password' '')"
+MEDIAMTX_WEBRTC_ICE_TRANSPORT="$(read_option 'mediamtx_webrtc_ice_transport' 'auto')"
+MEDIAMTX_WEBRTC_TCP_ONLY="$(read_option 'mediamtx_webrtc_tcp_only' 'false')"
 MEDIAMTX_SRT_PORT="$(read_option 'mediamtx_srt_port' '8890')"
 MEDIAMTX_API_PORT="$(read_option 'mediamtx_api_port' '9997')"
 MEDIAMTX_RECORD="$(read_option 'mediamtx_record' 'true')"
@@ -57,11 +60,17 @@ MEDIAMTX_HLS_PORT="${MEDIAMTX_HLS_PORT:-8888}"
 MEDIAMTX_HLS_ALWAYS_REMUX="${MEDIAMTX_HLS_ALWAYS_REMUX:-false}"
 MEDIAMTX_WEBRTC_PORT="${MEDIAMTX_WEBRTC_PORT:-8889}"
 MEDIAMTX_WEBRTC_UDP_PORT="${MEDIAMTX_WEBRTC_UDP_PORT:-8189}"
+MEDIAMTX_WEBRTC_PUBLIC_URL="${MEDIAMTX_WEBRTC_PUBLIC_URL:-}"
 MEDIAMTX_WEBRTC_PUBLIC_HOSTS="${MEDIAMTX_WEBRTC_PUBLIC_HOSTS:-homeassistant.local,192.168.33.17}"
 MEDIAMTX_WEBRTC_STUN_URL="${MEDIAMTX_WEBRTC_STUN_URL:-stun:stun.l.google.com:19302}"
 MEDIAMTX_WEBRTC_TURN_URL="${MEDIAMTX_WEBRTC_TURN_URL:-}"
 MEDIAMTX_WEBRTC_TURN_USERNAME="${MEDIAMTX_WEBRTC_TURN_USERNAME:-}"
 MEDIAMTX_WEBRTC_TURN_PASSWORD="${MEDIAMTX_WEBRTC_TURN_PASSWORD:-}"
+MEDIAMTX_WEBRTC_ICE_TRANSPORT="${MEDIAMTX_WEBRTC_ICE_TRANSPORT:-auto}"
+MEDIAMTX_WEBRTC_TCP_ONLY="${MEDIAMTX_WEBRTC_TCP_ONLY:-false}"
+if [[ "${MEDIAMTX_WEBRTC_TCP_ONLY}" == "true" && "$(read_option 'mediamtx_webrtc_ice_transport' '')" == "" ]]; then
+  MEDIAMTX_WEBRTC_ICE_TRANSPORT="tcp"
+fi
 MEDIAMTX_SRT_PORT="${MEDIAMTX_SRT_PORT:-8890}"
 MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT:-9997}"
 MEDIAMTX_RECORD="${MEDIAMTX_RECORD:-true}"
@@ -135,6 +144,9 @@ addon_camera_options_hash() {
     hikvision_1_host,
     hikvision_1_username,
     hikvision_1_password,
+    hikvision_1_camera_number,
+    hikvision_1_access_protocol,
+    hikvision_1_rtsp_transport,
     hikvision_1_rtsp_main,
     hikvision_1_rtsp_sub,
     hikvision_1_onvif_url,
@@ -149,6 +161,9 @@ addon_camera_options_hash() {
     hikvision_2_host,
     hikvision_2_username,
     hikvision_2_password,
+    hikvision_2_camera_number,
+    hikvision_2_access_protocol,
+    hikvision_2_rtsp_transport,
     hikvision_2_rtsp_main,
     hikvision_2_rtsp_sub,
     hikvision_2_onvif_url,
@@ -287,6 +302,33 @@ build_mediamtx_ice_servers_yaml() {
   fi
 }
 
+host_from_url() {
+  local value="$1"
+  value="${value#http://}"
+  value="${value#https://}"
+  value="${value%%/*}"
+  value="${value%%:*}"
+  printf '%s' "${value}"
+}
+
+append_csv_unique() {
+  local csv="$1"
+  local item="$2"
+  if [[ -z "${item}" ]]; then
+    printf '%s' "${csv}"
+    return
+  fi
+  if [[ ",${csv}," == *",${item},"* ]]; then
+    printf '%s' "${csv}"
+    return
+  fi
+  if [[ -z "${csv}" ]]; then
+    printf '%s' "${item}"
+  else
+    printf '%s,%s' "${csv}" "${item}"
+  fi
+}
+
 write_mediamtx_path() {
   local output="$1"
   local path_name="$2"
@@ -320,13 +362,42 @@ write_mediamtx_path() {
 
 generate_mediamtx_config() {
   local output="$1"
-  local public_hosts stun_url turn_url turn_username turn_password webrtc_public_hosts webrtc_ice_servers_yaml prebuffer_enabled
+  local public_hosts public_url public_url_host stun_url turn_url turn_username turn_password webrtc_public_hosts webrtc_ice_servers_yaml prebuffer_enabled ice_transport tcp_only udp_address tcp_address
   public_hosts="$(runtime_live_option 'mobile_webrtc_public_hosts' "${MEDIAMTX_WEBRTC_PUBLIC_HOSTS}")"
+  public_url="$(runtime_live_option 'mobile_webrtc_public_url' "${MEDIAMTX_WEBRTC_PUBLIC_URL}")"
+  public_url_host="$(host_from_url "${public_url}")"
+  public_hosts="$(append_csv_unique "${public_hosts}" "${public_url_host}")"
   stun_url="$(runtime_live_option 'mobile_webrtc_stun_url' "${MEDIAMTX_WEBRTC_STUN_URL}")"
   turn_url="$(runtime_live_option 'mobile_webrtc_turn_url' "${MEDIAMTX_WEBRTC_TURN_URL}")"
   turn_username="$(runtime_live_option 'mobile_webrtc_turn_username' "${MEDIAMTX_WEBRTC_TURN_USERNAME}")"
   turn_password="$(runtime_live_option 'mobile_webrtc_turn_password' "${MEDIAMTX_WEBRTC_TURN_PASSWORD}")"
   prebuffer_enabled="$(runtime_live_option 'prebuffer_enabled' 'true')"
+  ice_transport="$(runtime_live_option 'mobile_webrtc_ice_transport' "${MEDIAMTX_WEBRTC_ICE_TRANSPORT}")"
+  tcp_only="$(runtime_live_option 'mobile_webrtc_tcp_only' "${MEDIAMTX_WEBRTC_TCP_ONLY}")"
+  if [[ "${tcp_only}" == "true" && "$(runtime_live_option 'mobile_webrtc_ice_transport' '')" == "" ]]; then
+    ice_transport="tcp"
+  fi
+  if [[ "${ice_transport}" != "auto" && "${ice_transport}" != "udp" && "${ice_transport}" != "tcp" ]]; then
+    if [[ "${tcp_only}" == "true" ]]; then
+      ice_transport="tcp"
+    else
+      ice_transport="auto"
+    fi
+  fi
+  case "${ice_transport}" in
+    tcp)
+      udp_address=""
+      tcp_address=":${MEDIAMTX_WEBRTC_UDP_PORT}"
+      ;;
+    udp)
+      udp_address=":${MEDIAMTX_WEBRTC_UDP_PORT}"
+      tcp_address=""
+      ;;
+    *)
+      udp_address=":${MEDIAMTX_WEBRTC_UDP_PORT}"
+      tcp_address=":${MEDIAMTX_WEBRTC_UDP_PORT}"
+      ;;
+  esac
   webrtc_public_hosts="$(csv_to_json_array "${public_hosts}")"
   webrtc_ice_servers_yaml="$(build_mediamtx_ice_servers_yaml "${stun_url}" "${turn_url}" "${turn_username}" "${turn_password}")"
   cat > "${output}" <<EOF
@@ -365,8 +436,8 @@ hlsSegmentMaxSize: 50M
 webrtc: yes
 webrtcAddress: :${MEDIAMTX_WEBRTC_PORT}
 webrtcAllowOrigins: ["*"]
-webrtcLocalUDPAddress: :${MEDIAMTX_WEBRTC_UDP_PORT}
-webrtcLocalTCPAddress: :${MEDIAMTX_WEBRTC_UDP_PORT}
+webrtcLocalUDPAddress: "${udp_address}"
+webrtcLocalTCPAddress: "${tcp_address}"
 webrtcIPsFromInterfaces: no
 webrtcAdditionalHosts: ${webrtc_public_hosts}
 ${webrtc_ice_servers_yaml}
@@ -531,24 +602,31 @@ write_addon_options_config() {
   local output="$1"
   local camera1_name camera1_host camera1_username camera1_password
   local camera1_rtsp_main camera1_rtsp_sub camera1_onvif camera1_isapi
-  local camera1_enabled camera1_record camera1_low_latency camera1_snapshot_stream camera1_live_stream camera1_record_stream camera1_rtsp_sub_channel
+  local camera1_enabled camera1_record camera1_low_latency camera1_snapshot_stream camera1_live_stream camera1_record_stream
+  local camera1_camera_number camera1_access_protocol camera1_rtsp_transport camera1_rtsp_main_channel camera1_rtsp_sub_channel
   local camera2_name camera2_host camera2_username camera2_password
   local camera2_rtsp_main camera2_rtsp_sub camera2_onvif camera2_isapi
-  local camera2_enabled camera2_record camera2_low_latency camera2_snapshot_stream camera2_live_stream camera2_record_stream camera2_rtsp_sub_channel
+  local camera2_enabled camera2_record camera2_low_latency camera2_snapshot_stream camera2_live_stream camera2_record_stream
+  local camera2_camera_number camera2_access_protocol camera2_rtsp_transport camera2_rtsp_main_channel camera2_rtsp_sub_channel
 
   camera1_name="$(read_option 'hikvision_1_name' 'Hikvision 1')"
   camera1_host="$(read_option 'hikvision_1_host' '')"
   camera1_username="$(read_option 'hikvision_1_username' 'admin')"
   camera1_password="$(read_option 'hikvision_1_password' '')"
+  camera1_camera_number="$(read_option 'hikvision_1_camera_number' '1')"
+  case "${camera1_camera_number}" in ''|*[!0-9]*) camera1_camera_number="1" ;; esac
+  camera1_access_protocol="$(read_option 'hikvision_1_access_protocol' 'rtsp')"
+  camera1_rtsp_transport="$(read_option 'hikvision_1_rtsp_transport' 'tcp')"
   camera1_enabled="$(read_option 'hikvision_1_enabled' 'false')"
   camera1_record="$(read_option 'hikvision_1_record' 'true')"
   camera1_low_latency="$(read_option 'hikvision_1_low_latency' 'true')"
   camera1_snapshot_stream="$(read_option 'hikvision_1_snapshot_stream' 'sub')"
   camera1_live_stream="$(read_option 'hikvision_1_live_stream' 'sub')"
   camera1_record_stream="$(read_option 'hikvision_1_record_stream' 'main')"
-  camera1_rtsp_main="$(build_hikvision_rtsp "$(read_option 'hikvision_1_rtsp_main' '')" "${camera1_host}" "${camera1_username}" "${camera1_password}" "101")"
-  camera1_rtsp_sub="$(build_hikvision_rtsp "$(read_option 'hikvision_1_rtsp_sub' '')" "${camera1_host}" "${camera1_username}" "${camera1_password}" "102")"
-  camera1_rtsp_sub_channel="$(hikvision_channel_from_rtsp "${camera1_rtsp_sub}" "102")"
+  camera1_rtsp_main="$(build_hikvision_rtsp "$(read_option 'hikvision_1_rtsp_main' '')" "${camera1_host}" "${camera1_username}" "${camera1_password}" "${camera1_camera_number}01")"
+  camera1_rtsp_sub="$(build_hikvision_rtsp "$(read_option 'hikvision_1_rtsp_sub' '')" "${camera1_host}" "${camera1_username}" "${camera1_password}" "${camera1_camera_number}02")"
+  camera1_rtsp_main_channel="$(hikvision_channel_from_rtsp "${camera1_rtsp_main}" "${camera1_camera_number}01")"
+  camera1_rtsp_sub_channel="$(hikvision_channel_from_rtsp "${camera1_rtsp_sub}" "${camera1_camera_number}02")"
   camera1_onvif="$(read_option 'hikvision_1_onvif_url' '')"
   camera1_isapi="$(read_option 'hikvision_1_isapi_base_url' '')"
   if [[ -n "${camera1_host}" ]]; then
@@ -560,15 +638,20 @@ write_addon_options_config() {
   camera2_host="$(read_option 'hikvision_2_host' '')"
   camera2_username="$(read_option 'hikvision_2_username' 'admin')"
   camera2_password="$(read_option 'hikvision_2_password' '')"
+  camera2_camera_number="$(read_option 'hikvision_2_camera_number' '2')"
+  case "${camera2_camera_number}" in ''|*[!0-9]*) camera2_camera_number="2" ;; esac
+  camera2_access_protocol="$(read_option 'hikvision_2_access_protocol' 'rtsp')"
+  camera2_rtsp_transport="$(read_option 'hikvision_2_rtsp_transport' 'tcp')"
   camera2_enabled="$(read_option 'hikvision_2_enabled' 'false')"
   camera2_record="$(read_option 'hikvision_2_record' 'true')"
   camera2_low_latency="$(read_option 'hikvision_2_low_latency' 'true')"
   camera2_snapshot_stream="$(read_option 'hikvision_2_snapshot_stream' 'sub')"
   camera2_live_stream="$(read_option 'hikvision_2_live_stream' 'sub')"
   camera2_record_stream="$(read_option 'hikvision_2_record_stream' 'main')"
-  camera2_rtsp_main="$(build_hikvision_rtsp "$(read_option 'hikvision_2_rtsp_main' '')" "${camera2_host}" "${camera2_username}" "${camera2_password}" "101")"
-  camera2_rtsp_sub="$(build_hikvision_rtsp "$(read_option 'hikvision_2_rtsp_sub' '')" "${camera2_host}" "${camera2_username}" "${camera2_password}" "102")"
-  camera2_rtsp_sub_channel="$(hikvision_channel_from_rtsp "${camera2_rtsp_sub}" "102")"
+  camera2_rtsp_main="$(build_hikvision_rtsp "$(read_option 'hikvision_2_rtsp_main' '')" "${camera2_host}" "${camera2_username}" "${camera2_password}" "${camera2_camera_number}01")"
+  camera2_rtsp_sub="$(build_hikvision_rtsp "$(read_option 'hikvision_2_rtsp_sub' '')" "${camera2_host}" "${camera2_username}" "${camera2_password}" "${camera2_camera_number}02")"
+  camera2_rtsp_main_channel="$(hikvision_channel_from_rtsp "${camera2_rtsp_main}" "${camera2_camera_number}01")"
+  camera2_rtsp_sub_channel="$(hikvision_channel_from_rtsp "${camera2_rtsp_sub}" "${camera2_camera_number}02")"
   camera2_onvif="$(read_option 'hikvision_2_onvif_url' '')"
   camera2_isapi="$(read_option 'hikvision_2_isapi_base_url' '')"
   if [[ -n "${camera2_host}" ]]; then
@@ -585,6 +668,9 @@ write_addon_options_config() {
     --arg camera1_host "${camera1_host}" \
     --arg camera1_username "${camera1_username}" \
     --arg camera1_password "${camera1_password}" \
+    --arg camera1_camera_number "${camera1_camera_number}" \
+    --arg camera1_access_protocol "${camera1_access_protocol}" \
+    --arg camera1_rtsp_transport "${camera1_rtsp_transport}" \
     --arg camera1_rtsp_main "${camera1_rtsp_main}" \
     --arg camera1_rtsp_sub "${camera1_rtsp_sub}" \
     --arg camera1_onvif "${camera1_onvif}" \
@@ -595,11 +681,15 @@ write_addon_options_config() {
     --arg camera1_snapshot_stream "${camera1_snapshot_stream}" \
     --arg camera1_live_stream "${camera1_live_stream}" \
     --arg camera1_record_stream "${camera1_record_stream}" \
+    --arg camera1_rtsp_main_channel "${camera1_rtsp_main_channel}" \
     --arg camera1_rtsp_sub_channel "${camera1_rtsp_sub_channel}" \
     --arg camera2_name "${camera2_name}" \
     --arg camera2_host "${camera2_host}" \
     --arg camera2_username "${camera2_username}" \
     --arg camera2_password "${camera2_password}" \
+    --arg camera2_camera_number "${camera2_camera_number}" \
+    --arg camera2_access_protocol "${camera2_access_protocol}" \
+    --arg camera2_rtsp_transport "${camera2_rtsp_transport}" \
     --arg camera2_rtsp_main "${camera2_rtsp_main}" \
     --arg camera2_rtsp_sub "${camera2_rtsp_sub}" \
     --arg camera2_onvif "${camera2_onvif}" \
@@ -610,6 +700,7 @@ write_addon_options_config() {
     --arg camera2_snapshot_stream "${camera2_snapshot_stream}" \
     --arg camera2_live_stream "${camera2_live_stream}" \
     --arg camera2_record_stream "${camera2_record_stream}" \
+    --arg camera2_rtsp_main_channel "${camera2_rtsp_main_channel}" \
     --arg camera2_rtsp_sub_channel "${camera2_rtsp_sub_channel}" \
     '{
       server: {
@@ -629,8 +720,12 @@ write_addon_options_config() {
           host: $camera1_host,
           username: $camera1_username,
           password: $camera1_password,
+          camera_number: $camera1_camera_number,
+          access_protocol: (if ($camera1_access_protocol == "isapi" or $camera1_access_protocol == "onvif" or $camera1_access_protocol == "unicast" or $camera1_access_protocol == "multicast") then $camera1_access_protocol else "rtsp" end),
+          rtsp_transport: (if ($camera1_rtsp_transport == "udp" or $camera1_rtsp_transport == "auto") then $camera1_rtsp_transport else "tcp" end),
           rtsp_main: $camera1_rtsp_main,
           rtsp_sub: $camera1_rtsp_sub,
+          rtsp_main_channel: $camera1_rtsp_main_channel,
           rtsp_sub_channel: $camera1_rtsp_sub_channel,
           onvif_url: $camera1_onvif,
           isapi_base_url: $camera1_isapi,
@@ -648,8 +743,12 @@ write_addon_options_config() {
           host: $camera2_host,
           username: $camera2_username,
           password: $camera2_password,
+          camera_number: $camera2_camera_number,
+          access_protocol: (if ($camera2_access_protocol == "isapi" or $camera2_access_protocol == "onvif" or $camera2_access_protocol == "unicast" or $camera2_access_protocol == "multicast") then $camera2_access_protocol else "rtsp" end),
+          rtsp_transport: (if ($camera2_rtsp_transport == "udp" or $camera2_rtsp_transport == "auto") then $camera2_rtsp_transport else "tcp" end),
           rtsp_main: $camera2_rtsp_main,
           rtsp_sub: $camera2_rtsp_sub,
+          rtsp_main_channel: $camera2_rtsp_main_channel,
           rtsp_sub_channel: $camera2_rtsp_sub_channel,
           onvif_url: $camera2_onvif,
           isapi_base_url: $camera2_isapi,
@@ -705,8 +804,12 @@ cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
       "host": "192.168.1.64",
       "username": "admin",
       "password": "change-me",
+      "camera_number": "1",
+      "access_protocol": "rtsp",
+      "rtsp_transport": "tcp",
       "rtsp_main": "rtsp://admin:change-me@192.168.1.64:554/Streaming/Channels/101",
       "rtsp_sub": "rtsp://admin:change-me@192.168.1.64:554/Streaming/Channels/102",
+      "rtsp_main_channel": "101",
       "rtsp_sub_channel": "102",
       "onvif_url": "http://192.168.1.64:80/onvif/device_service",
       "isapi_base_url": "http://192.168.1.64",
@@ -724,9 +827,13 @@ cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
       "host": "192.168.1.65",
       "username": "admin",
       "password": "change-me",
-      "rtsp_main": "rtsp://admin:change-me@192.168.1.65:554/Streaming/Channels/101",
-      "rtsp_sub": "rtsp://admin:change-me@192.168.1.65:554/Streaming/Channels/102",
-      "rtsp_sub_channel": "102",
+      "camera_number": "2",
+      "access_protocol": "rtsp",
+      "rtsp_transport": "tcp",
+      "rtsp_main": "rtsp://admin:change-me@192.168.1.65:554/Streaming/Channels/201",
+      "rtsp_sub": "rtsp://admin:change-me@192.168.1.65:554/Streaming/Channels/202",
+      "rtsp_main_channel": "201",
+      "rtsp_sub_channel": "202",
       "onvif_url": "http://192.168.1.65:80/onvif/device_service",
       "isapi_base_url": "http://192.168.1.65",
       "enabled": false,
@@ -852,10 +959,14 @@ export EDGE_MEDIAMTX_RTSP_PORT="${MEDIAMTX_RTSP_PORT}"
 export EDGE_MEDIAMTX_HLS_PORT="${MEDIAMTX_HLS_PORT}"
 export EDGE_MEDIAMTX_WEBRTC_PORT="${MEDIAMTX_WEBRTC_PORT}"
 export EDGE_MEDIAMTX_WEBRTC_UDP_PORT="${MEDIAMTX_WEBRTC_UDP_PORT}"
+export EDGE_MEDIAMTX_WEBRTC_PUBLIC_URL="${MEDIAMTX_WEBRTC_PUBLIC_URL}"
 export EDGE_MEDIAMTX_WEBRTC_PUBLIC_HOSTS="${MEDIAMTX_WEBRTC_PUBLIC_HOSTS}"
 export EDGE_MEDIAMTX_WEBRTC_STUN_URL="${MEDIAMTX_WEBRTC_STUN_URL}"
 export EDGE_MEDIAMTX_WEBRTC_TURN_URL="${MEDIAMTX_WEBRTC_TURN_URL}"
 export EDGE_MEDIAMTX_WEBRTC_TURN_USERNAME="${MEDIAMTX_WEBRTC_TURN_USERNAME}"
+export EDGE_MEDIAMTX_WEBRTC_TURN_PASSWORD="${MEDIAMTX_WEBRTC_TURN_PASSWORD}"
+export EDGE_MEDIAMTX_WEBRTC_ICE_TRANSPORT="${MEDIAMTX_WEBRTC_ICE_TRANSPORT}"
+export EDGE_MEDIAMTX_WEBRTC_TCP_ONLY="${MEDIAMTX_WEBRTC_TCP_ONLY}"
 export EDGE_MEDIAMTX_SRT_PORT="${MEDIAMTX_SRT_PORT}"
 export EDGE_MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT}"
 export EDGE_JANUS_ENABLED="${JANUS_ENABLED}"
