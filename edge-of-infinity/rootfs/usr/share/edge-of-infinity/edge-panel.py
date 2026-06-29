@@ -1123,6 +1123,17 @@ def stream_capabilities(config: dict | None = None) -> dict:
             "ll_hls": {"status": "active" if mediamtx_ready else "starting", "transport": "hls-fmp4", "note": "MediaMTX low-latency HLS path."},
             "srt": {"status": "active" if mediamtx_ready else "starting", "transport": "srt"},
         },
+        "codec_policy": {
+            "webrtc_primary": "H264/AV1/VP9/VP8 where the browser supports them; H265/HEVC only when the browser WebRTC stack advertises support.",
+            "hevc": {
+                "rtsp_proxy": "supported by MediaMTX path proxying",
+                "ll_hls": "supported by MediaMTX when the client/player can decode HEVC",
+                "srt": "supported by MediaMTX transport",
+                "recording": "preserved by fMP4 stream-copy recording",
+                "webrtc": "experimental and browser/device dependent",
+            },
+            "mobile_lte_recommendation": "Use warmed sub stream for tiles/live start, keep main for recording, prefer H264 for universal WebRTC and HEVC for recording/LL-HLS when the phone supports it.",
+        },
         "runtime": runtime,
         "cameras": [
             {
@@ -3384,7 +3395,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.8.8"
+    server_version = "EdgePanel/0.8.9"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

@@ -167,6 +167,10 @@ These hosts are advertised as ICE candidates so the browser can connect to the a
 
 Starting with version `0.8.5`, MediaMTX no longer advertises Docker bridge interface IPs as WebRTC ICE candidates. It uses the configured public hosts and exposes the ICE port over UDP and TCP so browsers on the LAN are not offered unreachable `172.30.x.x` candidates first.
 
+Starting with version `0.8.9`, enabled cameras with `low_latency` keep MediaMTX paths warm when a stream is used by a tile, live view, or recording. This removes most cold-start delay where a phone opens the panel and MediaMTX would otherwise only then start pulling RTSP from the camera. WebRTC gather and handshake timeouts are also extended for LTE/5G clients.
+
+For LL-HLS mobile tests, `mediamtx_hls_always_remux` can be enabled in the add-on options. Keep it off unless you are testing HLS startup time, because always-remux keeps HLS work active even without a viewer.
+
 Starting with version `0.8.6`, `/homeassistant/edge/edge.json` remains the source of truth after it exists. Add-on options are copied only to `/tmp/edge-runtime/edge.options.json` for diagnostics and no longer overwrite panel changes on restart. Stream role choices are also persisted in:
 
 ```text
@@ -184,6 +188,10 @@ Starting with version `0.8.7`, the panel also persists the full submitted camera
 This includes host, login, RTSP, ONVIF, ISAPI, enable flags, and all stream role choices. The panel applies this file before config normalization, so a stale add-on option file or old `edge.json` contents cannot silently force saved camera fields back to previous values.
 
 Starting with version `0.8.8`, `/homeassistant/edge/panel-config.json` is the primary source of truth. Legacy override files are still written for recovery and older installs, but they do not override values already stored in `panel-config.json`.
+
+## HEVC / H265
+
+MediaMTX can proxy and record H265/HEVC through RTSP, LL-HLS, SRT, and fMP4 recording when the camera sends it. Browser WebRTC is different: the phone/browser WebRTC stack must also support HEVC. Use H265 for recording and compatible LL-HLS/SRT clients, but keep H264 available for universal WebRTC playback unless your target phone confirms H265 WebRTC support.
 
 Starting with version `0.8.3`, the old shell placeholder page and MJPEG status generator were removed from the runner. The Edge panel is the controller, while MediaMTX + Janus is the live path.
 

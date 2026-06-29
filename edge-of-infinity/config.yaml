@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.8.8"
+version: "0.8.9"
 slug: edge_of_infinity
 description: Private low-latency live NVR core for Hikvision and ONVIF cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -63,6 +63,7 @@ options:
   mediamtx_enabled: true
   mediamtx_rtsp_port: 8556
   mediamtx_hls_port: 8888
+  mediamtx_hls_always_remux: false
   mediamtx_webrtc_port: 8889
   mediamtx_webrtc_udp_port: 8189
   mediamtx_webrtc_public_hosts: homeassistant.local,192.168.33.17
@@ -112,6 +113,7 @@ schema:
   mediamtx_enabled: bool
   mediamtx_rtsp_port: port
   mediamtx_hls_port: port
+  mediamtx_hls_always_remux: bool
   mediamtx_webrtc_port: port
   mediamtx_webrtc_udp_port: port
   mediamtx_webrtc_public_hosts: str

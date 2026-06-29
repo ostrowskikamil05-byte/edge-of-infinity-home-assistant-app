@@ -27,6 +27,7 @@ CORE_ENGINE="$(read_option 'core_engine' 'mediamtx_janus')"
 MEDIAMTX_ENABLED="$(read_option 'mediamtx_enabled' 'true')"
 MEDIAMTX_RTSP_PORT="$(read_option 'mediamtx_rtsp_port' '8556')"
 MEDIAMTX_HLS_PORT="$(read_option 'mediamtx_hls_port' '8888')"
+MEDIAMTX_HLS_ALWAYS_REMUX="$(read_option 'mediamtx_hls_always_remux' 'false')"
 MEDIAMTX_WEBRTC_PORT="$(read_option 'mediamtx_webrtc_port' '8889')"
 MEDIAMTX_WEBRTC_UDP_PORT="$(read_option 'mediamtx_webrtc_udp_port' '8189')"
 MEDIAMTX_WEBRTC_PUBLIC_HOSTS="$(read_option 'mediamtx_webrtc_public_hosts' 'homeassistant.local,192.168.33.17')"
@@ -48,6 +49,7 @@ CORE_ENGINE="${CORE_ENGINE:-mediamtx_janus}"
 MEDIAMTX_ENABLED="${MEDIAMTX_ENABLED:-true}"
 MEDIAMTX_RTSP_PORT="${MEDIAMTX_RTSP_PORT:-8556}"
 MEDIAMTX_HLS_PORT="${MEDIAMTX_HLS_PORT:-8888}"
+MEDIAMTX_HLS_ALWAYS_REMUX="${MEDIAMTX_HLS_ALWAYS_REMUX:-false}"
 MEDIAMTX_WEBRTC_PORT="${MEDIAMTX_WEBRTC_PORT:-8889}"
 MEDIAMTX_WEBRTC_UDP_PORT="${MEDIAMTX_WEBRTC_UDP_PORT:-8189}"
 MEDIAMTX_WEBRTC_PUBLIC_HOSTS="${MEDIAMTX_WEBRTC_PUBLIC_HOSTS:-homeassistant.local,192.168.33.17}"
@@ -216,6 +218,7 @@ write_mediamtx_path() {
   local path_name="$2"
   local source_url="$3"
   local should_record="$4"
+  local keep_warm="${5:-false}"
 
   if [[ -z "${source_url}" || "${source_url}" == "null" ]]; then
     return
@@ -229,8 +232,13 @@ write_mediamtx_path() {
       printf '    sourceOnDemand: no\n'
       printf '    record: yes\n'
       printf '    recordPath: "%s/%%path/%%Y-%%m-%%d_%%H-%%M-%%S-%%f"\n' "${RECORDINGS_DIR}"
+    elif [[ "${keep_warm}" == "true" ]]; then
+      printf '    sourceOnDemand: no\n'
+      printf '    record: no\n'
     else
       printf '    sourceOnDemand: yes\n'
+      printf '    sourceOnDemandStartTimeout: 15s\n'
+      printf '    sourceOnDemandCloseAfter: 30s\n'
       printf '    record: no\n'
     fi
   } >> "${output}"
@@ -266,7 +274,7 @@ rtmp: no
 hls: yes
 hlsAddress: :${MEDIAMTX_HLS_PORT}
 hlsAllowOrigins: ["*"]
-hlsAlwaysRemux: false
+hlsAlwaysRemux: ${MEDIAMTX_HLS_ALWAYS_REMUX}
 hlsVariant: lowLatency
 hlsSegmentCount: 4
 hlsSegmentDuration: 1s
@@ -280,6 +288,9 @@ webrtcLocalUDPAddress: :${MEDIAMTX_WEBRTC_UDP_PORT}
 webrtcLocalTCPAddress: :${MEDIAMTX_WEBRTC_UDP_PORT}
 webrtcIPsFromInterfaces: no
 webrtcAdditionalHosts: ${webrtc_public_hosts}
+webrtcSTUNGatherTimeout: 5s
+webrtcHandshakeTimeout: 15s
+webrtcTrackGatherTimeout: 5s
 
 srt: yes
 srtAddress: :${MEDIAMTX_SRT_PORT}
@@ -297,15 +308,24 @@ EOF
 
   if jq -e '.cameras' "${EDGE_CONFIG}" >/dev/null 2>&1; then
     while IFS= read -r camera; do
-      local id safe_id rtsp_main rtsp_sub record record_stream
+      local id safe_id rtsp_main rtsp_sub enabled low_latency record tile_stream live_stream record_stream
+      local record_main record_sub warm_main warm_sub
       id="$(jq -r '.id // "camera"' <<< "${camera}")"
       safe_id="$(safe_path_id "${id}")"
       rtsp_main="$(jq -r '.rtsp_main // ""' <<< "${camera}")"
       rtsp_sub="$(jq -r '.rtsp_sub // ""' <<< "${camera}")"
+      enabled="$(jq -r '.enabled // false' <<< "${camera}")"
+      low_latency="$(jq -r '.low_latency // true' <<< "${camera}")"
       record="$(jq -r '.record // false' <<< "${camera}")"
+      tile_stream="$(jq -r '.tile_stream // "sub"' <<< "${camera}")"
+      live_stream="$(jq -r '.live_stream // "sub"' <<< "${camera}")"
       record_stream="$(jq -r '.record_stream // "main"' <<< "${camera}")"
-      write_mediamtx_path "${output}" "${safe_id}_main" "${rtsp_main}" "$([[ "${record}" == "true" && "${record_stream}" != "sub" ]] && echo true || echo false)"
-      write_mediamtx_path "${output}" "${safe_id}_sub" "${rtsp_sub}" "$([[ "${record}" == "true" && "${record_stream}" == "sub" ]] && echo true || echo false)"
+      record_main="$([[ "${enabled}" == "true" && "${record}" == "true" && "${record_stream}" != "sub" ]] && echo true || echo false)"
+      record_sub="$([[ "${enabled}" == "true" && "${record}" == "true" && "${record_stream}" == "sub" ]] && echo true || echo false)"
+      warm_main="$([[ "${enabled}" == "true" && "${low_latency}" == "true" && ( "${tile_stream}" == "main" || "${live_stream}" == "main" || "${record_main}" == "true" ) ]] && echo true || echo false)"
+      warm_sub="$([[ "${enabled}" == "true" && "${low_latency}" == "true" && ( "${tile_stream}" == "sub" || "${live_stream}" == "sub" || "${record_sub}" == "true" ) ]] && echo true || echo false)"
+      write_mediamtx_path "${output}" "${safe_id}_main" "${rtsp_main}" "${record_main}" "${warm_main}"
+      write_mediamtx_path "${output}" "${safe_id}_sub" "${rtsp_sub}" "${record_sub}" "${warm_sub}"
     done < <(jq -c '.cameras[]?' "${EDGE_CONFIG}")
   fi
 }
@@ -399,7 +419,8 @@ ${safe_id}_main: {
   rtsp_timeout = 5
   rtsp_conn_timeout = 3
   rtsp_notify_changes = true
-  bufferkf_ms = 500
+  bufferkf_ms = 1000
+  playoutdelay_ext = true
 }
 
 ${safe_id}_sub: {
@@ -413,7 +434,8 @@ ${safe_id}_sub: {
   rtsp_timeout = 5
   rtsp_conn_timeout = 3
   rtsp_notify_changes = true
-  bufferkf_ms = 500
+  bufferkf_ms = 1000
+  playoutdelay_ext = true
 }
 EOF
       index=$((index + 1))

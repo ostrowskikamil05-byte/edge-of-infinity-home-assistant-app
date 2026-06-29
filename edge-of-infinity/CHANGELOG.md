@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.9
+
+- Keep low-latency MediaMTX paths warm for enabled cameras when a stream is used by tile, live, or recording, reducing cold-start delay on phones.
+- Add MediaMTX WebRTC gather/handshake timeouts tuned for LTE/5G connections without failing too early.
+- Add `mediamtx_hls_always_remux` so LL-HLS can be kept ready for mobile tests without editing generated MediaMTX files.
+- Increase Janus RTSP keyframe buffer and enable playout-delay RTP extension negotiation for faster viewer startup.
+- Expose a codec policy in `/api/stream/capabilities`, making HEVC/H265 support explicit for RTSP proxying, LL-HLS, SRT, recording, and experimental browser WebRTC.
+
 ## 0.8.8
 
 - Add `/homeassistant/edge/panel-config.json` as the authoritative panel-owned camera configuration, then mirror it to runtime `edge.json`.
