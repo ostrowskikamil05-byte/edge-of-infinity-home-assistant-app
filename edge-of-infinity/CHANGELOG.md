@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.0
+
+- Add mobile WebRTC controls for public ICE hosts, STUN, and optional TURN fallback so LTE/5G failures can be fixed without editing generated runtime files.
+- Let Edge Settings control MediaMTX warm-stream prebuffer timing and Janus keyframe buffering, following the same startup principle as Scrypted prebuffer without copying its implementation.
+- Make `/homeassistant/edge/panel-config.json` the single authoritative save target and clear legacy override files after every successful save, preventing stream role selections from bouncing back to old values.
+- Add Scrypted-style Hikvision autoconfig recommendations for H264/HEVC, Smart Codec/H264+, keyframe interval, LTE substream bitrate, and browser audio compatibility.
+- Expose mobile ICE diagnostics through `/api/stream/capabilities`.
+
 ## 0.9.0
 
 - Rework the NVR page into camera recording cards with one playback video window, back/forward controls, and recording tiles instead of technical RTSP/path details.

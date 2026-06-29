@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.9.0"
+version: "0.10.0"
 slug: edge_of_infinity
 description: Private low-latency live NVR core for Hikvision and ONVIF cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -67,12 +67,17 @@ options:
   mediamtx_webrtc_port: 8889
   mediamtx_webrtc_udp_port: 8189
   mediamtx_webrtc_public_hosts: homeassistant.local,192.168.33.17
+  mediamtx_webrtc_stun_url: stun:stun.l.google.com:19302
+  mediamtx_webrtc_turn_url: ""
+  mediamtx_webrtc_turn_username: ""
+  mediamtx_webrtc_turn_password: ""
   mediamtx_srt_port: 8890
   mediamtx_api_port: 9997
   mediamtx_record: true
   janus_enabled: true
   janus_http_port: 8192
   janus_ws_port: 8193
+  janus_bufferkf_ms: 2000
   hikvision_1_enabled: false
   hikvision_1_name: Hikvision 1
   hikvision_1_host: ""
@@ -117,12 +122,17 @@ schema:
   mediamtx_webrtc_port: port
   mediamtx_webrtc_udp_port: port
   mediamtx_webrtc_public_hosts: str
+  mediamtx_webrtc_stun_url: str
+  mediamtx_webrtc_turn_url: str
+  mediamtx_webrtc_turn_username: str
+  mediamtx_webrtc_turn_password: password
   mediamtx_srt_port: port
   mediamtx_api_port: port
   mediamtx_record: bool
   janus_enabled: bool
   janus_http_port: port
   janus_ws_port: port
+  janus_bufferkf_ms: int(0,10000)
   hikvision_1_enabled: bool
   hikvision_1_name: str
   hikvision_1_host: str

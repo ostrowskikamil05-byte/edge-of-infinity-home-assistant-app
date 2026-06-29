@@ -64,6 +64,9 @@ MEDIAMTX_WEBRTC_PUBLIC_HOSTS = [
     for item in os.environ.get("EDGE_MEDIAMTX_WEBRTC_PUBLIC_HOSTS", "homeassistant.local,192.168.33.17").split(",")
     if item.strip()
 ]
+MEDIAMTX_WEBRTC_STUN_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_STUN_URL", "stun:stun.l.google.com:19302")
+MEDIAMTX_WEBRTC_TURN_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TURN_URL", "")
+MEDIAMTX_WEBRTC_TURN_USERNAME = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TURN_USERNAME", "")
 MEDIAMTX_SRT_PORT = int(os.environ.get("EDGE_MEDIAMTX_SRT_PORT", "8890"))
 MEDIAMTX_API_PORT = int(os.environ.get("EDGE_MEDIAMTX_API_PORT", "9997"))
 MEDIAMTX_CONFIG_PATH = Path(os.environ.get("EDGE_MEDIAMTX_CONFIG", "/tmp/edge-runtime/mediamtx.yml"))
@@ -96,6 +99,21 @@ def safe_int(value, fallback: int) -> int:
 
 def clamp_int(value, fallback: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, safe_int(value, fallback)))
+
+
+def safe_bool(value, fallback: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off"):
+            return False
+        return fallback
+    return bool(value)
 
 
 def read_json(path: Path, fallback):
@@ -390,6 +408,16 @@ def save_stream_overrides(config: dict) -> None:
     write_json(STREAM_OVERRIDES_PATH, {"cameras": overrides})
 
 
+def clear_legacy_override_files() -> None:
+    for path in (PANEL_CAMERA_OVERRIDES_PATH, STREAM_OVERRIDES_PATH):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            write_debug_event("legacy_override_clear_error", {"path": str(path), "error": str(error)})
+
+
 def apply_stream_overrides(config: dict) -> dict:
     cameras = config.get("cameras") if isinstance(config, dict) else []
     if not isinstance(cameras, list):
@@ -513,6 +541,14 @@ def normalize_config(payload: dict) -> dict:
             "frame_interval_ms": safe_int(live.get("frame_interval_ms"), 1200),
             "tile_fps": clamp_int(live.get("tile_fps"), 5, 1, 10),
             "tile_max_width": clamp_int(live.get("tile_max_width"), 960, 320, 1920),
+            "prebuffer_enabled": safe_bool(live.get("prebuffer_enabled"), True),
+            "prebuffer_local_ms": clamp_int(live.get("prebuffer_local_ms"), 4000, 0, 10000),
+            "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
+            "mobile_webrtc_public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
+            "mobile_webrtc_stun_url": live.get("mobile_webrtc_stun_url") if live.get("mobile_webrtc_stun_url") is not None else MEDIAMTX_WEBRTC_STUN_URL,
+            "mobile_webrtc_turn_url": live.get("mobile_webrtc_turn_url") or MEDIAMTX_WEBRTC_TURN_URL,
+            "mobile_webrtc_turn_username": live.get("mobile_webrtc_turn_username") or MEDIAMTX_WEBRTC_TURN_USERNAME,
+            "mobile_webrtc_turn_password": live.get("mobile_webrtc_turn_password") or "",
         },
         "nvr": {
             "segment_seconds": clamp_int(nvr.get("segment_seconds"), 10, 2, 300),
@@ -613,7 +649,7 @@ def redact_config(value):
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
-            if key in ("password", "api_key"):
+            if key in ("password", "api_key") or key.endswith("_password"):
                 result[key] = "***" if item else ""
             elif key.startswith("rtsp_") or key.endswith("_rtsp"):
                 result[key] = redact_rtsp(str(item or ""))
@@ -811,8 +847,7 @@ def commit_panel_config(payload: dict) -> dict:
     committed = authoritative_config_from_payload(payload)
     write_json(PANEL_CONFIG_PATH, committed)
     write_json(CONFIG_PATH, committed)
-    save_panel_camera_overrides(committed)
-    save_stream_overrides(committed)
+    clear_legacy_override_files()
     return committed
 
 
@@ -1114,6 +1149,7 @@ def stream_urls(camera: dict, index: int) -> dict:
 
 def stream_capabilities(config: dict | None = None) -> dict:
     config = config or load_config()
+    live = config.get("live") if isinstance(config.get("live"), dict) else {}
     runtime = engine_runtime_status()
     mediamtx_ready = runtime["mediamtx"]["api_reachable"] or runtime["mediamtx"]["config_exists"]
     janus_ready = runtime["janus"]["api_reachable"] or runtime["janus"]["streaming_config_exists"]
@@ -1134,6 +1170,16 @@ def stream_capabilities(config: dict | None = None) -> dict:
                 "webrtc": "experimental and browser/device dependent",
             },
             "mobile_lte_recommendation": "Use warmed sub stream for tiles/live start, keep main for recording, prefer H264 for universal WebRTC and HEVC for recording/LL-HLS when the phone supports it.",
+        },
+        "mobile_webrtc": {
+            "public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
+            "stun_url": live.get("mobile_webrtc_stun_url") if live.get("mobile_webrtc_stun_url") is not None else MEDIAMTX_WEBRTC_STUN_URL,
+            "turn_configured": bool(live.get("mobile_webrtc_turn_url") or MEDIAMTX_WEBRTC_TURN_URL),
+            "ice_udp_port": MEDIAMTX_WEBRTC_UDP_PORT,
+            "whep_port": MEDIAMTX_WEBRTC_PORT,
+            "prebuffer_enabled": safe_bool(live.get("prebuffer_enabled"), True),
+            "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
+            "diagnosis": "If LAN works but LTE fails, the browser usually cannot reach the advertised ICE host/ports. Use a reachable public host/DDNS and port route first; add TURN only as fallback for CGNAT/firewalls.",
         },
         "runtime": runtime,
         "cameras": [
@@ -1703,6 +1749,7 @@ def fetch_camera_autoconfig(camera: dict) -> dict:
     if not device and not streams:
         autoconfig_error = "Camera ISAPI did not return device or stream configuration. " + " | ".join(essential_errors)
 
+    recommendations = camera_autoconfig_recommendations(streams, channels)
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "ok": not autoconfig_error,
@@ -1710,12 +1757,78 @@ def fetch_camera_autoconfig(camera: dict) -> dict:
         "device": device,
         "streams": streams,
         "channels": channels,
+        "recommendations": recommendations,
         "effective_streams": effective_streams(camera),
         "sections": {
             key: {"ok": value.get("ok", False), "error": value.get("error", "")}
             for key, value in raw_sections.items()
         },
     }
+
+
+def camera_autoconfig_recommendations(streams: dict, channels: list[dict]) -> list[dict]:
+    recommendations = []
+    source_streams = streams if streams else {
+        ("main" if str(channel.get("id", "")).endswith("01") else "sub"): channel
+        for channel in channels
+        if isinstance(channel, dict)
+    }
+    for name, stream in source_streams.items():
+        if not isinstance(stream, dict):
+            continue
+        video = stream.get("video") if isinstance(stream.get("video"), dict) else {}
+        audio = stream.get("audio") if isinstance(stream.get("audio"), dict) else {}
+        codec = str(video.get("codec") or "").lower()
+        fps = safe_int(video.get("fps"), 0)
+        keyframe = safe_int(video.get("keyframe_interval"), 0)
+        target_keyframe = fps * 4 if fps else 0
+        bitrate = safe_int(video.get("bitrate"), 0)
+        width = safe_int(video.get("width"), 0)
+        height = safe_int(video.get("height"), 0)
+        if codec and codec not in ("h264", "h.264"):
+            recommendations.append({
+                "stream": name,
+                "severity": "warning",
+                "message": f"{name}: WebRTC in browsers is safest with H264. HEVC/H265 can be kept for recording/LL-HLS, but live WebRTC may need H264 or transcoding.",
+            })
+        if codec in ("h264+", "h.264+", "smart264", "smart h264"):
+            recommendations.append({
+                "stream": name,
+                "severity": "warning",
+                "message": f"{name}: disable H264+/Smart Codec for live streaming reliability.",
+            })
+        if target_keyframe and keyframe and abs(keyframe - target_keyframe) > max(4, fps):
+            recommendations.append({
+                "stream": name,
+                "severity": "notice",
+                "message": f"{name}: keyframe interval should be close to fps * 4 ({target_keyframe}) for faster starts; camera reports {keyframe}.",
+            })
+        if name == "sub" and width and height and (width > 1280 or height > 720):
+            recommendations.append({
+                "stream": name,
+                "severity": "notice",
+                "message": f"{name}: substream is {width}x{height}. For LTE tiles, 1280x720 around 1 Mbit or 640x360 around 500 Kbit starts faster.",
+            })
+        if name == "sub" and bitrate and bitrate > 1500:
+            recommendations.append({
+                "stream": name,
+                "severity": "notice",
+                "message": f"{name}: bitrate {bitrate} kbit/s is high for LTE tile/live start; consider 500-1000 kbit/s variable bitrate.",
+            })
+        audio_codec = str(audio.get("codec") or "").lower()
+        if audio_codec and audio_codec not in ("pcmu", "pcm_mulaw", "g711ulaw", "g711mulaw", "aac", "opus", "pcm_alaw", "g711alaw"):
+            recommendations.append({
+                "stream": name,
+                "severity": "notice",
+                "message": f"{name}: audio codec {audio_codec} may need transcoding for browser/WebRTC playback.",
+            })
+    if not recommendations:
+        recommendations.append({
+            "stream": "all",
+            "severity": "ok",
+            "message": "Streams look compatible. Keep substream warmed for mobile live and main stream for recording.",
+        })
+    return recommendations
 
 
 def update_stream_config(camera: dict, stream_name: str, settings: dict) -> dict:
@@ -2754,6 +2867,7 @@ INDEX_HTML = r"""<!doctype html>
         const device = state.data?.device || {};
         const streams = state.data?.streams || {};
         const channels = Array.isArray(state.data?.channels) ? state.data.channels : [];
+        const recommendations = Array.isArray(state.data?.recommendations) ? state.data.recommendations : [];
         const effective = renderEffectiveStreams(state.data?.effective_streams);
         const sectionSummary = state.data?.sections
           ? Object.entries(state.data.sections).map(([name, item]) => `${name}: ${item.ok ? 'ok' : item.error}`).join(' | ')
@@ -2771,6 +2885,13 @@ INDEX_HTML = r"""<!doctype html>
             ${state.message ? `<p class="section-status state-online">${escapeHtml(state.message)}</p>` : ''}
             ${device.serial_number ? `<p class="section-status">Serial: ${escapeHtml(device.serial_number)} ${device.device_name ? `| Name: ${escapeHtml(device.device_name)}` : ''}</p>` : ''}
             ${effective}
+            ${recommendations.length ? `<div class="stream-strip">${recommendations.map((item) => `
+              <div class="stream-pill">
+                <b>${escapeHtml(text(item.severity, 'notice')).toUpperCase()}</b>
+                <span>${escapeHtml(text(item.stream, 'all'))}</span>
+                <code>${escapeHtml(text(item.message))}</code>
+              </div>
+            `).join('')}</div>` : ''}
             ${channels.length ? `<div class="stream-strip">${channels.map((channel) => `
               <div class="stream-pill">
                 <b>ch ${escapeHtml(text(channel.id))}</b>
@@ -2903,8 +3024,18 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="srt" ${liveConfig.engine === 'srt' ? 'selected' : ''}>SRT relay</option>
               </select></label>
               <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label>
+              <label>Tile FPS<input name="live-tile-fps" type="number" min="1" max="10" value="${escapeHtml(text(liveConfig.tile_fps, 5))}"></label>
+              <label>Tile max width<input name="live-tile-max-width" type="number" min="320" max="1920" value="${escapeHtml(text(liveConfig.tile_max_width, 960))}"></label>
+              <label>Mobile public hosts<input name="live-mobile-public-hosts" value="${escapeHtml(text(liveConfig.mobile_webrtc_public_hosts, 'homeassistant.local,192.168.33.17'))}" placeholder="homeassistant.local,public.example.com"></label>
+              <label>STUN URL<input name="live-mobile-stun-url" value="${escapeHtml(text(liveConfig.mobile_webrtc_stun_url, 'stun:stun.l.google.com:19302'))}"></label>
+              <label>TURN URL<input name="live-mobile-turn-url" value="${escapeHtml(liveConfig.mobile_webrtc_turn_url || '')}" placeholder="turns:turn.example.com:443"></label>
+              <label>TURN username<input name="live-mobile-turn-username" value="${escapeHtml(liveConfig.mobile_webrtc_turn_username || '')}"></label>
+              <label>TURN password<input name="live-mobile-turn-password" type="password" value="${escapeHtml(liveConfig.mobile_webrtc_turn_password || '')}"></label>
+              <label>Local prebuffer ms<input name="live-prebuffer-local-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_local_ms, 4000))}"></label>
+              <label>Remote prebuffer ms<input name="live-prebuffer-remote-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_remote_ms, 2000))}"></label>
+              <label class="check-row"><input name="live-prebuffer-enabled" type="checkbox" ${liveConfig.prebuffer_enabled !== false ? 'checked' : ''}> Keep selected low-latency streams warm</label>
             </div>
-            <p class="notice">MediaMTX is the RTSP rebroadcast core. Janus WebRTC consumes the MediaMTX RTSP proxy so camera connections stay centralized.</p>
+            <p class="notice">MediaMTX is the RTSP rebroadcast core. For LTE, public hosts must be reachable from the phone. STUN is the fast discovery path; TURN is a fallback when CGNAT or a firewall blocks direct ICE.</p>
           </section>
         `;
       }
@@ -3059,7 +3190,17 @@ INDEX_HTML = r"""<!doctype html>
           },
           live: {
             engine: get('live-engine').value,
-            frame_interval_ms: Number(get('live-frame-interval-ms').value || 1200)
+            frame_interval_ms: Number(get('live-frame-interval-ms').value || 1200),
+            tile_fps: Number(get('live-tile-fps').value || 5),
+            tile_max_width: Number(get('live-tile-max-width').value || 960),
+            prebuffer_enabled: get('live-prebuffer-enabled').checked,
+            prebuffer_local_ms: Number(get('live-prebuffer-local-ms').value || 4000),
+            prebuffer_remote_ms: Number(get('live-prebuffer-remote-ms').value || 2000),
+            mobile_webrtc_public_hosts: get('live-mobile-public-hosts').value.trim(),
+            mobile_webrtc_stun_url: get('live-mobile-stun-url').value.trim(),
+            mobile_webrtc_turn_url: get('live-mobile-turn-url').value.trim(),
+            mobile_webrtc_turn_username: get('live-mobile-turn-username').value.trim(),
+            mobile_webrtc_turn_password: get('live-mobile-turn-password').value
           },
           nvr: {
             segment_seconds: Number(get('nvr-segment-seconds').value || 10),
@@ -3488,7 +3629,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.9.0"
+    server_version = "EdgePanel/0.10.0"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

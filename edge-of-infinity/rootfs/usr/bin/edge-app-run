@@ -31,12 +31,17 @@ MEDIAMTX_HLS_ALWAYS_REMUX="$(read_option 'mediamtx_hls_always_remux' 'false')"
 MEDIAMTX_WEBRTC_PORT="$(read_option 'mediamtx_webrtc_port' '8889')"
 MEDIAMTX_WEBRTC_UDP_PORT="$(read_option 'mediamtx_webrtc_udp_port' '8189')"
 MEDIAMTX_WEBRTC_PUBLIC_HOSTS="$(read_option 'mediamtx_webrtc_public_hosts' 'homeassistant.local,192.168.33.17')"
+MEDIAMTX_WEBRTC_STUN_URL="$(read_option 'mediamtx_webrtc_stun_url' 'stun:stun.l.google.com:19302')"
+MEDIAMTX_WEBRTC_TURN_URL="$(read_option 'mediamtx_webrtc_turn_url' '')"
+MEDIAMTX_WEBRTC_TURN_USERNAME="$(read_option 'mediamtx_webrtc_turn_username' '')"
+MEDIAMTX_WEBRTC_TURN_PASSWORD="$(read_option 'mediamtx_webrtc_turn_password' '')"
 MEDIAMTX_SRT_PORT="$(read_option 'mediamtx_srt_port' '8890')"
 MEDIAMTX_API_PORT="$(read_option 'mediamtx_api_port' '9997')"
 MEDIAMTX_RECORD="$(read_option 'mediamtx_record' 'true')"
 JANUS_ENABLED="$(read_option 'janus_enabled' 'true')"
 JANUS_HTTP_PORT="$(read_option 'janus_http_port' '8192')"
 JANUS_WS_PORT="$(read_option 'janus_ws_port' '8193')"
+JANUS_BUFFERKF_MS="$(read_option 'janus_bufferkf_ms' '2000')"
 
 LOG_LEVEL="${LOG_LEVEL:-info}"
 API_PORT="${API_PORT:-8088}"
@@ -53,12 +58,17 @@ MEDIAMTX_HLS_ALWAYS_REMUX="${MEDIAMTX_HLS_ALWAYS_REMUX:-false}"
 MEDIAMTX_WEBRTC_PORT="${MEDIAMTX_WEBRTC_PORT:-8889}"
 MEDIAMTX_WEBRTC_UDP_PORT="${MEDIAMTX_WEBRTC_UDP_PORT:-8189}"
 MEDIAMTX_WEBRTC_PUBLIC_HOSTS="${MEDIAMTX_WEBRTC_PUBLIC_HOSTS:-homeassistant.local,192.168.33.17}"
+MEDIAMTX_WEBRTC_STUN_URL="${MEDIAMTX_WEBRTC_STUN_URL:-stun:stun.l.google.com:19302}"
+MEDIAMTX_WEBRTC_TURN_URL="${MEDIAMTX_WEBRTC_TURN_URL:-}"
+MEDIAMTX_WEBRTC_TURN_USERNAME="${MEDIAMTX_WEBRTC_TURN_USERNAME:-}"
+MEDIAMTX_WEBRTC_TURN_PASSWORD="${MEDIAMTX_WEBRTC_TURN_PASSWORD:-}"
 MEDIAMTX_SRT_PORT="${MEDIAMTX_SRT_PORT:-8890}"
 MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT:-9997}"
 MEDIAMTX_RECORD="${MEDIAMTX_RECORD:-true}"
 JANUS_ENABLED="${JANUS_ENABLED:-true}"
 JANUS_HTTP_PORT="${JANUS_HTTP_PORT:-8192}"
 JANUS_WS_PORT="${JANUS_WS_PORT:-8193}"
+JANUS_BUFFERKF_MS="${JANUS_BUFFERKF_MS:-2000}"
 
 if [[ "${DATABASE_PATH}" == "/config/edge.db" ]]; then
   DATABASE_PATH="/homeassistant/edge/edge.db"
@@ -213,6 +223,70 @@ csv_to_json_array() {
   printf '%s' "${result}"
 }
 
+yaml_escape() {
+  printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+runtime_live_option() {
+  local key="$1"
+  local fallback="$2"
+
+  if [[ -n "${EDGE_CONFIG:-}" && -f "${EDGE_CONFIG}" ]]; then
+    jq -r --arg key "${key}" --arg fallback "${fallback}" '
+      if (.live? and .live[$key] != null and .live[$key] != "") then
+        .live[$key] | tostring
+      else
+        $fallback
+      end
+    ' "${EDGE_CONFIG}" 2>/dev/null || printf '%s' "${fallback}"
+  else
+    printf '%s' "${fallback}"
+  fi
+}
+
+numeric_or_fallback() {
+  local value="$1"
+  local fallback="$2"
+  local minimum="${3:-0}"
+  local maximum="${4:-100000}"
+
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    value="${fallback}"
+  fi
+  if (( value < minimum )); then
+    value="${minimum}"
+  elif (( value > maximum )); then
+    value="${maximum}"
+  fi
+  printf '%s' "${value}"
+}
+
+build_mediamtx_ice_servers_yaml() {
+  local stun_url="$1"
+  local turn_url="$2"
+  local turn_username="$3"
+  local turn_password="$4"
+
+  if [[ -z "${stun_url}" && -z "${turn_url}" ]]; then
+    printf 'webrtcICEServers2: []\n'
+    return
+  fi
+
+  printf 'webrtcICEServers2:\n'
+  if [[ -n "${stun_url}" ]]; then
+    printf '  - url: "%s"\n' "$(yaml_escape "${stun_url}")"
+    printf '    username: ""\n'
+    printf '    password: ""\n'
+    printf '    clientOnly: false\n'
+  fi
+  if [[ -n "${turn_url}" ]]; then
+    printf '  - url: "%s"\n' "$(yaml_escape "${turn_url}")"
+    printf '    username: "%s"\n' "$(yaml_escape "${turn_username}")"
+    printf '    password: "%s"\n' "$(yaml_escape "${turn_password}")"
+    printf '    clientOnly: false\n'
+  fi
+}
+
 write_mediamtx_path() {
   local output="$1"
   local path_name="$2"
@@ -246,8 +320,15 @@ write_mediamtx_path() {
 
 generate_mediamtx_config() {
   local output="$1"
-  local webrtc_public_hosts
-  webrtc_public_hosts="$(csv_to_json_array "${MEDIAMTX_WEBRTC_PUBLIC_HOSTS}")"
+  local public_hosts stun_url turn_url turn_username turn_password webrtc_public_hosts webrtc_ice_servers_yaml prebuffer_enabled
+  public_hosts="$(runtime_live_option 'mobile_webrtc_public_hosts' "${MEDIAMTX_WEBRTC_PUBLIC_HOSTS}")"
+  stun_url="$(runtime_live_option 'mobile_webrtc_stun_url' "${MEDIAMTX_WEBRTC_STUN_URL}")"
+  turn_url="$(runtime_live_option 'mobile_webrtc_turn_url' "${MEDIAMTX_WEBRTC_TURN_URL}")"
+  turn_username="$(runtime_live_option 'mobile_webrtc_turn_username' "${MEDIAMTX_WEBRTC_TURN_USERNAME}")"
+  turn_password="$(runtime_live_option 'mobile_webrtc_turn_password' "${MEDIAMTX_WEBRTC_TURN_PASSWORD}")"
+  prebuffer_enabled="$(runtime_live_option 'prebuffer_enabled' 'true')"
+  webrtc_public_hosts="$(csv_to_json_array "${public_hosts}")"
+  webrtc_ice_servers_yaml="$(build_mediamtx_ice_servers_yaml "${stun_url}" "${turn_url}" "${turn_username}" "${turn_password}")"
   cat > "${output}" <<EOF
 logLevel: ${LOG_LEVEL}
 logDestinations: [stdout]
@@ -288,8 +369,9 @@ webrtcLocalUDPAddress: :${MEDIAMTX_WEBRTC_UDP_PORT}
 webrtcLocalTCPAddress: :${MEDIAMTX_WEBRTC_UDP_PORT}
 webrtcIPsFromInterfaces: no
 webrtcAdditionalHosts: ${webrtc_public_hosts}
+${webrtc_ice_servers_yaml}
 webrtcSTUNGatherTimeout: 5s
-webrtcHandshakeTimeout: 15s
+webrtcHandshakeTimeout: 20s
 webrtcTrackGatherTimeout: 5s
 
 srt: yes
@@ -322,8 +404,8 @@ EOF
       record_stream="$(jq -r '.record_stream // "main"' <<< "${camera}")"
       record_main="$([[ "${enabled}" == "true" && "${record}" == "true" && "${record_stream}" != "sub" ]] && echo true || echo false)"
       record_sub="$([[ "${enabled}" == "true" && "${record}" == "true" && "${record_stream}" == "sub" ]] && echo true || echo false)"
-      warm_main="$([[ "${enabled}" == "true" && "${low_latency}" == "true" && ( "${tile_stream}" == "main" || "${live_stream}" == "main" || "${record_main}" == "true" ) ]] && echo true || echo false)"
-      warm_sub="$([[ "${enabled}" == "true" && "${low_latency}" == "true" && ( "${tile_stream}" == "sub" || "${live_stream}" == "sub" || "${record_sub}" == "true" ) ]] && echo true || echo false)"
+      warm_main="$([[ "${enabled}" == "true" && "${low_latency}" == "true" && "${prebuffer_enabled}" == "true" && ( "${tile_stream}" == "main" || "${live_stream}" == "main" || "${record_main}" == "true" ) ]] && echo true || echo false)"
+      warm_sub="$([[ "${enabled}" == "true" && "${low_latency}" == "true" && "${prebuffer_enabled}" == "true" && ( "${tile_stream}" == "sub" || "${live_stream}" == "sub" || "${record_sub}" == "true" ) ]] && echo true || echo false)"
       write_mediamtx_path "${output}" "${safe_id}_main" "${rtsp_main}" "${record_main}" "${warm_main}"
       write_mediamtx_path "${output}" "${safe_id}_sub" "${rtsp_sub}" "${record_sub}" "${warm_sub}"
     done < <(jq -c '.cameras[]?' "${EDGE_CONFIG}")
@@ -333,6 +415,8 @@ EOF
 generate_janus_config() {
   local config_dir="$1"
   local streaming_config="${config_dir}/janus.plugin.streaming.jcfg"
+  local bufferkf_ms
+  bufferkf_ms="$(numeric_or_fallback "$(runtime_live_option 'prebuffer_remote_ms' "${JANUS_BUFFERKF_MS}")" "${JANUS_BUFFERKF_MS}" 0 10000)"
 
   mkdir -p "${config_dir}"
   cat > "${config_dir}/janus.jcfg" <<EOF
@@ -419,7 +503,7 @@ ${safe_id}_main: {
   rtsp_timeout = 5
   rtsp_conn_timeout = 3
   rtsp_notify_changes = true
-  bufferkf_ms = 1000
+  bufferkf_ms = ${bufferkf_ms}
   playoutdelay_ext = true
 }
 
@@ -434,7 +518,7 @@ ${safe_id}_sub: {
   rtsp_timeout = 5
   rtsp_conn_timeout = 3
   rtsp_notify_changes = true
-  bufferkf_ms = 1000
+  bufferkf_ms = ${bufferkf_ms}
   playoutdelay_ext = true
 }
 EOF
@@ -769,6 +853,9 @@ export EDGE_MEDIAMTX_HLS_PORT="${MEDIAMTX_HLS_PORT}"
 export EDGE_MEDIAMTX_WEBRTC_PORT="${MEDIAMTX_WEBRTC_PORT}"
 export EDGE_MEDIAMTX_WEBRTC_UDP_PORT="${MEDIAMTX_WEBRTC_UDP_PORT}"
 export EDGE_MEDIAMTX_WEBRTC_PUBLIC_HOSTS="${MEDIAMTX_WEBRTC_PUBLIC_HOSTS}"
+export EDGE_MEDIAMTX_WEBRTC_STUN_URL="${MEDIAMTX_WEBRTC_STUN_URL}"
+export EDGE_MEDIAMTX_WEBRTC_TURN_URL="${MEDIAMTX_WEBRTC_TURN_URL}"
+export EDGE_MEDIAMTX_WEBRTC_TURN_USERNAME="${MEDIAMTX_WEBRTC_TURN_USERNAME}"
 export EDGE_MEDIAMTX_SRT_PORT="${MEDIAMTX_SRT_PORT}"
 export EDGE_MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT}"
 export EDGE_JANUS_ENABLED="${JANUS_ENABLED}"

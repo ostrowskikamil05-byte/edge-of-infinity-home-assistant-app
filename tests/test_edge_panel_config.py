@@ -155,6 +155,75 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
         self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
 
+    def test_commit_panel_config_clears_legacy_override_files(self):
+        panel = load_panel_module()
+        payload = {
+            "server": {},
+            "storage": {},
+            "cameras": [camera("hikvision_1", "192.168.33.21", "sub")],
+        }
+        panel.save_panel_camera_overrides(payload)
+        panel.save_stream_overrides(payload)
+        self.assertTrue(panel.PANEL_CAMERA_OVERRIDES_PATH.exists())
+        self.assertTrue(panel.STREAM_OVERRIDES_PATH.exists())
+
+        committed = panel.commit_panel_config(payload)
+
+        self.assertEqual(committed["cameras"][0]["live_stream"], "main")
+        self.assertFalse(panel.PANEL_CAMERA_OVERRIDES_PATH.exists())
+        self.assertFalse(panel.STREAM_OVERRIDES_PATH.exists())
+
+    def test_live_mobile_settings_are_normalized_and_preserved(self):
+        panel = load_panel_module()
+        payload = {
+            "server": {},
+            "storage": {},
+            "live": {
+                "engine": "janus_webrtc",
+                "prebuffer_enabled": True,
+                "prebuffer_local_ms": 5000,
+                "prebuffer_remote_ms": 2500,
+                "mobile_webrtc_public_hosts": "edge.example.com,192.168.33.17",
+                "mobile_webrtc_stun_url": "stun:stun.l.google.com:19302",
+                "mobile_webrtc_turn_url": "turns:turn.example.com:443",
+                "mobile_webrtc_turn_username": "edge",
+                "mobile_webrtc_turn_password": "secret",
+            },
+            "cameras": [camera("hikvision_1", "192.168.33.21", "sub")],
+        }
+
+        normalized = panel.normalize_config(payload)
+
+        self.assertTrue(normalized["live"]["prebuffer_enabled"])
+        self.assertEqual(normalized["live"]["prebuffer_remote_ms"], 2500)
+        self.assertEqual(normalized["live"]["mobile_webrtc_public_hosts"], "edge.example.com,192.168.33.17")
+        self.assertEqual(normalized["live"]["mobile_webrtc_turn_url"], "turns:turn.example.com:443")
+        self.assertEqual(normalized["live"]["mobile_webrtc_turn_password"], "secret")
+
+    def test_autoconfig_recommends_keyframe_and_substream_tuning(self):
+        panel = load_panel_module()
+        recommendations = panel.camera_autoconfig_recommendations(
+            {
+                "sub": {
+                    "video": {
+                        "codec": "H.264",
+                        "width": "1920",
+                        "height": "1080",
+                        "fps": "20",
+                        "bitrate": "4096",
+                        "keyframe_interval": "20",
+                    },
+                    "audio": {"codec": "pcm_alaw"},
+                }
+            },
+            [],
+        )
+        messages = " ".join(item["message"] for item in recommendations)
+
+        self.assertIn("keyframe interval", messages)
+        self.assertIn("substream", messages)
+        self.assertIn("bitrate", messages)
+
     def test_recording_command_copies_h264_video_for_low_cpu_recording(self):
         panel = load_panel_module()
 

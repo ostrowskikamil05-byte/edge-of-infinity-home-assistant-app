@@ -169,6 +169,21 @@ Starting with version `0.8.5`, MediaMTX no longer advertises Docker bridge inter
 
 Starting with version `0.8.9`, enabled cameras with `low_latency` keep MediaMTX paths warm when a stream is used by a tile, live view, or recording. This removes most cold-start delay where a phone opens the panel and MediaMTX would otherwise only then start pulling RTSP from the camera. WebRTC gather and handshake timeouts are also extended for LTE/5G clients.
 
+Starting with version `0.10.0`, Edge Settings can save mobile WebRTC runtime values into `/homeassistant/edge/panel-config.json`:
+
+```text
+mobile_webrtc_public_hosts
+mobile_webrtc_stun_url
+mobile_webrtc_turn_url
+mobile_webrtc_turn_username
+mobile_webrtc_turn_password
+prebuffer_enabled
+prebuffer_local_ms
+prebuffer_remote_ms
+```
+
+On restart, the add-on generates MediaMTX and Janus configs from those values. The fastest LTE path is still direct ICE through a reachable public host/DDNS and open WebRTC/ICE ports. TURN is only the fallback when CGNAT or a carrier firewall prevents direct ICE. A VPS can be used as that public host, TURN server, or future relay bridge when the home network cannot expose ports.
+
 For LL-HLS mobile tests, `mediamtx_hls_always_remux` can be enabled in the add-on options. Keep it off unless you are testing HLS startup time, because always-remux keeps HLS work active even without a viewer.
 
 Starting with version `0.8.6`, `/homeassistant/edge/edge.json` remains the source of truth after it exists. Add-on options are copied only to `/tmp/edge-runtime/edge.options.json` for diagnostics and no longer overwrite panel changes on restart. Stream role choices are also persisted in:
@@ -187,7 +202,7 @@ Starting with version `0.8.7`, the panel also persists the full submitted camera
 
 This includes host, login, RTSP, ONVIF, ISAPI, enable flags, and all stream role choices. The panel applies this file before config normalization, so a stale add-on option file or old `edge.json` contents cannot silently force saved camera fields back to previous values.
 
-Starting with version `0.8.8`, `/homeassistant/edge/panel-config.json` is the primary source of truth. Legacy override files are still written for recovery and older installs, but they do not override values already stored in `panel-config.json`.
+Starting with version `0.8.8`, `/homeassistant/edge/panel-config.json` is the primary source of truth. Starting with version `0.10.0`, successful panel saves clear legacy `panel-camera-overrides.json` and `stream-overrides.json` files so old values cannot force stream roles back to previous settings.
 
 ## HEVC / H265
 
@@ -208,6 +223,8 @@ lost connection
 The `lost connection` state appears when a camera was previously online and the next RTSP probe fails.
 
 ## Hikvision Autoconfig
+
+Starting with version `0.10.0`, Autoconfig also returns camera recommendations inspired by Scrypted's camera preparation rules: H264 for universal browser/WebRTC live, main stream for recording, warmed substream for mobile start, keyframe interval close to `FPS * 4`, and moderate LTE substream bitrate. HEVC/H265 is still useful for recording or compatible LL-HLS/SRT clients, but browser WebRTC may need H264 or transcoding.
 
 Starting with version `0.4.7`, Camera Settings includes an `Autoconfig` action per camera. It reads Hikvision ISAPI sections through Digest authentication:
 
