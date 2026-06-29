@@ -651,20 +651,14 @@ if has_addon_camera_options && [[ ! -f "${EDGE_HOME_CONFIG}" ]]; then
   write_addon_options_config "${EDGE_CONFIG}"
   echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
   bashio::log.info "Created camera config from Home Assistant add-on options at ${EDGE_CONFIG}."
-elif has_addon_camera_options && { [[ "${SYNC_ADDON_OPTIONS}" == "true" ]] || [[ -n "${ADDON_OPTIONS_HASH}" && "${ADDON_OPTIONS_HASH}" != "${PREVIOUS_ADDON_OPTIONS_HASH}" ]]; }; then
+elif has_addon_camera_options && [[ -f "${EDGE_HOME_CONFIG}" ]]; then
   EDGE_CONFIG="${EDGE_HOME_CONFIG}"
-  if [[ "${SYNC_ADDON_OPTIONS}" == "true" && -f "${EDGE_HOME_CONFIG}" ]]; then
-    cp "${EDGE_HOME_CONFIG}" /homeassistant/edge/edge.before-addon-options.json
-    write_addon_options_config "${EDGE_CONFIG}"
-    echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
-    bashio::log.info "Applied updated Home Assistant add-on camera options to ${EDGE_CONFIG}."
-  elif [[ "${SYNC_ADDON_OPTIONS}" == "true" ]]; then
-    write_addon_options_config "${EDGE_CONFIG}"
-    echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
-    bashio::log.info "Applied Home Assistant add-on camera options to ${EDGE_CONFIG}."
+  write_addon_options_config "${EDGE_OPTIONS_CONFIG}"
+  echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
+  if [[ "${SYNC_ADDON_OPTIONS}" == "true" ]]; then
+    bashio::log.warning "sync_addon_options is enabled, but panel config already exists. Keeping ${EDGE_CONFIG} as source of truth and writing add-on options only to ${EDGE_OPTIONS_CONFIG}."
   else
-    echo "${ADDON_OPTIONS_HASH}" > "${ADDON_OPTIONS_HASH_PATH}"
-    bashio::log.info "Panel camera config already exists. Skipping add-on option sync to avoid overwriting panel changes."
+    bashio::log.info "Panel camera config already exists. Keeping ${EDGE_CONFIG} as source of truth."
   fi
 elif [[ -f "${EDGE_HOME_CONFIG}" ]]; then
   EDGE_CONFIG="${EDGE_HOME_CONFIG}"

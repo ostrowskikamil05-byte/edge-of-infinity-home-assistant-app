@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.6
+
+- Make the panel-owned `/homeassistant/edge/edge.json` authoritative once it exists; add-on options are no longer allowed to rewrite it on restart.
+- Persist stream role selections in `/homeassistant/edge/stream-overrides.json` and apply them on every config load so `tile`, `live`, `record`, and `snapshot` choices cannot bounce back after refresh or restart.
+- Expand regression tests to cover stream overrides after an external config rewrite.
+
 ## 0.8.5
 
 - Fix Camera Settings save verification so explicit `tile`, `live`, `record`, and `snapshot` stream choices from the panel are enforced after backend normalization and after the persisted config is read back.

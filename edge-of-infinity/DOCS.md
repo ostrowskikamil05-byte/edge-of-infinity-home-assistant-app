@@ -161,6 +161,14 @@ These hosts are advertised as ICE candidates so the browser can connect to the a
 
 Starting with version `0.8.5`, MediaMTX no longer advertises Docker bridge interface IPs as WebRTC ICE candidates. It uses the configured public hosts and exposes the ICE port over UDP and TCP so browsers on the LAN are not offered unreachable `172.30.x.x` candidates first.
 
+Starting with version `0.8.6`, `/homeassistant/edge/edge.json` remains the source of truth after it exists. Add-on options are copied only to `/tmp/edge-runtime/edge.options.json` for diagnostics and no longer overwrite panel changes on restart. Stream role choices are also persisted in:
+
+```text
+/homeassistant/edge/stream-overrides.json
+```
+
+Those overrides are applied on every config load so `tile`, `live`, `record`, and `snapshot` selections cannot bounce back when another source rewrites `edge.json`.
+
 Starting with version `0.8.3`, the old shell placeholder page and MJPEG status generator were removed from the runner. The Edge panel is the controller, while MediaMTX + Janus is the live path.
 
 Camera cards show a small rounded status badge:

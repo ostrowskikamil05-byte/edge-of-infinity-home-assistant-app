@@ -66,6 +66,7 @@ class EdgePanelConfigTests(unittest.TestCase):
             raw_payload,
         )
         panel.write_json(panel.CONFIG_PATH, saved_payload)
+        panel.save_stream_overrides(saved_payload)
         loaded_payload = panel.preserve_submitted_stream_choices(panel.load_config(), merged_payload, raw_payload)
 
         self.assertEqual(loaded_payload["cameras"][0]["snapshot_stream"], "sub")
@@ -73,6 +74,33 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(loaded_payload["cameras"][0]["tile_stream"], "sub")
         self.assertEqual(loaded_payload["cameras"][0]["record_stream"], "main")
         self.assertEqual(loaded_payload["cameras"][1]["snapshot_stream"], "main")
+
+    def test_stream_overrides_win_after_external_config_rewrite(self):
+        panel = load_panel_module()
+        existing = {
+            "server": {},
+            "storage": {},
+            "cameras": [
+                camera("hikvision_1", "192.168.33.21", "sub"),
+                camera("hikvision_2", "192.168.33.135", "main"),
+            ],
+        }
+        panel.write_json(panel.CONFIG_PATH, existing)
+        panel.save_stream_overrides(existing)
+
+        rewritten = json.loads(json.dumps(existing))
+        rewritten["cameras"][0]["snapshot_stream"] = "main"
+        rewritten["cameras"][0]["live_stream"] = "sub"
+        rewritten["cameras"][0]["tile_stream"] = "main"
+        rewritten["cameras"][0]["record_stream"] = "sub"
+        panel.write_json(panel.CONFIG_PATH, rewritten)
+
+        loaded = panel.load_config()
+
+        self.assertEqual(loaded["cameras"][0]["snapshot_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["live_stream"], "main")
+        self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["record_stream"], "main")
 
 
 if __name__ == "__main__":
