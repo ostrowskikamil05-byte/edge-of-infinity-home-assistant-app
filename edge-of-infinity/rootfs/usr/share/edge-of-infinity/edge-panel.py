@@ -518,6 +518,7 @@ def normalize_config(payload: dict) -> dict:
             "segment_seconds": clamp_int(nvr.get("segment_seconds"), 10, 2, 300),
             "retention_days": clamp_int(nvr.get("retention_days"), safe_int(storage.get("retention_days"), 14), 1, 365),
             "copy_all_streams": bool(nvr.get("copy_all_streams", True)),
+            "browser_playback": nvr.get("browser_playback") if nvr.get("browser_playback") in ("auto_h264", "copy", "h264") else "auto_h264",
         },
         "cameras": normalized,
         "future_vendors": payload.get("future_vendors") or ["dahua", "onvif", "rtsp"],
@@ -1201,6 +1202,107 @@ def recording_segments(camera: dict, index: int, limit: int = 24) -> list[dict]:
     return segments
 
 
+def recording_codec_mode(stream: str, nvr: dict) -> tuple[str, str, str, dict]:
+    probe = probe_rtsp_stream(stream, timeout=6)
+    video = probe.get("video") or {}
+    audio = probe.get("audio") or {}
+    video_codec = str(video.get("codec_name") or "").lower()
+    audio_codec = str(audio.get("codec_name") or "").lower()
+    playback_policy = nvr.get("browser_playback") if nvr.get("browser_playback") in ("auto_h264", "copy", "h264") else "auto_h264"
+    if playback_policy == "copy":
+        return "copy", video_codec, audio_codec, probe
+    if playback_policy == "h264":
+        return "transcode_to_h264", video_codec, audio_codec, probe
+    if video_codec and video_codec not in ("h264", "avc1"):
+        return "transcode_to_h264", video_codec, audio_codec, probe
+    return "copy_h264", video_codec, audio_codec, probe
+
+
+def recording_mode_from_codec(video_codec: str, nvr: dict) -> str:
+    codec = str(video_codec or "").lower()
+    playback_policy = nvr.get("browser_playback") if nvr.get("browser_playback") in ("auto_h264", "copy", "h264") else "auto_h264"
+    if playback_policy == "copy":
+        return "copy"
+    if playback_policy == "h264":
+        return "transcode_to_h264"
+    if codec and codec not in ("h264", "avc1"):
+        return "transcode_to_h264"
+    return "copy_h264"
+
+
+def build_recording_command(stream: str, output_pattern: str, segment_seconds: int, mode: str) -> list[str]:
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "info",
+        "-fflags",
+        "+genpts",
+        "-rtsp_transport",
+        "tcp",
+        "-probesize",
+        "32768",
+        "-analyzeduration",
+        "0",
+        "-i",
+        stream,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+    ]
+    if mode == "transcode_to_h264":
+        command += [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+        ]
+    else:
+        command += [
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+        ]
+    command += [
+        "-f",
+        "segment",
+        "-segment_format",
+        "mp4",
+        "-segment_format_options",
+        "movflags=+faststart",
+        "-segment_time",
+        str(segment_seconds),
+        "-reset_timestamps",
+        "1",
+        "-strftime",
+        "1",
+        output_pattern,
+    ]
+    return command
+
+
 def cleanup_old_recordings(directory: Path, retention_days: int) -> int:
     if not directory.exists():
         return 0
@@ -1229,6 +1331,8 @@ def recording_status_payload(config: dict | None = None) -> dict:
         segment_files = recording_segments(camera, index, limit=72)
         record_stream = camera.get("record_stream") or "main"
         record_rtsp = camera_stream(camera, record_stream)
+        video_codec = camera.get("record_video_codec") or camera.get("live_video_codec") or camera.get("video_codec") or camera.get("codec") or ""
+        nvr_mode = recording_mode_from_codec(video_codec, nvr)
         cameras.append(
             {
                 "index": index,
@@ -1236,6 +1340,8 @@ def recording_status_payload(config: dict | None = None) -> dict:
                 "key": key,
                 "record_stream": record_stream,
                 "record_rtsp": redact_rtsp(record_rtsp),
+                "record_mode": nvr_mode,
+                "video_codec": video_codec,
                 "recording": bool(process and process.poll() is None),
                 "pid": process.pid if process and process.poll() is None else None,
                 "directory": str(directory),
@@ -1268,41 +1374,8 @@ def start_recording(camera: dict, index: int) -> dict:
     removed_old = cleanup_old_recordings(directory, retention_days)
     log_path = directory / "ffmpeg.log"
     output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "info",
-        "-fflags",
-        "+genpts",
-        "-rtsp_transport",
-        "tcp",
-        "-probesize",
-        "32768",
-        "-analyzeduration",
-        "0",
-        "-i",
-        stream,
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a?",
-        "-c",
-        "copy",
-        "-f",
-        "segment",
-        "-segment_format",
-        "mp4",
-        "-segment_format_options",
-        "movflags=+faststart",
-        "-segment_time",
-        str(segment_seconds),
-        "-reset_timestamps",
-        "1",
-        "-strftime",
-        "1",
-        output_pattern,
-    ]
+    mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr)
+    command = build_recording_command(stream, output_pattern, segment_seconds, mode)
     log_file = log_path.open("ab")
     try:
         process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=log_file)
@@ -1318,6 +1391,10 @@ def start_recording(camera: dict, index: int) -> dict:
         "segment_seconds": segment_seconds,
         "retention_days": retention_days,
         "removed_old": removed_old,
+        "mode": mode,
+        "video_codec": video_codec,
+        "audio_codec": audio_codec,
+        "probe": probe,
         "command": redact_command(command),
     })
     return {
@@ -1328,6 +1405,9 @@ def start_recording(camera: dict, index: int) -> dict:
         "directory": str(directory),
         "record_stream": record_stream,
         "record_rtsp": redact_rtsp(stream),
+        "record_mode": mode,
+        "video_codec": video_codec,
+        "audio_codec": audio_codec,
         "segment_seconds": segment_seconds,
     }
 
@@ -2092,12 +2172,22 @@ INDEX_HTML = r"""<!doctype html>
         align-items: end;
         margin-bottom: 14px;
       }
-      .timeline {
-        height: 88px;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: repeating-linear-gradient(90deg, rgba(86,214,181,.18), rgba(86,214,181,.18) 3px, transparent 3px, transparent 54px), rgba(0,0,0,.16);
-        margin-top: 12px;
+      .nvr-card .body { display: grid; gap: 10px; }
+      .nvr-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+      .rec-badge {
+        border: 1px solid rgba(86,214,181,.45);
+        border-radius: 999px;
+        padding: 5px 9px;
+        color: var(--accent);
+        background: rgba(86,214,181,.09);
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: .02em;
+      }
+      .rec-badge.off {
+        border-color: rgba(250,110,126,.45);
+        color: var(--danger);
+        background: rgba(250,110,126,.08);
       }
       .recording-player {
         width: 100%;
@@ -2106,36 +2196,45 @@ INDEX_HTML = r"""<!doctype html>
         border: 1px solid var(--line);
         border-radius: 8px;
         background: #05080a;
-        margin-top: 12px;
       }
-      .recording-list {
+      .recording-empty {
+        aspect-ratio: 16 / 9;
+        border: 1px dashed var(--line);
+        border-radius: 8px;
         display: grid;
-        gap: 7px;
-        margin-top: 12px;
+        place-items: center;
+        background: rgba(0,0,0,.18);
+        color: var(--muted);
       }
-      .recording-item {
+      .recording-film-grid {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
         gap: 8px;
-        align-items: center;
+      }
+      .recording-tile {
+        min-width: 0;
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 8px;
         background: rgba(0,0,0,.14);
+        color: var(--text);
+        text-align: left;
+        cursor: pointer;
       }
-      .recording-item.active {
+      .recording-tile.active {
         border-color: rgba(86,214,181,.65);
         background: rgba(86,214,181,.08);
       }
-      .recording-item button {
-        min-width: 0;
+      .recording-tile b {
+        display: block;
         overflow-wrap: anywhere;
-        text-align: left;
+        font-size: 13px;
       }
       .recording-meta {
+        display: block;
+        margin-top: 4px;
         color: var(--muted);
-        font-size: 12px;
-        white-space: nowrap;
+        font-size: 11px;
       }
       .log-grid {
         display: grid;
@@ -2233,7 +2332,7 @@ INDEX_HTML = r"""<!doctype html>
           <header>
             <div>
               <h1>NVR</h1>
-              <p>Recording control, recent segments, and local playback.</p>
+              <p>Local video recordings and playback.</p>
             </div>
             <div class="toolbar">
               <button class="primary" id="refresh-nvr">Refresh NVR</button>
@@ -2242,11 +2341,6 @@ INDEX_HTML = r"""<!doctype html>
           <section class="panel">
             <h2>Recording</h2>
             <div id="nvr-grid" class="grid"></div>
-          </section>
-          <section class="panel">
-            <h2>Timeline</h2>
-            <p>Recorded MP4 segments are available inside each camera card. The full rewind/forward timeline will build on these files.</p>
-            <div class="timeline"></div>
           </section>
         </section>
 
@@ -2578,45 +2672,33 @@ INDEX_HTML = r"""<!doctype html>
       function nvrCard(camera, index) {
         const status = recordingStatus[index] || {};
         const isRecording = Boolean(status.recording);
-        const recordStream = status.record_stream || camera.record_stream || 'main';
-        const recordRtsp = status.record_rtsp || camera.record_rtsp || 'missing';
         const files = Array.isArray(status.files) ? status.files : [];
         const selected = selectedRecording[index] || '';
         const selectedIndex = files.findIndex((file) => file.url === selected);
         const player = selected
-          ? `<video class="recording-player" src="${escapeHtml(panelPath(selected))}" controls preload="metadata"></video>`
-          : '';
+          ? `<video class="recording-player" src="${escapeHtml(panelPath(selected))}" controls preload="metadata" playsinline></video>`
+          : `<div class="recording-empty">No video yet</div>`;
         const recordingList = files.length
-          ? `<div class="recording-list">${files.map((file) => `
-              <div class="recording-item ${file.url === selected ? 'active' : ''}">
-                <button type="button" data-play-recording="${escapeHtml(file.url)}" data-record-index="${index}">${escapeHtml(file.name)}</button>
+          ? `<div class="recording-film-grid">${files.map((file) => `
+              <button class="recording-tile ${file.url === selected ? 'active' : ''}" type="button" data-play-recording="${escapeHtml(file.url)}" data-record-index="${index}">
+                <b>${escapeHtml(file.name)}</b>
                 <span class="recording-meta">${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatDate(file.modified_at))}</span>
-              </div>
+              </button>
             `).join('')}</div>`
-          : `<p class="notice">No segments yet. Start recording and refresh after the first ${escapeHtml(text(status.segment_seconds, 10))}-second segment is closed.</p>`;
+          : `<p class="notice">Start recording. The first video appears after the first ${escapeHtml(text(status.segment_seconds, 10))}-second segment closes.</p>`;
         return `
-          <article class="camera">
+          <article class="camera nvr-card">
             <div class="body">
-              <div class="row">
+              <div class="nvr-head">
                 <div class="name">${escapeHtml(text(camera.name, `Camera ${index + 1}`))}</div>
-                <div class="vendor">${isRecording ? 'REC' : 'READY'}</div>
-              </div>
-              <div class="meta">
-                <div class="metric"><b>Host</b><span>${escapeHtml(text(camera.host))}</span></div>
-                <div class="metric"><b>Status</b><span class="${isRecording ? 'state-online' : ''}">${isRecording ? 'recording' : 'stopped'}</span></div>
-                <div class="metric"><b>Record stream</b><span>${escapeHtml(recordStream)}</span></div>
-                <div class="metric"><b>Segments</b><span>${escapeHtml(text(status.segments, '0'))}</span></div>
-                <div class="metric"><b>Segment</b><span>${escapeHtml(text(status.segment_seconds, 10))}s</span></div>
-                <div class="metric"><b>PID</b><span>${escapeHtml(text(status.pid, 'none'))}</span></div>
-                <div class="metric wide"><b>Record RTSP</b><span>${escapeHtml(recordRtsp)}</span></div>
-              </div>
-              <p class="notice">${escapeHtml(text(status.directory, 'Recording directory will appear after start.'))}</p>
-              <div class="actions">
-                <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}">${isRecording ? 'Stop recording' : 'Start recording'}</button>
-                <button data-playback-step="older" data-record-index="${index}" ${selectedIndex >= 0 && selectedIndex < files.length - 1 ? '' : 'disabled'}>Rewind</button>
-                <button data-playback-step="newer" data-record-index="${index}" ${selectedIndex > 0 ? '' : 'disabled'}>Forward</button>
+                <div class="rec-badge ${isRecording ? '' : 'off'}">${isRecording ? 'RECORDING' : 'STOPPED'}</div>
               </div>
               ${player}
+              <div class="actions">
+                <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}">${isRecording ? 'Stop' : 'Record'}</button>
+                <button data-playback-step="older" data-record-index="${index}" ${selectedIndex >= 0 && selectedIndex < files.length - 1 ? '' : 'disabled'}>Back</button>
+                <button data-playback-step="newer" data-record-index="${index}" ${selectedIndex > 0 ? '' : 'disabled'}>Forward</button>
+              </div>
               ${recordingList}
             </div>
           </article>
@@ -2803,8 +2885,13 @@ INDEX_HTML = r"""<!doctype html>
             <div class="form-grid">
               <label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label>
               <label>NVR retention days<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label>
+              <label>Browser recording<select name="nvr-browser-playback">
+                <option value="auto_h264" ${nvrConfig.browser_playback !== 'copy' && nvrConfig.browser_playback !== 'h264' ? 'selected' : ''}>Auto H264 for HEVC</option>
+                <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Copy original</option>
+                <option value="h264" ${nvrConfig.browser_playback === 'h264' ? 'selected' : ''}>Always H264</option>
+              </select></label>
             </div>
-            <p class="notice">NVR records with stream copy so every encoded camera frame in the selected recording stream is preserved without re-encoding.</p>
+            <p class="notice">NVR keeps H264 recordings light with video copy. HEVC/H265 is transcoded to H264 in auto mode so the panel can play the file.</p>
           </section>
           <section class="camera-form">
             <h2>Live Preview</h2>
@@ -2976,7 +3063,8 @@ INDEX_HTML = r"""<!doctype html>
           },
           nvr: {
             segment_seconds: Number(get('nvr-segment-seconds').value || 10),
-            retention_days: Number(get('nvr-retention-days').value || get('storage-retention-days').value || 14)
+            retention_days: Number(get('nvr-retention-days').value || get('storage-retention-days').value || 14),
+            browser_playback: get('nvr-browser-playback').value
           }
         };
       }
@@ -3350,19 +3438,24 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       nvrGrid.addEventListener('click', async (event) => {
-        const index = event.target?.dataset?.recordIndex;
-        const playRecording = event.target?.dataset?.playRecording;
+        const playTarget = event.target.closest('[data-play-recording]');
+        const playRecording = playTarget?.dataset?.playRecording;
+        let index = playTarget?.dataset?.recordIndex;
         if (index !== undefined && playRecording) {
           selectedRecording[index] = playRecording;
           renderNvrGrid();
           return;
         }
-        const playbackStep = event.target?.dataset?.playbackStep;
+        const stepTarget = event.target.closest('[data-playback-step]');
+        const playbackStep = stepTarget?.dataset?.playbackStep;
+        index = stepTarget?.dataset?.recordIndex;
         if (index !== undefined && playbackStep) {
           moveRecording(index, playbackStep);
           return;
         }
-        const action = event.target?.dataset?.recordAction;
+        const actionTarget = event.target.closest('[data-record-action]');
+        const action = actionTarget?.dataset?.recordAction;
+        index = actionTarget?.dataset?.recordIndex;
         if (index === undefined || !action) return;
         const response = await fetch(panelPath(`api/recording/${action}`), {
           method: 'POST',
@@ -3395,7 +3488,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.8.9"
+    server_version = "EdgePanel/0.9.0"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

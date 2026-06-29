@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0
+
+- Rework the NVR page into camera recording cards with one playback video window, back/forward controls, and recording tiles instead of technical RTSP/path details.
+- Store recordings in per-camera folders under the configured recordings directory and expose them through range-aware MP4 playback.
+- Add automatic NVR codec mode: H264 recordings use stream-copy video for low CPU, while HEVC/H265 recordings transcode to browser-friendly H264/AAC in auto mode.
+- Add an Edge Settings NVR playback policy selector: auto H264 for HEVC, copy original, or always H264.
+- Add regression tests for the recording FFmpeg command generation.
+
 ## 0.8.9
 
 - Keep low-latency MediaMTX paths warm for enabled cameras when a stream is used by tile, live, or recording, reducing cold-start delay on phones.

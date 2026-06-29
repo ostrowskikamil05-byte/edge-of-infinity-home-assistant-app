@@ -155,6 +155,36 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
         self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
 
+    def test_recording_command_copies_h264_video_for_low_cpu_recording(self):
+        panel = load_panel_module()
+
+        command = panel.build_recording_command(
+            "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/101",
+            "/tmp/%Y%m%d-%H%M%S.mp4",
+            10,
+            "copy_h264",
+        )
+
+        self.assertIn("-c:v", command)
+        self.assertEqual(command[command.index("-c:v") + 1], "copy")
+        self.assertIn("-c:a", command)
+        self.assertEqual(command[command.index("-c:a") + 1], "aac")
+
+    def test_recording_command_transcodes_hevc_to_browser_h264(self):
+        panel = load_panel_module()
+
+        command = panel.build_recording_command(
+            "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/101",
+            "/tmp/%Y%m%d-%H%M%S.mp4",
+            10,
+            "transcode_to_h264",
+        )
+
+        self.assertIn("-c:v", command)
+        self.assertEqual(command[command.index("-c:v") + 1], "libx264")
+        self.assertIn("-tune", command)
+        self.assertEqual(command[command.index("-tune") + 1], "zerolatency")
+
 
 if __name__ == "__main__":
     unittest.main()

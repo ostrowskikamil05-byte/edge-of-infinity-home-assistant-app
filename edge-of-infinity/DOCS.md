@@ -193,6 +193,8 @@ Starting with version `0.8.8`, `/homeassistant/edge/panel-config.json` is the pr
 
 MediaMTX can proxy and record H265/HEVC through RTSP, LL-HLS, SRT, and fMP4 recording when the camera sends it. Browser WebRTC is different: the phone/browser WebRTC stack must also support HEVC. Use H265 for recording and compatible LL-HLS/SRT clients, but keep H264 available for universal WebRTC playback unless your target phone confirms H265 WebRTC support.
 
+Starting with version `0.9.0`, the NVR panel has a browser playback policy. In `auto_h264` mode, H264 camera streams are recorded with video stream-copy, while HEVC/H265 streams are transcoded to H264/AAC MP4 segments so the Home Assistant panel and mobile browsers can play them. Use `copy` only when you want the original codec and already know your player supports it.
+
 Starting with version `0.8.3`, the old shell placeholder page and MJPEG status generator were removed from the runner. The Edge panel is the controller, while MediaMTX + Janus is the live path.
 
 Camera cards show a small rounded status badge:
