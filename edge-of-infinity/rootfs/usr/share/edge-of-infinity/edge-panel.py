@@ -57,6 +57,7 @@ CAMERA_OVERRIDE_FIELDS = (
     *STREAM_ROLE_FIELDS,
 )
 STREAM_ENGINES = ("janus_webrtc", "mediamtx", "ll_hls", "srt")
+REMOTE_ACCESS_MODES = ("local_only", "direct_public", "vps_relay", "turn_relay")
 MEDIAMTX_ENABLED = os.environ.get("EDGE_MEDIAMTX_ENABLED", "true").lower() == "true"
 MEDIAMTX_HOST = os.environ.get("EDGE_MEDIAMTX_HOST", "127.0.0.1")
 MEDIAMTX_RTSP_PORT = int(os.environ.get("EDGE_MEDIAMTX_RTSP_PORT", "8556"))
@@ -69,6 +70,7 @@ MEDIAMTX_WEBRTC_PUBLIC_HOSTS = [
     if item.strip()
 ]
 MEDIAMTX_WEBRTC_PUBLIC_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_PUBLIC_URL", "")
+MEDIAMTX_REMOTE_ACCESS_MODE = os.environ.get("EDGE_MEDIAMTX_REMOTE_ACCESS_MODE", "local_only")
 MEDIAMTX_WEBRTC_STUN_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_STUN_URL", "stun:stun.l.google.com:19302")
 MEDIAMTX_WEBRTC_TURN_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TURN_URL", "")
 MEDIAMTX_WEBRTC_TURN_USERNAME = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TURN_USERNAME", "")
@@ -293,6 +295,14 @@ def normalize_webrtc_ice_transport(value: str | None, tcp_only: object = None) -
     if MEDIAMTX_WEBRTC_ICE_TRANSPORT in ("auto", "udp", "tcp"):
         return MEDIAMTX_WEBRTC_ICE_TRANSPORT
     return "auto"
+
+
+def normalize_remote_access_mode(value: str | None) -> str:
+    if value in REMOTE_ACCESS_MODES:
+        return value
+    if MEDIAMTX_REMOTE_ACCESS_MODE in REMOTE_ACCESS_MODES:
+        return MEDIAMTX_REMOTE_ACCESS_MODE
+    return "local_only"
 
 
 def stream_channel(camera: dict, stream_name: str) -> str:
@@ -621,6 +631,7 @@ def normalize_config(payload: dict) -> dict:
         },
         "live": {
             "engine": live.get("engine") if live.get("engine") in STREAM_ENGINES else "janus_webrtc",
+            "remote_access_mode": normalize_remote_access_mode(live.get("remote_access_mode")),
             "frame_interval_ms": safe_int(live.get("frame_interval_ms"), 1200),
             "tile_fps": clamp_int(live.get("tile_fps"), 5, 1, 10),
             "tile_max_width": clamp_int(live.get("tile_max_width"), 960, 320, 1920),
@@ -1265,6 +1276,7 @@ def stream_capabilities(config: dict | None = None) -> dict:
             "mobile_lte_recommendation": "Use warmed sub stream for tiles/live start, keep main for recording, prefer H264 for universal WebRTC and HEVC for recording/LL-HLS when the phone supports it.",
         },
         "mobile_webrtc": {
+            "remote_access_mode": normalize_remote_access_mode(live.get("remote_access_mode")),
             "public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
             "public_url": live.get("mobile_webrtc_public_url") or "",
             "stun_url": live.get("mobile_webrtc_stun_url") if live.get("mobile_webrtc_stun_url") is not None else MEDIAMTX_WEBRTC_STUN_URL,
@@ -1281,7 +1293,7 @@ def stream_capabilities(config: dict | None = None) -> dict:
             "whep_port": MEDIAMTX_WEBRTC_PORT,
             "prebuffer_enabled": safe_bool(live.get("prebuffer_enabled"), True),
             "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
-            "diagnosis": "If LAN works but LTE fails, the browser usually cannot reach the advertised ICE host/ports. Use a reachable public host/DDNS and port route first; add TURN only as fallback for CGNAT/firewalls.",
+            "diagnosis": "If LAN works but LTE fails, the browser usually cannot reach the advertised ICE host/ports. Nabu Casa exposes the HA panel, not MediaMTX WebRTC ports. Use a reachable DDNS/VPS relay public URL first; add TURN for CGNAT/firewalls.",
         },
         "runtime": runtime,
         "cameras": [
@@ -2901,6 +2913,10 @@ INDEX_HTML = r"""<!doctype html>
           || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
       }
 
+      function isNabuCasaHost(hostname) {
+        return String(hostname || '').toLowerCase().endsWith('.ui.nabu.casa');
+      }
+
       function liveConnectionPlan(path) {
         const publicUrl = String(config?.live?.mobile_webrtc_public_url || '').trim().replace(/\/+$/, '');
         const mediaUrl = directMediaMtxPath(path);
@@ -2909,19 +2925,25 @@ INDEX_HTML = r"""<!doctype html>
         const mediaHost = parsedMediaUrl?.hostname || '';
         const pageIsLan = isLanHost(pageHost);
         const mediaIsLan = isLanHost(mediaHost);
+        const pageIsNabuCasa = isNabuCasaHost(pageHost);
+        const mediaIsNabuCasa = isNabuCasaHost(mediaHost);
         const pageIsHttps = window.location.protocol === 'https:';
         const mediaIsHttp = parsedMediaUrl?.protocol === 'http:';
         const publicUrlConfigured = Boolean(publicUrl);
         const remotePage = !pageIsLan;
         const iceTransport = String(config?.live?.mobile_webrtc_ice_transport || 'auto');
+        const remoteAccessMode = String(config?.live?.remote_access_mode || 'local_only');
         const diagnostics = {
           page_protocol: window.location.protocol,
           page_host: pageHost,
           page_is_lan: pageIsLan,
+          page_is_nabu_casa: pageIsNabuCasa,
           media_url: mediaUrl,
           media_protocol: parsedMediaUrl?.protocol || 'invalid',
           media_host: mediaHost || 'invalid',
           media_is_lan: mediaIsLan,
+          media_is_nabu_casa: mediaIsNabuCasa,
+          remote_access_mode: remoteAccessMode,
           public_url_configured: publicUrlConfigured,
           mobile_webrtc_public_url: publicUrl || '',
           ice_transport: iceTransport,
@@ -2937,12 +2959,30 @@ INDEX_HTML = r"""<!doctype html>
             diagnostics,
           };
         }
+        if (pageIsNabuCasa && !publicUrlConfigured) {
+          return {
+            url: '(no public MediaMTX URL configured)',
+            canEmbed: false,
+            reason: 'nabu_casa_needs_stream_relay',
+            message: 'Nabu Casa opens the Home Assistant panel, but it does not expose MediaMTX WebRTC ports. Set WebRTC public URL to a VPS/reverse-proxy/TURN reachable endpoint.',
+            diagnostics,
+          };
+        }
         if (remotePage && !publicUrlConfigured) {
           return {
             url: mediaUrl,
             canEmbed: false,
             reason: 'public_webrtc_url_missing',
             message: 'Remote live needs Edge Settings -> WebRTC public URL. A LAN fallback cannot work on LTE or another Wi-Fi.',
+            diagnostics,
+          };
+        }
+        if (publicUrlConfigured && mediaIsNabuCasa) {
+          return {
+            url: mediaUrl,
+            canEmbed: false,
+            reason: 'nabu_casa_public_url_not_supported',
+            message: 'Do not use ui.nabu.casa as WebRTC public URL. It is Home Assistant remote UI, not a MediaMTX relay endpoint.',
             diagnostics,
           };
         }
@@ -3561,6 +3601,12 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="ll_hls" ${liveConfig.engine === 'll_hls' ? 'selected' : ''}>LL-HLS experimental</option>
                 <option value="srt" ${liveConfig.engine === 'srt' ? 'selected' : ''}>SRT relay</option>
               </select></label>
+              <label>Remote access<select name="live-remote-access-mode">
+                <option value="local_only" ${text(liveConfig.remote_access_mode, 'local_only') === 'local_only' ? 'selected' : ''}>Local only / Nabu panel only</option>
+                <option value="direct_public" ${liveConfig.remote_access_mode === 'direct_public' ? 'selected' : ''}>Direct public DDNS</option>
+                <option value="vps_relay" ${liveConfig.remote_access_mode === 'vps_relay' ? 'selected' : ''}>VPS relay</option>
+                <option value="turn_relay" ${liveConfig.remote_access_mode === 'turn_relay' ? 'selected' : ''}>TURN relay</option>
+              </select></label>
               <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label>
               <label>Tile FPS<input name="live-tile-fps" type="number" min="1" max="10" value="${escapeHtml(text(liveConfig.tile_fps, 5))}"></label>
               <label>Tile max width<input name="live-tile-max-width" type="number" min="320" max="1920" value="${escapeHtml(text(liveConfig.tile_max_width, 960))}"></label>
@@ -3579,7 +3625,7 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="tcp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'tcp' ? 'selected' : ''}>TCP only</option>
               </select></label>
             </div>
-            <p class="notice">Remote LTE or another Wi-Fi cannot use a LAN-only 192.168 address. Set WebRTC public URL to a reachable MediaMTX address and expose TCP 8889 plus ICE 8189. Use Auto first, TCP only for strict mobile networks, and TURN/VPS when the home network cannot expose ports.</p>
+            <p class="notice">Nabu Casa opens the Home Assistant panel only; it does not expose MediaMTX WebRTC. For LTE, set Remote access to VPS relay or TURN relay and set WebRTC public URL to that reachable endpoint. Direct public mode needs TCP 8889 plus ICE 8189 reachable from outside.</p>
           </section>
         `;
       }
@@ -3760,6 +3806,7 @@ INDEX_HTML = r"""<!doctype html>
           },
           live: {
             engine: get('live-engine').value,
+            remote_access_mode: get('live-remote-access-mode').value,
             frame_interval_ms: Number(get('live-frame-interval-ms').value || 1200),
             tile_fps: Number(get('live-tile-fps').value || 5),
             tile_max_width: Number(get('live-tile-max-width').value || 960),
@@ -4231,7 +4278,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.4"
+    server_version = "EdgePanel/0.10.5"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

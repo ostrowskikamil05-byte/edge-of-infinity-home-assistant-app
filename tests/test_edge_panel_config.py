@@ -180,6 +180,7 @@ class EdgePanelConfigTests(unittest.TestCase):
             "storage": {},
             "live": {
                 "engine": "janus_webrtc",
+                "remote_access_mode": "vps_relay",
                 "prebuffer_enabled": True,
                 "prebuffer_local_ms": 5000,
                 "prebuffer_remote_ms": 2500,
@@ -196,6 +197,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         normalized = panel.normalize_config(payload)
 
         self.assertTrue(normalized["live"]["prebuffer_enabled"])
+        self.assertEqual(normalized["live"]["remote_access_mode"], "vps_relay")
         self.assertEqual(normalized["live"]["prebuffer_remote_ms"], 2500)
         self.assertEqual(normalized["live"]["mobile_webrtc_public_hosts"], "edge.example.com,192.168.33.17")
         self.assertEqual(normalized["live"]["mobile_webrtc_turn_url"], "turns:turn.example.com:443")

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.5
+
+- Add an explicit remote access mode for live preview: local-only, direct public DDNS, VPS relay, or TURN relay.
+- Detect Nabu Casa remote UI separately and explain that it opens the Home Assistant panel but does not expose MediaMTX WebRTC ports.
+- Prevent the panel from showing `ui.nabu.casa:8889` as if it were a valid MediaMTX endpoint when no WebRTC public URL is configured.
+- Persist remote access mode through panel config, add-on options config, stream capabilities, and startup diagnostics.
+
 ## 0.10.4
 
 - Detect remote WebRTC paths that cannot work on LTE, including missing public URL, LAN-only public URL, invalid URL scheme, and HTTPS pages trying to embed HTTP MediaMTX.
