@@ -308,6 +308,66 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/201")
         self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/202")
 
+    def test_hikvision_rtsp_rebuilds_when_host_changes_but_old_url_remains_in_form(self):
+        panel = load_panel_module()
+        payload = {
+            "server": {},
+            "storage": {},
+            "cameras": [
+                {
+                    "id": "hikvision_1",
+                    "vendor": "hikvision",
+                    "host": "192.168.33.50",
+                    "username": "admin",
+                    "password": "new-secret",
+                    "camera_number": "1",
+                    "rtsp_main_channel": "101",
+                    "rtsp_sub_channel": "102",
+                    "rtsp_main": "rtsp://admin:old-secret@192.168.33.21:554/Streaming/Channels/101",
+                    "rtsp_sub": "rtsp://admin:old-secret@192.168.33.21:554/Streaming/Channels/102",
+                    "enabled": True,
+                    "record": True,
+                }
+            ],
+        }
+
+        normalized = panel.normalize_config(payload)
+        camera_config = normalized["cameras"][0]
+
+        self.assertEqual(camera_config["host"], "192.168.33.50")
+        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:new-secret@192.168.33.50:554/Streaming/Channels/101")
+        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:new-secret@192.168.33.50:554/Streaming/Channels/102")
+
+    def test_save_then_reload_keeps_changed_connection_and_stream_values(self):
+        panel = load_panel_module()
+        existing = {
+            "server": {},
+            "storage": {},
+            "cameras": [camera("hikvision_1", "192.168.33.21", "main")],
+        }
+        panel.write_json(panel.PANEL_CONFIG_PATH, existing)
+
+        raw_payload = json.loads(json.dumps(existing))
+        raw_payload["cameras"][0]["host"] = "192.168.33.50"
+        raw_payload["cameras"][0]["password"] = "new-secret"
+        raw_payload["cameras"][0]["tile_stream"] = "sub"
+        raw_payload["cameras"][0]["live_stream"] = "sub"
+        raw_payload["cameras"][0]["record_stream"] = "sub"
+        raw_payload["cameras"][0]["snapshot_stream"] = "sub"
+
+        _, _, _, final_payload = panel.prepare_config_for_save(raw_payload)
+        panel.commit_panel_config(final_payload)
+        loaded = panel.load_config()
+
+        self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.50")
+        self.assertEqual(loaded["cameras"][0]["password"], "new-secret")
+        self.assertEqual(loaded["cameras"][0]["rtsp_main"], "rtsp://admin:new-secret@192.168.33.50:554/Streaming/Channels/101")
+        self.assertEqual(loaded["cameras"][0]["rtsp_sub"], "rtsp://admin:new-secret@192.168.33.50:554/Streaming/Channels/102")
+        self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["live_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["snapshot_stream"], "sub")
+
     def test_hikvision_channels_are_saved_and_build_rtsp_urls(self):
         panel = load_panel_module()
         payload = {

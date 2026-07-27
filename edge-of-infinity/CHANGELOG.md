@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.7
+
+- Rebuild generated Hikvision RTSP URLs when the saved form still contains an old RTSP URL but the camera host, username, password, or channel fields were changed.
+- Update the Camera Settings form submit path to refresh Hikvision RTSP main/sub URLs before sending the save request, so edited IP/login values are visible immediately after saving.
+- Add regression coverage for changing a camera IP/password while old RTSP URLs remain in the form.
+
 ## 0.10.6
 
 - Fix camera settings save bounce by making manual Hikvision channel fields authoritative; `camera_number` now only generates default channels when channel fields are empty.

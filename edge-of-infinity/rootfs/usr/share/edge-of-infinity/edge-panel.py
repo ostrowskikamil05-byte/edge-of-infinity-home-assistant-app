@@ -245,11 +245,53 @@ def build_rtsp(explicit: str, host: str, username: str, password: str, channel: 
     return ""
 
 
+def build_hikvision_rtsp(host: str, username: str, password: str, channel: str) -> str:
+    if host and username and password:
+        return f"rtsp://{username}:{password}@{host}:554/Streaming/Channels/{channel}"
+    return ""
+
+
 def hikvision_channel_from_rtsp(value: str, fallback: str) -> str:
     match = re.search(r"/Streaming/Channels/(\d+)", value or "")
     if match:
         return match.group(1)
     return fallback
+
+
+def rtsp_url_parts(value: str) -> dict:
+    parsed = urlparse(value or "")
+    return {
+        "host": parsed.hostname or "",
+        "username": parsed.username or "",
+        "password": parsed.password or "",
+        "channel": hikvision_channel_from_rtsp(value, ""),
+        "is_hikvision_streaming_path": "/Streaming/Channels/" in (parsed.path or value or ""),
+    }
+
+
+def hikvision_rtsp_needs_rebuild(value: str, host: str, username: str, password: str, channel: str) -> bool:
+    if not value:
+        return False
+    parts = rtsp_url_parts(value)
+    if not parts["is_hikvision_streaming_path"]:
+        return False
+    if host and parts["host"] and parts["host"] != host:
+        return True
+    if username and parts["username"] and parts["username"] != username:
+        return True
+    if password and parts["password"] and parts["password"] != password:
+        return True
+    if channel and parts["channel"] and parts["channel"] != channel:
+        return True
+    return False
+
+
+def refresh_hikvision_rtsp(value: str, host: str, username: str, password: str, channel: str) -> str:
+    if hikvision_rtsp_needs_rebuild(value, host, username, password, channel):
+        rebuilt = build_hikvision_rtsp(host, username, password, channel)
+        if rebuilt:
+            return rebuilt
+    return hikvision_rtsp_with_channel(value, channel)
 
 
 def normalize_hikvision_channel(value: str | int | None, fallback: str) -> str:
@@ -557,8 +599,8 @@ def normalize_camera(raw: dict, index: int) -> dict:
         default_sub_channel,
     )
     if vendor == "hikvision":
-        rtsp_main = hikvision_rtsp_with_channel(rtsp_main, rtsp_main_channel)
-        rtsp_sub = hikvision_rtsp_with_channel(rtsp_sub, rtsp_sub_channel)
+        rtsp_main = refresh_hikvision_rtsp(rtsp_main, host, username, password, rtsp_main_channel)
+        rtsp_sub = refresh_hikvision_rtsp(rtsp_sub, host, username, password, rtsp_sub_channel)
         rtsp_main = build_rtsp(rtsp_main, host, username, password, rtsp_main_channel)
         rtsp_sub = build_rtsp(rtsp_sub, host, username, password, rtsp_sub_channel)
         rtsp_main_channel = hikvision_channel_from_rtsp(rtsp_main, rtsp_main_channel)
@@ -3670,6 +3712,40 @@ INDEX_HTML = r"""<!doctype html>
         return value.replace(/\/Streaming\/Channels\/\d+/, `/Streaming/Channels/${channel}`);
       }
 
+      function rtspParts(value) {
+        try {
+          const parsed = new URL(value || '');
+          const match = String(parsed.pathname || '').match(/\/Streaming\/Channels\/(\d+)/);
+          return {
+            host: parsed.hostname || '',
+            username: decodeURIComponent(parsed.username || ''),
+            password: decodeURIComponent(parsed.password || ''),
+            channel: match ? match[1] : '',
+            hikvision: String(parsed.pathname || value || '').includes('/Streaming/Channels/')
+          };
+        } catch (_) {
+          return { host: '', username: '', password: '', channel: '', hikvision: false };
+        }
+      }
+
+      function buildHikvisionRtsp(host, username, password, channel) {
+        return host && username && password
+          ? `rtsp://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:554/Streaming/Channels/${channel}`
+          : '';
+      }
+
+      function refreshHikvisionRtsp(value, host, username, password, channel) {
+        const parts = rtspParts(value);
+        if (!value) return buildHikvisionRtsp(host, username, password, channel);
+        if (!parts.hikvision) return value;
+        const mismatch = (host && parts.host && parts.host !== host)
+          || (username && parts.username && parts.username !== username)
+          || (password && parts.password && parts.password !== password)
+          || (channel && parts.channel && parts.channel !== channel);
+        if (mismatch) return buildHikvisionRtsp(host, username, password, channel) || rtspWithHikvisionChannel(value, channel);
+        return rtspWithHikvisionChannel(value, channel);
+      }
+
       function hikvisionChannelFromRtsp(value, fallback = '102') {
         const match = String(value || '').match(/\/Streaming\/Channels\/(\d+)/);
         return match ? match[1] : fallback;
@@ -3699,15 +3775,18 @@ INDEX_HTML = r"""<!doctype html>
             : '';
           const rtspMainRaw = get('rtsp-main').value.trim();
           const rtspSubRaw = get('rtsp-sub').value.trim();
-          const rtspMain = vendor === 'hikvision' ? rtspWithHikvisionChannel(rtspMainRaw, rtspMainChannel) : rtspMainRaw;
-          const rtspSub = vendor === 'hikvision' ? rtspWithHikvisionChannel(rtspSubRaw, rtspSubChannel) : rtspSubRaw;
+          const host = get('host').value.trim();
+          const username = get('username').value.trim();
+          const password = get('password').value;
+          const rtspMain = vendor === 'hikvision' ? refreshHikvisionRtsp(rtspMainRaw, host, username, password, rtspMainChannel) : rtspMainRaw;
+          const rtspSub = vendor === 'hikvision' ? refreshHikvisionRtsp(rtspSubRaw, host, username, password, rtspSubChannel) : rtspSubRaw;
           return {
             id: config.cameras[index]?.id || `${get('vendor').value}_${index + 1}`,
             name: get('name').value,
             vendor,
-            host: get('host').value.trim(),
-            username: get('username').value.trim(),
-            password: get('password').value,
+            host,
+            username,
+            password,
             rtsp_main: rtspMain,
             rtsp_sub: rtspSub,
             camera_number: cameraNumber,
@@ -4295,7 +4374,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.6"
+    server_version = "EdgePanel/0.10.7"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
