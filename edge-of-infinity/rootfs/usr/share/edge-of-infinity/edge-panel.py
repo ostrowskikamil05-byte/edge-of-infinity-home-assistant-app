@@ -17,6 +17,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
+APP_VERSION = "0.10.12"
+SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
+UI_BUILD = "camera-save-dom-diagnostics-v4"
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
 CONFIG_PATH = Path(os.environ.get("EDGE_HOME_CONFIG", "/homeassistant/edge/edge.json"))
@@ -183,6 +186,8 @@ def write_debug_event(event: str, payload: dict | None = None) -> None:
     entry = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "event": event,
+        "server_version": SERVER_VERSION,
+        "ui_build": UI_BUILD,
         **redact_for_log(payload or {}),
     }
     try:
@@ -881,6 +886,8 @@ def collect_panel_logs() -> dict:
 
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "server_version": SERVER_VERSION,
+        "ui_build": UI_BUILD,
         "authoritative_config": str(CONFIG_PATH),
         "panel_mirror_config": str(PANEL_CONFIG_PATH),
         "config_summary": config_summary(config),
@@ -2416,7 +2423,11 @@ def health_payload() -> dict:
     return {
         "status": "ok",
         "product": "Edge of Infinity",
+        "version": APP_VERSION,
+        "server_version": SERVER_VERSION,
+        "ui_build": UI_BUILD,
         "mode": "mediamtx-janus-webrtc-core",
+        "authoritative_config": str(CONFIG_PATH),
         "core": engine_runtime_status(),
     }
 
@@ -2426,6 +2437,8 @@ INDEX_HTML = r"""<!doctype html>
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="edge-panel-version" content="__EDGE_PANEL_VERSION__">
+    <meta name="edge-ui-build" content="__EDGE_UI_BUILD__">
     <title>Edge of Infinity</title>
     <style>
       :root {
@@ -2488,6 +2501,18 @@ INDEX_HTML = r"""<!doctype html>
       }
       .brand { min-width: 0; font-size: 18px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       body.nav-collapsed .brand { display: none; }
+      .build-pill {
+        margin-left: auto;
+        border: 1px solid rgba(86,214,181,.28);
+        border-radius: 999px;
+        padding: 3px 7px;
+        color: var(--accent);
+        background: rgba(86,214,181,.07);
+        font-size: 11px;
+        font-weight: 750;
+        white-space: nowrap;
+      }
+      body.nav-collapsed .build-pill { display: none; }
       .nav { display: grid; gap: 7px; }
       .nav button {
         width: 100%;
@@ -2836,6 +2861,7 @@ INDEX_HTML = r"""<!doctype html>
             <span class="menu-toggle-lines" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
           <div class="brand">Edge of Infinity</div>
+          <div class="build-pill" title="Panel build">v__EDGE_PANEL_VERSION__</div>
         </div>
         <nav class="nav">
           <button class="active" data-page-target="home"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg></span><span class="nav-label">Home</span></button>
@@ -2964,6 +2990,8 @@ INDEX_HTML = r"""<!doctype html>
       const saveState = document.getElementById('save-state');
       const edgeSaveState = document.getElementById('edge-save-state');
       const menuToggle = document.getElementById('menu-toggle');
+      const EDGE_PANEL_VERSION = '__EDGE_PANEL_VERSION__';
+      const EDGE_UI_BUILD = '__EDGE_UI_BUILD__';
       let config = { cameras: [] };
       let live = {};
       let presets = [];
@@ -3158,6 +3186,8 @@ INDEX_HTML = r"""<!doctype html>
       function debugEvent(event, payload = {}) {
         const body = JSON.stringify({
           event,
+          panel_version: EDGE_PANEL_VERSION,
+          ui_build: EDGE_UI_BUILD,
           timestamp: new Date().toISOString(),
           page: document.querySelector('[data-page]:not([hidden])')?.dataset?.page || 'unknown',
           location: window.location.pathname,
@@ -3170,7 +3200,12 @@ INDEX_HTML = r"""<!doctype html>
           },
           payload
         });
-        fetch(panelPath('api/debug'), {
+        const query = new URLSearchParams({
+          event,
+          panel_version: EDGE_PANEL_VERSION,
+          ui_build: EDGE_UI_BUILD,
+        });
+        fetch(panelPath(`api/debug?${query.toString()}`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body
@@ -3271,6 +3306,8 @@ INDEX_HTML = r"""<!doctype html>
         logsView.innerHTML = [
           logBlock('Runtime summary', {
             generated_at: panelLogs.generated_at,
+            server_version: panelLogs.server_version,
+            ui_build: panelLogs.ui_build,
             authoritative_config: panelLogs.authoritative_config,
             runtime_config: panelLogs.runtime_config,
             config_summary: panelLogs.config_summary
@@ -4107,9 +4144,10 @@ INDEX_HTML = r"""<!doctype html>
         const cameras = Array.isArray(payload.cameras) ? payload.cameras : [];
         const parts = cameras.map((camera) => {
           const name = text(camera.name, camera.id || 'camera');
+          const host = text(camera.host, 'missing-host');
           const mainChannel = hikvisionChannelFromRtsp(camera.rtsp_main, '101');
           const subChannel = hikvisionChannelFromRtsp(camera.rtsp_sub, '102');
-          return `${name}: tile=${text(camera.tile_stream, 'sub')}, live=${text(camera.live_stream, 'sub')}, record=${text(camera.record_stream, 'main')}, snapshot=${text(camera.snapshot_stream, 'sub')}, main ch=${mainChannel}, sub ch=${subChannel}`;
+          return `${name}: host=${host}, tile=${text(camera.tile_stream, 'sub')}, live=${text(camera.live_stream, 'sub')}, record=${text(camera.record_stream, 'main')}, snapshot=${text(camera.snapshot_stream, 'sub')}, main ch=${mainChannel}, sub ch=${subChannel}`;
         });
         return parts.length ? parts.join(' | ') : 'no cameras';
       }
@@ -4531,6 +4569,11 @@ INDEX_HTML = r"""<!doctype html>
       restoreNavState();
 
       async function boot() {
+        debugEvent('ui_boot', {
+          panel_version: EDGE_PANEL_VERSION,
+          ui_build: EDGE_UI_BUILD,
+          path: window.location.pathname,
+        });
         await loadConfig();
         await Promise.all([loadPresets(), loadCameras(), loadRecordingStatus()]);
       }
@@ -4544,9 +4587,15 @@ INDEX_HTML = r"""<!doctype html>
 </html>
 """
 
+INDEX_HTML = (
+    INDEX_HTML
+    .replace("__EDGE_PANEL_VERSION__", APP_VERSION)
+    .replace("__EDGE_UI_BUILD__", UI_BUILD)
+)
+
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.11"
+    server_version = SERVER_VERSION
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -4555,6 +4604,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("X-Edge-Version", APP_VERSION)
+        self.send_header("X-Edge-UI-Build", UI_BUILD)
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
@@ -4574,6 +4625,14 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         if path == "/health":
             self.send_json(health_payload())
+            return
+        if path == "/api/version":
+            self.send_json({
+                "version": APP_VERSION,
+                "server_version": SERVER_VERSION,
+                "ui_build": UI_BUILD,
+                "authoritative_config": str(CONFIG_PATH),
+            })
             return
         if path == "/api/config":
             self.send_json(load_config())
@@ -4623,7 +4682,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         _post_path = route_path(parsed.path)
         parsed = parsed._replace(path=_post_path)
-        write_debug_event("api_post", {"path": parsed.path, "client": self.client_address[0]})
+        write_debug_event("api_post", {"path": parsed.path, "query": parse_qs(parsed.query), "client": self.client_address[0]})
         if parsed.path == "/api/config":
             self.save_config()
             return
@@ -4656,11 +4715,14 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def ui_debug(self) -> None:
         try:
+            query = parse_qs(urlparse(self.path).query)
             payload = self.read_body_json()
-            event = payload.get("event") if isinstance(payload, dict) else "ui_debug"
+            event = payload.get("event") if isinstance(payload, dict) else ""
+            event = event or (query.get("event") or ["ui_debug"])[0]
             write_debug_event(str(event or "ui_debug"), {
                 "client": self.client_address[0],
                 "user_agent": self.headers.get("User-Agent", ""),
+                "query": query,
                 "ui": payload,
             })
             self.send_json({"ok": True})

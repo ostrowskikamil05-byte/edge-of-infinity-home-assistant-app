@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.12
+
+- Expose the active panel/server build in the UI, health payload, headers, `/api/version`, and Runtime summary.
+- Add query-backed UI debug metadata so save-click diagnostics still identify the browser event and build even if the debug body is stripped or cached oddly by ingress.
+- Keep save debugging focused on proving whether the browser is sending current DOM values or an older cached panel payload.
+
 ## 0.10.11
 
 - Make Camera Settings save read the current DOM form values directly, refresh generated Hikvision RTSP fields only at save time, and keep an explicit local draft for diagnostics.

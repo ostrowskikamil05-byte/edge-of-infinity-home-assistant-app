@@ -49,7 +49,18 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("collectConfig({ refreshGenerated: true })", html)
         self.assertIn("form.addEventListener('submit'", html)
         self.assertIn("event.preventDefault()", html)
+        self.assertIn("host=${host}", html)
         self.assertNotIn("keepalive: true", html)
+
+    def test_panel_exposes_active_version_for_runtime_diagnostics(self):
+        panel = load_panel_module()
+
+        self.assertEqual(panel.APP_VERSION, "0.10.12")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.12")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.12")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.12")
+        self.assertIn("v0.10.12", panel.INDEX_HTML)
+        self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_save_pipeline_preserves_submitted_stream_roles(self):
         panel = load_panel_module()
