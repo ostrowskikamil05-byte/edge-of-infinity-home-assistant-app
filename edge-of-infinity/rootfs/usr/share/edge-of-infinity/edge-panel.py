@@ -17,9 +17,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.14"
+APP_VERSION = "0.10.15"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "home-live-subtile-config-mirror-v6"
+UI_BUILD = "live-audio-controls-honor-tile-v7"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -3078,7 +3078,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function mediaMtxPlayerUrl(url) {
         const separator = String(url).includes('?') ? '&' : '?';
-        return `${url}${separator}controls=false&muted=true&autoplay=true&playsInline=true&disablepictureinpicture=true`;
+        return `${url}${separator}controls=true&muted=false&autoplay=true&playsInline=true&disablepictureinpicture=true`;
       }
 
       function parseUrl(value) {
@@ -3409,25 +3409,12 @@ INDEX_HTML = r"""<!doctype html>
       function chooseHomePreviewStream(camera) {
         const requestedTileStream = camera.tile_stream || 'sub';
         const liveStream = camera.live_stream || 'sub';
-        const tileMaxWidth = Number(config?.live?.tile_max_width || 960);
-        const mainWidth = Number(camera.width || (liveStream === 'main' ? camera.live_width : '') || 0);
         const subConfigured = isStreamConfigured(camera, 'sub');
-        if (requestedTileStream === 'main' && subConfigured && mainWidth && mainWidth > tileMaxWidth) {
-          return {
-            stream: 'sub',
-            requested: requestedTileStream,
-            reason: 'main_stream_above_tile_width',
-            mainWidth,
-            tileMaxWidth,
-          };
-        }
         if (isStreamConfigured(camera, requestedTileStream)) {
           return {
             stream: requestedTileStream,
             requested: requestedTileStream,
             reason: 'configured_tile_stream',
-            mainWidth,
-            tileMaxWidth,
           };
         }
         const fallbackStream = subConfigured ? 'sub' : (isStreamConfigured(camera, 'main') ? 'main' : liveStream);
@@ -3435,8 +3422,6 @@ INDEX_HTML = r"""<!doctype html>
           stream: fallbackStream,
           requested: requestedTileStream,
           reason: 'tile_stream_missing_fallback',
-          mainWidth,
-          tileMaxWidth,
         };
       }
 
@@ -3463,8 +3448,6 @@ INDEX_HTML = r"""<!doctype html>
             stream: previewStream,
             requested_tile_stream: previewChoice.requested,
             preview_reason: previewChoice.reason,
-            main_width: previewChoice.mainWidth,
-            tile_max_width: previewChoice.tileMaxWidth,
             can_embed: plan.canEmbed,
             reason: plan.reason,
             diagnostics: plan.diagnostics,

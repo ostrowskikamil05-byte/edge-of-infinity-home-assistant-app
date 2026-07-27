@@ -573,7 +573,7 @@ ${safe_id}_main: {
   type = "rtsp"
   id = ${main_id}
   description = "${name} main via MediaMTX"
-  audio = false
+  audio = true
   video = true
   url = "${rtsp_main}"
   rtsp_reconnect_delay = 3
@@ -588,7 +588,7 @@ ${safe_id}_sub: {
   type = "rtsp"
   id = ${sub_id}
   description = "${name} sub via MediaMTX"
-  audio = false
+  audio = true
   video = true
   url = "${rtsp_sub}"
   rtsp_reconnect_delay = 3

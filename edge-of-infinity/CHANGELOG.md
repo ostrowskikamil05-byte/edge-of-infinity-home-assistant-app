@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.15
+
+- Restore live audio by embedding MediaMTX player pages with audio unmuted and visible controls instead of forcing `muted=true` with hidden controls.
+- Honor the selected Home tile stream exactly; choosing `main` no longer automatically falls back to `sub` because of 4K resolution.
+- Enable audio in generated Janus RTSP streaming mounts so the Janus path is not configured as video-only.
+
 ## 0.10.14
 
 - Keep Home camera tiles on the low-bandwidth substream when the configured tile stream is the 4K main stream and a substream exists, preventing MediaMTX/WebRTC player errors in small live tiles.

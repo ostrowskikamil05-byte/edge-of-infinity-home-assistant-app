@@ -59,11 +59,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.14")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.14")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.14")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.14")
-        self.assertIn("v0.10.14", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.15")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.15")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.15")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.15")
+        self.assertIn("v0.10.15", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
@@ -315,13 +315,20 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(addon_mirror, committed)
         self.assertEqual(addon_mirror["cameras"][0]["host"], "192.168.33.136")
 
-    def test_home_live_tiles_prefer_substream_for_large_main_preview(self):
+    def test_home_live_tiles_honor_tile_stream_and_enable_audio_controls(self):
         html = PANEL_PATH.read_text(encoding="utf-8")
 
         self.assertIn("function chooseHomePreviewStream(camera)", html)
-        self.assertIn("main_stream_above_tile_width", html)
+        self.assertIn("configured_tile_stream", html)
+        self.assertNotIn("main_stream_above_tile_width", html)
         self.assertIn("function mediaMtxPlayerUrl(url)", html)
-        self.assertIn("controls=false&muted=true&autoplay=true&playsInline=true&disablepictureinpicture=true", html)
+        self.assertIn("controls=true&muted=false&autoplay=true&playsInline=true&disablepictureinpicture=true", html)
+
+    def test_janus_streaming_mounts_do_not_disable_audio(self):
+        runner = (ROOT / "edge-of-infinity" / "rootfs" / "usr" / "bin" / "edge-app-run").read_text(encoding="utf-8")
+
+        self.assertIn("audio = true", runner)
+        self.assertNotIn("audio = false", runner)
 
     def test_live_mobile_settings_are_normalized_and_preserved(self):
         panel = load_panel_module()
