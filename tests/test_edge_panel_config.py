@@ -62,11 +62,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.22")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.22")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.22")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.22")
-        self.assertIn("v0.10.22", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.23")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.23")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.23")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.23")
+        self.assertIn("v0.10.23", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
@@ -391,6 +391,11 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function setCurrentRecordingTime", html)
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
+        self.assertIn("function recordingPlaybackModeForClient", html)
+        self.assertIn("server_file_sequence", html)
+        self.assertIn("function switchRecordingVideoToFile", html)
+        self.assertIn("ui_recording_server_file_switch", html)
+        self.assertIn("ui_recording_server_file_fast_seek", html)
         self.assertIn("data-recording-stream-start", html)
         self.assertIn("data-recording-timeline-label", html)
         self.assertIn("recording-native-timeline", html)
@@ -399,7 +404,6 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function seekCurrentRecordingStream", html)
         self.assertIn("data-recording-playback-mode", html)
         self.assertIn("continuous_stream", html)
-        self.assertNotIn("mobile_segment", html)
         self.assertIn("ui_recording_continuous_resume", html)
         self.assertIn("function recordingVideoDiagnostics", html)
         self.assertIn("ui_recording_video_error", html)

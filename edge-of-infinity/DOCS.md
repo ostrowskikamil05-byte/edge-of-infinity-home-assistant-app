@@ -183,6 +183,8 @@ Starting with version `0.10.21`, `always_on_enabled` keeps all enabled low-laten
 
 Starting with version `0.10.22`, always-on warming defaults to `always_on_stream_scope: tile` so Edge keeps lightweight camera tiles ready without forcing every 4K `main` stream to stay active. Use `all` only when the host has enough CPU/network headroom and you explicitly want every profile warm.
 
+Starting with version `0.10.23`, mobile NVR playback opens saved MP4 segment files directly from the server instead of the ffmpeg-generated continuous pipe. This is more compatible with the Home Assistant mobile WebView because the `/recordings/...` route supports byte ranges and lets the phone start playback immediately from an already written file. Desktop keeps the continuous stream mode.
+
 Starting with version `0.10.2`, `mobile_webrtc_ice_transport` can be `auto`, `udp`, or `tcp`. Use `auto` first because it exposes both UDP and TCP ICE on port `8189`. Use `udp` when everything is local and you want the simplest low-latency path. Use `tcp` when LTE, hotel Wi-Fi, or a friend's Wi-Fi blocks UDP, but remember that the public MediaMTX WebRTC address on `8889` and ICE port `8189` must still be reachable from that network. If the home network is behind CGNAT or cannot forward those ports, use a VPS or TURN relay instead of a LAN-only `192.168.x.x` address.
 
 The `WebRTC public URL` field must point to the public MediaMTX WHEP/WebRTC endpoint, for example:

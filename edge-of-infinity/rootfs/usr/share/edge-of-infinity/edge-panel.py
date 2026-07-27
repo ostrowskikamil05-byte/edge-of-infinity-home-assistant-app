@@ -17,9 +17,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.22"
+APP_VERSION = "0.10.23"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "continuous-nvr-player-v1"
+UI_BUILD = "mobile-server-file-nvr-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -4213,6 +4213,10 @@ INDEX_HTML = r"""<!doctype html>
           || /Android|iPhone|iPad|iPod|Mobile|Home Assistant/i.test(navigator.userAgent || '');
       }
 
+      function recordingPlaybackModeForClient() {
+        return isMobileNvrPlayback() ? 'server_file_sequence' : 'continuous_stream';
+      }
+
       function mediaUrlWithTimeFragment(url, seekSeconds) {
         const seek = Math.max(0, Number(seekSeconds || 0));
         if (!url || !seek) return url;
@@ -4277,6 +4281,50 @@ INDEX_HTML = r"""<!doctype html>
         const timeline = recordingTimeline(status.files || []);
         const entry = timeline.entries.find((item) => item.file.url === url);
         return entry ? entry.offset : 0;
+      }
+
+      function updateRecordingTileSelection(index, selectedUrl) {
+        nvrGrid.querySelectorAll(`[data-record-index="${index}"][data-play-recording]`).forEach((button) => {
+          button.classList.toggle('active', button.dataset.playRecording === selectedUrl);
+        });
+      }
+
+      function switchRecordingVideoToFile(index, target, autoplay = false, reason = 'server_file_seek') {
+        if (!target?.target?.file?.url) return false;
+        const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+        if (!video) return false;
+        const fileUrl = target.target.file.url;
+        const cleanCurrent = String(video.currentSrc || video.getAttribute('src') || '').split('#', 1)[0];
+        const cleanNext = new URL(panelPath(fileUrl), window.location.href).href;
+        const nextPath = panelPath(fileUrl);
+        const nextSrc = mediaUrlWithTimeFragment(nextPath, target.seek);
+        selectedRecording[index] = fileUrl;
+        selectedRecordingSeek[index] = target.seek;
+        selectedRecordingTimeline[index] = target.requested;
+        recordingStreamStartOffset[index] = target.target.offset;
+        video.dataset.recordingSeek = String(target.seek);
+        video.dataset.recordingStreamStart = String(target.target.offset);
+        video.dataset.recordingPlaybackMode = 'server_file_sequence';
+        updateRecordingTimelineUi(index, target.requested, target.timeline.total);
+        updateRecordingTileSelection(index, fileUrl);
+        if (cleanCurrent === cleanNext && video.readyState >= 1) {
+          try {
+            video.currentTime = target.seek;
+          } catch (error) {
+            debugEvent('ui_recording_server_file_seek_error', { index, reason, message: error.message });
+          }
+          if (autoplay) video.play().catch((error) => debugEvent('ui_recording_server_file_autoplay_error', { index, reason, message: error.message }));
+          debugEvent('ui_recording_server_file_fast_seek', { index, reason, recording: target.target.file.name, timeline_second: target.requested, segment_second: target.seek });
+          return true;
+        }
+        video.src = nextSrc;
+        video.dataset.recordingSrc = nextSrc;
+        video.load();
+        if (autoplay) {
+          video.play().catch((error) => debugEvent('ui_recording_server_file_autoplay_error', { index, reason, message: error.message }));
+        }
+        debugEvent('ui_recording_server_file_switch', { index, reason, recording: target.target.file.name, timeline_second: target.requested, segment_second: target.seek });
+        return true;
       }
 
       function recordingStatusSignature() {
@@ -4390,6 +4438,10 @@ INDEX_HTML = r"""<!doctype html>
         selectedRecording[index] = target.target.file.url;
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
+        if (video?.dataset?.recordingPlaybackMode === 'server_file_sequence') {
+          switchRecordingVideoToFile(index, target, wasPlaying, 'server_file_select');
+          return;
+        }
         if (seekCurrentRecordingStream(index, target.requested, target.timeline.total)) {
           return;
         }
@@ -4461,7 +4513,7 @@ INDEX_HTML = r"""<!doctype html>
         delete recordingContinueTimers[index];
       }
 
-      async function resumeRecordingWhenNextSegmentCloses(index, previousTotal, attempt = 0) {
+      async function resumeRecordingWhenNextSegmentCloses(index, previousTotal, attempt = 0, playbackMode = 'continuous_stream') {
         clearRecordingContinuation(index);
         await loadRecordingStatus({ reason: 'recording_continuation_refresh' });
         const status = recordingStatus[index] || {};
@@ -4474,8 +4526,12 @@ INDEX_HTML = r"""<!doctype html>
             selectedRecordingSeek[index] = target.seek;
             selectedRecordingTimeline[index] = target.requested;
             recordingStreamStartOffset[index] = target.requested;
-            recordingStreamNonce[index] = Date.now();
             recordingAutoplayAfterRender[index] = true;
+            if (playbackMode === 'server_file_sequence') {
+              switchRecordingVideoToFile(index, target, true, 'server_file_resume');
+              return;
+            }
+            recordingStreamNonce[index] = Date.now();
             debugEvent('ui_recording_continuous_resume', {
               index,
               previous_total: previousTotal,
@@ -4488,7 +4544,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         if ((status.recording || status.desired_recording) && attempt < 12) {
           recordingContinueTimers[index] = window.setTimeout(() => {
-            resumeRecordingWhenNextSegmentCloses(index, previousTotal, attempt + 1);
+            resumeRecordingWhenNextSegmentCloses(index, previousTotal, attempt + 1, playbackMode);
           }, 1500);
           return;
         }
@@ -4505,7 +4561,21 @@ INDEX_HTML = r"""<!doctype html>
       function playNextRecordingSegment(index, video = null) {
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
-        const previousTotal = recordingTimeline(files).total;
+        const timeline = recordingTimeline(files);
+        const previousTotal = timeline.total;
+        if (video?.dataset?.recordingPlaybackMode === 'server_file_sequence') {
+          const entries = timeline.entries || [];
+          const current = entries.findIndex((entry) => entry.file.url === selectedRecording[index]);
+          if (current >= 0 && current < entries.length - 1) {
+            const next = entries[current + 1];
+            switchRecordingVideoToFile(index, { timeline, target: next, requested: next.offset, seek: 0 }, true, 'server_file_next');
+            return;
+          }
+          if (status.recording || status.desired_recording) {
+            resumeRecordingWhenNextSegmentCloses(index, previousTotal, 0, 'server_file_sequence');
+            return;
+          }
+        }
         if (video?.dataset?.recordingPlaybackMode === 'continuous_stream' && (status.recording || status.desired_recording)) {
           resumeRecordingWhenNextSegmentCloses(index, previousTotal, 0);
           return;
@@ -4810,10 +4880,13 @@ INDEX_HTML = r"""<!doctype html>
         if (!Number.isFinite(storedStreamStart)) recordingStreamStartOffset[index] = streamStart;
         const targetForPoster = recordingTargetForOffset(index, timelineValue);
         const selectedFile = targetForPoster?.target?.file || null;
-        const playbackMode = 'continuous_stream';
-        const playerSrc = timelineTotal ? recordingStreamUrl(status, index, streamStart) : '';
-        const playerSeek = 0;
-        const playerStreamStart = streamStart;
+        const playbackMode = recordingPlaybackModeForClient();
+        const playerSeek = playbackMode === 'server_file_sequence' ? Number(targetForPoster?.seek || 0) : 0;
+        const playerStreamStart = playbackMode === 'server_file_sequence' ? Number(targetForPoster?.target?.offset || 0) : streamStart;
+        const rawPlayerSrc = timelineTotal
+          ? (playbackMode === 'server_file_sequence' && selectedFile?.url ? panelPath(selectedFile.url) : recordingStreamUrl(status, index, streamStart))
+          : '';
+        const playerSrc = playbackMode === 'server_file_sequence' ? mediaUrlWithTimeFragment(rawPlayerSrc, playerSeek) : rawPlayerSrc;
         const posterUrl = targetForPoster?.target?.file?.thumbnail_url ? panelPath(targetForPoster.target.file.thumbnail_url) : '';
         const preloadMode = 'auto';
         const playable = Boolean(timelineTotal && playerSrc);

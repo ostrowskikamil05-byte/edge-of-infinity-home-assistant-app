@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.23
+
+- Use direct saved MP4 files for mobile NVR playback through the existing range-enabled `/recordings/...` route instead of the ffmpeg concat pipe, improving Home Assistant mobile WebView compatibility.
+- Keep desktop on the continuous NVR stream while phones use a `server_file_sequence` mode that switches to the next saved segment without rebuilding the whole NVR card.
+- Make thumbnail clicks and Back/Forward update the active mobile video element directly, reducing reloads caused by full panel renders.
+
 ## 0.10.22
 
 - Change always-on live warming to default to the tile preview stream instead of forcing every main/sub path warm, reducing 4K background load that could cause stutter after `0.10.21`.
