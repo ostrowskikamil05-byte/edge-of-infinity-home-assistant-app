@@ -913,7 +913,13 @@ if [[ -f "${ADDON_OPTIONS_HASH_PATH}" ]]; then
   PREVIOUS_ADDON_OPTIONS_HASH="$(cat "${ADDON_OPTIONS_HASH_PATH}")"
 fi
 
-if [[ -f "${EDGE_PANEL_CONFIG}" ]] && jq -e '.cameras | type == "array" and length > 0' "${EDGE_PANEL_CONFIG}" >/dev/null 2>&1; then
+if [[ -f "${EDGE_PANEL_CONFIG}" ]] && [[ -f "${EDGE_HOME_CONFIG}" ]] &&
+  [[ "${EDGE_HOME_CONFIG}" -nt "${EDGE_PANEL_CONFIG}" ]] &&
+  jq -e '.cameras | type == "array" and length > 0' "${EDGE_HOME_CONFIG}" >/dev/null 2>&1; then
+  EDGE_CONFIG="${EDGE_HOME_CONFIG}"
+  cp "${EDGE_HOME_CONFIG}" "${EDGE_PANEL_CONFIG}"
+  bashio::log.warning "Runtime ${EDGE_HOME_CONFIG} is newer than panel config. Adopting it as the current camera config."
+elif [[ -f "${EDGE_PANEL_CONFIG}" ]] && jq -e '.cameras | type == "array" and length > 0' "${EDGE_PANEL_CONFIG}" >/dev/null 2>&1; then
   EDGE_CONFIG="${EDGE_HOME_CONFIG}"
   cp "${EDGE_PANEL_CONFIG}" "${EDGE_HOME_CONFIG}"
   bashio::log.info "Using panel-authoritative camera config from ${EDGE_PANEL_CONFIG}."

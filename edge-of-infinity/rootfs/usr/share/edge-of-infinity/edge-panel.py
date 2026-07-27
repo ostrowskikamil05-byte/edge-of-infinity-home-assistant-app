@@ -143,6 +143,13 @@ def write_json(path: Path, payload) -> None:
     tmp.replace(path)
 
 
+def file_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def read_text_tail(path: Path, limit: int = 4000) -> str:
     try:
         if not path.exists():
@@ -249,6 +256,37 @@ def build_hikvision_rtsp(host: str, username: str, password: str, channel: str) 
     if host and username and password:
         return f"rtsp://{username}:{password}@{host}:554/Streaming/Channels/{channel}"
     return ""
+
+
+def url_host(value: str) -> str:
+    try:
+        return urlparse(value or "").hostname or ""
+    except ValueError:
+        return ""
+
+
+def refresh_hikvision_onvif_url(value: str, host: str) -> str:
+    if not host:
+        return value or ""
+    if not value:
+        return f"http://{host}:80/onvif/device_service"
+    parsed = urlparse(value)
+    path = parsed.path or ""
+    if parsed.scheme not in ("http", "https") or parsed.hostname != host or path != "/onvif/device_service":
+        return f"http://{host}:80/onvif/device_service"
+    return value
+
+
+def refresh_hikvision_isapi_base_url(value: str, host: str) -> str:
+    if not host:
+        return value or ""
+    if not value:
+        return f"http://{host}"
+    parsed = urlparse(value)
+    path = (parsed.path or "").rstrip("/")
+    if parsed.scheme not in ("http", "https") or parsed.hostname != host or "/ISAPI/" in path or "/Streaming/" in path:
+        return f"http://{host}"
+    return value.rstrip("/")
 
 
 def hikvision_channel_from_rtsp(value: str, fallback: str) -> str:
@@ -617,6 +655,9 @@ def normalize_camera(raw: dict, index: int) -> dict:
 
     onvif_url = raw.get("onvif_url") or (f"http://{host}:80/onvif/device_service" if host else "")
     isapi_base_url = raw.get("isapi_base_url") or (f"http://{host}" if host and vendor == "hikvision" else "")
+    if vendor == "hikvision":
+        onvif_url = refresh_hikvision_onvif_url(onvif_url, host)
+        isapi_base_url = refresh_hikvision_isapi_base_url(isapi_base_url, host)
 
     return {
         "id": camera_id,
@@ -971,12 +1012,33 @@ def authoritative_config_from_payload(raw_payload: dict) -> dict:
 
 
 def load_config() -> dict:
+    panel_config = {}
+    runtime_config = {}
     if PANEL_CONFIG_PATH.exists():
         panel_config = authoritative_config_from_payload(read_json(PANEL_CONFIG_PATH, {"cameras": []}))
-        if panel_config.get("cameras"):
-            return panel_config
+    if CONFIG_PATH.exists():
+        runtime_config = effective_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
 
-    config = effective_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
+    if panel_config.get("cameras") and runtime_config.get("cameras"):
+        panel_mtime = file_mtime(PANEL_CONFIG_PATH)
+        runtime_mtime = file_mtime(CONFIG_PATH)
+        if runtime_mtime > panel_mtime + 1:
+            write_debug_event("config_source_selected", {
+                "source": "runtime_edge_json_newer",
+                "runtime_config": str(CONFIG_PATH),
+                "panel_config": str(PANEL_CONFIG_PATH),
+                "runtime_mtime": runtime_mtime,
+                "panel_mtime": panel_mtime,
+                "summary": config_summary(runtime_config),
+            })
+            write_json(PANEL_CONFIG_PATH, runtime_config)
+            return runtime_config
+        return panel_config
+
+    if panel_config.get("cameras"):
+        return panel_config
+
+    config = runtime_config or effective_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
     if not config.get("cameras") and CONFIG_BACKUP_PATH.exists():
         backup = effective_config_from_payload(read_json(CONFIG_BACKUP_PATH, {"cameras": []}))
         if backup.get("cameras"):
@@ -3746,21 +3808,71 @@ INDEX_HTML = r"""<!doctype html>
         return rtspWithHikvisionChannel(value, channel);
       }
 
+      function refreshHikvisionOnvifUrl(value, host) {
+        if (!host) return value || '';
+        if (!value) return `http://${host}:80/onvif/device_service`;
+        try {
+          const parsed = new URL(value);
+          if (!['http:', 'https:'].includes(parsed.protocol) || parsed.hostname !== host || parsed.pathname !== '/onvif/device_service') {
+            return `http://${host}:80/onvif/device_service`;
+          }
+          return value;
+        } catch (_) {
+          return `http://${host}:80/onvif/device_service`;
+        }
+      }
+
+      function refreshHikvisionIsapiBaseUrl(value, host) {
+        if (!host) return value || '';
+        if (!value) return `http://${host}`;
+        try {
+          const parsed = new URL(value);
+          if (!['http:', 'https:'].includes(parsed.protocol) || parsed.hostname !== host || parsed.pathname.includes('/ISAPI/') || parsed.pathname.includes('/Streaming/')) {
+            return `http://${host}`;
+          }
+          return value.replace(/\/+$/, '');
+        } catch (_) {
+          return `http://${host}`;
+        }
+      }
+
       function hikvisionChannelFromRtsp(value, fallback = '102') {
         const match = String(value || '').match(/\/Streaming\/Channels\/(\d+)/);
         return match ? match[1] : fallback;
       }
 
+      function cameraField(section, index, name) {
+        const prefix = `camera-${index}`;
+        const element = section.querySelector(`[name="${prefix}-${name}"]`);
+        if (!element) {
+          throw new Error(`Missing camera field: ${prefix}-${name}`);
+        }
+        return element;
+      }
+
+      function refreshGeneratedCameraFields(section, index) {
+        const vendor = cameraField(section, index, 'vendor').value;
+        if (vendor !== 'hikvision') return;
+        const host = cameraField(section, index, 'host').value.trim();
+        const username = cameraField(section, index, 'username').value.trim();
+        const password = cameraField(section, index, 'password').value;
+        const cameraNumber = cameraField(section, index, 'camera-number').value.trim() || String(index + 1);
+        const mainChannel = cameraField(section, index, 'rtsp-main-channel').value.trim() || `${cameraNumber}01`;
+        const subChannel = cameraField(section, index, 'rtsp-sub-channel').value.trim() || `${cameraNumber}02`;
+        const mainInput = cameraField(section, index, 'rtsp-main');
+        const subInput = cameraField(section, index, 'rtsp-sub');
+        mainInput.value = refreshHikvisionRtsp(mainInput.value.trim(), host, username, password, mainChannel);
+        subInput.value = refreshHikvisionRtsp(subInput.value.trim(), host, username, password, subChannel);
+        const onvifInput = cameraField(section, index, 'onvif');
+        const isapiInput = cameraField(section, index, 'isapi');
+        onvifInput.value = refreshHikvisionOnvifUrl(onvifInput.value.trim(), host);
+        isapiInput.value = refreshHikvisionIsapiBaseUrl(isapiInput.value.trim(), host);
+      }
+
       function collectConfig() {
         const cameras = Array.from(form.querySelectorAll('[data-camera-form]')).map((section, index) => {
-          const prefix = `camera-${index}`;
-          const get = (name) => {
-            const element = section.querySelector(`[name="${prefix}-${name}"]`);
-            if (!element) {
-              throw new Error(`Missing camera field: ${prefix}-${name}`);
-            }
-            return element;
-          };
+          refreshGeneratedCameraFields(section, index);
+          const get = (name) => cameraField(section, index, name);
           const vendor = get('vendor').value;
           const cameraNumber = get('camera-number').value.trim() || '1';
           const defaultMainChannel = `${cameraNumber}01`;
@@ -3806,6 +3918,15 @@ INDEX_HTML = r"""<!doctype html>
           };
         });
         return { ...config, cameras };
+      }
+
+      function syncConfigDraftFromForm() {
+        try {
+          config = collectConfig();
+          configDirty = true;
+        } catch (error) {
+          debugEvent('ui_config_draft_sync_error', { message: error.message });
+        }
       }
 
       function newCamera(index) {
@@ -4268,10 +4389,10 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);
 
       form.addEventListener('input', () => {
-        configDirty = true;
+        syncConfigDraftFromForm();
       });
       form.addEventListener('change', () => {
-        configDirty = true;
+        syncConfigDraftFromForm();
       });
 
       form.addEventListener('click', async (event) => {
@@ -4374,7 +4495,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.7"
+    server_version = "EdgePanel/0.10.8"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

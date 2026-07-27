@@ -155,6 +155,29 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
         self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
 
+    def test_newer_runtime_edge_json_is_adopted_over_panel_config(self):
+        panel = load_panel_module()
+        panel_payload = {
+            "server": {},
+            "storage": {},
+            "cameras": [camera("hikvision_1", "192.168.33.21", "main")],
+        }
+        runtime_payload = {
+            "server": {},
+            "storage": {},
+            "cameras": [camera("hikvision_1", "192.168.33.136", "sub")],
+        }
+        panel.write_json(panel.PANEL_CONFIG_PATH, panel_payload)
+        panel.write_json(panel.CONFIG_PATH, runtime_payload)
+        os.utime(panel.PANEL_CONFIG_PATH, (1000, 1000))
+        os.utime(panel.CONFIG_PATH, (1010, 1010))
+
+        loaded = panel.load_config()
+        mirrored = panel.read_json(panel.PANEL_CONFIG_PATH, {})
+
+        self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.136")
+        self.assertEqual(mirrored["cameras"][0]["host"], "192.168.33.136")
+
     def test_prepare_save_keeps_ui_changes_without_bouncing_to_existing_config(self):
         panel = load_panel_module()
         existing = {
@@ -337,6 +360,36 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(camera_config["host"], "192.168.33.50")
         self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:new-secret@192.168.33.50:554/Streaming/Channels/101")
         self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:new-secret@192.168.33.50:554/Streaming/Channels/102")
+
+    def test_hikvision_onvif_and_isapi_are_rebuilt_when_host_changes(self):
+        panel = load_panel_module()
+        payload = {
+            "server": {},
+            "storage": {},
+            "cameras": [
+                {
+                    "id": "hikvision_1",
+                    "vendor": "hikvision",
+                    "host": "192.168.33.136",
+                    "username": "admin",
+                    "password": "secret",
+                    "rtsp_main": "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/101",
+                    "rtsp_sub": "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/102",
+                    "onvif_url": "rtsp://192.168.33.21:554/Streaming/Channels/101?transportmode=unicast&profile=Profile_1",
+                    "isapi_base_url": "http://192.168.33.21/ISAPI/Streaming/channels/101/httpPreview",
+                    "enabled": True,
+                    "record": True,
+                }
+            ],
+        }
+
+        normalized = panel.normalize_config(payload)
+        camera_config = normalized["cameras"][0]
+
+        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.168.33.136:554/Streaming/Channels/101")
+        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.168.33.136:554/Streaming/Channels/102")
+        self.assertEqual(camera_config["onvif_url"], "http://192.168.33.136:80/onvif/device_service")
+        self.assertEqual(camera_config["isapi_base_url"], "http://192.168.33.136")
 
     def test_save_then_reload_keeps_changed_connection_and_stream_values(self):
         panel = load_panel_module()

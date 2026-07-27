@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.8
+
+- Adopt `/homeassistant/edge/edge.json` when it is newer than `panel-config.json`, so manual File Editor changes are not overwritten by an older panel copy.
+- Refresh generated Hikvision RTSP, ONVIF, and ISAPI fields live in the Camera Settings form whenever camera connection fields change.
+- Rebuild invalid Hikvision ONVIF/ISAPI values that point to stream endpoints instead of the camera base service.
+- Add regression coverage for newer runtime config adoption and Hikvision URL rebuilding after IP changes.
+
 ## 0.10.7
 
 - Rebuild generated Hikvision RTSP URLs when the saved form still contains an old RTSP URL but the camera host, username, password, or channel fields were changed.
