@@ -61,11 +61,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.16")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.16")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.16")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.16")
-        self.assertIn("v0.10.16", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.17")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.17")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.17")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.17")
+        self.assertIn("v0.10.17", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
@@ -380,6 +380,18 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("data-recording-fullscreen", html)
         self.assertIn("data-recording-scrub", html)
         self.assertIn("function selectRecordingAtOffset", html)
+
+    def test_nvr_timeline_does_not_rerender_during_active_playback(self):
+        html = PANEL_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("function isNvrPlaybackBusy", html)
+        self.assertIn("ui_recording_status_render_skipped", html)
+        self.assertIn("function previewRecordingAtOffset", html)
+        self.assertIn("function setCurrentRecordingTime", html)
+        self.assertIn("data-recording-timeline-label", html)
+        self.assertIn("nvrGrid.addEventListener('input'", html)
+        self.assertIn("nvrGrid.addEventListener('timeupdate'", html)
+        self.assertIn("nvrGrid.addEventListener('ended'", html)
 
     def test_live_mobile_settings_are_normalized_and_preserved(self):
         panel = load_panel_module()

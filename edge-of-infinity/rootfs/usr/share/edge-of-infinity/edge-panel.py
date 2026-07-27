@@ -17,9 +17,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.16"
+APP_VERSION = "0.10.17"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "runtime-sync-nvr-timeline-fullscreen-v8"
+UI_BUILD = "smooth-nvr-playback-no-rerender-v9"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -3420,6 +3420,9 @@ INDEX_HTML = r"""<!doctype html>
       let recordingStatus = {};
       let selectedRecording = {};
       let selectedRecordingSeek = {};
+      let recordingAutoplayAfterRender = {};
+      let nvrScrubbing = false;
+      let lastNvrRenderSignature = '';
       let configDirty = false;
       let lastFormDraft = null;
       let lastFormDraftAt = 0;
@@ -3777,36 +3780,124 @@ INDEX_HTML = r"""<!doctype html>
         return { timeline, value: entry.offset + seek, seek };
       }
 
-      function selectRecordingAtOffset(index, offset) {
+      function recordingStatusSignature() {
+        return Object.values(recordingStatus)
+          .sort((a, b) => Number(a.index || 0) - Number(b.index || 0))
+          .map((item) => {
+            const files = Array.isArray(item.files) ? item.files : [];
+            const fileSignature = files.map((file) => `${file.url}:${file.size_bytes}:${file.start_ts}`).join(',');
+            return `${item.index}:${item.recording_status}:${item.recording}:${item.segments}:${fileSignature}`;
+          })
+          .join('|');
+      }
+
+      function isNvrPlaybackBusy() {
+        if (nvrScrubbing) return true;
+        const focusedScrub = document.activeElement?.closest?.('[data-recording-scrub]');
+        if (focusedScrub) return true;
+        return Array.from(nvrGrid.querySelectorAll('video[data-recording-player]')).some((video) => {
+          return !video.paused && !video.ended && video.readyState >= 1;
+        });
+      }
+
+      function updateRecordingTimelineUi(index, value, total) {
+        const safeValue = Math.max(0, Math.floor(Number(value || 0)));
+        const safeTotal = Math.max(0, Math.floor(Number(total || 0)));
+        const label = nvrGrid.querySelector(`[data-recording-timeline-label="${index}"]`);
+        if (label) {
+          label.textContent = `${formatDuration(safeValue)} / ${formatDuration(safeTotal)}`;
+        }
+        const scrub = nvrGrid.querySelector(`[data-recording-scrub="${index}"]`);
+        if (scrub && document.activeElement !== scrub) {
+          scrub.value = String(Math.min(safeValue, Number(scrub.max || safeValue)));
+        }
+      }
+
+      function recordingTargetForOffset(index, offset) {
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
-        const { entries } = recordingTimeline(files);
-        if (!entries.length) return;
+        const timeline = recordingTimeline(files);
+        const { entries } = timeline;
+        if (!entries.length) return null;
         const requested = Math.max(0, Math.floor(Number(offset || 0)));
         const target = entries.find((entry) => requested < entry.offset + entry.duration) || entries[entries.length - 1];
-        selectedRecording[index] = target.file.url;
-        selectedRecordingSeek[index] = Math.max(0, Math.min(requested - target.offset, Math.max(0, target.duration - 1)));
+        const seek = Math.max(0, Math.min(requested - target.offset, Math.max(0, target.duration - 1)));
+        return { timeline, target, requested, seek };
+      }
+
+      function setCurrentRecordingTime(index, seek) {
+        const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+        if (!video) return false;
+        const applySeek = () => {
+          try {
+            video.currentTime = seek;
+          } catch (error) {
+            debugEvent('ui_recording_seek_error', { index, seek, message: error.message });
+          }
+        };
+        if (video.readyState >= 1) {
+          applySeek();
+        } else {
+          video.addEventListener('loadedmetadata', applySeek, { once: true });
+        }
+        return true;
+      }
+
+      function previewRecordingAtOffset(index, offset) {
+        const target = recordingTargetForOffset(index, offset);
+        if (!target) return;
+        updateRecordingTimelineUi(index, target.requested, target.timeline.total);
+        if (target.target.file.url === selectedRecording[index]) {
+          selectedRecordingSeek[index] = target.seek;
+          setCurrentRecordingTime(index, target.seek);
+        }
+      }
+
+      function selectRecordingAtOffset(index, offset) {
+        const target = recordingTargetForOffset(index, offset);
+        if (!target) return;
+        const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+        const wasPlaying = Boolean(video && !video.paused && !video.ended);
+        const oldSelected = selectedRecording[index];
+        const sameSegment = target.target.file.url === oldSelected;
+        selectedRecording[index] = target.target.file.url;
+        selectedRecordingSeek[index] = target.seek;
         debugEvent('ui_recording_timeline_seek', {
           index,
-          recording: target.file.name,
-          timeline_second: requested,
+          recording: target.target.file.name,
+          timeline_second: target.requested,
           segment_second: selectedRecordingSeek[index],
+          same_segment: sameSegment,
         });
-        renderNvrGrid();
+        if (video && sameSegment) {
+          setCurrentRecordingTime(index, target.seek);
+          updateRecordingTimelineUi(index, target.requested, target.timeline.total);
+          return;
+        }
+        recordingAutoplayAfterRender[index] = wasPlaying;
+        renderNvrGrid({ reason: 'timeline_seek' });
       }
 
       function applyRecordingSeek() {
         document.querySelectorAll('video[data-recording-player]').forEach((video) => {
+          const index = video.dataset.recordingPlayer;
           const seek = Math.max(0, Number(video.dataset.recordingSeek || 0));
-          if (!seek) return;
           const applySeek = () => {
-            try {
-              video.currentTime = seek;
-            } catch (error) {
-              debugEvent('ui_recording_seek_error', {
-                index: video.dataset.recordingPlayer,
-                seek,
-                message: error.message,
+            if (seek) {
+              try {
+                video.currentTime = seek;
+              } catch (error) {
+                debugEvent('ui_recording_seek_error', {
+                  index,
+                  seek,
+                  message: error.message,
+                });
+              }
+            }
+            if (recordingAutoplayAfterRender[index]) {
+              delete recordingAutoplayAfterRender[index];
+              video.play().catch((error) => {
+                debugEvent('ui_recording_autoplay_error', { index, message: error.message });
               });
             }
           };
@@ -3816,6 +3907,33 @@ INDEX_HTML = r"""<!doctype html>
             video.addEventListener('loadedmetadata', applySeek, { once: true });
           }
         });
+      }
+
+      function syncRecordingVideoProgress(video) {
+        const index = video?.dataset?.recordingPlayer;
+        if (index === undefined) return;
+        const status = recordingStatus[index] || {};
+        const files = Array.isArray(status.files) ? status.files : [];
+        selectedRecordingSeek[index] = Math.max(0, Math.floor(Number(video.currentTime || 0)));
+        const selection = recordingOffsetForSelection(files, selectedRecording[index], selectedRecordingSeek[index]);
+        updateRecordingTimelineUi(index, selection.value, selection.timeline.total);
+      }
+
+      function playNextRecordingSegment(index) {
+        const status = recordingStatus[index] || {};
+        const files = Array.isArray(status.files) ? status.files : [];
+        const { entries } = recordingTimeline(files);
+        const current = entries.findIndex((entry) => entry.file.url === selectedRecording[index]);
+        if (current < 0 || current >= entries.length - 1) {
+          debugEvent('ui_recording_segment_end', { index, next: false });
+          return;
+        }
+        const next = entries[current + 1];
+        selectedRecording[index] = next.file.url;
+        selectedRecordingSeek[index] = 0;
+        recordingAutoplayAfterRender[index] = true;
+        debugEvent('ui_recording_segment_end', { index, next: true, recording: next.file.name });
+        renderNvrGrid({ reason: 'recording_auto_next_segment' });
       }
 
       function pretty(value) {
@@ -4086,7 +4204,7 @@ INDEX_HTML = r"""<!doctype html>
           ? `<div class="recording-timeline">
               <div class="timeline-row">
                 <span>Continuous video timeline</span>
-                <span>${escapeHtml(formatDuration(timelineValue))} / ${escapeHtml(formatDuration(timelineTotal))}</span>
+                <span data-recording-timeline-label="${index}">${escapeHtml(formatDuration(timelineValue))} / ${escapeHtml(formatDuration(timelineTotal))}</span>
               </div>
               <input type="range" min="0" max="${Math.max(0, timelineTotal - 1)}" step="1" value="${timelineValue}" data-recording-scrub="${index}" aria-label="Recording timeline">
               <div class="timeline-row">
@@ -4292,14 +4410,20 @@ INDEX_HTML = r"""<!doctype html>
         ];
         config = { ...config, cameras };
         form.innerHTML = cameras.map(cameraForm).join('');
-        renderNvrGrid();
+        renderNvrGrid({ reason: 'render_config' });
         renderPresetSlots(cameras);
         renderEdgeSettings();
       }
 
-      function renderNvrGrid() {
+      function renderNvrGrid(options = {}) {
         const cameras = config.cameras && config.cameras.length ? config.cameras : [];
         nvrGrid.innerHTML = cameras.map(nvrCard).join('');
+        lastNvrRenderSignature = recordingStatusSignature();
+        debugEvent('ui_nvr_render', {
+          reason: options.reason || 'render',
+          signature: lastNvrRenderSignature,
+          active_playback: isNvrPlaybackBusy(),
+        });
         applyRecordingSeek();
       }
 
@@ -4811,7 +4935,7 @@ INDEX_HTML = r"""<!doctype html>
         monitorLiveFrames();
       }
 
-      async function loadRecordingStatus() {
+      async function loadRecordingStatus(options = {}) {
         if (nvrLoading) return;
         nvrLoading = true;
         try {
@@ -4844,7 +4968,20 @@ INDEX_HTML = r"""<!doctype html>
               delete selectedRecordingSeek[item.index];
             }
           });
-          renderNvrGrid();
+          const nextSignature = recordingStatusSignature();
+          const shouldRender = Boolean(options.forceRender)
+            || activePage !== 'nvr'
+            || !lastNvrRenderSignature
+            || (nextSignature !== lastNvrRenderSignature && !isNvrPlaybackBusy());
+          if (shouldRender) {
+            renderNvrGrid({ reason: options.reason || 'recording_status' });
+          } else {
+            debugEvent('ui_recording_status_render_skipped', {
+              reason: options.reason || 'recording_status',
+              signature_changed: nextSignature !== lastNvrRenderSignature,
+              active_playback: isNvrPlaybackBusy(),
+            });
+          }
         } finally {
           nvrLoading = false;
         }
@@ -4853,13 +4990,16 @@ INDEX_HTML = r"""<!doctype html>
       function moveRecording(index, direction) {
         const files = Array.isArray(recordingStatus[index]?.files) ? recordingStatus[index].files : [];
         if (!files.length) return;
+        const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+        const wasPlaying = Boolean(video && !video.paused && !video.ended);
         const current = Math.max(0, files.findIndex((file) => file.url === selectedRecording[index]));
         const next = direction === 'older'
           ? Math.min(files.length - 1, current + 1)
           : Math.max(0, current - 1);
         selectedRecording[index] = files[next].url;
         selectedRecordingSeek[index] = 0;
-        renderNvrGrid();
+        recordingAutoplayAfterRender[index] = wasPlaying;
+        renderNvrGrid({ reason: `playback_${direction}` });
       }
 
       function streamSettingsFromEditor(editor) {
@@ -4953,7 +5093,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         if (activePage !== 'nvr') return;
         nvrTimer = window.setInterval(() => {
-          loadRecordingStatus().catch((error) => {
+          loadRecordingStatus({ reason: 'timer' }).catch((error) => {
             debugEvent('ui_recording_status_error', { message: error.message });
           });
         }, 5000);
@@ -4991,7 +5131,7 @@ INDEX_HTML = r"""<!doctype html>
 
       document.getElementById('refresh-nvr').addEventListener('click', async () => {
         debugEvent('ui_refresh_nvr_click');
-        await loadRecordingStatus();
+        await loadRecordingStatus({ forceRender: true, reason: 'manual_refresh' });
       });
 
       document.getElementById('refresh-logs').addEventListener('click', async () => {
@@ -5190,7 +5330,7 @@ INDEX_HTML = r"""<!doctype html>
         if (index !== undefined && playRecording) {
           selectedRecording[index] = playRecording;
           selectedRecordingSeek[index] = 0;
-          renderNvrGrid();
+          renderNvrGrid({ reason: 'recording_tile_click' });
           return;
         }
         const stepTarget = event.target.closest('[data-playback-step]');
@@ -5213,15 +5353,49 @@ INDEX_HTML = r"""<!doctype html>
         if (!response.ok) {
           saveState.textContent = data.error || 'Recording action failed.';
         }
-        await loadRecordingStatus();
+        await loadRecordingStatus({ forceRender: true, reason: `recording_${action}` });
         await loadCameras();
       });
 
       nvrGrid.addEventListener('change', (event) => {
         const scrub = event.target.closest('[data-recording-scrub]');
         if (!scrub) return;
+        nvrScrubbing = false;
         selectRecordingAtOffset(scrub.dataset.recordingScrub, scrub.value);
       });
+
+      nvrGrid.addEventListener('input', (event) => {
+        const scrub = event.target.closest('[data-recording-scrub]');
+        if (!scrub) return;
+        nvrScrubbing = true;
+        previewRecordingAtOffset(scrub.dataset.recordingScrub, scrub.value);
+      });
+
+      nvrGrid.addEventListener('pointerdown', (event) => {
+        if (event.target.closest('[data-recording-scrub]')) {
+          nvrScrubbing = true;
+        }
+      });
+
+      nvrGrid.addEventListener('pointerup', (event) => {
+        if (event.target.closest('[data-recording-scrub]')) {
+          nvrScrubbing = false;
+        }
+      });
+
+      window.addEventListener('pointerup', () => {
+        nvrScrubbing = false;
+      });
+
+      nvrGrid.addEventListener('timeupdate', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video && !nvrScrubbing) syncRecordingVideoProgress(video);
+      }, true);
+
+      nvrGrid.addEventListener('ended', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) playNextRecordingSegment(video.dataset.recordingPlayer);
+      }, true);
 
       restoreNavState();
 
@@ -5232,7 +5406,7 @@ INDEX_HTML = r"""<!doctype html>
           path: window.location.pathname,
         });
         await loadConfig();
-        await Promise.all([loadPresets(), loadCameras(), loadRecordingStatus()]);
+        await Promise.all([loadPresets(), loadCameras(), loadRecordingStatus({ forceRender: true, reason: 'boot' })]);
       }
 
       boot().catch((error) => {

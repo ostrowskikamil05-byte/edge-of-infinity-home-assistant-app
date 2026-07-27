@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.17
+
+- Stop the NVR status timer from rebuilding the video player while a recording is playing or the timeline scrubber is active.
+- Make timeline scrubbing inside the current MP4 segment seek the existing `<video>` element directly instead of reloading the source.
+- Keep the timeline slider synchronized with playback time and auto-continue into the next recording segment when possible.
+
 ## 0.10.16
 
 - Sync MediaMTX and Janus runtime config immediately after panel saves, so changed camera IPs, stream choices, WebRTC public hosts, ICE mode, and NVR segment length stop waiting for an add-on restart.
