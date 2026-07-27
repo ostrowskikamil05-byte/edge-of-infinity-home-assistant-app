@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.13
+
+- Fix save requests behind Home Assistant Ingress by reading JSON request bodies sent with `Transfer-Encoding: chunked`.
+- Refuse empty `/api/config` saves instead of silently re-saving the old `edge.json`, which made the panel appear to bounce back to previous values.
+- Add request-body diagnostics to save and UI debug events so future save issues show whether the browser payload reached the add-on.
+- Replace the legacy `addon_config` map with `app_config` to satisfy current Supervisor app validation.
+
 ## 0.10.12
 
 - Expose the active panel/server build in the UI, health payload, headers, `/api/version`, and Runtime summary.

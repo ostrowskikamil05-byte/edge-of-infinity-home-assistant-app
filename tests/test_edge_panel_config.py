@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -46,21 +47,52 @@ class EdgePanelConfigTests(unittest.TestCase):
         html = PANEL_PATH.read_text(encoding="utf-8")
 
         self.assertIn("function cameraFormSnapshot()", html)
+        self.assertIn("function edgeFormSnapshot()", html)
         self.assertIn("collectConfig({ refreshGenerated: true })", html)
         self.assertIn("form.addEventListener('submit'", html)
         self.assertIn("event.preventDefault()", html)
         self.assertIn("host=${host}", html)
+        self.assertIn("ui_save_edge_settings_click", html)
         self.assertNotIn("keepalive: true", html)
 
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.12")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.12")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.12")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.12")
-        self.assertIn("v0.10.12", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.13")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.13")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.13")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.13")
+        self.assertIn("v0.10.13", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
+
+    def test_chunked_json_request_body_is_read_for_ingress_saves(self):
+        panel = load_panel_module()
+        raw = b'{"cameras":[{"id":"hikvision_1","host":"192.168.33.136"}]}'
+        chunked = b"".join([
+            b"10\r\n", raw[:16], b"\r\n",
+            f"{len(raw[16:]):x}\r\n".encode("ascii"), raw[16:], b"\r\n",
+            b"0\r\n\r\n",
+        ])
+        handler = object.__new__(panel.EdgeHandler)
+        handler.headers = {"Transfer-Encoding": "chunked", "Content-Type": "application/json"}
+        handler.rfile = io.BytesIO(chunked)
+
+        payload = panel.EdgeHandler.read_body_json(handler)
+
+        self.assertEqual(payload["cameras"][0]["host"], "192.168.33.136")
+        self.assertEqual(handler._last_body_info["bytes_read"], len(raw))
+
+    def test_config_save_refuses_empty_request_body_before_reusing_existing_config(self):
+        source = PANEL_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("config_save_empty_body", source)
+        self.assertIn("empty_request_body", source)
+
+    def test_supervisor_config_uses_current_app_config_map_type(self):
+        config_text = (ROOT / "edge-of-infinity" / "config.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("type: app_config", config_text)
+        self.assertNotIn("type: addon_config", config_text)
 
     def test_save_pipeline_preserves_submitted_stream_roles(self):
         panel = load_panel_module()

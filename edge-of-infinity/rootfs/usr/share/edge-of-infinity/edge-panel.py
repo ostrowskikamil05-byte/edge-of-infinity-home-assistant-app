@@ -17,9 +17,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.12"
+APP_VERSION = "0.10.13"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "camera-save-dom-diagnostics-v4"
+UI_BUILD = "chunked-body-safe-save-v5"
+MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
 CONFIG_PATH = Path(os.environ.get("EDGE_HOME_CONFIG", "/homeassistant/edge/edge.json"))
@@ -144,6 +145,34 @@ def write_json(path: Path, payload) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def read_chunked_body_from_stream(stream, max_bytes: int = MAX_REQUEST_BODY_BYTES) -> bytes:
+    chunks = []
+    total = 0
+    while True:
+        line = stream.readline(65537)
+        if not line:
+            break
+        size_text = line.split(b";", 1)[0].strip()
+        if not size_text:
+            continue
+        try:
+            size = int(size_text, 16)
+        except ValueError as error:
+            raise ValueError(f"Invalid chunked request size: {size_text!r}") from error
+        if size == 0:
+            while True:
+                trailer = stream.readline(65537)
+                if trailer in (b"", b"\r\n", b"\n"):
+                    break
+            break
+        total += size
+        if total > max_bytes:
+            raise ValueError("Request body is too large.")
+        chunks.append(stream.read(size))
+        stream.read(2)
+    return b"".join(chunks)
 
 
 def file_mtime(path: Path) -> float:
@@ -3936,6 +3965,15 @@ INDEX_HTML = r"""<!doctype html>
         });
       }
 
+      function edgeFormSnapshot() {
+        const snapshot = {};
+        Array.from(edgeForm.elements || []).forEach((element) => {
+          if (!element.name) return;
+          snapshot[element.name] = element.type === 'checkbox' ? element.checked : element.value;
+        });
+        return snapshot;
+      }
+
       function collectConfig(options = {}) {
         const refreshGenerated = options.refreshGenerated !== false;
         const existingCameras = Array.isArray(config.cameras) ? config.cameras : [];
@@ -4448,9 +4486,21 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       document.getElementById('save-edge-settings').addEventListener('click', async () => {
+        const edgeBeforeSnapshot = edgeFormSnapshot();
+        const camerasBeforeSnapshot = cameraFormSnapshot();
         const payload = collectEdgeSettings();
+        debugEvent('ui_save_edge_settings_click', {
+          summary: saveSummary(payload),
+          edge_form: edgeBeforeSnapshot,
+          camera_form: camerasBeforeSnapshot,
+          live: payload.live,
+          storage: payload.storage,
+          nvr: payload.nvr,
+          cameras: payload.cameras,
+        });
         if (!hasMeaningfulCameras(payload)) {
           edgeSaveState.textContent = 'Save blocked: camera configuration is empty, so existing settings were not overwritten.';
+          debugEvent('ui_save_edge_settings_blocked', { reason: 'empty_camera_configuration' });
           return;
         }
         edgeSaveState.textContent = 'Saving Edge settings...';
@@ -4462,6 +4512,7 @@ INDEX_HTML = r"""<!doctype html>
         const data = await response.json();
         if (!response.ok) {
           edgeSaveState.textContent = data.error || 'Could not save Edge settings.';
+          debugEvent('ui_save_edge_settings_error', { status: response.status, data });
           return;
         }
         config = await fetchSavedConfig();
@@ -4473,6 +4524,13 @@ INDEX_HTML = r"""<!doctype html>
         }
         if (panelLogs) await loadLogs();
         edgeSaveState.textContent = 'Saved. Edge settings are stored in /homeassistant/edge/edge.json. panel-config.json was refreshed as a diagnostics mirror.';
+        debugEvent('ui_save_edge_settings_done', {
+          sentSummary: saveSummary(payload),
+          savedSummary: saveSummary(config),
+          live: config.live,
+          storage: config.storage,
+          nvr: config.nvr,
+        });
       });
 
       document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);
@@ -4708,9 +4766,34 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
+    def read_raw_body(self) -> bytes:
+        length_header = self.headers.get("Content-Length", "")
+        transfer_encoding = self.headers.get("Transfer-Encoding", "")
+        content_type = self.headers.get("Content-Type", "")
+        info = {
+            "content_length": length_header,
+            "transfer_encoding": transfer_encoding,
+            "content_type": content_type,
+            "bytes_read": 0,
+        }
+        self._last_body_info = info
+        if length_header:
+            try:
+                length = int(length_header)
+            except ValueError as error:
+                raise ValueError(f"Invalid Content-Length: {length_header}") from error
+            if length > MAX_REQUEST_BODY_BYTES:
+                raise ValueError("Request body is too large.")
+            body = self.rfile.read(length)
+        elif "chunked" in transfer_encoding.lower():
+            body = read_chunked_body_from_stream(self.rfile)
+        else:
+            body = b""
+        info["bytes_read"] = len(body)
+        return body
+
     def read_body_json(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length)
+        body = self.read_raw_body()
         return json.loads(body.decode("utf-8")) if body else {}
 
     def ui_debug(self) -> None:
@@ -4723,16 +4806,31 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "client": self.client_address[0],
                 "user_agent": self.headers.get("User-Agent", ""),
                 "query": query,
+                "request_body": getattr(self, "_last_body_info", {}),
                 "ui": payload,
             })
             self.send_json({"ok": True})
-        except (json.JSONDecodeError, OSError) as error:
+        except (json.JSONDecodeError, OSError, ValueError) as error:
             write_debug_event("ui_debug_error", {"error": str(error)})
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
 
     def save_config(self) -> None:
         try:
-            raw_payload, merged_payload, normalized_payload, final_payload = prepare_config_for_save(self.read_body_json())
+            request_payload = self.read_body_json()
+            body_info = getattr(self, "_last_body_info", {})
+            if not request_payload:
+                write_debug_event("config_save_empty_body", {
+                    "body": body_info,
+                    "client": self.client_address[0],
+                    "headers": {
+                        "content_length": self.headers.get("Content-Length", ""),
+                        "transfer_encoding": self.headers.get("Transfer-Encoding", ""),
+                        "content_type": self.headers.get("Content-Type", ""),
+                    },
+                })
+                self.send_json({"error": "empty_request_body", "body": body_info}, HTTPStatus.BAD_REQUEST)
+                return
+            raw_payload, merged_payload, normalized_payload, final_payload = prepare_config_for_save(request_payload)
             backup_config()
             backup_panel_config()
             committed_payload = commit_panel_config(final_payload)
@@ -4755,6 +4853,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "saved_summary": config_summary(saved_payload),
                 "verified": config_summary(committed_payload) == config_summary(saved_payload),
                 "changed_by": self.client_address[0],
+                "request_body": body_info,
                 "authoritative_path": str(CONFIG_PATH),
                 "panel_mirror_path": str(PANEL_CONFIG_PATH),
             })
