@@ -2973,6 +2973,8 @@ INDEX_HTML = r"""<!doctype html>
       let recordingStatus = {};
       let selectedRecording = {};
       let configDirty = false;
+      let lastFormDraft = null;
+      let lastFormDraftAt = 0;
       let panelLogs = null;
       let activePage = 'home';
       let nvrLoading = false;
@@ -3171,8 +3173,7 @@ INDEX_HTML = r"""<!doctype html>
         fetch(panelPath('api/debug'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body,
-          keepalive: true
+          body
         }).catch(() => {});
       }
 
@@ -3862,9 +3863,47 @@ INDEX_HTML = r"""<!doctype html>
         isapiInput.value = refreshHikvisionIsapiBaseUrl(isapiInput.value.trim(), host);
       }
 
-      function collectConfig() {
+      function cameraFormSnapshot() {
+        return Array.from(form.querySelectorAll('[data-camera-form]')).map((section, index) => {
+          const prefix = `camera-${index}`;
+          const field = (name) => section.querySelector(`[name="${prefix}-${name}"]`);
+          const value = (name) => {
+            const element = field(name);
+            if (!element) return '';
+            if (element.type === 'checkbox') return element.checked;
+            return element.value;
+          };
+          return {
+            index,
+            id: Array.isArray(config.cameras) ? config.cameras[index]?.id : '',
+            name: value('name'),
+            vendor: value('vendor'),
+            host: value('host'),
+            username: value('username'),
+            password: value('password') ? 'set' : '',
+            camera_number: value('camera-number'),
+            access_protocol: value('access-protocol'),
+            rtsp_transport: value('rtsp-transport'),
+            rtsp_main_channel: value('rtsp-main-channel'),
+            rtsp_sub_channel: value('rtsp-sub-channel'),
+            rtsp_main: value('rtsp-main'),
+            rtsp_sub: value('rtsp-sub'),
+            enabled: value('enabled'),
+            record: value('record'),
+            low_latency: value('low-latency'),
+            snapshot_stream: value('snapshot-stream'),
+            live_stream: value('live-stream'),
+            tile_stream: value('tile-stream'),
+            record_stream: value('record-stream')
+          };
+        });
+      }
+
+      function collectConfig(options = {}) {
+        const refreshGenerated = options.refreshGenerated !== false;
+        const existingCameras = Array.isArray(config.cameras) ? config.cameras : [];
         const cameras = Array.from(form.querySelectorAll('[data-camera-form]')).map((section, index) => {
-          refreshGeneratedCameraFields(section, index);
+          if (refreshGenerated) refreshGeneratedCameraFields(section, index);
           const get = (name) => cameraField(section, index, name);
           const vendor = get('vendor').value;
           const cameraNumber = get('camera-number').value.trim() || '1';
@@ -3886,7 +3925,7 @@ INDEX_HTML = r"""<!doctype html>
           const rtspMain = vendor === 'hikvision' ? refreshHikvisionRtsp(rtspMainRaw, host, username, password, rtspMainChannel) : rtspMainRaw;
           const rtspSub = vendor === 'hikvision' ? refreshHikvisionRtsp(rtspSubRaw, host, username, password, rtspSubChannel) : rtspSubRaw;
           return {
-            id: config.cameras[index]?.id || `${get('vendor').value}_${index + 1}`,
+            id: existingCameras[index]?.id || `${get('vendor').value}_${index + 1}`,
             name: get('name').value,
             vendor,
             host,
@@ -3915,7 +3954,9 @@ INDEX_HTML = r"""<!doctype html>
 
       function syncConfigDraftFromForm() {
         try {
-          config = collectConfig();
+          config = collectConfig({ refreshGenerated: false });
+          lastFormDraft = config;
+          lastFormDraftAt = Date.now();
           configDirty = true;
         } catch (error) {
           debugEvent('ui_config_draft_sync_error', { message: error.message });
@@ -4312,8 +4353,20 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       document.getElementById('save-config').addEventListener('click', async () => {
-        const payload = collectConfig();
-        debugEvent('ui_save_config_click', { summary: saveSummary(payload), cameras: payload.cameras });
+        const beforeSnapshot = cameraFormSnapshot();
+        const draftAgeMs = lastFormDraftAt ? Date.now() - lastFormDraftAt : null;
+        const payload = collectConfig({ refreshGenerated: true });
+        config = payload;
+        lastFormDraft = payload;
+        lastFormDraftAt = Date.now();
+        const afterSnapshot = cameraFormSnapshot();
+        debugEvent('ui_save_config_click', {
+          summary: saveSummary(payload),
+          cameras: payload.cameras,
+          form_before_collect: beforeSnapshot,
+          form_after_collect: afterSnapshot,
+          draft_age_ms: draftAgeMs
+        });
         if (!hasMeaningfulCameras(payload)) {
           saveState.textContent = 'Save blocked: at least one camera needs host/IP or RTSP, so existing configuration was not overwritten.';
           debugEvent('ui_save_config_blocked', { reason: 'empty_camera_configuration' });
@@ -4349,6 +4402,11 @@ INDEX_HTML = r"""<!doctype html>
           savedSummary,
           normalized: sentSummary !== savedSummary
         });
+      });
+
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        document.getElementById('save-config').click();
       });
 
       document.getElementById('save-edge-settings').addEventListener('click', async () => {
@@ -4488,7 +4546,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.10"
+    server_version = "EdgePanel/0.10.11"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")

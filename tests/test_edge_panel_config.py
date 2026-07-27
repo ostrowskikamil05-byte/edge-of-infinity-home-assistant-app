@@ -42,6 +42,15 @@ def camera(camera_id, host, snapshot_stream):
 
 
 class EdgePanelConfigTests(unittest.TestCase):
+    def test_panel_save_uses_dom_snapshot_and_prevents_plain_form_submit(self):
+        html = PANEL_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("function cameraFormSnapshot()", html)
+        self.assertIn("collectConfig({ refreshGenerated: true })", html)
+        self.assertIn("form.addEventListener('submit'", html)
+        self.assertIn("event.preventDefault()", html)
+        self.assertNotIn("keepalive: true", html)
+
     def test_save_pipeline_preserves_submitted_stream_roles(self):
         panel = load_panel_module()
         existing = {

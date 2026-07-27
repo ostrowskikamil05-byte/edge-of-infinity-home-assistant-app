@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.11
+
+- Make Camera Settings save read the current DOM form values directly, refresh generated Hikvision RTSP fields only at save time, and keep an explicit local draft for diagnostics.
+- Prevent accidental form submit/reload from discarding unsaved camera edits when Enter is pressed inside an input.
+- Fix browser UI debug events so save logs include the submitted camera payload plus before/after form snapshots.
+
 ## 0.10.10
 
 - Make `/homeassistant/edge/edge.json` the single authoritative camera config source; `panel-config.json` is now only a diagnostics mirror and legacy migration fallback.
