@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.14
+
+- Keep Home camera tiles on the low-bandwidth substream when the configured tile stream is the 4K main stream and a substream exists, preventing MediaMTX/WebRTC player errors in small live tiles.
+- Embed MediaMTX WebRTC player pages with muted autoplay, inline mobile playback, and hidden controls so Home shows video instead of player chrome.
+- Mirror every successful panel save to `/config/edge.json` as well as `/homeassistant/edge/edge.json` and `panel-config.json`, making the app configuration file visible in the add-on config mount.
+- Export `EDGE_ADDON_CONFIG` to the panel and refresh the `/config/edge.json` mirror during add-on startup.
+
 ## 0.10.13
 
 - Fix save requests behind Home Assistant Ingress by reading JSON request bodies sent with `Transfer-Encoding: chunked`.

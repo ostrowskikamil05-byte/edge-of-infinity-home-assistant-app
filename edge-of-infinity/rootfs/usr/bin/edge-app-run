@@ -947,6 +947,14 @@ else
   cp "${EDGE_HOME_EXAMPLE_CONFIG}" "${EDGE_CONFIG}"
 fi
 
+if [[ -f "${EDGE_CONFIG}" && "${EDGE_CONFIG}" != "${EDGE_ADDON_CONFIG}" ]]; then
+  if cp "${EDGE_CONFIG}" "${EDGE_ADDON_CONFIG}"; then
+    bashio::log.info "Mirrored active camera config to ${EDGE_ADDON_CONFIG} for app configuration visibility."
+  else
+    bashio::log.warning "Could not mirror active camera config to ${EDGE_ADDON_CONFIG}."
+  fi
+fi
+
 MEDIAMTX_CONFIG=/tmp/edge-runtime/mediamtx.yml
 JANUS_CONFIG_DIR=/tmp/edge-runtime/janus
 MEDIAMTX_PID=""
@@ -1006,6 +1014,7 @@ bashio::log.info "Running Edge panel as controller for MediaMTX + Janus."
 
 export EDGE_CONFIG
 export EDGE_HOME_CONFIG
+export EDGE_ADDON_CONFIG
 export EDGE_HOME_DIR=/homeassistant/edge
 export EDGE_DATA_DIR=/tmp/edge-placeholder
 export API_PORT

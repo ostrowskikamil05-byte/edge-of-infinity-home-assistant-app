@@ -17,13 +17,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.13"
+APP_VERSION = "0.10.14"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "chunked-body-safe-save-v5"
+UI_BUILD = "home-live-subtile-config-mirror-v6"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
 CONFIG_PATH = Path(os.environ.get("EDGE_HOME_CONFIG", "/homeassistant/edge/edge.json"))
+ADDON_CONFIG_PATH = Path(os.environ.get("EDGE_ADDON_CONFIG", "/config/edge.json"))
 CONFIG_BACKUP_PATH = HOME_DIR / "edge.backup.json"
 PRESETS_PATH = HOME_DIR / "camera-presets.json"
 PANEL_CONFIG_PATH = HOME_DIR / "panel-config.json"
@@ -918,11 +919,13 @@ def collect_panel_logs() -> dict:
         "server_version": SERVER_VERSION,
         "ui_build": UI_BUILD,
         "authoritative_config": str(CONFIG_PATH),
+        "addon_config_mirror": str(ADDON_CONFIG_PATH),
         "panel_mirror_config": str(PANEL_CONFIG_PATH),
         "config_summary": config_summary(config),
         "edge_debug": redact_rtsp(read_text_tail(DEBUG_LOG_PATH, 16000)),
         "last_save_debug": safe_json_file(HOME_DIR / "last-save-debug.json"),
         "last_saved_config": safe_json_file(HOME_DIR / "edge.last-saved.json"),
+        "addon_config_file": safe_json_file(ADDON_CONFIG_PATH),
         "panel_config": safe_json_file(PANEL_CONFIG_PATH),
         "runtime_config_file": safe_json_file(CONFIG_PATH),
         "recording_logs": recording_logs,
@@ -1079,6 +1082,13 @@ def commit_panel_config(payload: dict) -> dict:
     committed = authoritative_config_from_payload(payload)
     write_json(CONFIG_PATH, committed)
     write_json(PANEL_CONFIG_PATH, committed)
+    if ADDON_CONFIG_PATH != CONFIG_PATH:
+        try:
+            write_json(ADDON_CONFIG_PATH, committed)
+        except OSError as error:
+            write_debug_event("addon_config_mirror_error", {"path": str(ADDON_CONFIG_PATH), "error": str(error)})
+        else:
+            write_debug_event("addon_config_mirror_updated", {"path": str(ADDON_CONFIG_PATH)})
     clear_legacy_override_files()
     return committed
 
@@ -2457,6 +2467,7 @@ def health_payload() -> dict:
         "ui_build": UI_BUILD,
         "mode": "mediamtx-janus-webrtc-core",
         "authoritative_config": str(CONFIG_PATH),
+        "addon_config_mirror": str(ADDON_CONFIG_PATH),
         "core": engine_runtime_status(),
     }
 
@@ -3056,13 +3067,18 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function directMediaMtxPath(path) {
-        const clean = String(path).replace(/^\/+/, '');
+        const clean = String(path).replace(/^\/+/, '').replace(/\/+$/, '');
         const publicUrl = String(config?.live?.mobile_webrtc_public_url || '').trim().replace(/\/+$/, '');
         if (publicUrl) return `${publicUrl}/${clean}`;
         if (window.location.hostname) {
           return `http://${window.location.hostname}:8889/${clean}`;
         }
         return `http://127.0.0.1:8889/${clean}`;
+      }
+
+      function mediaMtxPlayerUrl(url) {
+        const separator = String(url).includes('?') ? '&' : '?';
+        return `${url}${separator}controls=false&muted=true&autoplay=true&playsInline=true&disablepictureinpicture=true`;
       }
 
       function parseUrl(value) {
@@ -3384,21 +3400,60 @@ INDEX_HTML = r"""<!doctype html>
         return rows ? `<div class="stream-strip">${rows}</div>` : '';
       }
 
+      function isStreamConfigured(camera, streamName) {
+        if (!camera || !streamName) return false;
+        if (camera.effective_streams?.[streamName]?.configured) return true;
+        return Boolean(camera[`rtsp_${streamName}`]);
+      }
+
+      function chooseHomePreviewStream(camera) {
+        const requestedTileStream = camera.tile_stream || 'sub';
+        const liveStream = camera.live_stream || 'sub';
+        const tileMaxWidth = Number(config?.live?.tile_max_width || 960);
+        const mainWidth = Number(camera.width || (liveStream === 'main' ? camera.live_width : '') || 0);
+        const subConfigured = isStreamConfigured(camera, 'sub');
+        if (requestedTileStream === 'main' && subConfigured && mainWidth && mainWidth > tileMaxWidth) {
+          return {
+            stream: 'sub',
+            requested: requestedTileStream,
+            reason: 'main_stream_above_tile_width',
+            mainWidth,
+            tileMaxWidth,
+          };
+        }
+        if (isStreamConfigured(camera, requestedTileStream)) {
+          return {
+            stream: requestedTileStream,
+            requested: requestedTileStream,
+            reason: 'configured_tile_stream',
+            mainWidth,
+            tileMaxWidth,
+          };
+        }
+        const fallbackStream = subConfigured ? 'sub' : (isStreamConfigured(camera, 'main') ? 'main' : liveStream);
+        return {
+          stream: fallbackStream,
+          requested: requestedTileStream,
+          reason: 'tile_stream_missing_fallback',
+          mainWidth,
+          tileMaxWidth,
+        };
+      }
+
       function cameraCard(camera) {
         const online = camera.status === 'online';
         const liveKey = camera.key || `${camera.id || 'camera'}_${camera.index ?? 0}`;
         const liveId = camera.id || liveKey;
         const videoCodec = camera.video_codec || camera.codec;
         const liveStream = camera.live_stream || 'sub';
-        const tileStream = camera.tile_stream || 'sub';
-        const hasSubPreview = camera.effective_streams?.sub?.configured;
-        const previewStream = hasSubPreview ? tileStream : liveStream;
+        const previewChoice = chooseHomePreviewStream(camera);
+        const previewStream = previewChoice.stream;
         const liveResolution = camera.live_width && camera.live_height ? `${camera.live_width}x${camera.live_height}` : 'unknown';
         const previewResolution = previewStream === liveStream ? liveResolution : 'tile';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
         const mediamtxPath = `${encodeURIComponent(liveId)}_${encodeURIComponent(previewStream)}`;
         const plan = liveConnectionPlan(mediamtxPath);
-        const mediamtxUrl = plan.url;
+        const mediamtxUrl = plan.canEmbed ? mediaMtxPlayerUrl(plan.url) : plan.url;
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         if (live[liveKey]) {
           debugEvent('ui_live_plan', {
@@ -3406,6 +3461,10 @@ INDEX_HTML = r"""<!doctype html>
             cameraIndex: camera.index,
             cameraId: camera.id,
             stream: previewStream,
+            requested_tile_stream: previewChoice.requested,
+            preview_reason: previewChoice.reason,
+            main_width: previewChoice.mainWidth,
+            tile_max_width: previewChoice.tileMaxWidth,
             can_embed: plan.canEmbed,
             reason: plan.reason,
             diagnostics: plan.diagnostics,
@@ -3413,7 +3472,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         const preview = live[liveKey]
           ? (plan.canEmbed
-            ? `<iframe class="live-frame" src="${escapeHtml(mediamtxUrl)}" data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} WebRTC live" loading="lazy" allow="autoplay; fullscreen; encrypted-media" onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)"></iframe>`
+            ? `<iframe class="live-frame" src="${escapeHtml(mediamtxUrl)}" data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} WebRTC live" loading="eager" allow="autoplay; fullscreen; encrypted-media" onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
             : liveBlockedPreview(plan))
           : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         return `
@@ -3442,6 +3501,14 @@ INDEX_HTML = r"""<!doctype html>
         }
         debugEvent('ui_live_frame_load', {
           liveKey,
+          url: frame?.dataset?.liveUrl || '',
+          path: frame?.dataset?.livePath || '',
+        });
+      };
+
+      window.edgeFrameError = function edgeFrameError(frame) {
+        debugEvent('ui_live_frame_error', {
+          liveKey: frame?.dataset?.liveKey || 'unknown',
           url: frame?.dataset?.liveUrl || '',
           path: frame?.dataset?.livePath || '',
         });
@@ -4523,7 +4590,7 @@ INDEX_HTML = r"""<!doctype html>
           updateLiveTimer();
         }
         if (panelLogs) await loadLogs();
-        edgeSaveState.textContent = 'Saved. Edge settings are stored in /homeassistant/edge/edge.json. panel-config.json was refreshed as a diagnostics mirror.';
+        edgeSaveState.textContent = 'Saved. Edge settings are stored in /homeassistant/edge/edge.json and mirrored to /config/edge.json plus panel-config.json.';
         debugEvent('ui_save_edge_settings_done', {
           sentSummary: saveSummary(payload),
           savedSummary: saveSummary(config),
@@ -4855,6 +4922,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "changed_by": self.client_address[0],
                 "request_body": body_info,
                 "authoritative_path": str(CONFIG_PATH),
+                "addon_config_mirror_path": str(ADDON_CONFIG_PATH),
                 "panel_mirror_path": str(PANEL_CONFIG_PATH),
             })
             stop_orphan_recordings(saved_payload)

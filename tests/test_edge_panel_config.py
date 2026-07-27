@@ -16,6 +16,7 @@ def load_panel_module():
     os.environ["EDGE_HOME_DIR"] = str(temp_root / "home")
     os.environ["EDGE_DATA_DIR"] = str(temp_root / "data")
     os.environ["EDGE_HOME_CONFIG"] = str(temp_root / "home" / "edge.json")
+    os.environ["EDGE_ADDON_CONFIG"] = str(temp_root / "addon-config" / "edge.json")
     spec = importlib.util.spec_from_file_location(f"edge_panel_test_{temp_root.name}", PANEL_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -58,11 +59,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.13")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.13")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.13")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.13")
-        self.assertIn("v0.10.13", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.14")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.14")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.14")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.14")
+        self.assertIn("v0.10.14", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
@@ -299,6 +300,28 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(committed["cameras"][0]["live_stream"], "main")
         self.assertFalse(panel.PANEL_CAMERA_OVERRIDES_PATH.exists())
         self.assertFalse(panel.STREAM_OVERRIDES_PATH.exists())
+
+    def test_commit_panel_config_mirrors_addon_config_file(self):
+        panel = load_panel_module()
+        payload = {
+            "server": {},
+            "storage": {},
+            "cameras": [camera("hikvision_1", "192.168.33.136", "sub")],
+        }
+
+        committed = panel.commit_panel_config(payload)
+        addon_mirror = panel.read_json(panel.ADDON_CONFIG_PATH, {})
+
+        self.assertEqual(addon_mirror, committed)
+        self.assertEqual(addon_mirror["cameras"][0]["host"], "192.168.33.136")
+
+    def test_home_live_tiles_prefer_substream_for_large_main_preview(self):
+        html = PANEL_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("function chooseHomePreviewStream(camera)", html)
+        self.assertIn("main_stream_above_tile_width", html)
+        self.assertIn("function mediaMtxPlayerUrl(url)", html)
+        self.assertIn("controls=false&muted=true&autoplay=true&playsInline=true&disablepictureinpicture=true", html)
 
     def test_live_mobile_settings_are_normalized_and_preserved(self):
         panel = load_panel_module()
