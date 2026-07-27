@@ -17,9 +17,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.15"
+APP_VERSION = "0.10.16"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "live-audio-controls-honor-tile-v7"
+UI_BUILD = "runtime-sync-nvr-timeline-fullscreen-v8"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -67,6 +67,7 @@ MEDIAMTX_ENABLED = os.environ.get("EDGE_MEDIAMTX_ENABLED", "true").lower() == "t
 MEDIAMTX_HOST = os.environ.get("EDGE_MEDIAMTX_HOST", "127.0.0.1")
 MEDIAMTX_RTSP_PORT = int(os.environ.get("EDGE_MEDIAMTX_RTSP_PORT", "8556"))
 MEDIAMTX_HLS_PORT = int(os.environ.get("EDGE_MEDIAMTX_HLS_PORT", "8888"))
+MEDIAMTX_HLS_ALWAYS_REMUX = os.environ.get("EDGE_MEDIAMTX_HLS_ALWAYS_REMUX", "false").lower() == "true"
 MEDIAMTX_WEBRTC_PORT = int(os.environ.get("EDGE_MEDIAMTX_WEBRTC_PORT", "8889"))
 MEDIAMTX_WEBRTC_UDP_PORT = int(os.environ.get("EDGE_MEDIAMTX_WEBRTC_UDP_PORT", "8189"))
 MEDIAMTX_WEBRTC_PUBLIC_HOSTS = [
@@ -88,6 +89,7 @@ MEDIAMTX_WEBRTC_ICE_TRANSPORT = os.environ.get(
 MEDIAMTX_SRT_PORT = int(os.environ.get("EDGE_MEDIAMTX_SRT_PORT", "8890"))
 MEDIAMTX_API_PORT = int(os.environ.get("EDGE_MEDIAMTX_API_PORT", "9997"))
 MEDIAMTX_CONFIG_PATH = Path(os.environ.get("EDGE_MEDIAMTX_CONFIG", "/tmp/edge-runtime/mediamtx.yml"))
+MEDIAMTX_RECORD = os.environ.get("EDGE_MEDIAMTX_RECORD", "true").lower() == "true"
 JANUS_ENABLED = os.environ.get("EDGE_JANUS_ENABLED", "true").lower() == "true"
 JANUS_HOST = os.environ.get("EDGE_JANUS_HOST", "127.0.0.1")
 JANUS_HTTP_PORT = int(os.environ.get("EDGE_JANUS_HTTP_PORT", "8192"))
@@ -924,10 +926,14 @@ def collect_panel_logs() -> dict:
         "config_summary": config_summary(config),
         "edge_debug": redact_rtsp(read_text_tail(DEBUG_LOG_PATH, 16000)),
         "last_save_debug": safe_json_file(HOME_DIR / "last-save-debug.json"),
+        "last_runtime_sync": safe_json_file(HOME_DIR / "edge.last-runtime-sync.json"),
         "last_saved_config": safe_json_file(HOME_DIR / "edge.last-saved.json"),
         "addon_config_file": safe_json_file(ADDON_CONFIG_PATH),
         "panel_config": safe_json_file(PANEL_CONFIG_PATH),
         "runtime_config_file": safe_json_file(CONFIG_PATH),
+        "runtime_config": engine_runtime_status(),
+        "runtime_mediamtx_config": redact_rtsp(read_text_tail(MEDIAMTX_CONFIG_PATH, 20000)),
+        "runtime_janus_streaming_config": redact_rtsp(read_text_tail(JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg", 20000)),
         "recording_logs": recording_logs,
     }
 
@@ -1307,6 +1313,297 @@ def janus_mount_id(index: int, stream_name: str) -> int:
     return 10000 + (index * 10) + stream_offset
 
 
+def yaml_string(value: str) -> str:
+    return json.dumps(str(value or ""))
+
+
+def bool_yaml(value: bool) -> str:
+    return "true" if bool(value) else "false"
+
+
+def csv_values(value: str) -> list[str]:
+    seen = set()
+    values = []
+    for item in str(value or "").split(","):
+        cleaned = item.strip()
+        if cleaned and cleaned not in seen:
+            values.append(cleaned)
+            seen.add(cleaned)
+    return values
+
+
+def append_unique(values: list[str], value: str) -> list[str]:
+    if value and value not in values:
+        return [*values, value]
+    return values
+
+
+def live_value(config: dict, key: str, fallback=""):
+    live = config.get("live") if isinstance(config.get("live"), dict) else {}
+    value = live.get(key)
+    return fallback if value in (None, "") else value
+
+
+def mediamtx_ice_servers_yaml(config: dict) -> list[str]:
+    stun_url = str(live_value(config, "mobile_webrtc_stun_url", MEDIAMTX_WEBRTC_STUN_URL) or "")
+    turn_url = str(live_value(config, "mobile_webrtc_turn_url", MEDIAMTX_WEBRTC_TURN_URL) or "")
+    turn_username = str(live_value(config, "mobile_webrtc_turn_username", MEDIAMTX_WEBRTC_TURN_USERNAME) or "")
+    turn_password = str(live_value(config, "mobile_webrtc_turn_password", MEDIAMTX_WEBRTC_TURN_PASSWORD) or "")
+    if not stun_url and not turn_url:
+        return ["webrtcICEServers2: []"]
+    lines = ["webrtcICEServers2:"]
+    if stun_url:
+        lines += [
+            f"  - url: {yaml_string(stun_url)}",
+            '    username: ""',
+            '    password: ""',
+            "    clientOnly: false",
+        ]
+    if turn_url:
+        lines += [
+            f"  - url: {yaml_string(turn_url)}",
+            f"    username: {yaml_string(turn_username)}",
+            f"    password: {yaml_string(turn_password)}",
+            "    clientOnly: false",
+        ]
+    return lines
+
+
+def mediamtx_ice_addresses(config: dict) -> tuple[str, str]:
+    live = config.get("live") if isinstance(config.get("live"), dict) else {}
+    ice_transport = normalize_webrtc_ice_transport(
+        live.get("mobile_webrtc_ice_transport"),
+        live.get("mobile_webrtc_tcp_only"),
+    )
+    if ice_transport == "tcp":
+        return "", f":{MEDIAMTX_WEBRTC_UDP_PORT}"
+    if ice_transport == "udp":
+        return f":{MEDIAMTX_WEBRTC_UDP_PORT}", ""
+    return f":{MEDIAMTX_WEBRTC_UDP_PORT}", f":{MEDIAMTX_WEBRTC_UDP_PORT}"
+
+
+def mediamtx_public_hosts(config: dict) -> list[str]:
+    public_hosts = csv_values(str(live_value(config, "mobile_webrtc_public_hosts", ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS)) or ""))
+    public_url_host = url_host(str(live_value(config, "mobile_webrtc_public_url", MEDIAMTX_WEBRTC_PUBLIC_URL) or ""))
+    return append_unique(public_hosts, public_url_host)
+
+
+def add_mediamtx_path(lines: list[str], path_name: str, source_url: str, should_record: bool, keep_warm: bool, recordings_dir: str, retention_days: int) -> None:
+    if not source_url:
+        return
+    lines += [
+        f"  {path_name}:",
+        f"    source: {yaml_string(source_url)}",
+        "    rtspTransport: tcp",
+    ]
+    if should_record and MEDIAMTX_RECORD:
+        lines += [
+            "    sourceOnDemand: no",
+            "    record: yes",
+            f"    recordPath: {yaml_string(f'{recordings_dir}/%path/%Y-%m-%d_%H-%M-%S-%f')}",
+        ]
+    elif keep_warm:
+        lines += [
+            "    sourceOnDemand: no",
+            "    record: no",
+        ]
+    else:
+        lines += [
+            "    sourceOnDemand: yes",
+            "    sourceOnDemandStartTimeout: 15s",
+            "    sourceOnDemandCloseAfter: 30s",
+            "    record: no",
+        ]
+
+
+def write_mediamtx_runtime_config(config: dict) -> dict:
+    if not MEDIAMTX_ENABLED:
+        return {"enabled": False, "written": False, "path_count": 0}
+    storage = config.get("storage") if isinstance(config.get("storage"), dict) else {}
+    live = config.get("live") if isinstance(config.get("live"), dict) else {}
+    recordings_dir = str(storage.get("recordings_dir") or "/media/edge-of-infinity/recordings").rstrip("/")
+    retention_days = clamp_int(
+        (config.get("nvr") if isinstance(config.get("nvr"), dict) else {}).get("retention_days"),
+        safe_int(storage.get("retention_days"), 14),
+        1,
+        365,
+    )
+    segment_seconds = clamp_int(
+        (config.get("nvr") if isinstance(config.get("nvr"), dict) else {}).get("segment_seconds"),
+        10,
+        2,
+        300,
+    )
+    prebuffer_enabled = safe_bool(live.get("prebuffer_enabled"), True)
+    udp_address, tcp_address = mediamtx_ice_addresses(config)
+    public_hosts = mediamtx_public_hosts(config)
+    lines = [
+        f"logLevel: {os.environ.get('LOG_LEVEL', 'info')}",
+        "logDestinations: [stdout]",
+        "readTimeout: 10s",
+        "writeTimeout: 10s",
+        "writeQueueSize: 512",
+        "udpMaxPayloadSize: 1452",
+        "",
+        "api: yes",
+        f"apiAddress: :{MEDIAMTX_API_PORT}",
+        "",
+        "metrics: no",
+        "pprof: no",
+        "playback: yes",
+        "playbackAddress: :9996",
+        "",
+        "rtsp: yes",
+        "rtspTransports: [tcp]",
+        'rtspEncryption: "no"',
+        f"rtspAddress: :{MEDIAMTX_RTSP_PORT}",
+        "",
+        "rtmp: no",
+        "",
+        "hls: yes",
+        f"hlsAddress: :{MEDIAMTX_HLS_PORT}",
+        'hlsAllowOrigins: ["*"]',
+        f"hlsAlwaysRemux: {bool_yaml(MEDIAMTX_HLS_ALWAYS_REMUX)}",
+        "hlsVariant: lowLatency",
+        "hlsSegmentCount: 4",
+        "hlsSegmentDuration: 1s",
+        "hlsPartDuration: 200ms",
+        "hlsSegmentMaxSize: 50M",
+        "",
+        "webrtc: yes",
+        f"webrtcAddress: :{MEDIAMTX_WEBRTC_PORT}",
+        'webrtcAllowOrigins: ["*"]',
+        f"webrtcLocalUDPAddress: {yaml_string(udp_address)}",
+        f"webrtcLocalTCPAddress: {yaml_string(tcp_address)}",
+        "webrtcIPsFromInterfaces: no",
+        f"webrtcAdditionalHosts: {json.dumps(public_hosts)}",
+        *mediamtx_ice_servers_yaml(config),
+        "webrtcSTUNGatherTimeout: 5s",
+        "webrtcHandshakeTimeout: 20s",
+        "webrtcTrackGatherTimeout: 5s",
+        "",
+        "srt: yes",
+        f"srtAddress: :{MEDIAMTX_SRT_PORT}",
+        "",
+        "pathDefaults:",
+        "  sourceOnDemand: yes",
+        "  rtspTransport: tcp",
+        "  recordFormat: fmp4",
+        "  recordPartDuration: 1s",
+        f"  recordSegmentDuration: {segment_seconds}s",
+        f"  recordDeleteAfter: {retention_days}d",
+        "",
+        "paths:",
+    ]
+    path_count = 0
+    for index, camera in enumerate(config.get("cameras", [])):
+        if not isinstance(camera, dict):
+            continue
+        record_stream = normalize_stream_name(camera.get("record_stream"), "main")
+        tile_stream = normalize_stream_name(camera.get("tile_stream"), "sub")
+        live_stream = normalize_stream_name(camera.get("live_stream"), "sub")
+        enabled = safe_bool(camera.get("enabled"), False)
+        record = safe_bool(camera.get("record"), False)
+        low_latency = safe_bool(camera.get("low_latency"), True)
+        record_main = enabled and record and record_stream == "main"
+        record_sub = enabled and record and record_stream == "sub"
+        warm_main = enabled and low_latency and prebuffer_enabled and (tile_stream == "main" or live_stream == "main" or record_main)
+        warm_sub = enabled and low_latency and prebuffer_enabled and (tile_stream == "sub" or live_stream == "sub" or record_sub)
+        before = len(lines)
+        add_mediamtx_path(lines, mediamtx_path(camera, index, "main"), camera.get("rtsp_main") or "", record_main, warm_main, recordings_dir, retention_days)
+        if len(lines) > before:
+            path_count += 1
+        before = len(lines)
+        add_mediamtx_path(lines, mediamtx_path(camera, index, "sub"), camera.get("rtsp_sub") or "", record_sub, warm_sub, recordings_dir, retention_days)
+        if len(lines) > before:
+            path_count += 1
+    MEDIAMTX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = MEDIAMTX_CONFIG_PATH.with_suffix(MEDIAMTX_CONFIG_PATH.suffix + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp.replace(MEDIAMTX_CONFIG_PATH)
+    return {
+        "enabled": True,
+        "written": True,
+        "path": str(MEDIAMTX_CONFIG_PATH),
+        "path_count": path_count,
+        "public_hosts": public_hosts,
+        "ice_transport": normalize_webrtc_ice_transport(live.get("mobile_webrtc_ice_transport"), live.get("mobile_webrtc_tcp_only")),
+        "recording_enabled": MEDIAMTX_RECORD,
+        "segment_seconds": segment_seconds,
+    }
+
+
+def write_janus_streaming_runtime_config(config: dict) -> dict:
+    if not JANUS_ENABLED:
+        return {"enabled": False, "written": False, "mounts": 0}
+    live = config.get("live") if isinstance(config.get("live"), dict) else {}
+    bufferkf_ms = clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000)
+    streaming_config = JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg"
+    lines = [
+        "general: {",
+        '  admin_key = "edge-local"',
+        "}",
+    ]
+    mounts = 0
+    for index, camera in enumerate(config.get("cameras", [])):
+        if not isinstance(camera, dict):
+            continue
+        camera_id = safe_id(camera.get("id") or f"camera_{index + 1}")
+        name = str(camera.get("name") or camera_id).replace('"', '\\"')
+        for stream_name in ("main", "sub"):
+            path_name = mediamtx_path(camera, index, stream_name)
+            mount_id = janus_mount_id(index, stream_name)
+            url = f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}/{path_name}"
+            lines += [
+                "",
+                f"{path_name}: {{",
+                '  type = "rtsp"',
+                f"  id = {mount_id}",
+                f"  description = {yaml_string(f'{name} {stream_name} via MediaMTX')}",
+                "  audio = true",
+                "  video = true",
+                f"  url = {yaml_string(url)}",
+                "  rtsp_reconnect_delay = 3",
+                "  rtsp_timeout = 5",
+                "  rtsp_conn_timeout = 3",
+                "  rtsp_notify_changes = true",
+                f"  bufferkf_ms = {bufferkf_ms}",
+                "  playoutdelay_ext = true",
+                "}",
+            ]
+            mounts += 1
+    JANUS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = streaming_config.with_suffix(streaming_config.suffix + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp.replace(streaming_config)
+    return {
+        "enabled": True,
+        "written": True,
+        "path": str(streaming_config),
+        "mounts": mounts,
+        "restart_required": True,
+    }
+
+
+def sync_runtime_engine_config(config: dict, reason: str) -> dict:
+    result = {"reason": reason, "mediamtx": {}, "janus": {}}
+    try:
+        result["mediamtx"] = write_mediamtx_runtime_config(config)
+    except OSError as error:
+        result["mediamtx"] = {"written": False, "error": str(error), "type": type(error).__name__}
+    try:
+        result["janus"] = write_janus_streaming_runtime_config(config)
+    except OSError as error:
+        result["janus"] = {"written": False, "error": str(error), "type": type(error).__name__}
+    write_json(HOME_DIR / "edge.last-runtime-sync.json", result)
+    write_debug_event("runtime_engine_config_sync", {
+        "reason": reason,
+        "result": result,
+        "summary": config_summary(config),
+    })
+    return result
+
+
 def mediamtx_api_url(path: str) -> str:
     return f"http://127.0.0.1:{MEDIAMTX_API_PORT}{path}"
 
@@ -1504,7 +1801,25 @@ def recording_base_dir(camera: dict, index: int) -> Path:
     return recordings_dir / safe_id(camera.get("id") or f"camera_{index + 1}")
 
 
-def recording_segments(camera: dict, index: int, limit: int = 24) -> list[dict]:
+def recording_segment_start_ts(path: Path, fallback_ts: float) -> int:
+    name = path.stem
+    patterns = (
+        (r"^(\d{8})-(\d{6})", "%Y%m%d%H%M%S"),
+        (r"^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})", "%Y%m%d%H%M%S"),
+    )
+    for pattern, fmt in patterns:
+        match = re.search(pattern, name)
+        if not match:
+            continue
+        stamp = "".join(match.groups())
+        try:
+            return int(time.mktime(time.strptime(stamp, fmt)))
+        except (OverflowError, ValueError):
+            continue
+    return int(fallback_ts)
+
+
+def recording_segments(camera: dict, index: int, limit: int = 24, segment_seconds: int = 10) -> list[dict]:
     directory = recording_base_dir(camera, index)
     if not directory.exists():
         return []
@@ -1513,12 +1828,19 @@ def recording_segments(camera: dict, index: int, limit: int = 24) -> list[dict]:
     segments = []
     for path in files[:limit]:
         stat = path.stat()
+        start_ts = recording_segment_start_ts(path, stat.st_mtime)
+        duration_seconds = clamp_int(segment_seconds, 10, 1, 3600)
         segments.append(
             {
                 "name": path.name,
                 "url": f"recordings/{key}/{path.name}",
                 "size_bytes": stat.st_size,
                 "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(stat.st_mtime)),
+                "start_ts": start_ts,
+                "start_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(start_ts)),
+                "duration_seconds": duration_seconds,
+                "end_ts": start_ts + duration_seconds,
+                "kind": "video_segment",
             }
         )
     return segments
@@ -1708,7 +2030,9 @@ def recording_status_payload(config: dict | None = None) -> dict:
         directory = recording_base_dir(camera, index)
         segment_count = len(list(directory.glob("*.mp4"))) if directory.exists() else 0
         nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
-        segment_files = recording_segments(camera, index, limit=72)
+        segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
+        segment_files = recording_segments(camera, index, limit=240, segment_seconds=segment_seconds)
+        timeline_files = sorted(segment_files, key=lambda item: (item.get("start_ts") or 0, item.get("name") or ""))
         record_stream = camera.get("record_stream") or "main"
         record_rtsp = camera_stream(camera, record_stream)
         preflight_error = recording_preflight_error(camera, record_stream)
@@ -1744,7 +2068,14 @@ def recording_status_payload(config: dict | None = None) -> dict:
                 "directory_exists": directory.exists(),
                 "segments": segment_count,
                 "files": segment_files,
-                "segment_seconds": nvr.get("segment_seconds", 10),
+                "segment_seconds": segment_seconds,
+                "timeline": {
+                    "continuous": True,
+                    "file_count": len(timeline_files),
+                    "total_seconds": sum(safe_int(item.get("duration_seconds"), segment_seconds) for item in timeline_files),
+                    "oldest_at": timeline_files[0].get("start_at") if timeline_files else "",
+                    "newest_at": timeline_files[-1].get("start_at") if timeline_files else "",
+                },
                 "last_error": health["last_error"],
                 "log_path": health["log_path"],
                 "log_tail": health["log_tail"],
@@ -2616,6 +2947,26 @@ INDEX_HTML = r"""<!doctype html>
       .preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
       .preview iframe.live-frame { width: 100%; height: 100%; border: 0; display: block; background: #05080a; }
       .preview span { color: var(--muted); font-size: 13px; padding: 12px; text-align: center; }
+      .fullscreen-button {
+        position: absolute;
+        left: 10px;
+        top: 10px;
+        z-index: 3;
+        width: 32px;
+        height: 32px;
+        display: grid;
+        place-items: center;
+        padding: 0;
+        border-color: rgba(86,214,181,.45);
+        background: rgba(8, 13, 16, .68);
+        color: var(--accent);
+        backdrop-filter: blur(6px);
+      }
+      .fullscreen-button svg {
+        width: 17px;
+        height: 17px;
+        display: block;
+      }
       .live-blocked {
         width: 100%;
         height: 100%;
@@ -2794,6 +3145,34 @@ INDEX_HTML = r"""<!doctype html>
         border: 1px solid var(--line);
         border-radius: 8px;
         background: #05080a;
+      }
+      .recording-player-wrap {
+        position: relative;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .recording-player-wrap .recording-player {
+        border-radius: 8px;
+      }
+      .recording-timeline {
+        display: grid;
+        gap: 6px;
+        border: 1px solid rgba(86,214,181,.22);
+        border-radius: 8px;
+        padding: 9px 10px;
+        background: rgba(86,214,181,.05);
+      }
+      .timeline-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .recording-timeline input[type="range"] {
+        padding: 0;
+        accent-color: var(--accent);
       }
       .recording-empty {
         aspect-ratio: 16 / 9;
@@ -3040,6 +3419,7 @@ INDEX_HTML = r"""<!doctype html>
       let cameraAuto = {};
       let recordingStatus = {};
       let selectedRecording = {};
+      let selectedRecordingSeek = {};
       let configDirty = false;
       let lastFormDraft = null;
       let lastFormDraftAt = 0;
@@ -3079,6 +3459,39 @@ INDEX_HTML = r"""<!doctype html>
       function mediaMtxPlayerUrl(url) {
         const separator = String(url).includes('?') ? '&' : '?';
         return `${url}${separator}controls=true&muted=false&autoplay=true&playsInline=true&disablepictureinpicture=true`;
+      }
+
+      function fullscreenIcon() {
+        return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 3H3v5"/><path d="M16 3h5v5"/><path d="M21 16v5h-5"/><path d="M8 21H3v-5"/><path d="M3 3l7 7"/><path d="M21 3l-7 7"/><path d="M21 21l-7-7"/><path d="M3 21l7-7"/></svg>';
+      }
+
+      function requestEdgeFullscreen(target, context) {
+        if (!target) return;
+        const media = target.querySelector('video, iframe') || target;
+        try {
+          if (media.tagName === 'VIDEO' && typeof media.webkitEnterFullscreen === 'function') {
+            media.webkitEnterFullscreen();
+            debugEvent('ui_fullscreen_open', { context, mode: 'webkit_video' });
+            return;
+          }
+          const mediaRequest = media.requestFullscreen
+            || media.webkitRequestFullscreen
+            || media.msRequestFullscreen;
+          const targetRequest = target.requestFullscreen
+            || target.webkitRequestFullscreen
+            || target.msRequestFullscreen;
+          const request = mediaRequest || targetRequest;
+          const requestTarget = mediaRequest ? media : target;
+          if (!request) {
+            debugEvent('ui_fullscreen_unavailable', { context });
+            return;
+          }
+          Promise.resolve(request.call(requestTarget))
+            .then(() => debugEvent('ui_fullscreen_open', { context, mode: 'standard' }))
+            .catch((error) => debugEvent('ui_fullscreen_error', { context, message: error.message }));
+        } catch (error) {
+          debugEvent('ui_fullscreen_error', { context, message: error.message });
+        }
       }
 
       function parseUrl(value) {
@@ -3324,6 +3737,87 @@ INDEX_HTML = r"""<!doctype html>
         return date.toLocaleString();
       }
 
+      function formatDuration(value) {
+        const total = Math.max(0, Math.floor(Number(value || 0)));
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const seconds = total % 60;
+        const mm = String(minutes).padStart(hours ? 2 : 1, '0');
+        const ss = String(seconds).padStart(2, '0');
+        return hours ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
+      }
+
+      function sortedRecordingFiles(files) {
+        return [...(Array.isArray(files) ? files : [])]
+          .filter((file) => file && file.url)
+          .sort((a, b) => {
+            const at = Number(a.start_ts || 0);
+            const bt = Number(b.start_ts || 0);
+            if (at !== bt) return at - bt;
+            return String(a.name || '').localeCompare(String(b.name || ''));
+          });
+      }
+
+      function recordingTimeline(files) {
+        let offset = 0;
+        const entries = sortedRecordingFiles(files).map((file) => {
+          const duration = Math.max(1, Math.floor(Number(file.duration_seconds || 10)));
+          const entry = { file, offset, duration };
+          offset += duration;
+          return entry;
+        });
+        return { entries, total: offset };
+      }
+
+      function recordingOffsetForSelection(files, selectedUrl, seekSeconds = 0) {
+        const timeline = recordingTimeline(files);
+        const entry = timeline.entries.find((item) => item.file.url === selectedUrl) || timeline.entries[timeline.entries.length - 1];
+        if (!entry) return { timeline, value: 0, seek: 0 };
+        const seek = Math.max(0, Math.min(Math.floor(Number(seekSeconds || 0)), Math.max(0, entry.duration - 1)));
+        return { timeline, value: entry.offset + seek, seek };
+      }
+
+      function selectRecordingAtOffset(index, offset) {
+        const status = recordingStatus[index] || {};
+        const files = Array.isArray(status.files) ? status.files : [];
+        const { entries } = recordingTimeline(files);
+        if (!entries.length) return;
+        const requested = Math.max(0, Math.floor(Number(offset || 0)));
+        const target = entries.find((entry) => requested < entry.offset + entry.duration) || entries[entries.length - 1];
+        selectedRecording[index] = target.file.url;
+        selectedRecordingSeek[index] = Math.max(0, Math.min(requested - target.offset, Math.max(0, target.duration - 1)));
+        debugEvent('ui_recording_timeline_seek', {
+          index,
+          recording: target.file.name,
+          timeline_second: requested,
+          segment_second: selectedRecordingSeek[index],
+        });
+        renderNvrGrid();
+      }
+
+      function applyRecordingSeek() {
+        document.querySelectorAll('video[data-recording-player]').forEach((video) => {
+          const seek = Math.max(0, Number(video.dataset.recordingSeek || 0));
+          if (!seek) return;
+          const applySeek = () => {
+            try {
+              video.currentTime = seek;
+            } catch (error) {
+              debugEvent('ui_recording_seek_error', {
+                index: video.dataset.recordingPlayer,
+                seek,
+                message: error.message,
+              });
+            }
+          };
+          if (video.readyState >= 1) {
+            applySeek();
+          } else {
+            video.addEventListener('loadedmetadata', applySeek, { once: true });
+          }
+        });
+      }
+
       function pretty(value) {
         if (typeof value === 'string') return value || 'empty';
         try {
@@ -3359,8 +3853,11 @@ INDEX_HTML = r"""<!doctype html>
           }),
           logBlock('Edge debug', panelLogs.edge_debug || 'No debug log yet.'),
           logBlock('Last save debug', panelLogs.last_save_debug || {}),
+          logBlock('Last runtime sync', panelLogs.last_runtime_sync || {}),
           logBlock('Panel config', panelLogs.panel_config || {}),
           logBlock('Runtime edge.json', panelLogs.runtime_config_file || {}),
+          logBlock('MediaMTX runtime config', panelLogs.runtime_mediamtx_config || 'missing'),
+          logBlock('Janus streaming config', panelLogs.runtime_janus_streaming_config || 'missing'),
           logBlock('Last saved response', panelLogs.last_saved_config || {}),
           ...recordingLogs.map((item) => logBlock(`Recording ffmpeg: ${item.path}`, item.tail || 'empty'))
         ].join('');
@@ -3455,12 +3952,15 @@ INDEX_HTML = r"""<!doctype html>
         }
         const preview = live[liveKey]
           ? (plan.canEmbed
-            ? `<iframe class="live-frame" src="${escapeHtml(mediamtxUrl)}" data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} WebRTC live" loading="eager" allow="autoplay; fullscreen; encrypted-media" onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
+            ? `<iframe class="live-frame" src="${escapeHtml(mediamtxUrl)}" data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} WebRTC live" loading="eager" allow="autoplay; fullscreen; encrypted-media" allowfullscreen onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
             : liveBlockedPreview(plan))
           : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
+        const fullscreenButton = live[liveKey] && plan.canEmbed
+          ? `<button class="fullscreen-button" type="button" data-fullscreen-live aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>`
+          : '';
         return `
           <article class="camera video-tile">
-            <div class="preview" data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" data-live-path="${escapeHtml(mediamtxPath)}" title="Click to toggle live preview">${preview}${statusBadge}</div>
+            <div class="preview" data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" data-live-path="${escapeHtml(mediamtxPath)}" title="Click to toggle live preview">${preview}${statusBadge}${fullscreenButton}</div>
             <div class="body">
               <div class="row">
                 <div class="name">${escapeHtml(text(camera.name, camera.id))}</div>
@@ -3570,18 +4070,39 @@ INDEX_HTML = r"""<!doctype html>
         const recordError = status.record_error || status.last_error || '';
         const files = Array.isArray(status.files) ? status.files : [];
         const selected = selectedRecording[index] || '';
+        const seekSeconds = Number(selectedRecordingSeek[index] || 0);
         const selectedIndex = files.findIndex((file) => file.url === selected);
+        const selection = recordingOffsetForSelection(files, selected, seekSeconds);
+        const timeline = selection.timeline;
+        const timelineTotal = timeline.total;
+        const timelineValue = Math.max(0, Math.min(selection.value, Math.max(0, timelineTotal - 1)));
         const player = selected
-          ? `<video class="recording-player" src="${escapeHtml(panelPath(selected))}" controls preload="metadata" playsinline></video>`
+          ? `<div class="recording-player-wrap" data-recording-wrap="${index}">
+              <video class="recording-player" src="${escapeHtml(panelPath(selected))}" controls preload="metadata" playsinline data-recording-player="${index}" data-recording-seek="${escapeHtml(selection.seek)}"></video>
+              <button class="fullscreen-button" type="button" data-recording-fullscreen="${index}" aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>
+            </div>`
           : `<div class="recording-empty">No video yet</div>`;
+        const timelineControl = timelineTotal
+          ? `<div class="recording-timeline">
+              <div class="timeline-row">
+                <span>Continuous video timeline</span>
+                <span>${escapeHtml(formatDuration(timelineValue))} / ${escapeHtml(formatDuration(timelineTotal))}</span>
+              </div>
+              <input type="range" min="0" max="${Math.max(0, timelineTotal - 1)}" step="1" value="${timelineValue}" data-recording-scrub="${index}" aria-label="Recording timeline">
+              <div class="timeline-row">
+                <span>${escapeHtml(text(status.timeline?.oldest_at, 'oldest'))}</span>
+                <span>${escapeHtml(text(status.timeline?.newest_at, 'newest'))}</span>
+              </div>
+            </div>`
+          : '';
         const recordingList = files.length
           ? `<div class="recording-film-grid">${files.map((file) => `
               <button class="recording-tile ${file.url === selected ? 'active' : ''}" type="button" data-play-recording="${escapeHtml(file.url)}" data-record-index="${index}">
                 <b>${escapeHtml(file.name)}</b>
-                <span class="recording-meta">${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatDate(file.modified_at))}</span>
+                <span class="recording-meta">${escapeHtml(formatDuration(file.duration_seconds || status.segment_seconds || 10))} | ${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatDate(file.start_at || file.modified_at))}</span>
               </button>
             `).join('')}</div>`
-          : `<p class="notice">${desiredRecording ? 'Recording is scheduled. The first video appears after the first' : 'Start recording. The first video appears after the first'} ${escapeHtml(text(status.segment_seconds, 10))}-second segment closes.</p>`;
+          : `<p class="notice">${desiredRecording ? 'Continuous video recording is scheduled. The first playable clip appears after the first' : 'Start continuous video recording. The first playable clip appears after the first'} ${escapeHtml(text(status.segment_seconds, 10))}-second segment closes.</p>`;
         const diagnostics = recordError
           ? `<p class="section-status state-offline">${escapeHtml(recordErrorText(recordError))}</p>`
           : `<p class="section-status">${escapeHtml(text(status.record_rtsp, 'Record RTSP not ready'))}</p>`;
@@ -3593,6 +4114,7 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="rec-badge ${isRecording ? '' : 'off'}">${badgeText}</div>
               </div>
               ${player}
+              ${timelineControl}
               ${diagnostics}
               <div class="actions">
                 <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}" ${!isRecording && !canRecord ? 'disabled' : ''}>${isRecording ? 'Stop' : 'Record'}</button>
@@ -3778,6 +4300,7 @@ INDEX_HTML = r"""<!doctype html>
       function renderNvrGrid() {
         const cameras = config.cameras && config.cameras.length ? config.cameras : [];
         nvrGrid.innerHTML = cameras.map(nvrCard).join('');
+        applyRecordingSeek();
       }
 
       function renderPresetSlots(cameras) {
@@ -4314,9 +4837,11 @@ INDEX_HTML = r"""<!doctype html>
             const selected = selectedRecording[item.index];
             if (files.length && !files.some((file) => file.url === selected)) {
               selectedRecording[item.index] = files[0].url;
+              selectedRecordingSeek[item.index] = 0;
             }
             if (!files.length) {
               delete selectedRecording[item.index];
+              delete selectedRecordingSeek[item.index];
             }
           });
           renderNvrGrid();
@@ -4333,6 +4858,7 @@ INDEX_HTML = r"""<!doctype html>
           ? Math.min(files.length - 1, current + 1)
           : Math.max(0, current - 1);
         selectedRecording[index] = files[next].url;
+        selectedRecordingSeek[index] = 0;
         renderNvrGrid();
       }
 
@@ -4520,8 +5046,8 @@ INDEX_HTML = r"""<!doctype html>
         const sentSummary = saveSummary(payload);
         const savedSummary = saveSummary(verified);
         saveState.textContent = sentSummary === savedSummary
-          ? `Saved. ${savedSummary}`
-          : `Saved, but server normalized values. Sent: ${sentSummary} | Server: ${savedSummary}`;
+          ? `Saved and runtime synced. ${savedSummary}`
+          : `Saved and runtime synced, but server normalized values. Sent: ${sentSummary} | Server: ${savedSummary}`;
         debugEvent('ui_save_config_done', {
           sentSummary,
           serverSummary: saveSummary(data),
@@ -4573,7 +5099,7 @@ INDEX_HTML = r"""<!doctype html>
           updateLiveTimer();
         }
         if (panelLogs) await loadLogs();
-        edgeSaveState.textContent = 'Saved. Edge settings are stored in /homeassistant/edge/edge.json and mirrored to /config/edge.json plus panel-config.json.';
+        edgeSaveState.textContent = 'Saved and runtime synced. Edge settings are stored in /homeassistant/edge/edge.json and mirrored to /config/edge.json plus panel-config.json.';
         debugEvent('ui_save_edge_settings_done', {
           sentSummary: saveSummary(payload),
           savedSummary: saveSummary(config),
@@ -4616,6 +5142,14 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       grid.addEventListener('click', async (event) => {
+        const fullscreenTarget = event.target.closest('[data-fullscreen-live]');
+        if (fullscreenTarget) {
+          event.preventDefault();
+          event.stopPropagation();
+          const preview = fullscreenTarget.closest('.preview');
+          requestEdgeFullscreen(preview, 'home_live');
+          return;
+        }
         const addTile = event.target.closest('[data-add-camera-tile]');
         if (addTile) {
           debugEvent('ui_add_camera_tile_click');
@@ -4642,11 +5176,20 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       nvrGrid.addEventListener('click', async (event) => {
+        const fullscreenTarget = event.target.closest('[data-recording-fullscreen]');
+        if (fullscreenTarget) {
+          event.preventDefault();
+          event.stopPropagation();
+          const wrap = fullscreenTarget.closest('[data-recording-wrap]');
+          requestEdgeFullscreen(wrap, 'nvr_recording');
+          return;
+        }
         const playTarget = event.target.closest('[data-play-recording]');
         const playRecording = playTarget?.dataset?.playRecording;
         let index = playTarget?.dataset?.recordIndex;
         if (index !== undefined && playRecording) {
           selectedRecording[index] = playRecording;
+          selectedRecordingSeek[index] = 0;
           renderNvrGrid();
           return;
         }
@@ -4672,6 +5215,12 @@ INDEX_HTML = r"""<!doctype html>
         }
         await loadRecordingStatus();
         await loadCameras();
+      });
+
+      nvrGrid.addEventListener('change', (event) => {
+        const scrub = event.target.closest('[data-recording-scrub]');
+        if (!scrub) return;
+        selectRecordingAtOffset(scrub.dataset.recordingScrub, scrub.value);
       });
 
       restoreNavState();
@@ -4909,6 +5458,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "panel_mirror_path": str(PANEL_CONFIG_PATH),
             })
             stop_orphan_recordings(saved_payload)
+            sync_runtime_engine_config(saved_payload, "config_save")
             schedule_recording_ensure(saved_payload, "config_save")
             remember_camera_presets(saved_payload.get("cameras", []))
             refresh_status()
@@ -5061,9 +5611,11 @@ def main() -> None:
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
     try:
+        config = load_config()
+        sync_runtime_engine_config(config, "boot_panel")
         status_payload = refresh_status()
         write_debug_event("boot_refresh_status_done", {"camera_summary": config_summary(status_payload)})
-        schedule_recording_ensure(load_config(), "boot")
+        schedule_recording_ensure(config, "boot")
     except Exception as error:
         write_debug_event("boot_refresh_status_error", {"error": str(error), "type": type(error).__name__})
         raise

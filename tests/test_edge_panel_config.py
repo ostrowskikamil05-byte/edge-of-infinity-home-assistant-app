@@ -17,6 +17,8 @@ def load_panel_module():
     os.environ["EDGE_DATA_DIR"] = str(temp_root / "data")
     os.environ["EDGE_HOME_CONFIG"] = str(temp_root / "home" / "edge.json")
     os.environ["EDGE_ADDON_CONFIG"] = str(temp_root / "addon-config" / "edge.json")
+    os.environ["EDGE_MEDIAMTX_CONFIG"] = str(temp_root / "runtime" / "mediamtx.yml")
+    os.environ["EDGE_JANUS_CONFIG_DIR"] = str(temp_root / "runtime" / "janus")
     spec = importlib.util.spec_from_file_location(f"edge_panel_test_{temp_root.name}", PANEL_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -59,11 +61,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.15")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.15")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.15")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.15")
-        self.assertIn("v0.10.15", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.16")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.16")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.16")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.16")
+        self.assertIn("v0.10.16", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
@@ -329,6 +331,55 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         self.assertIn("audio = true", runner)
         self.assertNotIn("audio = false", runner)
+
+    def test_runtime_engine_config_uses_saved_camera_values(self):
+        panel = load_panel_module()
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "live": {
+                    "mobile_webrtc_public_url": "http://edge.example.com:8889",
+                    "mobile_webrtc_public_hosts": "homeassistant.local",
+                    "mobile_webrtc_ice_transport": "tcp",
+                },
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.136",
+                        "username": "admin",
+                        "password": "secret",
+                        "live_stream": "sub",
+                        "tile_stream": "sub",
+                        "record_stream": "sub",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+
+        result = panel.sync_runtime_engine_config(payload, "test")
+        mediamtx_config = panel.MEDIAMTX_CONFIG_PATH.read_text(encoding="utf-8")
+        janus_config = (panel.JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg").read_text(encoding="utf-8")
+
+        self.assertTrue(result["mediamtx"]["written"])
+        self.assertIn("edge.example.com", mediamtx_config)
+        self.assertIn("hikvision_1_sub:", mediamtx_config)
+        self.assertIn("rtsp://admin:secret@192.168.33.136:554/Streaming/Channels/102", mediamtx_config)
+        self.assertIn("record: yes", mediamtx_config)
+        self.assertIn("audio = true", janus_config)
+        self.assertIn("hikvision_1_sub", janus_config)
+
+    def test_panel_has_fullscreen_and_recording_timeline_controls(self):
+        html = PANEL_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("function requestEdgeFullscreen", html)
+        self.assertIn("data-fullscreen-live", html)
+        self.assertIn("data-recording-fullscreen", html)
+        self.assertIn("data-recording-scrub", html)
+        self.assertIn("function selectRecordingAtOffset", html)
 
     def test_live_mobile_settings_are_normalized_and_preserved(self):
         panel = load_panel_module()
@@ -622,6 +673,43 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         self.assertTrue(status["desired_recording"])
         self.assertEqual(status["recording_status"], "scheduled_stopped")
+
+    def test_recording_status_exposes_video_timeline_metadata(self):
+        panel = load_panel_module()
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "nvr": {"segment_seconds": 12},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+        panel.write_json(panel.CONFIG_PATH, payload)
+        directory = panel.recording_base_dir(payload["cameras"][0], 0)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "20260727-173000.mp4").write_bytes(b"video")
+        (directory / "20260727-173012.mp4").write_bytes(b"video")
+
+        status = panel.recording_status_payload(payload)["cameras"][0]
+        files = status["files"]
+
+        self.assertEqual(status["segment_seconds"], 12)
+        self.assertEqual(status["timeline"]["file_count"], 2)
+        self.assertEqual(status["timeline"]["total_seconds"], 24)
+        self.assertEqual(files[0]["kind"], "video_segment")
+        self.assertEqual(files[0]["duration_seconds"], 12)
+        self.assertIn("start_ts", files[0])
 
     def test_ensure_configured_recordings_starts_enabled_record_camera(self):
         panel = load_panel_module()

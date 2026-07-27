@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.16
+
+- Sync MediaMTX and Janus runtime config immediately after panel saves, so changed camera IPs, stream choices, WebRTC public hosts, ICE mode, and NVR segment length stop waiting for an add-on restart.
+- Add runtime sync diagnostics to the Logs page, including the redacted generated MediaMTX and Janus streaming config.
+- Expose NVR recordings as continuous video timeline metadata and add a second-level playback scrubber across recent MP4 segments.
+- Add fullscreen controls for Home live tiles and NVR playback.
+
 ## 0.10.15
 
 - Restore live audio by embedding MediaMTX player pages with audio unmuted and visible controls instead of forcing `muted=true` with hidden controls.
