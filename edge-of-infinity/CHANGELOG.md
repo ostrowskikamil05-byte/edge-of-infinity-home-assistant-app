@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.20
+
+- Fix mobile fullscreen by falling back to an in-panel fullscreen mode when the Home Assistant mobile WebView blocks the browser Fullscreen API.
+- Switch NVR playback toward native video controls instead of the custom range slider, reducing UI-triggered reloads while seeking.
+- Defer recording thumbnail loading through lazy/idle loading so snapshot generation does not compete with the video player during startup.
+- Add media-fragment seeks for mobile MP4 segment playback to make opening a selected moment faster.
+
 ## 0.10.19
 
 - Add recording thumbnails for every listed MP4 segment, so the NVR list shows timestamped preview frames instead of using the player as a snapshot tool.

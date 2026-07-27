@@ -17,9 +17,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.19"
+APP_VERSION = "0.10.20"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-thumbnails-fast-seek-v11"
+UI_BUILD = "mobile-nvr-native-player-v12"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -3063,6 +3063,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       * { box-sizing: border-box; }
       body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; }
+      body.soft-fullscreen-active { overflow: hidden; }
       .app {
         min-height: 100vh;
         display: grid;
@@ -3201,6 +3202,39 @@ INDEX_HTML = r"""<!doctype html>
         width: 17px;
         height: 17px;
         display: block;
+      }
+      .edge-soft-fullscreen {
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 9999 !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        max-width: none !important;
+        max-height: none !important;
+        aspect-ratio: auto !important;
+        border-radius: 0 !important;
+        background: #000 !important;
+        display: grid !important;
+        place-items: center !important;
+      }
+      .edge-soft-fullscreen .recording-player,
+      .edge-soft-fullscreen iframe,
+      .edge-soft-fullscreen .live-frame {
+        width: 100% !important;
+        height: 100% !important;
+        max-height: 100vh !important;
+        aspect-ratio: auto !important;
+        object-fit: contain !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+      }
+      .edge-soft-fullscreen .fullscreen-button {
+        left: auto;
+        right: 12px;
+        top: 12px;
+        width: 42px;
+        height: 42px;
+        background: rgba(0,0,0,.62);
       }
       .live-blocked {
         width: 100%;
@@ -3397,6 +3431,7 @@ INDEX_HTML = r"""<!doctype html>
         padding: 9px 10px;
         background: rgba(86,214,181,.05);
       }
+      .recording-native-timeline { padding: 8px 10px; }
       .timeline-row {
         display: flex;
         align-items: center;
@@ -3404,10 +3439,6 @@ INDEX_HTML = r"""<!doctype html>
         gap: 10px;
         color: var(--muted);
         font-size: 12px;
-      }
-      .recording-timeline input[type="range"] {
-        padding: 0;
-        accent-color: var(--accent);
       }
       .recording-empty {
         aspect-ratio: 16 / 9;
@@ -3687,7 +3718,6 @@ INDEX_HTML = r"""<!doctype html>
       let recordingStreamStartOffset = {};
       let recordingStreamNonce = {};
       let recordingAutoplayAfterRender = {};
-      let nvrScrubbing = false;
       let lastNvrRenderSignature = '';
       let configDirty = false;
       let lastFormDraft = null;
@@ -3695,6 +3725,10 @@ INDEX_HTML = r"""<!doctype html>
       let panelLogs = null;
       let activePage = 'home';
       let nvrLoading = false;
+      let softFullscreenTarget = null;
+      let thumbnailHydrationTimer = 0;
+      let thumbnailObserver = null;
+      const THUMB_PLACEHOLDER = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270"%3E%3Crect width="480" height="270" fill="%2305080a"/%3E%3C/svg%3E';
       const liveFrameTimers = new Map();
 
       const panelBase = window.location.pathname.endsWith('/')
@@ -3734,9 +3768,40 @@ INDEX_HTML = r"""<!doctype html>
         return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 3H3v5"/><path d="M16 3h5v5"/><path d="M21 16v5h-5"/><path d="M8 21H3v-5"/><path d="M3 3l7 7"/><path d="M21 3l-7 7"/><path d="M21 21l-7-7"/><path d="M3 21l7-7"/></svg>';
       }
 
+      function exitSoftFullscreen(context = 'unknown') {
+        if (!softFullscreenTarget) return;
+        softFullscreenTarget.classList.remove('edge-soft-fullscreen');
+        document.body.classList.remove('soft-fullscreen-active');
+        debugEvent('ui_fullscreen_close', { context, mode: 'soft' });
+        softFullscreenTarget = null;
+      }
+
+      function enterSoftFullscreen(target, context) {
+        if (!target) return;
+        exitSoftFullscreen(context);
+        softFullscreenTarget = target;
+        target.classList.add('edge-soft-fullscreen');
+        document.body.classList.add('soft-fullscreen-active');
+        debugEvent('ui_fullscreen_open', { context, mode: 'soft_fallback' });
+      }
+
       function requestEdgeFullscreen(target, context) {
         if (!target) return;
         const media = target.querySelector('video, iframe') || target;
+        if (softFullscreenTarget === target) {
+          exitSoftFullscreen(context);
+          return;
+        }
+        const activeFullscreen = document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement;
+        if (activeFullscreen) {
+          const exit = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+          if (exit) {
+            Promise.resolve(exit.call(document))
+              .then(() => debugEvent('ui_fullscreen_close', { context, mode: 'standard' }))
+              .catch((error) => debugEvent('ui_fullscreen_error', { context, message: error.message, phase: 'exit' }));
+            return;
+          }
+        }
         try {
           if (media.tagName === 'VIDEO' && typeof media.webkitEnterFullscreen === 'function') {
             media.webkitEnterFullscreen();
@@ -3752,14 +3817,19 @@ INDEX_HTML = r"""<!doctype html>
           const request = mediaRequest || targetRequest;
           const requestTarget = mediaRequest ? media : target;
           if (!request) {
-            debugEvent('ui_fullscreen_unavailable', { context });
+            debugEvent('ui_fullscreen_unavailable', { context, fallback: 'soft' });
+            enterSoftFullscreen(target, context);
             return;
           }
           Promise.resolve(request.call(requestTarget))
             .then(() => debugEvent('ui_fullscreen_open', { context, mode: 'standard' }))
-            .catch((error) => debugEvent('ui_fullscreen_error', { context, message: error.message }));
+            .catch((error) => {
+              debugEvent('ui_fullscreen_error', { context, message: error.message, fallback: 'soft' });
+              enterSoftFullscreen(target, context);
+            });
         } catch (error) {
-          debugEvent('ui_fullscreen_error', { context, message: error.message });
+          debugEvent('ui_fullscreen_error', { context, message: error.message, fallback: 'soft' });
+          enterSoftFullscreen(target, context);
         }
       }
 
@@ -4097,6 +4167,46 @@ INDEX_HTML = r"""<!doctype html>
           || /Android|iPhone|iPad|iPod|Mobile|Home Assistant/i.test(navigator.userAgent || '');
       }
 
+      function mediaUrlWithTimeFragment(url, seekSeconds) {
+        const seek = Math.max(0, Number(seekSeconds || 0));
+        if (!url || !seek) return url;
+        const clean = String(url).split('#', 1)[0];
+        return `${clean}#t=${seek.toFixed(3)}`;
+      }
+
+      function loadRecordingThumbnail(image) {
+        const source = image?.dataset?.recordingThumbSrc;
+        if (!source) return;
+        image.src = source;
+        image.removeAttribute('data-recording-thumb-src');
+      }
+
+      function hydrateRecordingThumbnails() {
+        if (thumbnailObserver) {
+          thumbnailObserver.disconnect();
+          thumbnailObserver = null;
+        }
+        const images = Array.from(nvrGrid.querySelectorAll('img[data-recording-thumb-src]'));
+        if (!images.length) return;
+        if ('IntersectionObserver' in window) {
+          thumbnailObserver = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+              if (!entry.isIntersecting) return;
+              loadRecordingThumbnail(entry.target);
+              thumbnailObserver.unobserve(entry.target);
+            });
+          }, { root: null, rootMargin: '220px 0px', threshold: 0.01 });
+          images.forEach((image) => thumbnailObserver.observe(image));
+          return;
+        }
+        images.slice(0, 8).forEach(loadRecordingThumbnail);
+      }
+
+      function scheduleRecordingThumbnailHydration() {
+        if (thumbnailHydrationTimer) window.clearTimeout(thumbnailHydrationTimer);
+        thumbnailHydrationTimer = window.setTimeout(hydrateRecordingThumbnails, isMobileNvrPlayback() ? 900 : 250);
+      }
+
       function offsetForRecordingUrl(index, url) {
         const status = recordingStatus[index] || {};
         const timeline = recordingTimeline(status.files || []);
@@ -4116,9 +4226,6 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function isNvrPlaybackBusy() {
-        if (nvrScrubbing) return true;
-        const focusedScrub = document.activeElement?.closest?.('[data-recording-scrub]');
-        if (focusedScrub) return true;
         return Array.from(nvrGrid.querySelectorAll('video[data-recording-player]')).some((video) => {
           return !video.paused && !video.ended && video.readyState >= 1;
         });
@@ -4131,10 +4238,6 @@ INDEX_HTML = r"""<!doctype html>
         const label = nvrGrid.querySelector(`[data-recording-timeline-label="${index}"]`);
         if (label) {
           label.textContent = recordingTimelineLabel(index, safeValue, safeTotal);
-        }
-        const scrub = nvrGrid.querySelector(`[data-recording-scrub="${index}"]`);
-        if (scrub && document.activeElement !== scrub) {
-          scrub.value = String(Math.min(safeValue, Number(scrub.max || safeValue)));
         }
       }
 
@@ -4212,15 +4315,6 @@ INDEX_HTML = r"""<!doctype html>
           });
           return false;
         }
-      }
-
-      function previewRecordingAtOffset(index, offset) {
-        const target = recordingTargetForOffset(index, offset);
-        if (!target) return;
-        updateRecordingTimelineUi(index, target.requested, target.timeline.total);
-        selectedRecording[index] = target.target.file.url;
-        selectedRecordingSeek[index] = target.seek;
-        selectedRecordingTimeline[index] = target.requested;
       }
 
       function selectRecordingAtOffset(index, offset) {
@@ -4637,13 +4731,14 @@ INDEX_HTML = r"""<!doctype html>
         const selectedFile = targetForPoster?.target?.file || null;
         const mobilePlayback = isMobileNvrPlayback();
         const playbackMode = mobilePlayback ? 'mobile_segment' : 'continuous_stream';
-        const playerSrc = timelineTotal
+        const rawPlayerSrc = timelineTotal
           ? (mobilePlayback && selectedFile?.url ? panelPath(selectedFile.url) : recordingStreamUrl(status, index, streamStart))
           : '';
         const playerSeek = mobilePlayback ? Number(targetForPoster?.seek || 0) : 0;
+        const playerSrc = mobilePlayback ? mediaUrlWithTimeFragment(rawPlayerSrc, playerSeek) : rawPlayerSrc;
         const playerStreamStart = mobilePlayback ? Number(targetForPoster?.target?.offset || 0) : streamStart;
         const posterUrl = targetForPoster?.target?.file?.thumbnail_url ? panelPath(targetForPoster.target.file.thumbnail_url) : '';
-        const preloadMode = mobilePlayback ? 'metadata' : 'auto';
+        const preloadMode = 'auto';
         const playable = Boolean(timelineTotal && playerSrc);
         const player = playable
           ? `<div class="recording-player-wrap" data-recording-wrap="${index}">
@@ -4652,12 +4747,11 @@ INDEX_HTML = r"""<!doctype html>
             </div>`
           : `<div class="recording-empty">No video yet</div>`;
         const timelineControl = timelineTotal
-          ? `<div class="recording-timeline">
+          ? `<div class="recording-timeline recording-native-timeline">
               <div class="timeline-row">
-                <span>Continuous video timeline</span>
+                <span>Recording time</span>
                 <span data-recording-timeline-label="${index}">${escapeHtml(recordingTimelineLabel(index, timelineValue, timelineTotal))}</span>
               </div>
-              <input type="range" min="0" max="${Math.max(0, timelineTotal - 1)}" step="1" value="${timelineValue}" data-recording-scrub="${index}" aria-label="Recording timeline">
               <div class="timeline-row">
                 <span>${escapeHtml(text(status.timeline?.oldest_at, 'oldest'))}</span>
                 <span>${escapeHtml(text(status.timeline?.newest_at, 'newest'))}</span>
@@ -4668,7 +4762,7 @@ INDEX_HTML = r"""<!doctype html>
           ? `<div class="recording-film-grid">${files.map((file) => `
               <button class="recording-tile ${file.url === selected ? 'active' : ''}" type="button" data-play-recording="${escapeHtml(file.url)}" data-recording-offset="${escapeHtml(offsetForRecordingUrl(index, file.url))}" data-record-index="${index}">
                 <span class="recording-thumb-wrap">
-                  <img class="recording-thumb" src="${escapeHtml(panelPath(file.thumbnail_url || ''))}" alt="${escapeHtml(file.name)} snapshot" loading="lazy">
+                  <img class="recording-thumb" src="${THUMB_PLACEHOLDER}" data-recording-thumb-src="${escapeHtml(panelPath(file.thumbnail_url || ''))}" alt="${escapeHtml(file.name)} snapshot" loading="lazy" decoding="async" fetchpriority="low">
                   <span class="recording-thumb-time">${escapeHtml(formatTimestampSeconds(file.start_ts || file.start_at || file.modified_at))}</span>
                 </span>
                 <b>${escapeHtml(file.name)}</b>
@@ -4880,6 +4974,7 @@ INDEX_HTML = r"""<!doctype html>
           active_playback: isNvrPlaybackBusy(),
         });
         applyRecordingSeek();
+        scheduleRecordingThumbnailHydration();
       }
 
       function renderPresetSlots(cameras) {
@@ -5816,39 +5911,9 @@ INDEX_HTML = r"""<!doctype html>
         await loadCameras();
       });
 
-      nvrGrid.addEventListener('change', (event) => {
-        const scrub = event.target.closest('[data-recording-scrub]');
-        if (!scrub) return;
-        nvrScrubbing = false;
-        selectRecordingAtOffset(scrub.dataset.recordingScrub, scrub.value);
-      });
-
-      nvrGrid.addEventListener('input', (event) => {
-        const scrub = event.target.closest('[data-recording-scrub]');
-        if (!scrub) return;
-        nvrScrubbing = true;
-        previewRecordingAtOffset(scrub.dataset.recordingScrub, scrub.value);
-      });
-
-      nvrGrid.addEventListener('pointerdown', (event) => {
-        if (event.target.closest('[data-recording-scrub]')) {
-          nvrScrubbing = true;
-        }
-      });
-
-      nvrGrid.addEventListener('pointerup', (event) => {
-        if (event.target.closest('[data-recording-scrub]')) {
-          nvrScrubbing = false;
-        }
-      });
-
-      window.addEventListener('pointerup', () => {
-        nvrScrubbing = false;
-      });
-
       nvrGrid.addEventListener('timeupdate', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if (video && !nvrScrubbing) syncRecordingVideoProgress(video);
+        if (video) syncRecordingVideoProgress(video);
       }, true);
 
       nvrGrid.addEventListener('ended', (event) => {
@@ -5880,6 +5945,18 @@ INDEX_HTML = r"""<!doctype html>
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if (video) debugEvent('ui_recording_video_error', recordingVideoDiagnostics(video));
       }, true);
+
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') exitSoftFullscreen('keyboard');
+      });
+
+      document.addEventListener('fullscreenchange', () => {
+        if (!document.fullscreenElement) debugEvent('ui_fullscreen_change', { active: false });
+      });
+
+      document.addEventListener('webkitfullscreenchange', () => {
+        if (!document.webkitFullscreenElement) debugEvent('ui_fullscreen_change', { active: false, webkit: true });
+      });
 
       restoreNavState();
 
