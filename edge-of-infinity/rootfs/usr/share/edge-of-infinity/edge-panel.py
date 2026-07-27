@@ -548,9 +548,6 @@ def normalize_camera(raw: dict, index: int) -> dict:
     default_sub_channel = hikvision_channel_for_camera_number(camera_number, "sub")
     raw_main_channel = raw.get("rtsp_main_channel") or hikvision_channel_from_rtsp(rtsp_main, default_main_channel)
     raw_sub_channel = raw.get("rtsp_sub_channel") or hikvision_channel_from_rtsp(rtsp_sub, default_sub_channel)
-    if raw.get("camera_number"):
-        raw_main_channel = raw_main_channel if str(raw_main_channel).startswith(camera_number) else default_main_channel
-        raw_sub_channel = raw_sub_channel if str(raw_sub_channel).startswith(camera_number) else default_sub_channel
     rtsp_main_channel = normalize_hikvision_channel(
         raw_main_channel,
         default_main_channel,
@@ -953,6 +950,26 @@ def commit_panel_config(payload: dict) -> dict:
     write_json(CONFIG_PATH, committed)
     clear_legacy_override_files()
     return committed
+
+
+def prepare_config_for_save(raw_payload: dict) -> tuple[dict, dict, dict, dict]:
+    if not isinstance(raw_payload, dict):
+        raw_payload = {}
+    raw_cameras = raw_payload.get("cameras") if isinstance(raw_payload, dict) else None
+    if not raw_cameras:
+        existing = load_config()
+        if existing.get("cameras"):
+            raw_payload = {**existing, **raw_payload, "cameras": existing["cameras"]}
+    merged_payload = merge_existing_camera_values(raw_payload)
+    validate_config_for_save(merged_payload)
+    normalized_payload = normalize_config(merged_payload)
+    final_payload = preserve_submitted_stream_choices(
+        json.loads(json.dumps(normalized_payload)),
+        merged_payload,
+        raw_payload,
+    )
+    validate_config_for_save(final_payload)
+    return raw_payload, merged_payload, normalized_payload, final_payload
 
 
 def run_json(command: list[str], timeout: int) -> dict | None:
@@ -3675,10 +3692,10 @@ INDEX_HTML = r"""<!doctype html>
           const mainInput = get('rtsp-main-channel').value.trim();
           const subInput = get('rtsp-sub-channel').value.trim();
           const rtspMainChannel = vendor === 'hikvision'
-            ? (mainInput && mainInput.startsWith(cameraNumber) ? mainInput : defaultMainChannel)
+            ? (mainInput || defaultMainChannel)
             : '';
           const rtspSubChannel = vendor === 'hikvision'
-            ? (subInput && subInput.startsWith(cameraNumber) ? subInput : defaultSubChannel)
+            ? (subInput || defaultSubChannel)
             : '';
           const rtspMainRaw = get('rtsp-main').value.trim();
           const rtspSubRaw = get('rtsp-sub').value.trim();
@@ -4278,7 +4295,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.5"
+    server_version = "EdgePanel/0.10.6"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -4400,40 +4417,26 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def save_config(self) -> None:
         try:
-            raw_payload = self.read_body_json()
-            if not isinstance(raw_payload, dict):
-                raw_payload = {}
-            raw_cameras = raw_payload.get("cameras") if isinstance(raw_payload, dict) else None
-            if not raw_cameras:
-                existing = load_config()
-                if existing.get("cameras"):
-                    raw_payload = {**existing, **raw_payload, "cameras": existing["cameras"]}
-            merged_payload = merge_existing_camera_values(raw_payload)
-            validate_config_for_save(merged_payload)
-            normalized_payload = normalize_config(merged_payload)
-            payload = json.loads(json.dumps(normalized_payload))
-            payload = preserve_submitted_stream_choices(payload, merged_payload, raw_payload)
-            validate_config_for_save(payload)
+            raw_payload, merged_payload, normalized_payload, final_payload = prepare_config_for_save(self.read_body_json())
             backup_config()
             backup_panel_config()
-            committed_payload = commit_panel_config(payload)
-            loaded_payload = load_config()
-            if config_summary(loaded_payload) != config_summary(committed_payload):
+            committed_payload = commit_panel_config(final_payload)
+            saved_payload = authoritative_config_from_payload(read_json(PANEL_CONFIG_PATH, {"cameras": []}))
+            if config_summary(saved_payload) != config_summary(committed_payload):
                 write_debug_event("config_save_rewrite_after_verify", {
                     "expected_summary": config_summary(committed_payload),
-                    "loaded_summary": config_summary(loaded_payload),
+                    "loaded_summary": config_summary(saved_payload),
                 })
                 committed_payload = commit_panel_config(committed_payload)
-                loaded_payload = load_config()
-            saved_payload = preserve_submitted_stream_choices(loaded_payload, committed_payload, merged_payload, raw_payload)
-            saved_payload = commit_panel_config(saved_payload)
+                saved_payload = authoritative_config_from_payload(read_json(PANEL_CONFIG_PATH, {"cameras": []}))
             write_json(HOME_DIR / "edge.last-saved.json", saved_payload)
             save_debug_payload(raw_payload, merged_payload, normalized_payload, saved_payload)
             write_debug_event("config_save", {
                 "raw_summary": config_summary(raw_payload),
                 "merged_summary": config_summary(merged_payload),
                 "normalized_summary": config_summary(normalized_payload),
-                "final_summary": config_summary(committed_payload),
+                "final_summary": config_summary(final_payload),
+                "committed_summary": config_summary(committed_payload),
                 "saved_summary": config_summary(saved_payload),
                 "verified": config_summary(committed_payload) == config_summary(saved_payload),
                 "changed_by": self.client_address[0],
@@ -4581,6 +4584,7 @@ def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     DATA_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    clear_legacy_override_files()
     write_debug_event("boot_start", {
         "server_version": EdgeHandler.server_version,
         "home_dir": str(HOME_DIR),

@@ -155,6 +155,37 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
         self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
 
+    def test_prepare_save_keeps_ui_changes_without_bouncing_to_existing_config(self):
+        panel = load_panel_module()
+        existing = {
+            "server": {},
+            "storage": {},
+            "cameras": [camera("hikvision_1", "192.168.33.21", "main")],
+        }
+        panel.write_json(panel.PANEL_CONFIG_PATH, existing)
+
+        raw_payload = json.loads(json.dumps(existing))
+        raw_payload["cameras"][0]["camera_number"] = "1"
+        raw_payload["cameras"][0]["rtsp_main_channel"] = "201"
+        raw_payload["cameras"][0]["rtsp_sub_channel"] = "202"
+        raw_payload["cameras"][0]["tile_stream"] = "sub"
+        raw_payload["cameras"][0]["live_stream"] = "sub"
+        raw_payload["cameras"][0]["record_stream"] = "sub"
+        raw_payload["cameras"][0]["snapshot_stream"] = "sub"
+
+        _, _, _, final_payload = panel.prepare_config_for_save(raw_payload)
+        committed = panel.commit_panel_config(final_payload)
+        loaded = panel.load_config()
+
+        self.assertEqual(committed["cameras"][0]["rtsp_main_channel"], "201")
+        self.assertEqual(committed["cameras"][0]["rtsp_sub_channel"], "202")
+        self.assertEqual(committed["cameras"][0]["live_stream"], "sub")
+        self.assertEqual(committed["cameras"][0]["record_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["rtsp_main_channel"], "201")
+        self.assertEqual(loaded["cameras"][0]["rtsp_sub_channel"], "202")
+        self.assertEqual(loaded["cameras"][0]["live_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
+
     def test_commit_panel_config_clears_legacy_override_files(self):
         panel = load_panel_module()
         payload = {
@@ -232,8 +263,6 @@ class EdgePanelConfigTests(unittest.TestCase):
                     "username": "admin",
                     "password": "secret",
                     "camera_number": "2",
-                    "rtsp_main_channel": "101",
-                    "rtsp_sub_channel": "102",
                     "enabled": True,
                     "record": True,
                 }
@@ -248,6 +277,36 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(camera_config["rtsp_sub_channel"], "202")
         self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.168.33.135:554/Streaming/Channels/201")
         self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.168.33.135:554/Streaming/Channels/202")
+
+    def test_manual_hikvision_channels_are_not_overwritten_by_camera_number(self):
+        panel = load_panel_module()
+        payload = {
+            "server": {},
+            "storage": {},
+            "cameras": [
+                {
+                    "id": "hikvision_1",
+                    "vendor": "hikvision",
+                    "host": "192.168.33.21",
+                    "username": "admin",
+                    "password": "secret",
+                    "camera_number": "1",
+                    "rtsp_main_channel": "201",
+                    "rtsp_sub_channel": "202",
+                    "enabled": True,
+                    "record": True,
+                }
+            ],
+        }
+
+        normalized = panel.normalize_config(payload)
+        camera_config = normalized["cameras"][0]
+
+        self.assertEqual(camera_config["camera_number"], "1")
+        self.assertEqual(camera_config["rtsp_main_channel"], "201")
+        self.assertEqual(camera_config["rtsp_sub_channel"], "202")
+        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/201")
+        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/202")
 
     def test_hikvision_channels_are_saved_and_build_rtsp_urls(self):
         panel = load_panel_module()

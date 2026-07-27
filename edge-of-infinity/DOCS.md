@@ -200,6 +200,8 @@ Starting with version `0.10.4`, the panel refuses to embed WebRTC when the brows
 
 Starting with version `0.10.5`, Edge Settings has a `Remote access` mode: `local_only`, `direct_public`, `vps_relay`, or `turn_relay`. Nabu Casa is treated as `local_only / panel only`: it can open the Home Assistant UI, but it is not a MediaMTX WebRTC relay and must not be used as `WebRTC public URL`. For LTE without forwarded ports, choose `vps_relay` or `turn_relay` and set `WebRTC public URL` to that relay endpoint.
 
+Starting with version `0.10.6`, manual Hikvision channel fields are authoritative. `camera_number` still generates defaults such as `101/102` or `201/202`, but it no longer rejects a manually entered channel pair. The panel also clears legacy override files on boot and returns the verified `panel-config.json` payload after save, so Camera Settings should no longer bounce stream roles or channels back to the previous state.
+
 For LL-HLS mobile tests, `mediamtx_hls_always_remux` can be enabled in the add-on options. Keep it off unless you are testing HLS startup time, because always-remux keeps HLS work active even without a viewer.
 
 Starting with version `0.8.6`, `/homeassistant/edge/edge.json` remains the source of truth after it exists. Add-on options are copied only to `/tmp/edge-runtime/edge.options.json` for diagnostics and no longer overwrite panel changes on restart. Stream role choices are also persisted in:

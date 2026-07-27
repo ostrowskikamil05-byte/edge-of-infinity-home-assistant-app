@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.6
+
+- Fix camera settings save bounce by making manual Hikvision channel fields authoritative; `camera_number` now only generates default channels when channel fields are empty.
+- Simplify the server save pipeline so the response is the verified `panel-config.json` payload, not a second re-normalized load that could reintroduce old values.
+- Clear legacy `panel-camera-overrides.json` and `stream-overrides.json` on panel boot as well as after saves, removing stale override files from the active config path.
+- Add regression coverage for saving stream roles and manual `201/202` channels without reverting to the existing `101/102` config.
+
 ## 0.10.5
 
 - Add an explicit remote access mode for live preview: local-only, direct public DDNS, VPS relay, or TURN relay.
