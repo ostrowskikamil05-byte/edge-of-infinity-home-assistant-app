@@ -40,6 +40,7 @@ MEDIAMTX_WEBRTC_TURN_PASSWORD="$(read_option 'mediamtx_webrtc_turn_password' '')
 MEDIAMTX_WEBRTC_ICE_TRANSPORT="$(read_option 'mediamtx_webrtc_ice_transport' 'auto')"
 MEDIAMTX_WEBRTC_TCP_ONLY="$(read_option 'mediamtx_webrtc_tcp_only' 'false')"
 MEDIAMTX_ALWAYS_ON_LIVE="$(read_option 'mediamtx_always_on_live' 'true')"
+MEDIAMTX_ALWAYS_ON_STREAM_SCOPE="$(read_option 'mediamtx_always_on_stream_scope' 'tile')"
 MEDIAMTX_SRT_PORT="$(read_option 'mediamtx_srt_port' '8890')"
 MEDIAMTX_API_PORT="$(read_option 'mediamtx_api_port' '9997')"
 MEDIAMTX_RECORD="$(read_option 'mediamtx_record' 'true')"
@@ -72,6 +73,7 @@ MEDIAMTX_WEBRTC_TURN_PASSWORD="${MEDIAMTX_WEBRTC_TURN_PASSWORD:-}"
 MEDIAMTX_WEBRTC_ICE_TRANSPORT="${MEDIAMTX_WEBRTC_ICE_TRANSPORT:-auto}"
 MEDIAMTX_WEBRTC_TCP_ONLY="${MEDIAMTX_WEBRTC_TCP_ONLY:-false}"
 MEDIAMTX_ALWAYS_ON_LIVE="${MEDIAMTX_ALWAYS_ON_LIVE:-true}"
+MEDIAMTX_ALWAYS_ON_STREAM_SCOPE="${MEDIAMTX_ALWAYS_ON_STREAM_SCOPE:-tile}"
 if [[ "${MEDIAMTX_WEBRTC_TCP_ONLY}" == "true" && "$(read_option 'mediamtx_webrtc_ice_transport' '')" == "" ]]; then
   MEDIAMTX_WEBRTC_ICE_TRANSPORT="tcp"
 fi
@@ -370,7 +372,7 @@ write_mediamtx_path() {
 
 generate_mediamtx_config() {
   local output="$1"
-  local public_hosts public_url public_url_host stun_url turn_url turn_username turn_password webrtc_public_hosts webrtc_ice_servers_yaml prebuffer_enabled always_on_enabled ice_transport tcp_only udp_address tcp_address
+  local public_hosts public_url public_url_host stun_url turn_url turn_username turn_password webrtc_public_hosts webrtc_ice_servers_yaml prebuffer_enabled always_on_enabled always_on_scope ice_transport tcp_only udp_address tcp_address
   public_hosts="$(runtime_live_option 'mobile_webrtc_public_hosts' "${MEDIAMTX_WEBRTC_PUBLIC_HOSTS}")"
   public_url="$(runtime_live_option 'mobile_webrtc_public_url' "${MEDIAMTX_WEBRTC_PUBLIC_URL}")"
   public_url_host="$(host_from_url "${public_url}")"
@@ -381,6 +383,8 @@ generate_mediamtx_config() {
   turn_password="$(runtime_live_option 'mobile_webrtc_turn_password' "${MEDIAMTX_WEBRTC_TURN_PASSWORD}")"
   prebuffer_enabled="$(runtime_live_option 'prebuffer_enabled' 'true')"
   always_on_enabled="$(runtime_live_option 'always_on_enabled' "${MEDIAMTX_ALWAYS_ON_LIVE}")"
+  always_on_scope="$(runtime_live_option 'always_on_stream_scope' "${MEDIAMTX_ALWAYS_ON_STREAM_SCOPE}")"
+  case "${always_on_scope}" in tile|live|tile_live|all) ;; *) always_on_scope="tile" ;; esac
   ice_transport="$(runtime_live_option 'mobile_webrtc_ice_transport' "${MEDIAMTX_WEBRTC_ICE_TRANSPORT}")"
   tcp_only="$(runtime_live_option 'mobile_webrtc_tcp_only' "${MEDIAMTX_WEBRTC_TCP_ONLY}")"
   if [[ "${tcp_only}" == "true" && "$(runtime_live_option 'mobile_webrtc_ice_transport' '')" == "" ]]; then
@@ -471,7 +475,7 @@ EOF
   if jq -e '.cameras' "${EDGE_CONFIG}" >/dev/null 2>&1; then
     while IFS= read -r camera; do
       local id safe_id rtsp_main rtsp_sub enabled low_latency record tile_stream live_stream record_stream
-      local record_main record_sub warm_main warm_sub
+      local record_main record_sub selected_main selected_sub always_on_main always_on_sub warm_main warm_sub
       id="$(jq -r '.id // "camera"' <<< "${camera}")"
       safe_id="$(safe_path_id "${id}")"
       rtsp_main="$(jq -r '.rtsp_main // ""' <<< "${camera}")"
@@ -484,8 +488,12 @@ EOF
       record_stream="$(jq -r '.record_stream // "main"' <<< "${camera}")"
       record_main="$([[ "${enabled}" == "true" && "${record}" == "true" && "${record_stream}" != "sub" ]] && echo true || echo false)"
       record_sub="$([[ "${enabled}" == "true" && "${record}" == "true" && "${record_stream}" == "sub" ]] && echo true || echo false)"
-      warm_main="$([[ "${enabled}" == "true" && "${low_latency}" == "true" && "${prebuffer_enabled}" == "true" && ( "${always_on_enabled}" == "true" || "${tile_stream}" == "main" || "${live_stream}" == "main" || "${record_main}" == "true" ) ]] && echo true || echo false)"
-      warm_sub="$([[ "${enabled}" == "true" && "${low_latency}" == "true" && "${prebuffer_enabled}" == "true" && ( "${always_on_enabled}" == "true" || "${tile_stream}" == "sub" || "${live_stream}" == "sub" || "${record_sub}" == "true" ) ]] && echo true || echo false)"
+      selected_main="$([[ "${tile_stream}" == "main" || "${live_stream}" == "main" ]] && echo true || echo false)"
+      selected_sub="$([[ "${tile_stream}" == "sub" || "${live_stream}" == "sub" ]] && echo true || echo false)"
+      always_on_main="$([[ "${always_on_enabled}" == "true" && ( "${always_on_scope}" == "all" || ( ( "${always_on_scope}" == "tile" || "${always_on_scope}" == "tile_live" ) && "${tile_stream}" == "main" ) || ( ( "${always_on_scope}" == "live" || "${always_on_scope}" == "tile_live" ) && "${live_stream}" == "main" ) ) ]] && echo true || echo false)"
+      always_on_sub="$([[ "${always_on_enabled}" == "true" && ( "${always_on_scope}" == "all" || ( ( "${always_on_scope}" == "tile" || "${always_on_scope}" == "tile_live" ) && "${tile_stream}" == "sub" ) || ( ( "${always_on_scope}" == "live" || "${always_on_scope}" == "tile_live" ) && "${live_stream}" == "sub" ) ) ]] && echo true || echo false)"
+      warm_main="$([[ "${enabled}" == "true" && "${low_latency}" == "true" && "${prebuffer_enabled}" == "true" && ( "${selected_main}" == "true" || "${always_on_main}" == "true" || "${record_main}" == "true" ) ]] && echo true || echo false)"
+      warm_sub="$([[ "${enabled}" == "true" && "${low_latency}" == "true" && "${prebuffer_enabled}" == "true" && ( "${selected_sub}" == "true" || "${always_on_sub}" == "true" || "${record_sub}" == "true" ) ]] && echo true || echo false)"
       write_mediamtx_path "${output}" "${safe_id}_main" "${rtsp_main}" "${record_main}" "${warm_main}"
       write_mediamtx_path "${output}" "${safe_id}_sub" "${rtsp_sub}" "${record_sub}" "${warm_sub}"
     done < <(jq -c '.cameras[]?' "${EDGE_CONFIG}")
@@ -617,7 +625,7 @@ write_addon_options_config() {
   local camera2_rtsp_main camera2_rtsp_sub camera2_onvif camera2_isapi
   local camera2_enabled camera2_record camera2_low_latency camera2_snapshot_stream camera2_live_stream camera2_record_stream
   local camera2_camera_number camera2_access_protocol camera2_rtsp_transport camera2_rtsp_main_channel camera2_rtsp_sub_channel
-  local mediamtx_remote_access_mode mediamtx_webrtc_ice_transport mediamtx_always_on_live
+  local mediamtx_remote_access_mode mediamtx_webrtc_ice_transport mediamtx_always_on_live mediamtx_always_on_stream_scope
 
   mediamtx_remote_access_mode="${MEDIAMTX_REMOTE_ACCESS_MODE}"
   case "${mediamtx_remote_access_mode}" in local_only|direct_public|vps_relay|turn_relay) ;; *) mediamtx_remote_access_mode="local_only" ;; esac
@@ -625,6 +633,8 @@ write_addon_options_config() {
   case "${mediamtx_webrtc_ice_transport}" in auto|udp|tcp) ;; *) mediamtx_webrtc_ice_transport="auto" ;; esac
   mediamtx_always_on_live="${MEDIAMTX_ALWAYS_ON_LIVE}"
   case "${mediamtx_always_on_live}" in true|false) ;; *) mediamtx_always_on_live="true" ;; esac
+  mediamtx_always_on_stream_scope="${MEDIAMTX_ALWAYS_ON_STREAM_SCOPE}"
+  case "${mediamtx_always_on_stream_scope}" in tile|live|tile_live|all) ;; *) mediamtx_always_on_stream_scope="tile" ;; esac
 
   camera1_name="$(read_option 'hikvision_1_name' 'Hikvision 1')"
   camera1_host="$(read_option 'hikvision_1_host' '')"
@@ -690,6 +700,7 @@ write_addon_options_config() {
     --arg live_webrtc_turn_password "${MEDIAMTX_WEBRTC_TURN_PASSWORD}" \
     --arg live_webrtc_ice_transport "${mediamtx_webrtc_ice_transport}" \
     --arg live_always_on_enabled "${mediamtx_always_on_live}" \
+    --arg live_always_on_stream_scope "${mediamtx_always_on_stream_scope}" \
     --arg camera1_name "${camera1_name}" \
     --arg camera1_host "${camera1_host}" \
     --arg camera1_username "${camera1_username}" \
@@ -746,6 +757,7 @@ write_addon_options_config() {
         tile_max_width: 960,
         prebuffer_enabled: true,
         always_on_enabled: ($live_always_on_enabled == "true"),
+        always_on_stream_scope: $live_always_on_stream_scope,
         prebuffer_local_ms: 4000,
         prebuffer_remote_ms: 2000,
         mobile_webrtc_public_hosts: $live_webrtc_public_hosts,
@@ -825,6 +837,7 @@ bashio::log.info "WebRTC public URL: ${MEDIAMTX_WEBRTC_PUBLIC_URL:-not set}"
 bashio::log.info "WebRTC public hosts: ${MEDIAMTX_WEBRTC_PUBLIC_HOSTS:-not set}"
 bashio::log.info "WebRTC ICE transport: ${MEDIAMTX_WEBRTC_ICE_TRANSPORT}"
 bashio::log.info "Always-on live streams: ${MEDIAMTX_ALWAYS_ON_LIVE}"
+bashio::log.info "Always-on stream scope: ${MEDIAMTX_ALWAYS_ON_STREAM_SCOPE}"
 
 install_custom_component
 

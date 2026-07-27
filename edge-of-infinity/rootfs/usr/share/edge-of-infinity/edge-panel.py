@@ -17,9 +17,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.21"
+APP_VERSION = "0.10.22"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "always-on-live-core-v1"
+UI_BUILD = "continuous-nvr-player-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -67,6 +67,7 @@ CAMERA_OVERRIDE_FIELDS = (
 )
 STREAM_ENGINES = ("janus_webrtc", "mediamtx", "ll_hls", "srt")
 REMOTE_ACCESS_MODES = ("local_only", "direct_public", "vps_relay", "turn_relay")
+ALWAYS_ON_STREAM_SCOPES = ("tile", "live", "tile_live", "all")
 MEDIAMTX_ENABLED = os.environ.get("EDGE_MEDIAMTX_ENABLED", "true").lower() == "true"
 MEDIAMTX_HOST = os.environ.get("EDGE_MEDIAMTX_HOST", "127.0.0.1")
 MEDIAMTX_RTSP_PORT = int(os.environ.get("EDGE_MEDIAMTX_RTSP_PORT", "8556"))
@@ -427,6 +428,10 @@ def normalize_remote_access_mode(value: str | None) -> str:
     return "local_only"
 
 
+def normalize_always_on_stream_scope(value: str | None) -> str:
+    return value if value in ALWAYS_ON_STREAM_SCOPES else "tile"
+
+
 def stream_channel(camera: dict, stream_name: str) -> str:
     stream_name = normalize_stream_name(stream_name, "sub")
     fallback = STREAM_FALLBACK_CHANNELS[stream_name]
@@ -759,6 +764,7 @@ def normalize_config(payload: dict) -> dict:
             "tile_max_width": clamp_int(live.get("tile_max_width"), 960, 320, 1920),
             "prebuffer_enabled": safe_bool(live.get("prebuffer_enabled"), True),
             "always_on_enabled": safe_bool(live.get("always_on_enabled"), True),
+            "always_on_stream_scope": normalize_always_on_stream_scope(live.get("always_on_stream_scope")),
             "prebuffer_local_ms": clamp_int(live.get("prebuffer_local_ms"), 4000, 0, 10000),
             "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
             "mobile_webrtc_public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
@@ -1452,6 +1458,7 @@ def write_mediamtx_runtime_config(config: dict) -> dict:
     )
     prebuffer_enabled = safe_bool(live.get("prebuffer_enabled"), True)
     always_on_enabled = safe_bool(live.get("always_on_enabled"), True)
+    always_on_scope = normalize_always_on_stream_scope(live.get("always_on_stream_scope"))
     udp_address, tcp_address = mediamtx_ice_addresses(config)
     public_hosts = mediamtx_public_hosts(config)
     lines = [
@@ -1524,16 +1531,26 @@ def write_mediamtx_runtime_config(config: dict) -> dict:
         low_latency = safe_bool(camera.get("low_latency"), True)
         record_main = enabled and record and record_stream == "main"
         record_sub = enabled and record and record_stream == "sub"
+        selected_main = tile_stream == "main" or live_stream == "main"
+        selected_sub = tile_stream == "sub" or live_stream == "sub"
+        always_on_main = always_on_enabled and (
+            always_on_scope == "all"
+            or (always_on_scope in ("tile", "tile_live") and tile_stream == "main")
+            or (always_on_scope in ("live", "tile_live") and live_stream == "main")
+        )
+        always_on_sub = always_on_enabled and (
+            always_on_scope == "all"
+            or (always_on_scope in ("tile", "tile_live") and tile_stream == "sub")
+            or (always_on_scope in ("live", "tile_live") and live_stream == "sub")
+        )
         warm_main = enabled and low_latency and prebuffer_enabled and (
-            always_on_enabled
-            or tile_stream == "main"
-            or live_stream == "main"
+            selected_main
+            or always_on_main
             or record_main
         )
         warm_sub = enabled and low_latency and prebuffer_enabled and (
-            always_on_enabled
-            or tile_stream == "sub"
-            or live_stream == "sub"
+            selected_sub
+            or always_on_sub
             or record_sub
         )
         before = len(lines)
@@ -1559,6 +1576,7 @@ def write_mediamtx_runtime_config(config: dict) -> dict:
         "segment_seconds": segment_seconds,
         "prebuffer_enabled": prebuffer_enabled,
         "always_on_enabled": always_on_enabled,
+        "always_on_stream_scope": always_on_scope,
     }
 
 
@@ -1777,6 +1795,7 @@ def stream_capabilities(config: dict | None = None) -> dict:
             "whep_port": MEDIAMTX_WEBRTC_PORT,
             "prebuffer_enabled": safe_bool(live.get("prebuffer_enabled"), True),
             "always_on_enabled": safe_bool(live.get("always_on_enabled"), True),
+            "always_on_stream_scope": normalize_always_on_stream_scope(live.get("always_on_stream_scope")),
             "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
             "diagnosis": "If LAN works but LTE fails, the browser usually cannot reach the advertised ICE host/ports. Nabu Casa exposes the HA panel, not MediaMTX WebRTC ports. Use a reachable DDNS/VPS relay public URL first; add TURN for CGNAT/firewalls.",
         },
@@ -3521,6 +3540,17 @@ INDEX_HTML = r"""<!doctype html>
       .recording-thumb-wrap {
         position: relative;
         background: #05080a;
+        display: block;
+      }
+      .recording-thumb-wrap.thumb-error::after {
+        content: "No preview";
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        font-size: 12px;
+        background: rgba(5, 8, 10, .84);
       }
       .log-grid {
         display: grid;
@@ -3733,6 +3763,7 @@ INDEX_HTML = r"""<!doctype html>
       let recordingStreamStartOffset = {};
       let recordingStreamNonce = {};
       let recordingAutoplayAfterRender = {};
+      let recordingContinueTimers = {};
       let lastNvrRenderSignature = '';
       let configDirty = false;
       let lastFormDraft = null;
@@ -3743,7 +3774,7 @@ INDEX_HTML = r"""<!doctype html>
       let softFullscreenTarget = null;
       let thumbnailHydrationTimer = 0;
       let thumbnailObserver = null;
-      const THUMB_PLACEHOLDER = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270"%3E%3Crect width="480" height="270" fill="%2305080a"/%3E%3C/svg%3E';
+      const THUMB_PLACEHOLDER = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270"%3E%3Crect width="480" height="270" fill="%2305080a"/%3E%3Ctext x="240" y="136" fill="%238ea4a1" font-family="Arial" font-size="18" text-anchor="middle"%3EPreview loading%3C/text%3E%3C/svg%3E';
       const liveFrameTimers = new Map();
 
       const panelBase = window.location.pathname.endsWith('/')
@@ -4189,9 +4220,24 @@ INDEX_HTML = r"""<!doctype html>
         return `${clean}#t=${seek.toFixed(3)}`;
       }
 
+      function recordingDefaultTarget(files) {
+        const timeline = recordingTimeline(files);
+        const first = timeline.entries[0];
+        if (!first) return null;
+        return { timeline, target: first, requested: first.offset, seek: 0 };
+      }
+
+      function markRecordingThumbnailFailed(image) {
+        image.removeAttribute('data-recording-thumb-src');
+        image.closest('.recording-thumb-wrap')?.classList.add('thumb-error');
+        image.src = THUMB_PLACEHOLDER;
+      }
+
       function loadRecordingThumbnail(image) {
         const source = image?.dataset?.recordingThumbSrc;
         if (!source) return;
+        image.onload = () => image.closest('.recording-thumb-wrap')?.classList.add('thumb-loaded');
+        image.onerror = () => markRecordingThumbnailFailed(image);
         image.src = source;
         image.removeAttribute('data-recording-thumb-src');
       }
@@ -4203,6 +4249,10 @@ INDEX_HTML = r"""<!doctype html>
         }
         const images = Array.from(nvrGrid.querySelectorAll('img[data-recording-thumb-src]'));
         if (!images.length) return;
+        const immediate = images.slice(0, isMobileNvrPlayback() ? 4 : 8);
+        immediate.forEach(loadRecordingThumbnail);
+        const deferred = images.slice(immediate.length);
+        if (!deferred.length) return;
         if ('IntersectionObserver' in window) {
           thumbnailObserver = new IntersectionObserver((entries) => {
             entries.forEach((entry) => {
@@ -4211,15 +4261,15 @@ INDEX_HTML = r"""<!doctype html>
               thumbnailObserver.unobserve(entry.target);
             });
           }, { root: null, rootMargin: '220px 0px', threshold: 0.01 });
-          images.forEach((image) => thumbnailObserver.observe(image));
+          deferred.forEach((image) => thumbnailObserver.observe(image));
           return;
         }
-        images.slice(0, 8).forEach(loadRecordingThumbnail);
+        deferred.slice(0, 8).forEach(loadRecordingThumbnail);
       }
 
       function scheduleRecordingThumbnailHydration() {
         if (thumbnailHydrationTimer) window.clearTimeout(thumbnailHydrationTimer);
-        thumbnailHydrationTimer = window.setTimeout(hydrateRecordingThumbnails, isMobileNvrPlayback() ? 900 : 250);
+        thumbnailHydrationTimer = window.setTimeout(hydrateRecordingThumbnails, isMobileNvrPlayback() ? 120 : 80);
       }
 
       function offsetForRecordingUrl(index, url) {
@@ -4337,31 +4387,9 @@ INDEX_HTML = r"""<!doctype html>
         if (!target) return;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         const wasPlaying = Boolean(video && !video.paused && !video.ended);
-        const previousSelected = selectedRecording[index] || '';
         selectedRecording[index] = target.target.file.url;
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
-        if (isMobileNvrPlayback()) {
-          if (previousSelected === target.target.file.url && setCurrentRecordingTime(index, target.requested)) {
-            debugEvent('ui_recording_mobile_segment_fast_seek', {
-              index,
-              recording: target.target.file.name,
-              timeline_second: target.requested,
-              segment_second: target.seek,
-            });
-            return;
-          }
-          recordingStreamStartOffset[index] = target.target.offset;
-          recordingAutoplayAfterRender[index] = wasPlaying;
-          debugEvent('ui_recording_mobile_segment_seek', {
-            index,
-            recording: target.target.file.name,
-            timeline_second: target.requested,
-            segment_second: target.seek,
-          });
-          renderNvrGrid({ reason: 'mobile_segment_seek' });
-          return;
-        }
         if (seekCurrentRecordingStream(index, target.requested, target.timeline.total)) {
           return;
         }
@@ -4427,29 +4455,67 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
 
-      function playNextRecordingSegment(index, video = null) {
-        if (video?.dataset?.recordingPlaybackMode === 'mobile_segment') {
-          const status = recordingStatus[index] || {};
-          const files = Array.isArray(status.files) ? status.files : [];
-          const { entries } = recordingTimeline(files);
-          const current = entries.findIndex((entry) => entry.file.url === selectedRecording[index]);
-          if (current >= 0 && current < entries.length - 1) {
-            const next = entries[current + 1];
-            selectedRecording[index] = next.file.url;
-            selectedRecordingSeek[index] = 0;
-            selectedRecordingTimeline[index] = next.offset;
-            recordingStreamStartOffset[index] = next.offset;
+      function clearRecordingContinuation(index) {
+        if (!recordingContinueTimers[index]) return;
+        window.clearTimeout(recordingContinueTimers[index]);
+        delete recordingContinueTimers[index];
+      }
+
+      async function resumeRecordingWhenNextSegmentCloses(index, previousTotal, attempt = 0) {
+        clearRecordingContinuation(index);
+        await loadRecordingStatus({ reason: 'recording_continuation_refresh' });
+        const status = recordingStatus[index] || {};
+        const files = Array.isArray(status.files) ? status.files : [];
+        const timeline = recordingTimeline(files);
+        if (timeline.total > previousTotal) {
+          const target = recordingTargetInTimeline(timeline, previousTotal);
+          if (target) {
+            selectedRecording[index] = target.target.file.url;
+            selectedRecordingSeek[index] = target.seek;
+            selectedRecordingTimeline[index] = target.requested;
+            recordingStreamStartOffset[index] = target.requested;
+            recordingStreamNonce[index] = Date.now();
             recordingAutoplayAfterRender[index] = true;
-            debugEvent('ui_recording_mobile_segment_next', { index, recording: next.file.name, timeline_second: next.offset });
-            renderNvrGrid({ reason: 'mobile_segment_next' });
+            debugEvent('ui_recording_continuous_resume', {
+              index,
+              previous_total: previousTotal,
+              new_total: timeline.total,
+              attempt,
+            });
+            renderNvrGrid({ reason: 'continuous_recording_resume' });
             return;
           }
+        }
+        if ((status.recording || status.desired_recording) && attempt < 12) {
+          recordingContinueTimers[index] = window.setTimeout(() => {
+            resumeRecordingWhenNextSegmentCloses(index, previousTotal, attempt + 1);
+          }, 1500);
+          return;
+        }
+        debugEvent('ui_recording_stream_ended', {
+          index,
+          timeline_second: selectedRecordingTimeline[index],
+          stream_start: recordingStreamStartOffset[index],
+          playback_mode: 'continuous_stream',
+          previous_total: previousTotal,
+          attempt,
+        });
+      }
+
+      function playNextRecordingSegment(index, video = null) {
+        const status = recordingStatus[index] || {};
+        const files = Array.isArray(status.files) ? status.files : [];
+        const previousTotal = recordingTimeline(files).total;
+        if (video?.dataset?.recordingPlaybackMode === 'continuous_stream' && (status.recording || status.desired_recording)) {
+          resumeRecordingWhenNextSegmentCloses(index, previousTotal, 0);
+          return;
         }
         debugEvent('ui_recording_stream_ended', {
           index,
           timeline_second: selectedRecordingTimeline[index],
           stream_start: recordingStreamStartOffset[index],
           playback_mode: video?.dataset?.recordingPlaybackMode || 'continuous_stream',
+          previous_total: previousTotal,
         });
       }
 
@@ -4744,14 +4810,10 @@ INDEX_HTML = r"""<!doctype html>
         if (!Number.isFinite(storedStreamStart)) recordingStreamStartOffset[index] = streamStart;
         const targetForPoster = recordingTargetForOffset(index, timelineValue);
         const selectedFile = targetForPoster?.target?.file || null;
-        const mobilePlayback = isMobileNvrPlayback();
-        const playbackMode = mobilePlayback ? 'mobile_segment' : 'continuous_stream';
-        const rawPlayerSrc = timelineTotal
-          ? (mobilePlayback && selectedFile?.url ? panelPath(selectedFile.url) : recordingStreamUrl(status, index, streamStart))
-          : '';
-        const playerSeek = mobilePlayback ? Number(targetForPoster?.seek || 0) : 0;
-        const playerSrc = mobilePlayback ? mediaUrlWithTimeFragment(rawPlayerSrc, playerSeek) : rawPlayerSrc;
-        const playerStreamStart = mobilePlayback ? Number(targetForPoster?.target?.offset || 0) : streamStart;
+        const playbackMode = 'continuous_stream';
+        const playerSrc = timelineTotal ? recordingStreamUrl(status, index, streamStart) : '';
+        const playerSeek = 0;
+        const playerStreamStart = streamStart;
         const posterUrl = targetForPoster?.target?.file?.thumbnail_url ? panelPath(targetForPoster.target.file.thumbnail_url) : '';
         const preloadMode = 'auto';
         const playable = Boolean(timelineTotal && playerSrc);
@@ -5060,7 +5122,13 @@ INDEX_HTML = r"""<!doctype html>
               <label>Local prebuffer ms<input name="live-prebuffer-local-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_local_ms, 4000))}"></label>
               <label>Remote prebuffer ms<input name="live-prebuffer-remote-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_remote_ms, 2000))}"></label>
               <label class="check-row"><input name="live-prebuffer-enabled" type="checkbox" ${liveConfig.prebuffer_enabled !== false ? 'checked' : ''}> Keep selected low-latency streams warm</label>
-              <label class="check-row"><input name="live-always-on-enabled" type="checkbox" ${liveConfig.always_on_enabled !== false ? 'checked' : ''}> Keep all enabled camera streams always on</label>
+              <label class="check-row"><input name="live-always-on-enabled" type="checkbox" ${liveConfig.always_on_enabled !== false ? 'checked' : ''}> Keep live paths warm after boot</label>
+              <label>Always-on scope<select name="live-always-on-stream-scope">
+                <option value="tile" ${text(liveConfig.always_on_stream_scope, 'tile') === 'tile' ? 'selected' : ''}>Tile preview only</option>
+                <option value="live" ${liveConfig.always_on_stream_scope === 'live' ? 'selected' : ''}>Live stream only</option>
+                <option value="tile_live" ${liveConfig.always_on_stream_scope === 'tile_live' ? 'selected' : ''}>Tile + live</option>
+                <option value="all" ${liveConfig.always_on_stream_scope === 'all' ? 'selected' : ''}>All camera streams</option>
+              </select></label>
               <label>WebRTC ICE transport<select name="live-mobile-ice-transport">
                 <option value="auto" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'auto' ? 'selected' : ''}>Auto UDP + TCP</option>
                 <option value="udp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'udp' ? 'selected' : ''}>UDP only</option>
@@ -5401,6 +5469,7 @@ INDEX_HTML = r"""<!doctype html>
             tile_max_width: Number(get('live-tile-max-width').value || 960),
             prebuffer_enabled: get('live-prebuffer-enabled').checked,
             always_on_enabled: get('live-always-on-enabled').checked,
+            always_on_stream_scope: get('live-always-on-stream-scope').value,
             prebuffer_local_ms: Number(get('live-prebuffer-local-ms').value || 4000),
             prebuffer_remote_ms: Number(get('live-prebuffer-remote-ms').value || 2000),
             mobile_webrtc_public_url: get('live-mobile-public-url').value.trim(),
@@ -5527,12 +5596,12 @@ INDEX_HTML = r"""<!doctype html>
             const files = Array.isArray(item.files) ? item.files : [];
             const selected = selectedRecording[item.index];
             if (files.length && !files.some((file) => file.url === selected)) {
-              selectedRecording[item.index] = files[0].url;
-              selectedRecordingSeek[item.index] = 0;
-              const selection = recordingOffsetForSelection(files, files[0].url, 0);
-              selectedRecordingTimeline[item.index] = selection.value;
+              const selection = recordingDefaultTarget(files);
+              selectedRecording[item.index] = selection?.target?.file?.url || files[0].url;
+              selectedRecordingSeek[item.index] = selection?.seek || 0;
+              selectedRecordingTimeline[item.index] = selection?.requested || 0;
               if (!Number.isFinite(Number(recordingStreamStartOffset[item.index]))) {
-                recordingStreamStartOffset[item.index] = selection.value;
+                recordingStreamStartOffset[item.index] = selection?.requested || 0;
               }
             }
             if (!files.length) {

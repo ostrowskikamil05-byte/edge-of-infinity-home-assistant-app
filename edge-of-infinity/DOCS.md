@@ -172,6 +172,7 @@ mobile_webrtc_turn_password
 mobile_webrtc_ice_transport
 prebuffer_enabled
 always_on_enabled
+always_on_stream_scope
 prebuffer_local_ms
 prebuffer_remote_ms
 ```
@@ -179,6 +180,8 @@ prebuffer_remote_ms
 On restart, the add-on generates MediaMTX and Janus configs from those values. The fastest LTE path is still direct ICE through a reachable public host/DDNS and open WebRTC/ICE ports. TURN is only the fallback when CGNAT or a carrier firewall prevents direct ICE. A VPS can be used as that public host, TURN server, or future relay bridge when the home network cannot expose ports.
 
 Starting with version `0.10.21`, `always_on_enabled` keeps all enabled low-latency camera paths connected in MediaMTX after add-on boot, even when no phone or browser is watching. This trades extra steady CPU/network use for much faster first-frame loading when the panel is opened again. NVR recording still follows each camera's `record` and `record_stream` settings.
+
+Starting with version `0.10.22`, always-on warming defaults to `always_on_stream_scope: tile` so Edge keeps lightweight camera tiles ready without forcing every 4K `main` stream to stay active. Use `all` only when the host has enough CPU/network headroom and you explicitly want every profile warm.
 
 Starting with version `0.10.2`, `mobile_webrtc_ice_transport` can be `auto`, `udp`, or `tcp`. Use `auto` first because it exposes both UDP and TCP ICE on port `8189`. Use `udp` when everything is local and you want the simplest low-latency path. Use `tcp` when LTE, hotel Wi-Fi, or a friend's Wi-Fi blocks UDP, but remember that the public MediaMTX WebRTC address on `8889` and ICE port `8189` must still be reachable from that network. If the home network is behind CGNAT or cannot forward those ports, use a VPS or TURN relay instead of a LAN-only `192.168.x.x` address.
 

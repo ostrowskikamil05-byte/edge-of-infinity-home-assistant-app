@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.22
+
+- Change always-on live warming to default to the tile preview stream instead of forcing every main/sub path warm, reducing 4K background load that could cause stutter after `0.10.21`.
+- Add `always_on_stream_scope` / `mediamtx_always_on_stream_scope` with `tile`, `live`, `tile_live`, and `all` choices for controlled warm-up.
+- Make mobile NVR use the continuous recording stream instead of opening single 10-second MP4 segments, so playback can continue across clips.
+- Start NVR playback from the beginning of the available timeline by default instead of the newest closed segment.
+- Load the first recording thumbnails immediately and show a readable placeholder if a thumbnail cannot be generated.
+
 ## 0.10.21
 
 - Keep every enabled low-latency camera stream warm through MediaMTX when `always_on_enabled` is active, so live starts without waiting for a viewer to open the panel.
