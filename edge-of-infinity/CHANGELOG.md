@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.19
+
+- Add recording thumbnails for every listed MP4 segment, so the NVR list shows timestamped preview frames instead of using the player as a snapshot tool.
+- Make mobile NVR playback use direct MP4 segment files with inline playback metadata, while desktop keeps the continuous joined timeline stream.
+- Seek inside the currently loaded mobile segment without rebuilding the player, reducing reload delays when moving the timeline by a few seconds.
+- Add `HEAD` and richer byte-range/CORS headers for recorded MP4 files to improve playback in mobile Home Assistant browsers.
+- Log HTML5 recording-player diagnostics for errors, stalls, and metadata readiness so phone playback failures show codec/source details in Edge logs.
+
 ## 0.10.18
 
 - Add a continuous NVR playback endpoint that streams a joined MP4 timeline from recorded segments, so playback no longer reloads at each 10-12 second segment boundary.

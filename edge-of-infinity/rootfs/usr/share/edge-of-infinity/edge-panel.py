@@ -17,9 +17,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.18"
+APP_VERSION = "0.10.19"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "continuous-nvr-playback-snapshots-v10"
+UI_BUILD = "nvr-thumbnails-fast-seek-v11"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -35,7 +35,9 @@ PORT = int(os.environ.get("API_PORT", "8088"))
 SNAPSHOT_DIR = HOME_DIR / "snapshots"
 DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 STREAM_LIST_DIR = HOME_DIR / "stream-lists"
+RECORDING_THUMB_DIR = HOME_DIR / "recording-thumbs"
 RECORDING_STREAM_LOG_PATH = HOME_DIR / "recording-stream.log"
+MIN_RECORDING_FILE_READY_SECONDS = 2.0
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
 DEBUG_LOCK = threading.Lock()
 HIKVISION_MAIN_CHANNEL = "101"
@@ -1832,12 +1834,32 @@ def recording_segment_start_ts(path: Path, fallback_ts: float) -> int:
     return int(fallback_ts)
 
 
+def recording_file_ready(path: Path, now: float | None = None, min_age_seconds: float | None = None) -> bool:
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    if stat.st_size <= 0:
+        return False
+    min_age_seconds = MIN_RECORDING_FILE_READY_SECONDS if min_age_seconds is None else min_age_seconds
+    if min_age_seconds > 0 and (now or time.time()) - stat.st_mtime < min_age_seconds:
+        return False
+    return True
+
+
+def playable_recording_files(directory: Path) -> list[Path]:
+    if not directory.exists():
+        return []
+    now = time.time()
+    return [path for path in directory.glob("*.mp4") if recording_file_ready(path, now)]
+
+
 def recording_segments(camera: dict, index: int, limit: int = 24, segment_seconds: int = 10) -> list[dict]:
     directory = recording_base_dir(camera, index)
     if not directory.exists():
         return []
     key = recording_key(camera, index)
-    files = sorted(directory.glob("*.mp4"), key=lambda item: item.stat().st_mtime, reverse=True)
+    files = sorted(playable_recording_files(directory), key=lambda item: item.stat().st_mtime, reverse=True)
     segments = []
     for path in files[:limit]:
         stat = path.stat()
@@ -1847,6 +1869,7 @@ def recording_segments(camera: dict, index: int, limit: int = 24, segment_second
             {
                 "name": path.name,
                 "url": f"recordings/{key}/{path.name}",
+                "thumbnail_url": f"recording-thumbs/{key}/{path.name}.jpg",
                 "size_bytes": stat.st_size,
                 "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(stat.st_mtime)),
                 "start_ts": start_ts,
@@ -1863,7 +1886,7 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
     directory = recording_base_dir(camera, index)
     if not directory.exists():
         return []
-    files = sorted(directory.glob("*.mp4"), key=lambda item: (recording_segment_start_ts(item, item.stat().st_mtime), item.name))
+    files = sorted(playable_recording_files(directory), key=lambda item: (recording_segment_start_ts(item, item.stat().st_mtime), item.name))
     entries = []
     offset = 0
     duration_seconds = clamp_int(segment_seconds, 10, 1, 3600)
@@ -1939,20 +1962,25 @@ def recording_stream_plan(key: str, start_seconds: int = 0) -> dict:
 
 
 def build_recording_stream_command(concat_path: Path, seek_seconds: int = 0) -> list[str]:
-    return [
+    command = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "warning",
         "-nostdin",
-        "-ss",
-        str(max(0, safe_int(seek_seconds, 0))),
+        "-fflags",
+        "+genpts",
         "-f",
         "concat",
         "-safe",
         "0",
         "-i",
         str(concat_path),
+    ]
+    seek = max(0, safe_int(seek_seconds, 0))
+    if seek:
+        command += ["-ss", str(seek)]
+    command += [
         "-map",
         "0:v:0",
         "-map",
@@ -1965,6 +1993,82 @@ def build_recording_stream_command(concat_path: Path, seek_seconds: int = 0) -> 
         "mp4",
         "pipe:1",
     ]
+    return command
+
+
+def recording_file_for_key(key: str, filename: str) -> Path | None:
+    safe_name = Path(filename).name
+    if safe_name.endswith(".jpg"):
+        safe_name = safe_name.removesuffix(".jpg")
+    if not safe_name.endswith(".mp4"):
+        return None
+    config = load_config()
+    target = camera_for_recording_key(config, key)
+    if target is None:
+        return None
+    camera, index = target
+    path = recording_base_dir(camera, index) / safe_name
+    return path if path.exists() else None
+
+
+def recording_thumbnail_path(key: str, filename: str) -> Path:
+    safe_name = Path(filename).name
+    if safe_name.endswith(".jpg"):
+        safe_name = safe_name.removesuffix(".jpg")
+    return RECORDING_THUMB_DIR / safe_id(key) / f"{safe_name}.jpg"
+
+
+def build_recording_thumbnail_command(source: Path, target: Path, seek_seconds: float = 0.6) -> list[str]:
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        str(max(0, seek_seconds)),
+        "-i",
+        str(source),
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale='min(480,iw)':-2",
+        "-q:v",
+        "5",
+        str(target),
+    ]
+
+
+def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
+    target = recording_thumbnail_path(key, filename)
+    try:
+        if target.exists() and target.stat().st_mtime >= source.stat().st_mtime and target.stat().st_size > 0:
+            return target
+    except OSError:
+        pass
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg_not_installed_in_addon")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".jpg.tmp")
+    command = build_recording_thumbnail_command(source, tmp)
+    started_at = time.monotonic()
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
+    if result.returncode != 0 or not tmp.exists() or tmp.stat().st_size <= 0:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-600:] or f"thumbnail_ffmpeg_exit_{result.returncode}")
+    tmp.replace(target)
+    write_debug_event("recording_thumbnail_generated", {
+        "key": key,
+        "source": source.name,
+        "target": str(target),
+        "duration_ms": int((time.monotonic() - started_at) * 1000),
+        "command": redact_command(command),
+    })
+    return target
 
 
 def recording_log_path(camera: dict, index: int) -> Path:
@@ -2149,7 +2253,8 @@ def recording_status_payload(config: dict | None = None) -> dict:
         key = recording_key(camera, index)
         process = RECORDING_PROCESSES.get(key)
         directory = recording_base_dir(camera, index)
-        segment_count = len(list(directory.glob("*.mp4"))) if directory.exists() else 0
+        total_segment_count = len(list(directory.glob("*.mp4"))) if directory.exists() else 0
+        segment_count = len(playable_recording_files(directory))
         nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
         segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
         segment_files = recording_segments(camera, index, limit=240, segment_seconds=segment_seconds)
@@ -2190,6 +2295,8 @@ def recording_status_payload(config: dict | None = None) -> dict:
                 "directory": str(directory),
                 "directory_exists": directory.exists(),
                 "segments": segment_count,
+                "segments_total": total_segment_count,
+                "segments_pending": max(0, total_segment_count - segment_count),
                 "files": segment_files,
                 "segment_seconds": segment_seconds,
                 "timeline": {
@@ -3323,11 +3430,12 @@ INDEX_HTML = r"""<!doctype html>
         min-width: 0;
         border: 1px solid var(--line);
         border-radius: 8px;
-        padding: 8px;
+        padding: 0;
         background: rgba(0,0,0,.14);
         color: var(--text);
         text-align: left;
         cursor: pointer;
+        overflow: hidden;
       }
       .recording-tile.active {
         border-color: rgba(86,214,181,.65);
@@ -3337,38 +3445,36 @@ INDEX_HTML = r"""<!doctype html>
         display: block;
         overflow-wrap: anywhere;
         font-size: 13px;
+        padding: 8px 8px 0;
       }
       .recording-meta {
         display: block;
         margin-top: 4px;
+        padding: 0 8px 8px;
         color: var(--muted);
         font-size: 11px;
       }
-      .snapshot-strip {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
-        gap: 8px;
-        max-height: 188px;
-        overflow-y: auto;
-      }
-      .snapshot-card {
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        overflow: hidden;
-        background: rgba(0,0,0,.16);
-      }
-      .snapshot-card img {
+      .recording-thumb {
         width: 100%;
         aspect-ratio: 16 / 9;
+        display: block;
         object-fit: cover;
-        display: block;
         background: #05080a;
+        border-bottom: 1px solid var(--line);
       }
-      .snapshot-card span {
-        display: block;
-        padding: 6px 8px;
-        color: var(--muted);
+      .recording-thumb-time {
+        position: absolute;
+        left: 8px;
+        bottom: 7px;
+        padding: 3px 6px;
+        border-radius: 999px;
+        background: rgba(3, 6, 8, .72);
+        color: #d7f5ef;
         font-size: 11px;
+      }
+      .recording-thumb-wrap {
+        position: relative;
+        background: #05080a;
       }
       .log-grid {
         display: grid;
@@ -3580,7 +3686,6 @@ INDEX_HTML = r"""<!doctype html>
       let selectedRecordingTimeline = {};
       let recordingStreamStartOffset = {};
       let recordingStreamNonce = {};
-      let recordingSnapshots = {};
       let recordingAutoplayAfterRender = {};
       let nvrScrubbing = false;
       let lastNvrRenderSignature = '';
@@ -3987,22 +4092,16 @@ INDEX_HTML = r"""<!doctype html>
         return panelPath(`recordings-stream/${encodeURIComponent(key)}.mp4?start=${start}&v=${recordingStreamNonce[index]}`);
       }
 
+      function isMobileNvrPlayback() {
+        return window.matchMedia('(max-width: 820px)').matches
+          || /Android|iPhone|iPad|iPod|Mobile|Home Assistant/i.test(navigator.userAgent || '');
+      }
+
       function offsetForRecordingUrl(index, url) {
         const status = recordingStatus[index] || {};
         const timeline = recordingTimeline(status.files || []);
         const entry = timeline.entries.find((item) => item.file.url === url);
         return entry ? entry.offset : 0;
-      }
-
-      function recordingSnapshotsHtml(index) {
-        const snapshots = Array.isArray(recordingSnapshots[index]) ? recordingSnapshots[index] : [];
-        if (!snapshots.length) return '<p class="notice">Snapshots from playback will appear here.</p>';
-        return snapshots.map((item) => `
-          <div class="snapshot-card">
-            <img src="${escapeHtml(item.url)}" alt="${escapeHtml(item.recordedAt)}">
-            <span>${escapeHtml(item.recordedAt)} | ${escapeHtml(item.offsetLabel)}</span>
-          </div>
-        `).join('');
       }
 
       function recordingStatusSignature() {
@@ -4074,6 +4173,47 @@ INDEX_HTML = r"""<!doctype html>
         return true;
       }
 
+      function canSeekBufferedVideo(video, relativeSeek) {
+        if (!video || relativeSeek < 0 || video.readyState < 1) return false;
+        const ranges = video.seekable || video.buffered;
+        if (ranges && ranges.length) {
+          for (let i = 0; i < ranges.length; i += 1) {
+            if (relativeSeek >= ranges.start(i) && relativeSeek <= ranges.end(i)) return true;
+          }
+        }
+        const duration = Number(video.duration);
+        if (Number.isFinite(duration) && duration > 0) return relativeSeek <= duration;
+        return relativeSeek <= Number(video.currentTime || 0) + 1.5;
+      }
+
+      function seekCurrentRecordingStream(index, timelineSecond, total) {
+        const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+        if (!video) return false;
+        const streamStart = Math.max(0, Number(video.dataset.recordingStreamStart || recordingStreamStartOffset[index] || 0));
+        const relativeSeek = Math.floor(Number(timelineSecond || 0)) - streamStart;
+        if (!canSeekBufferedVideo(video, relativeSeek)) return false;
+        try {
+          video.currentTime = Math.max(0, relativeSeek);
+          updateRecordingTimelineUi(index, timelineSecond, total);
+          debugEvent('ui_recording_fast_seek', {
+            index,
+            timeline_second: timelineSecond,
+            relative_seek: relativeSeek,
+            stream_start: streamStart,
+          });
+          return true;
+        } catch (error) {
+          debugEvent('ui_recording_fast_seek_error', {
+            index,
+            timeline_second: timelineSecond,
+            relative_seek: relativeSeek,
+            stream_start: streamStart,
+            message: error.message,
+          });
+          return false;
+        }
+      }
+
       function previewRecordingAtOffset(index, offset) {
         const target = recordingTargetForOffset(index, offset);
         if (!target) return;
@@ -4088,9 +4228,34 @@ INDEX_HTML = r"""<!doctype html>
         if (!target) return;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         const wasPlaying = Boolean(video && !video.paused && !video.ended);
+        const previousSelected = selectedRecording[index] || '';
         selectedRecording[index] = target.target.file.url;
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
+        if (isMobileNvrPlayback()) {
+          if (previousSelected === target.target.file.url && setCurrentRecordingTime(index, target.requested)) {
+            debugEvent('ui_recording_mobile_segment_fast_seek', {
+              index,
+              recording: target.target.file.name,
+              timeline_second: target.requested,
+              segment_second: target.seek,
+            });
+            return;
+          }
+          recordingStreamStartOffset[index] = target.target.offset;
+          recordingAutoplayAfterRender[index] = wasPlaying;
+          debugEvent('ui_recording_mobile_segment_seek', {
+            index,
+            recording: target.target.file.name,
+            timeline_second: target.requested,
+            segment_second: target.seek,
+          });
+          renderNvrGrid({ reason: 'mobile_segment_seek' });
+          return;
+        }
+        if (seekCurrentRecordingStream(index, target.requested, target.timeline.total)) {
+          return;
+        }
         recordingStreamStartOffset[index] = target.requested;
         recordingStreamNonce[index] = Date.now();
         debugEvent('ui_recording_timeline_seek', {
@@ -4153,51 +4318,54 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
 
-      function playNextRecordingSegment(index) {
+      function playNextRecordingSegment(index, video = null) {
+        if (video?.dataset?.recordingPlaybackMode === 'mobile_segment') {
+          const status = recordingStatus[index] || {};
+          const files = Array.isArray(status.files) ? status.files : [];
+          const { entries } = recordingTimeline(files);
+          const current = entries.findIndex((entry) => entry.file.url === selectedRecording[index]);
+          if (current >= 0 && current < entries.length - 1) {
+            const next = entries[current + 1];
+            selectedRecording[index] = next.file.url;
+            selectedRecordingSeek[index] = 0;
+            selectedRecordingTimeline[index] = next.offset;
+            recordingStreamStartOffset[index] = next.offset;
+            recordingAutoplayAfterRender[index] = true;
+            debugEvent('ui_recording_mobile_segment_next', { index, recording: next.file.name, timeline_second: next.offset });
+            renderNvrGrid({ reason: 'mobile_segment_next' });
+            return;
+          }
+        }
         debugEvent('ui_recording_stream_ended', {
           index,
           timeline_second: selectedRecordingTimeline[index],
           stream_start: recordingStreamStartOffset[index],
+          playback_mode: video?.dataset?.recordingPlaybackMode || 'continuous_stream',
         });
       }
 
-      function captureRecordingSnapshot(index) {
-        const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
-        if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
-          debugEvent('ui_recording_snapshot_blocked', { index, reason: 'video_not_ready' });
-          return;
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        const context = canvas.getContext('2d');
-        let url = '';
-        try {
-          context.drawImage(video, 0, 0, canvas.width, canvas.height);
-          url = canvas.toDataURL('image/jpeg', 0.88);
-        } catch (error) {
-          debugEvent('ui_recording_snapshot_error', { index, message: error.message });
-          return;
-        }
-        const timelineSecond = Math.max(0, Math.floor(Number(selectedRecordingTimeline[index] || 0)));
-        const status = recordingStatus[index] || {};
-        const recordedAt = formatTimestampSeconds(recordingWallClockAtOffset(status.files || [], timelineSecond));
-        const item = {
-          url,
-          recordedAt,
-          offsetLabel: formatDuration(timelineSecond),
-          capturedAt: formatTimestampSeconds(Math.floor(Date.now() / 1000)),
+      function recordingVideoDiagnostics(video) {
+        const errorNames = {
+          1: 'MEDIA_ERR_ABORTED',
+          2: 'MEDIA_ERR_NETWORK',
+          3: 'MEDIA_ERR_DECODE',
+          4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
         };
-        recordingSnapshots[index] = [item, ...(recordingSnapshots[index] || [])].slice(0, 12);
-        const strip = nvrGrid.querySelector(`[data-recording-snapshots="${index}"]`);
-        if (strip) strip.innerHTML = recordingSnapshotsHtml(index);
-        debugEvent('ui_recording_snapshot_captured', {
-          index,
-          recorded_at: recordedAt,
-          timeline_second: timelineSecond,
-          width: canvas.width,
-          height: canvas.height,
-        });
+        return {
+          index: video?.dataset?.recordingPlayer,
+          src: video?.currentSrc || video?.querySelector?.('source')?.src || video?.getAttribute?.('src') || '',
+          playback_mode: video?.dataset?.recordingPlaybackMode || '',
+          recording_seek: video?.dataset?.recordingSeek || '',
+          stream_start: video?.dataset?.recordingStreamStart || '',
+          ready_state: video?.readyState,
+          network_state: video?.networkState,
+          current_time: Number(video?.currentTime || 0),
+          duration: Number.isFinite(Number(video?.duration)) ? Number(video.duration) : String(video?.duration || ''),
+          paused: Boolean(video?.paused),
+          error_code: video?.error?.code || 0,
+          error_name: errorNames[video?.error?.code] || '',
+          error_message: video?.error?.message || '',
+        };
       }
 
       function pretty(value) {
@@ -4465,11 +4633,21 @@ INDEX_HTML = r"""<!doctype html>
         const storedStreamStart = Number(recordingStreamStartOffset[index]);
         const streamStart = Math.max(0, Math.min(Number.isFinite(storedStreamStart) ? storedStreamStart : timelineValue, timelineMax));
         if (!Number.isFinite(storedStreamStart)) recordingStreamStartOffset[index] = streamStart;
-        const playerSrc = timelineTotal ? recordingStreamUrl(status, index, streamStart) : '';
+        const targetForPoster = recordingTargetForOffset(index, timelineValue);
+        const selectedFile = targetForPoster?.target?.file || null;
+        const mobilePlayback = isMobileNvrPlayback();
+        const playbackMode = mobilePlayback ? 'mobile_segment' : 'continuous_stream';
+        const playerSrc = timelineTotal
+          ? (mobilePlayback && selectedFile?.url ? panelPath(selectedFile.url) : recordingStreamUrl(status, index, streamStart))
+          : '';
+        const playerSeek = mobilePlayback ? Number(targetForPoster?.seek || 0) : 0;
+        const playerStreamStart = mobilePlayback ? Number(targetForPoster?.target?.offset || 0) : streamStart;
+        const posterUrl = targetForPoster?.target?.file?.thumbnail_url ? panelPath(targetForPoster.target.file.thumbnail_url) : '';
+        const preloadMode = mobilePlayback ? 'metadata' : 'auto';
         const playable = Boolean(timelineTotal && playerSrc);
         const player = playable
           ? `<div class="recording-player-wrap" data-recording-wrap="${index}">
-              <video class="recording-player" src="${escapeHtml(playerSrc)}" controls preload="metadata" playsinline data-recording-player="${index}" data-recording-seek="0" data-recording-stream-start="${escapeHtml(streamStart)}"></video>
+              <video class="recording-player" src="${escapeHtml(playerSrc)}" ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ''} controls preload="${preloadMode}" playsinline webkit-playsinline data-recording-player="${index}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
               <button class="fullscreen-button" type="button" data-recording-fullscreen="${index}" aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>
             </div>`
           : `<div class="recording-empty">No video yet</div>`;
@@ -4489,17 +4667,15 @@ INDEX_HTML = r"""<!doctype html>
         const recordingList = files.length
           ? `<div class="recording-film-grid">${files.map((file) => `
               <button class="recording-tile ${file.url === selected ? 'active' : ''}" type="button" data-play-recording="${escapeHtml(file.url)}" data-recording-offset="${escapeHtml(offsetForRecordingUrl(index, file.url))}" data-record-index="${index}">
+                <span class="recording-thumb-wrap">
+                  <img class="recording-thumb" src="${escapeHtml(panelPath(file.thumbnail_url || ''))}" alt="${escapeHtml(file.name)} snapshot" loading="lazy">
+                  <span class="recording-thumb-time">${escapeHtml(formatTimestampSeconds(file.start_ts || file.start_at || file.modified_at))}</span>
+                </span>
                 <b>${escapeHtml(file.name)}</b>
-                <span class="recording-meta">${escapeHtml(formatDuration(file.duration_seconds || status.segment_seconds || 10))} | ${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatDate(file.start_at || file.modified_at))}</span>
+                <span class="recording-meta">${escapeHtml(formatDuration(file.duration_seconds || status.segment_seconds || 10))} | ${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatTimestampSeconds(file.start_ts || file.start_at || file.modified_at))}</span>
               </button>
             `).join('')}</div>`
           : `<p class="notice">${desiredRecording ? 'Continuous video recording is scheduled. The first playable clip appears after the first' : 'Start continuous video recording. The first playable clip appears after the first'} ${escapeHtml(text(status.segment_seconds, 10))}-second segment closes.</p>`;
-        const snapshotPanel = playable
-          ? `<div class="actions">
-              <button type="button" data-recording-snapshot="${index}">Snapshot</button>
-            </div>
-            <div class="snapshot-strip" data-recording-snapshots="${index}">${recordingSnapshotsHtml(index)}</div>`
-          : '';
         const diagnostics = recordError
           ? `<p class="section-status state-offline">${escapeHtml(recordErrorText(recordError))}</p>`
           : `<p class="section-status">${escapeHtml(text(status.record_rtsp, 'Record RTSP not ready'))}</p>`;
@@ -4512,7 +4688,6 @@ INDEX_HTML = r"""<!doctype html>
               </div>
               ${player}
               ${timelineControl}
-              ${snapshotPanel}
               ${diagnostics}
               <div class="actions">
                 <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}" ${!isRecording && !canRecord ? 'disabled' : ''}>${isRecording ? 'Stop' : 'Record'}</button>
@@ -5610,11 +5785,6 @@ INDEX_HTML = r"""<!doctype html>
           requestEdgeFullscreen(wrap, 'nvr_recording');
           return;
         }
-        const snapshotTarget = event.target.closest('[data-recording-snapshot]');
-        if (snapshotTarget) {
-          captureRecordingSnapshot(snapshotTarget.dataset.recordingSnapshot);
-          return;
-        }
         const playTarget = event.target.closest('[data-play-recording]');
         const playRecording = playTarget?.dataset?.playRecording;
         let index = playTarget?.dataset?.recordIndex;
@@ -5683,7 +5853,32 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('ended', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if (video) playNextRecordingSegment(video.dataset.recordingPlayer);
+        if (video) playNextRecordingSegment(video.dataset.recordingPlayer, video);
+      }, true);
+
+      nvrGrid.addEventListener('loadedmetadata', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) debugEvent('ui_recording_video_loadedmetadata', recordingVideoDiagnostics(video));
+      }, true);
+
+      nvrGrid.addEventListener('canplay', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) debugEvent('ui_recording_video_canplay', recordingVideoDiagnostics(video));
+      }, true);
+
+      nvrGrid.addEventListener('waiting', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) debugEvent('ui_recording_video_waiting', recordingVideoDiagnostics(video));
+      }, true);
+
+      nvrGrid.addEventListener('stalled', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) debugEvent('ui_recording_video_stalled', recordingVideoDiagnostics(video));
+      }, true);
+
+      nvrGrid.addEventListener('error', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) debugEvent('ui_recording_video_error', recordingVideoDiagnostics(video));
       }, true);
 
       restoreNavState();
@@ -5795,11 +5990,25 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path.startswith("/recordings-stream/") and path.endswith(".mp4"):
             self.serve_recording_stream(path, parsed.query)
             return
+        if path.startswith("/recording-thumbs/") and path.endswith(".jpg"):
+            self.serve_recording_thumbnail(path)
+            return
         if path.startswith("/recordings/") and path.endswith(".mp4"):
             self.serve_recording(path)
             return
 
         self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = route_path(parsed.path)
+        if path.startswith("/recordings/") and path.endswith(".mp4"):
+            self.serve_recording(path, send_body=False)
+            return
+        self.send_response(HTTPStatus.NOT_FOUND)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -6087,7 +6296,30 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "plan": {name: value for name, value in plan.items() if name != "concat_path"},
             })
 
-    def serve_recording(self, request_path: str) -> None:
+    def serve_recording_thumbnail(self, request_path: str) -> None:
+        parts = request_path.removeprefix("/recording-thumbs/").split("/", 1)
+        if len(parts) != 2:
+            self.send_json({"error": "recording_thumbnail_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+        key, filename = parts
+        source = recording_file_for_key(key, filename)
+        if source is None:
+            self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+        try:
+            thumb = ensure_recording_thumbnail(key, source, filename)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            write_debug_event("recording_thumbnail_error", {
+                "key": key,
+                "filename": Path(filename).name,
+                "error": str(error),
+                "type": type(error).__name__,
+            })
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+            return
+        self.send_bytes(thumb.read_bytes(), "image/jpeg")
+
+    def serve_recording(self, request_path: str, send_body: bool = True) -> None:
         parts = request_path.removeprefix("/recordings/").split("/", 1)
         if len(parts) != 2:
             self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
@@ -6132,14 +6364,35 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 return
 
         length = end - start + 1
+        disposition_name = safe_name.replace('"', "_")
         self.send_response(status)
         self.send_header("Content-Type", "video/mp4")
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(length))
+        self.send_header("Content-Disposition", f'inline; filename="{disposition_name}"')
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Edge-Version", APP_VERSION)
+        self.send_header("X-Edge-UI-Build", UI_BUILD)
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
+
+        write_debug_event("recording_file_request", {
+            "method": self.command,
+            "path": request_path,
+            "key": key,
+            "filename": safe_name,
+            "range": range_header,
+            "status": int(status),
+            "start": start,
+            "end": end,
+            "length": length,
+            "file_size": file_size,
+            "send_body": send_body,
+        })
+        if not send_body:
+            return
 
         with target.open("rb") as handle:
             handle.seek(start)
@@ -6160,6 +6413,7 @@ def main() -> None:
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     DATA_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     STREAM_LIST_DIR.mkdir(parents=True, exist_ok=True)
+    RECORDING_THUMB_DIR.mkdir(parents=True, exist_ok=True)
     clear_legacy_override_files()
     write_debug_event("boot_start", {
         "server_version": EdgeHandler.server_version,
