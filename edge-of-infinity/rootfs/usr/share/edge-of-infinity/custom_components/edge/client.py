@@ -14,6 +14,29 @@ if TYPE_CHECKING:
 
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
+CONFIG_CAMERA_FIELDS = (
+    "id",
+    "name",
+    "vendor",
+    "host",
+    "username",
+    "rtsp_main",
+    "rtsp_sub",
+    "camera_number",
+    "access_protocol",
+    "rtsp_transport",
+    "rtsp_main_channel",
+    "rtsp_sub_channel",
+    "onvif_url",
+    "isapi_base_url",
+    "enabled",
+    "record",
+    "low_latency",
+    "snapshot_stream",
+    "live_stream",
+    "tile_stream",
+    "record_stream",
+)
 
 
 class EdgeClientError(Exception):
@@ -127,7 +150,9 @@ class EdgeClient:
         if self.is_local:
             payload = await self._read_local_json("cameras.json")
             cameras = payload.get("cameras") if isinstance(payload, dict) else payload
-            return _normalize_cameras(cameras if isinstance(cameras, list) else [])
+            config_cameras = await self._local_config_cameras()
+            merged = _merge_camera_config(cameras if isinstance(cameras, list) else [], config_cameras)
+            return _normalize_cameras(merged)
 
         try:
             payload = await self._request("GET", "/cameras")
@@ -135,11 +160,28 @@ class EdgeClient:
             payload = await self._request("GET", "/cameras.json")
 
         if isinstance(payload, list):
-            return _normalize_cameras(payload)
-        if isinstance(payload, dict):
-            cameras = payload.get("cameras")
+            cameras = payload
+        elif isinstance(payload, dict):
+            cameras = payload.get("cameras") if isinstance(payload.get("cameras"), list) else []
+        else:
+            cameras = []
+
+        try:
+            config_payload = await self._request("GET", "/api/config")
+        except EdgeClientError:
+            config_payload = {}
+        config_cameras = config_payload.get("cameras") if isinstance(config_payload, dict) else []
+        return _normalize_cameras(_merge_camera_config(cameras, config_cameras if isinstance(config_cameras, list) else []))
+
+    async def _local_config_cameras(self) -> list[dict[str, Any]]:
+        for filename in ("panel-config.json", "edge.json"):
+            try:
+                payload = await self._read_local_json(filename)
+            except EdgeClientError:
+                continue
+            cameras = payload.get("cameras") if isinstance(payload, dict) else None
             if isinstance(cameras, list):
-                return _normalize_cameras(cameras)
+                return [camera for camera in cameras if isinstance(camera, dict)]
         return []
 
     async def camera_image(self, camera: dict[str, Any]) -> bytes | None:
@@ -197,6 +239,37 @@ def _stream_profile(camera: dict[str, Any], stream_name: str) -> dict[str, Any]:
         "rtsp": _redact_rtsp(rtsp),
         "configured": bool(rtsp),
     }
+
+
+def _camera_lookup_key(camera: dict[str, Any], index: int) -> str:
+    return str(camera.get("id") or f"index:{index}")
+
+
+def _merge_camera_config(status_cameras: list[dict[str, Any]], config_cameras: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Overlay saved config fields onto camera status rows.
+
+    `cameras.json` is status-oriented and can be stale for a few seconds after a save.
+    The config files/API are authoritative for connection fields.
+    """
+    config_by_key = {
+        _camera_lookup_key(camera, index): camera
+        for index, camera in enumerate(config_cameras)
+        if isinstance(camera, dict)
+    }
+    merged = []
+    max_len = max(len(status_cameras), len(config_cameras))
+    for index in range(max_len):
+        status = status_cameras[index] if index < len(status_cameras) and isinstance(status_cameras[index], dict) else {}
+        config = {}
+        if index < len(config_cameras) and isinstance(config_cameras[index], dict):
+            config = config_cameras[index]
+        config = config_by_key.get(_camera_lookup_key(status, index), config)
+        camera = dict(status)
+        for field in CONFIG_CAMERA_FIELDS:
+            if field in config and config[field] is not None:
+                camera[field] = config[field]
+        merged.append(camera)
+    return merged
 
 
 def _effective_streams(camera: dict[str, Any]) -> dict[str, Any]:

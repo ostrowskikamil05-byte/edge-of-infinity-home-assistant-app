@@ -325,10 +325,11 @@ def hikvision_rtsp_needs_rebuild(value: str, host: str, username: str, password:
 
 
 def refresh_hikvision_rtsp(value: str, host: str, username: str, password: str, channel: str) -> str:
+    rebuilt = build_hikvision_rtsp(host, username, password, channel)
+    if rebuilt:
+        return rebuilt
     if hikvision_rtsp_needs_rebuild(value, host, username, password, channel):
-        rebuilt = build_hikvision_rtsp(host, username, password, channel)
-        if rebuilt:
-            return rebuilt
+        return rebuilt or hikvision_rtsp_with_channel(value, channel)
     return hikvision_rtsp_with_channel(value, channel)
 
 
@@ -3797,14 +3798,16 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function refreshHikvisionRtsp(value, host, username, password, channel) {
+        const rebuilt = buildHikvisionRtsp(host, username, password, channel);
+        if (rebuilt) return rebuilt;
         const parts = rtspParts(value);
-        if (!value) return buildHikvisionRtsp(host, username, password, channel);
+        if (!value) return '';
         if (!parts.hikvision) return value;
         const mismatch = (host && parts.host && parts.host !== host)
           || (username && parts.username && parts.username !== username)
           || (password && parts.password && parts.password !== password)
           || (channel && parts.channel && parts.channel !== channel);
-        if (mismatch) return buildHikvisionRtsp(host, username, password, channel) || rtspWithHikvisionChannel(value, channel);
+        if (mismatch) return rebuilt || rtspWithHikvisionChannel(value, channel);
         return rtspWithHikvisionChannel(value, channel);
       }
 
@@ -4495,7 +4498,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.8"
+    server_version = "EdgePanel/0.10.9"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -4504,7 +4507,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(payload)

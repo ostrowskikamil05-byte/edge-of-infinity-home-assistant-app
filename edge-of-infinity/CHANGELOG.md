@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.9
+
+- Make Hikvision RTSP main/sub URLs generated from Host/IP, username, password, and channel fields whenever those base fields are available.
+- Overlay saved camera config onto Home Assistant camera status rows so stale `cameras.json` status cannot make entities show old IP/stream settings.
+- Add stronger no-cache headers for panel/API responses behind Home Assistant ingress.
+- Add integration regression coverage for stale status using old IP while saved config has the new IP.
+
 ## 0.10.8
 
 - Adopt `/homeassistant/edge/edge.json` when it is newer than `panel-config.json`, so manual File Editor changes are not overwritten by an older panel copy.
