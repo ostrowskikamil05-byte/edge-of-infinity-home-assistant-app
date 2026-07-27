@@ -127,7 +127,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(loaded["cameras"][0]["tile_stream"], "main")
         self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
 
-    def test_panel_config_wins_over_stale_runtime_and_override_files(self):
+    def test_runtime_edge_json_wins_over_stale_panel_config_and_override_files(self):
         panel = load_panel_module()
         runtime = {
             "server": {},
@@ -141,21 +141,27 @@ class EdgePanelConfigTests(unittest.TestCase):
         panel.save_panel_camera_overrides(runtime)
         panel.save_stream_overrides(runtime)
 
-        authoritative = json.loads(json.dumps(runtime))
-        authoritative["cameras"][0]["snapshot_stream"] = "sub"
-        authoritative["cameras"][0]["live_stream"] = "sub"
-        authoritative["cameras"][0]["tile_stream"] = "sub"
-        authoritative["cameras"][0]["record_stream"] = "sub"
-        panel.write_json(panel.PANEL_CONFIG_PATH, authoritative)
+        stale_panel = json.loads(json.dumps(runtime))
+        stale_panel["cameras"][0]["host"] = "192.168.1.64"
+        stale_panel["cameras"][0]["snapshot_stream"] = "sub"
+        stale_panel["cameras"][0]["live_stream"] = "sub"
+        stale_panel["cameras"][0]["tile_stream"] = "sub"
+        stale_panel["cameras"][0]["record_stream"] = "sub"
+        panel.write_json(panel.PANEL_CONFIG_PATH, stale_panel)
+        os.utime(panel.PANEL_CONFIG_PATH, (2000, 2000))
+        os.utime(panel.CONFIG_PATH, (1000, 1000))
 
         loaded = panel.load_config()
+        mirrored = panel.read_json(panel.PANEL_CONFIG_PATH, {})
 
-        self.assertEqual(loaded["cameras"][0]["snapshot_stream"], "sub")
-        self.assertEqual(loaded["cameras"][0]["live_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.21")
+        self.assertEqual(loaded["cameras"][0]["snapshot_stream"], "main")
+        self.assertEqual(loaded["cameras"][0]["live_stream"], "main")
         self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
-        self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
+        self.assertEqual(loaded["cameras"][0]["record_stream"], "main")
+        self.assertEqual(mirrored["cameras"][0]["host"], "192.168.33.21")
 
-    def test_newer_runtime_edge_json_is_adopted_over_panel_config(self):
+    def test_runtime_edge_json_is_adopted_over_panel_config_regardless_of_mtime(self):
         panel = load_panel_module()
         panel_payload = {
             "server": {},
@@ -169,14 +175,29 @@ class EdgePanelConfigTests(unittest.TestCase):
         }
         panel.write_json(panel.PANEL_CONFIG_PATH, panel_payload)
         panel.write_json(panel.CONFIG_PATH, runtime_payload)
-        os.utime(panel.PANEL_CONFIG_PATH, (1000, 1000))
-        os.utime(panel.CONFIG_PATH, (1010, 1010))
+        os.utime(panel.PANEL_CONFIG_PATH, (2000, 2000))
+        os.utime(panel.CONFIG_PATH, (1000, 1000))
 
         loaded = panel.load_config()
         mirrored = panel.read_json(panel.PANEL_CONFIG_PATH, {})
 
         self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.136")
         self.assertEqual(mirrored["cameras"][0]["host"], "192.168.33.136")
+
+    def test_legacy_panel_config_is_migrated_when_edge_json_is_missing(self):
+        panel = load_panel_module()
+        panel_payload = {
+            "server": {},
+            "storage": {},
+            "cameras": [camera("hikvision_1", "192.168.33.136", "sub")],
+        }
+        panel.write_json(panel.PANEL_CONFIG_PATH, panel_payload)
+
+        loaded = panel.load_config()
+        runtime = panel.read_json(panel.CONFIG_PATH, {})
+
+        self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.136")
+        self.assertEqual(runtime["cameras"][0]["host"], "192.168.33.136")
 
     def test_prepare_save_keeps_ui_changes_without_bouncing_to_existing_config(self):
         panel = load_panel_module()
@@ -185,7 +206,7 @@ class EdgePanelConfigTests(unittest.TestCase):
             "storage": {},
             "cameras": [camera("hikvision_1", "192.168.33.21", "main")],
         }
-        panel.write_json(panel.PANEL_CONFIG_PATH, existing)
+        panel.write_json(panel.CONFIG_PATH, existing)
 
         raw_payload = json.loads(json.dumps(existing))
         raw_payload["cameras"][0]["camera_number"] = "1"
@@ -398,7 +419,7 @@ class EdgePanelConfigTests(unittest.TestCase):
             "storage": {},
             "cameras": [camera("hikvision_1", "192.168.33.21", "main")],
         }
-        panel.write_json(panel.PANEL_CONFIG_PATH, existing)
+        panel.write_json(panel.CONFIG_PATH, existing)
 
         raw_payload = json.loads(json.dumps(existing))
         raw_payload["cameras"][0]["host"] = "192.168.33.50"

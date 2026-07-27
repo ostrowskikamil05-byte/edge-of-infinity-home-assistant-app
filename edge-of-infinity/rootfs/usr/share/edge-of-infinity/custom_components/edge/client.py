@@ -174,7 +174,7 @@ class EdgeClient:
         return _normalize_cameras(_merge_camera_config(cameras, config_cameras if isinstance(config_cameras, list) else []))
 
     async def _local_config_cameras(self) -> list[dict[str, Any]]:
-        for filename in ("panel-config.json", "edge.json"):
+        for filename in ("edge.json", "panel-config.json"):
             try:
                 payload = await self._read_local_json(filename)
             except EdgeClientError:

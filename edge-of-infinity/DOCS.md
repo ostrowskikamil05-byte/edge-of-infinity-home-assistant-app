@@ -75,15 +75,7 @@ When `host`, `username`, and `password` are set but RTSP fields are empty, Edge 
 /Streaming/Channels/102
 ```
 
-Starting with version `0.8.8`, the sidebar panel stores the authoritative camera state here:
-
-```text
-/homeassistant/edge/panel-config.json
-```
-
-The JSON file below is the mirrored runtime config used by MediaMTX, Janus, and older tooling.
-
-On first start, the app creates:
+Starting with version `0.10.10`, the sidebar panel and add-on startup use one authoritative camera state file:
 
 ```text
 /homeassistant/edge/edge.json
@@ -101,9 +93,9 @@ The app also writes a template:
 /homeassistant/edge/edge.example.json
 ```
 
-`edge.example.json` may be refreshed by the app. Your real camera settings belong in the sidebar panel, which writes `/homeassistant/edge/panel-config.json` and mirrors it to `/homeassistant/edge/edge.json`, visible in File Editor as `/config/edge/edge.json`.
+`edge.example.json` may be refreshed by the app. Your real camera settings belong in the sidebar panel, which writes `/homeassistant/edge/edge.json`, visible in File Editor as `/config/edge/edge.json`.
 
-The app must not overwrite an existing panel config. When `panel-config.json` exists, add-on startup copies it to `edge.json` before generating MediaMTX and Janus runtime config.
+`/homeassistant/edge/panel-config.json` is now only a diagnostics mirror and a one-time legacy migration fallback. When `edge.json` exists and contains cameras, add-on startup always uses `edge.json` before generating MediaMTX and Janus runtime config.
 
 The initial file contains two Hikvision camera slots:
 
@@ -169,7 +161,7 @@ Starting with version `0.8.5`, MediaMTX no longer advertises Docker bridge inter
 
 Starting with version `0.8.9`, enabled cameras with `low_latency` keep MediaMTX paths warm when a stream is used by a tile, live view, or recording. This removes most cold-start delay where a phone opens the panel and MediaMTX would otherwise only then start pulling RTSP from the camera. WebRTC gather and handshake timeouts are also extended for LTE/5G clients.
 
-Starting with version `0.10.0`, Edge Settings can save mobile WebRTC runtime values into `/homeassistant/edge/panel-config.json`:
+Starting with version `0.10.0`, Edge Settings can save mobile WebRTC runtime values into `/homeassistant/edge/edge.json`:
 
 ```text
 mobile_webrtc_public_hosts
@@ -200,27 +192,11 @@ Starting with version `0.10.4`, the panel refuses to embed WebRTC when the brows
 
 Starting with version `0.10.5`, Edge Settings has a `Remote access` mode: `local_only`, `direct_public`, `vps_relay`, or `turn_relay`. Nabu Casa is treated as `local_only / panel only`: it can open the Home Assistant UI, but it is not a MediaMTX WebRTC relay and must not be used as `WebRTC public URL`. For LTE without forwarded ports, choose `vps_relay` or `turn_relay` and set `WebRTC public URL` to that relay endpoint.
 
-Starting with version `0.10.6`, manual Hikvision channel fields are authoritative. `camera_number` still generates defaults such as `101/102` or `201/202`, but it no longer rejects a manually entered channel pair. The panel also clears legacy override files on boot and returns the verified `panel-config.json` payload after save, so Camera Settings should no longer bounce stream roles or channels back to the previous state.
+Starting with version `0.10.6`, manual Hikvision channel fields are authoritative. `camera_number` still generates defaults such as `101/102` or `201/202`, but it no longer rejects a manually entered channel pair.
 
 For LL-HLS mobile tests, `mediamtx_hls_always_remux` can be enabled in the add-on options. Keep it off unless you are testing HLS startup time, because always-remux keeps HLS work active even without a viewer.
 
-Starting with version `0.8.6`, `/homeassistant/edge/edge.json` remains the source of truth after it exists. Add-on options are copied only to `/tmp/edge-runtime/edge.options.json` for diagnostics and no longer overwrite panel changes on restart. Stream role choices are also persisted in:
-
-```text
-/homeassistant/edge/stream-overrides.json
-```
-
-Those overrides are applied on every config load so `tile`, `live`, `record`, and `snapshot` selections cannot bounce back when another source rewrites `edge.json`.
-
-Starting with version `0.8.7`, the panel also persists the full submitted camera form in:
-
-```text
-/homeassistant/edge/panel-camera-overrides.json
-```
-
-This includes host, login, RTSP, ONVIF, ISAPI, enable flags, and all stream role choices. The panel applies this file before config normalization, so a stale add-on option file or old `edge.json` contents cannot silently force saved camera fields back to previous values.
-
-Starting with version `0.8.8`, `/homeassistant/edge/panel-config.json` is the primary source of truth. Starting with version `0.10.0`, successful panel saves clear legacy `panel-camera-overrides.json` and `stream-overrides.json` files. Starting with version `0.10.1`, those legacy files are no longer applied while loading fallback runtime config, so stale values cannot force stream roles back to previous settings.
+Starting with version `0.10.10`, `/homeassistant/edge/edge.json` is the single source of truth after it exists. Add-on options are copied only to `/tmp/edge-runtime/edge.options.json` for diagnostics and no longer overwrite panel changes on restart. Successful panel saves clear legacy `panel-camera-overrides.json` and `stream-overrides.json` files so stale values cannot force stream roles or connection fields back to previous settings.
 
 Starting with version `0.10.2`, Hikvision setup can use `camera_number` as the simple source of truth for stream URLs. Camera number `1` maps to `101/102`, camera number `2` maps to `201/202`, and so on. This lets the panel rebuild RTSP URLs from host, username, password, and camera number without manually editing every RTSP path. The saved `access_protocol` and `rtsp_transport` fields are also preserved so the panel and generated runtime config stay aligned.
 

@@ -881,8 +881,8 @@ def collect_panel_logs() -> dict:
 
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "authoritative_config": str(PANEL_CONFIG_PATH),
-        "runtime_config": str(CONFIG_PATH),
+        "authoritative_config": str(CONFIG_PATH),
+        "panel_mirror_config": str(PANEL_CONFIG_PATH),
         "config_summary": config_summary(config),
         "edge_debug": redact_rtsp(read_text_tail(DEBUG_LOG_PATH, 16000)),
         "last_save_debug": safe_json_file(HOME_DIR / "last-save-debug.json"),
@@ -1013,34 +1013,24 @@ def authoritative_config_from_payload(raw_payload: dict) -> dict:
 
 
 def load_config() -> dict:
-    panel_config = {}
-    runtime_config = {}
-    if PANEL_CONFIG_PATH.exists():
-        panel_config = authoritative_config_from_payload(read_json(PANEL_CONFIG_PATH, {"cameras": []}))
-    if CONFIG_PATH.exists():
-        runtime_config = effective_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
+    config = effective_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
+    if config.get("cameras"):
+        if read_json(PANEL_CONFIG_PATH, {}) != config:
+            write_json(PANEL_CONFIG_PATH, config)
+        return config
 
-    if panel_config.get("cameras") and runtime_config.get("cameras"):
-        panel_mtime = file_mtime(PANEL_CONFIG_PATH)
-        runtime_mtime = file_mtime(CONFIG_PATH)
-        if runtime_mtime > panel_mtime + 1:
-            write_debug_event("config_source_selected", {
-                "source": "runtime_edge_json_newer",
-                "runtime_config": str(CONFIG_PATH),
-                "panel_config": str(PANEL_CONFIG_PATH),
-                "runtime_mtime": runtime_mtime,
-                "panel_mtime": panel_mtime,
-                "summary": config_summary(runtime_config),
-            })
-            write_json(PANEL_CONFIG_PATH, runtime_config)
-            return runtime_config
-        return panel_config
-
+    panel_config = authoritative_config_from_payload(read_json(PANEL_CONFIG_PATH, {"cameras": []}))
     if panel_config.get("cameras"):
+        write_debug_event("config_source_selected", {
+            "source": "panel_config_fallback",
+            "runtime_config": str(CONFIG_PATH),
+            "panel_config": str(PANEL_CONFIG_PATH),
+            "summary": config_summary(panel_config),
+        })
+        write_json(CONFIG_PATH, panel_config)
         return panel_config
 
-    config = runtime_config or effective_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
-    if not config.get("cameras") and CONFIG_BACKUP_PATH.exists():
+    if CONFIG_BACKUP_PATH.exists():
         backup = effective_config_from_payload(read_json(CONFIG_BACKUP_PATH, {"cameras": []}))
         if backup.get("cameras"):
             write_json(CONFIG_PATH, backup)
@@ -1051,8 +1041,8 @@ def load_config() -> dict:
 
 def commit_panel_config(payload: dict) -> dict:
     committed = authoritative_config_from_payload(payload)
-    write_json(PANEL_CONFIG_PATH, committed)
     write_json(CONFIG_PATH, committed)
+    write_json(PANEL_CONFIG_PATH, committed)
     clear_legacy_override_files()
     return committed
 
@@ -2908,7 +2898,7 @@ INDEX_HTML = r"""<!doctype html>
               <button id="add-camera" type="button">Add camera</button>
               <button class="primary" id="save-config" type="button">Save cameras</button>
             </div>
-            <p class="notice" id="save-state">Changes are saved to <code>/homeassistant/edge/panel-config.json</code> and mirrored to runtime <code>edge.json</code>.</p>
+            <p class="notice" id="save-state">Changes are saved to <code>/homeassistant/edge/edge.json</code>. <code>panel-config.json</code> is only a diagnostics mirror.</p>
           </section>
         </section>
 
@@ -2924,7 +2914,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="actions">
               <button class="primary" id="save-edge-settings" type="button">Save Edge settings</button>
             </div>
-            <p class="notice" id="edge-save-state">Core settings are saved to <code>/homeassistant/edge/panel-config.json</code> and mirrored to runtime <code>edge.json</code>. Some runtime changes may need an add-on restart.</p>
+            <p class="notice" id="edge-save-state">Core settings are saved to <code>/homeassistant/edge/edge.json</code>. <code>panel-config.json</code> is only a diagnostics mirror. Some runtime changes may need an add-on restart.</p>
           </section>
         </section>
 
@@ -4386,7 +4376,7 @@ INDEX_HTML = r"""<!doctype html>
           updateLiveTimer();
         }
         if (panelLogs) await loadLogs();
-        edgeSaveState.textContent = 'Saved. Edge settings are stored in /homeassistant/edge/panel-config.json and mirrored to edge.json.';
+        edgeSaveState.textContent = 'Saved. Edge settings are stored in /homeassistant/edge/edge.json. panel-config.json was refreshed as a diagnostics mirror.';
       });
 
       document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);
@@ -4498,7 +4488,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
-    server_version = "EdgePanel/0.10.9"
+    server_version = "EdgePanel/0.10.10"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
@@ -4626,14 +4616,14 @@ class EdgeHandler(BaseHTTPRequestHandler):
             backup_config()
             backup_panel_config()
             committed_payload = commit_panel_config(final_payload)
-            saved_payload = authoritative_config_from_payload(read_json(PANEL_CONFIG_PATH, {"cameras": []}))
+            saved_payload = authoritative_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
             if config_summary(saved_payload) != config_summary(committed_payload):
                 write_debug_event("config_save_rewrite_after_verify", {
                     "expected_summary": config_summary(committed_payload),
                     "loaded_summary": config_summary(saved_payload),
                 })
                 committed_payload = commit_panel_config(committed_payload)
-                saved_payload = authoritative_config_from_payload(read_json(PANEL_CONFIG_PATH, {"cameras": []}))
+                saved_payload = authoritative_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
             write_json(HOME_DIR / "edge.last-saved.json", saved_payload)
             save_debug_payload(raw_payload, merged_payload, normalized_payload, saved_payload)
             write_debug_event("config_save", {
@@ -4645,7 +4635,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "saved_summary": config_summary(saved_payload),
                 "verified": config_summary(committed_payload) == config_summary(saved_payload),
                 "changed_by": self.client_address[0],
-                "authoritative_path": str(PANEL_CONFIG_PATH),
+                "authoritative_path": str(CONFIG_PATH),
+                "panel_mirror_path": str(PANEL_CONFIG_PATH),
             })
             stop_orphan_recordings(saved_payload)
             schedule_recording_ensure(saved_payload, "config_save")

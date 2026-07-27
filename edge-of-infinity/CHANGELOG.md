@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.10
+
+- Make `/homeassistant/edge/edge.json` the single authoritative camera config source; `panel-config.json` is now only a diagnostics mirror and legacy migration fallback.
+- Update add-on startup to always prefer `edge.json` when it exists, preventing stale `panel-config.json` from restoring old camera values on restart.
+- Verify panel saves against `edge.json` and make the Home Assistant integration read `edge.json` before the mirror.
+- Add regression coverage for stale panel config no longer overriding saved camera fields.
+
 ## 0.10.9
 
 - Make Hikvision RTSP main/sub URLs generated from Host/IP, username, password, and channel fields whenever those base fields are available.
