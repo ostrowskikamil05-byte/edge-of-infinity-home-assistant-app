@@ -17,9 +17,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.17"
+APP_VERSION = "0.10.18"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "smooth-nvr-playback-no-rerender-v9"
+UI_BUILD = "continuous-nvr-playback-snapshots-v10"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -34,6 +34,8 @@ DEBUG_LOG_PATH = HOME_DIR / "edge-debug.log"
 PORT = int(os.environ.get("API_PORT", "8088"))
 SNAPSHOT_DIR = HOME_DIR / "snapshots"
 DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
+STREAM_LIST_DIR = HOME_DIR / "stream-lists"
+RECORDING_STREAM_LOG_PATH = HOME_DIR / "recording-stream.log"
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
 DEBUG_LOCK = threading.Lock()
 HIKVISION_MAIN_CHANNEL = "101"
@@ -934,6 +936,7 @@ def collect_panel_logs() -> dict:
         "runtime_config": engine_runtime_status(),
         "runtime_mediamtx_config": redact_rtsp(read_text_tail(MEDIAMTX_CONFIG_PATH, 20000)),
         "runtime_janus_streaming_config": redact_rtsp(read_text_tail(JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg", 20000)),
+        "recording_stream_log": redact_rtsp(read_text_tail(RECORDING_STREAM_LOG_PATH, 12000)),
         "recording_logs": recording_logs,
     }
 
@@ -1306,6 +1309,16 @@ def mediamtx_path(camera: dict, index: int, stream_name: str) -> str:
     camera_id = safe_id(camera.get("id") or f"camera_{index + 1}")
     stream_name = normalize_stream_name(stream_name, "sub")
     return f"{camera_id}_{stream_name}"
+
+
+def mediamtx_rtsp_url(camera: dict, index: int, stream_name: str) -> str:
+    return f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}/{mediamtx_path(camera, index, stream_name)}"
+
+
+def recording_source_stream(camera: dict, index: int, stream_name: str) -> tuple[str, str]:
+    if MEDIAMTX_ENABLED:
+        return mediamtx_rtsp_url(camera, index, stream_name), "mediamtx_rebroadcast"
+    return camera_stream(camera, stream_name), "camera_direct"
 
 
 def janus_mount_id(index: int, stream_name: str) -> int:
@@ -1846,6 +1859,114 @@ def recording_segments(camera: dict, index: int, limit: int = 24, segment_second
     return segments
 
 
+def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_seconds: int = 10) -> list[dict]:
+    directory = recording_base_dir(camera, index)
+    if not directory.exists():
+        return []
+    files = sorted(directory.glob("*.mp4"), key=lambda item: (recording_segment_start_ts(item, item.stat().st_mtime), item.name))
+    entries = []
+    offset = 0
+    duration_seconds = clamp_int(segment_seconds, 10, 1, 3600)
+    for path in files[-limit:]:
+        stat = path.stat()
+        start_ts = recording_segment_start_ts(path, stat.st_mtime)
+        entries.append(
+            {
+                "path": path,
+                "name": path.name,
+                "start_ts": start_ts,
+                "start_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(start_ts)),
+                "offset": offset,
+                "duration_seconds": duration_seconds,
+            }
+        )
+        offset += duration_seconds
+    return entries
+
+
+def camera_for_recording_key(config: dict, key: str) -> tuple[dict, int] | None:
+    for index, camera in enumerate(config.get("cameras", [])):
+        if recording_key(camera, index) == key:
+            return camera, index
+    return None
+
+
+def ffconcat_file_line(path: Path) -> str:
+    clean_path = str(path.resolve()).replace("\\", "/").replace("'", "\\'")
+    return f"file '{clean_path}'"
+
+
+def recording_stream_plan(key: str, start_seconds: int = 0) -> dict:
+    config = load_config()
+    target = camera_for_recording_key(config, key)
+    if target is None:
+        raise FileNotFoundError("recording_camera_not_found")
+    camera, index = target
+    nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
+    segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
+    entries = recording_file_entries(camera, index, limit=1000, segment_seconds=segment_seconds)
+    if not entries:
+        raise FileNotFoundError("recording_stream_empty")
+
+    total_seconds = sum(safe_int(item.get("duration_seconds"), segment_seconds) for item in entries)
+    requested = max(0, min(safe_int(start_seconds, 0), max(0, total_seconds - 1)))
+    selected_index = 0
+    selected_seek = 0
+    for position, entry in enumerate(entries):
+        duration = safe_int(entry.get("duration_seconds"), segment_seconds)
+        if requested < entry["offset"] + duration:
+            selected_index = position
+            selected_seek = max(0, requested - entry["offset"])
+            break
+    selected = entries[selected_index:]
+
+    STREAM_LIST_DIR.mkdir(parents=True, exist_ok=True)
+    concat_path = STREAM_LIST_DIR / f"{safe_id(key)}-{time.time_ns()}.ffconcat"
+    concat_payload = "\n".join(ffconcat_file_line(item["path"]) for item in selected) + "\n"
+    concat_path.write_text(concat_payload, encoding="utf-8")
+    return {
+        "key": key,
+        "camera_id": camera.get("id"),
+        "camera_index": index,
+        "concat_path": concat_path,
+        "requested_start_seconds": requested,
+        "seek_seconds": selected_seek,
+        "file_count": len(selected),
+        "first_file": selected[0]["name"],
+        "total_seconds": total_seconds,
+        "segment_seconds": segment_seconds,
+    }
+
+
+def build_recording_stream_command(concat_path: Path, seek_seconds: int = 0) -> list[str]:
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-nostdin",
+        "-ss",
+        str(max(0, safe_int(seek_seconds, 0))),
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c",
+        "copy",
+        "-movflags",
+        "frag_keyframe+empty_moov+default_base_moof",
+        "-f",
+        "mp4",
+        "pipe:1",
+    ]
+
+
 def recording_log_path(camera: dict, index: int) -> Path:
     return recording_base_dir(camera, index) / "ffmpeg.log"
 
@@ -2034,7 +2155,8 @@ def recording_status_payload(config: dict | None = None) -> dict:
         segment_files = recording_segments(camera, index, limit=240, segment_seconds=segment_seconds)
         timeline_files = sorted(segment_files, key=lambda item: (item.get("start_ts") or 0, item.get("name") or ""))
         record_stream = camera.get("record_stream") or "main"
-        record_rtsp = camera_stream(camera, record_stream)
+        direct_record_rtsp = camera_stream(camera, record_stream)
+        record_rtsp, record_source = recording_source_stream(camera, index, record_stream)
         preflight_error = recording_preflight_error(camera, record_stream)
         desired_recording = camera_should_record(camera)
         is_recording = bool(process and process.poll() is None)
@@ -2056,10 +2178,11 @@ def recording_status_payload(config: dict | None = None) -> dict:
                 "key": key,
                 "record_stream": record_stream,
                 "record_rtsp": redact_rtsp(record_rtsp),
+                "record_source": record_source,
                 "record_mode": nvr_mode,
                 "video_codec": video_codec,
                 "desired_recording": desired_recording,
-                "can_record": not preflight_error and bool(record_rtsp),
+                "can_record": not preflight_error and bool(direct_record_rtsp),
                 "record_error": preflight_error,
                 "recording": is_recording,
                 "recording_status": recording_status,
@@ -2140,9 +2263,10 @@ def start_recording(camera: dict, index: int) -> dict:
         raise RuntimeError("ffmpeg_not_installed_in_addon")
 
     record_stream = camera.get("record_stream") or "main"
-    stream = camera_stream(camera, record_stream)
-    if not stream:
+    direct_stream = camera_stream(camera, record_stream)
+    if not direct_stream:
         raise ValueError(recording_preflight_error(camera, record_stream) or "recording_rtsp_not_configured")
+    stream, record_source = recording_source_stream(camera, index, record_stream)
 
     directory = recording_base_dir(camera, index)
     directory.mkdir(parents=True, exist_ok=True)
@@ -2160,7 +2284,7 @@ def start_recording(camera: dict, index: int) -> dict:
     removed_old = cleanup_old_recordings(directory, retention_days)
     log_path = directory / "ffmpeg.log"
     output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
-    mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr)
+    mode, video_codec, audio_codec, probe = recording_codec_mode(direct_stream, nvr)
     command = build_recording_command(stream, output_pattern, segment_seconds, mode)
     log_header = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -2168,6 +2292,7 @@ def start_recording(camera: dict, index: int) -> dict:
         "key": key,
         "camera_id": camera.get("id"),
         "record_stream": record_stream,
+        "record_source": record_source,
         "directory": str(directory),
         "output_pattern": output_pattern,
         "mode": mode,
@@ -2194,6 +2319,7 @@ def start_recording(camera: dict, index: int) -> dict:
             "key": key,
             "camera_id": camera.get("id"),
             "record_stream": record_stream,
+            "record_source": record_source,
             "exit_code": early_exit,
             "log_tail": tail,
             "command": redact_command(command),
@@ -2203,6 +2329,7 @@ def start_recording(camera: dict, index: int) -> dict:
         "key": key,
         "camera_id": camera.get("id"),
         "record_stream": record_stream,
+        "record_source": record_source,
         "segment_seconds": segment_seconds,
         "retention_days": retention_days,
         "removed_old": removed_old,
@@ -2219,6 +2346,7 @@ def start_recording(camera: dict, index: int) -> dict:
         "pid": process.pid,
         "directory": str(directory),
         "record_stream": record_stream,
+        "record_source": record_source,
         "record_rtsp": redact_rtsp(stream),
         "record_mode": mode,
         "video_codec": video_codec,
@@ -3187,6 +3315,9 @@ INDEX_HTML = r"""<!doctype html>
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
         gap: 8px;
+        max-height: 232px;
+        overflow-y: auto;
+        padding-right: 3px;
       }
       .recording-tile {
         min-width: 0;
@@ -3210,6 +3341,32 @@ INDEX_HTML = r"""<!doctype html>
       .recording-meta {
         display: block;
         margin-top: 4px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .snapshot-strip {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+        gap: 8px;
+        max-height: 188px;
+        overflow-y: auto;
+      }
+      .snapshot-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: rgba(0,0,0,.16);
+      }
+      .snapshot-card img {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: cover;
+        display: block;
+        background: #05080a;
+      }
+      .snapshot-card span {
+        display: block;
+        padding: 6px 8px;
         color: var(--muted);
         font-size: 11px;
       }
@@ -3420,6 +3577,10 @@ INDEX_HTML = r"""<!doctype html>
       let recordingStatus = {};
       let selectedRecording = {};
       let selectedRecordingSeek = {};
+      let selectedRecordingTimeline = {};
+      let recordingStreamStartOffset = {};
+      let recordingStreamNonce = {};
+      let recordingSnapshots = {};
       let recordingAutoplayAfterRender = {};
       let nvrScrubbing = false;
       let lastNvrRenderSignature = '';
@@ -3740,6 +3901,20 @@ INDEX_HTML = r"""<!doctype html>
         return date.toLocaleString();
       }
 
+      function formatTimestampSeconds(value) {
+        if (!value) return 'unknown time';
+        const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value);
+        return date.toLocaleString(undefined, {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        });
+      }
+
       function formatDuration(value) {
         const total = Math.max(0, Math.floor(Number(value || 0)));
         const hours = Math.floor(total / 3600);
@@ -3772,12 +3947,62 @@ INDEX_HTML = r"""<!doctype html>
         return { entries, total: offset };
       }
 
+      function recordingTargetInTimeline(timeline, offset) {
+        const entries = timeline.entries || [];
+        if (!entries.length) return null;
+        const timelineMax = Math.max(0, Number(timeline.total || 0) - 1);
+        const requested = Math.max(0, Math.min(Math.floor(Number(offset || 0)), timelineMax));
+        const target = entries.find((entry) => requested < entry.offset + entry.duration) || entries[entries.length - 1];
+        const seek = Math.max(0, Math.min(requested - target.offset, Math.max(0, target.duration - 1)));
+        return { timeline, target, requested, seek };
+      }
+
       function recordingOffsetForSelection(files, selectedUrl, seekSeconds = 0) {
         const timeline = recordingTimeline(files);
         const entry = timeline.entries.find((item) => item.file.url === selectedUrl) || timeline.entries[timeline.entries.length - 1];
         if (!entry) return { timeline, value: 0, seek: 0 };
         const seek = Math.max(0, Math.min(Math.floor(Number(seekSeconds || 0)), Math.max(0, entry.duration - 1)));
         return { timeline, value: entry.offset + seek, seek };
+      }
+
+      function recordingWallClockAtOffset(files, offset) {
+        const target = recordingTargetInTimeline(recordingTimeline(files), offset);
+        if (!target) return '';
+        const baseTs = Number(target.target.file.start_ts || 0);
+        return baseTs ? baseTs + target.seek : '';
+      }
+
+      function recordingTimelineLabel(index, value, total) {
+        const status = recordingStatus[index] || {};
+        const files = Array.isArray(status.files) ? status.files : [];
+        const wallClock = recordingWallClockAtOffset(files, value);
+        return `${formatTimestampSeconds(wallClock)} | ${formatDuration(value)} / ${formatDuration(total)}`;
+      }
+
+      function recordingStreamUrl(status, index, offset) {
+        const key = status?.key;
+        if (!key) return '';
+        if (!recordingStreamNonce[index]) recordingStreamNonce[index] = Date.now();
+        const start = Math.max(0, Math.floor(Number(offset || 0)));
+        return panelPath(`recordings-stream/${encodeURIComponent(key)}.mp4?start=${start}&v=${recordingStreamNonce[index]}`);
+      }
+
+      function offsetForRecordingUrl(index, url) {
+        const status = recordingStatus[index] || {};
+        const timeline = recordingTimeline(status.files || []);
+        const entry = timeline.entries.find((item) => item.file.url === url);
+        return entry ? entry.offset : 0;
+      }
+
+      function recordingSnapshotsHtml(index) {
+        const snapshots = Array.isArray(recordingSnapshots[index]) ? recordingSnapshots[index] : [];
+        if (!snapshots.length) return '<p class="notice">Snapshots from playback will appear here.</p>';
+        return snapshots.map((item) => `
+          <div class="snapshot-card">
+            <img src="${escapeHtml(item.url)}" alt="${escapeHtml(item.recordedAt)}">
+            <span>${escapeHtml(item.recordedAt)} | ${escapeHtml(item.offsetLabel)}</span>
+          </div>
+        `).join('');
       }
 
       function recordingStatusSignature() {
@@ -3803,9 +4028,10 @@ INDEX_HTML = r"""<!doctype html>
       function updateRecordingTimelineUi(index, value, total) {
         const safeValue = Math.max(0, Math.floor(Number(value || 0)));
         const safeTotal = Math.max(0, Math.floor(Number(total || 0)));
+        selectedRecordingTimeline[index] = Math.min(safeValue, Math.max(0, safeTotal - 1));
         const label = nvrGrid.querySelector(`[data-recording-timeline-label="${index}"]`);
         if (label) {
-          label.textContent = `${formatDuration(safeValue)} / ${formatDuration(safeTotal)}`;
+          label.textContent = recordingTimelineLabel(index, safeValue, safeTotal);
         }
         const scrub = nvrGrid.querySelector(`[data-recording-scrub="${index}"]`);
         if (scrub && document.activeElement !== scrub) {
@@ -3819,20 +4045,25 @@ INDEX_HTML = r"""<!doctype html>
         const timeline = recordingTimeline(files);
         const { entries } = timeline;
         if (!entries.length) return null;
-        const requested = Math.max(0, Math.floor(Number(offset || 0)));
-        const target = entries.find((entry) => requested < entry.offset + entry.duration) || entries[entries.length - 1];
-        const seek = Math.max(0, Math.min(requested - target.offset, Math.max(0, target.duration - 1)));
-        return { timeline, target, requested, seek };
+        return recordingTargetInTimeline(timeline, offset);
       }
 
-      function setCurrentRecordingTime(index, seek) {
+      function setCurrentRecordingTime(index, timelineSecond) {
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         if (!video) return false;
+        const streamStart = Math.max(0, Number(video.dataset.recordingStreamStart || recordingStreamStartOffset[index] || 0));
+        const relativeSeek = Math.max(0, Math.floor(Number(timelineSecond || 0)) - streamStart);
         const applySeek = () => {
           try {
-            video.currentTime = seek;
+            video.currentTime = relativeSeek;
           } catch (error) {
-            debugEvent('ui_recording_seek_error', { index, seek, message: error.message });
+            debugEvent('ui_recording_seek_error', {
+              index,
+              timeline_second: timelineSecond,
+              relative_seek: relativeSeek,
+              stream_start: streamStart,
+              message: error.message,
+            });
           }
         };
         if (video.readyState >= 1) {
@@ -3847,10 +4078,9 @@ INDEX_HTML = r"""<!doctype html>
         const target = recordingTargetForOffset(index, offset);
         if (!target) return;
         updateRecordingTimelineUi(index, target.requested, target.timeline.total);
-        if (target.target.file.url === selectedRecording[index]) {
-          selectedRecordingSeek[index] = target.seek;
-          setCurrentRecordingTime(index, target.seek);
-        }
+        selectedRecording[index] = target.target.file.url;
+        selectedRecordingSeek[index] = target.seek;
+        selectedRecordingTimeline[index] = target.requested;
       }
 
       function selectRecordingAtOffset(index, offset) {
@@ -3858,24 +4088,20 @@ INDEX_HTML = r"""<!doctype html>
         if (!target) return;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         const wasPlaying = Boolean(video && !video.paused && !video.ended);
-        const oldSelected = selectedRecording[index];
-        const sameSegment = target.target.file.url === oldSelected;
         selectedRecording[index] = target.target.file.url;
         selectedRecordingSeek[index] = target.seek;
+        selectedRecordingTimeline[index] = target.requested;
+        recordingStreamStartOffset[index] = target.requested;
+        recordingStreamNonce[index] = Date.now();
         debugEvent('ui_recording_timeline_seek', {
           index,
           recording: target.target.file.name,
           timeline_second: target.requested,
           segment_second: selectedRecordingSeek[index],
-          same_segment: sameSegment,
+          continuous_stream_start: recordingStreamStartOffset[index],
         });
-        if (video && sameSegment) {
-          setCurrentRecordingTime(index, target.seek);
-          updateRecordingTimelineUi(index, target.requested, target.timeline.total);
-          return;
-        }
         recordingAutoplayAfterRender[index] = wasPlaying;
-        renderNvrGrid({ reason: 'timeline_seek' });
+        renderNvrGrid({ reason: 'timeline_seek_continuous' });
       }
 
       function applyRecordingSeek() {
@@ -3914,26 +4140,64 @@ INDEX_HTML = r"""<!doctype html>
         if (index === undefined) return;
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
-        selectedRecordingSeek[index] = Math.max(0, Math.floor(Number(video.currentTime || 0)));
-        const selection = recordingOffsetForSelection(files, selectedRecording[index], selectedRecordingSeek[index]);
-        updateRecordingTimelineUi(index, selection.value, selection.timeline.total);
+        const streamStart = Math.max(0, Number(video.dataset.recordingStreamStart || recordingStreamStartOffset[index] || 0));
+        const timelineSecond = streamStart + Math.max(0, Math.floor(Number(video.currentTime || 0)));
+        const target = recordingTargetForOffset(index, timelineSecond);
+        if (target) {
+          selectedRecording[index] = target.target.file.url;
+          selectedRecordingSeek[index] = target.seek;
+          selectedRecordingTimeline[index] = target.requested;
+          updateRecordingTimelineUi(index, target.requested, target.timeline.total);
+        } else {
+          updateRecordingTimelineUi(index, timelineSecond, recordingTimeline(files).total);
+        }
       }
 
       function playNextRecordingSegment(index) {
-        const status = recordingStatus[index] || {};
-        const files = Array.isArray(status.files) ? status.files : [];
-        const { entries } = recordingTimeline(files);
-        const current = entries.findIndex((entry) => entry.file.url === selectedRecording[index]);
-        if (current < 0 || current >= entries.length - 1) {
-          debugEvent('ui_recording_segment_end', { index, next: false });
+        debugEvent('ui_recording_stream_ended', {
+          index,
+          timeline_second: selectedRecordingTimeline[index],
+          stream_start: recordingStreamStartOffset[index],
+        });
+      }
+
+      function captureRecordingSnapshot(index) {
+        const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+        if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+          debugEvent('ui_recording_snapshot_blocked', { index, reason: 'video_not_ready' });
           return;
         }
-        const next = entries[current + 1];
-        selectedRecording[index] = next.file.url;
-        selectedRecordingSeek[index] = 0;
-        recordingAutoplayAfterRender[index] = true;
-        debugEvent('ui_recording_segment_end', { index, next: true, recording: next.file.name });
-        renderNvrGrid({ reason: 'recording_auto_next_segment' });
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const context = canvas.getContext('2d');
+        let url = '';
+        try {
+          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+          url = canvas.toDataURL('image/jpeg', 0.88);
+        } catch (error) {
+          debugEvent('ui_recording_snapshot_error', { index, message: error.message });
+          return;
+        }
+        const timelineSecond = Math.max(0, Math.floor(Number(selectedRecordingTimeline[index] || 0)));
+        const status = recordingStatus[index] || {};
+        const recordedAt = formatTimestampSeconds(recordingWallClockAtOffset(status.files || [], timelineSecond));
+        const item = {
+          url,
+          recordedAt,
+          offsetLabel: formatDuration(timelineSecond),
+          capturedAt: formatTimestampSeconds(Math.floor(Date.now() / 1000)),
+        };
+        recordingSnapshots[index] = [item, ...(recordingSnapshots[index] || [])].slice(0, 12);
+        const strip = nvrGrid.querySelector(`[data-recording-snapshots="${index}"]`);
+        if (strip) strip.innerHTML = recordingSnapshotsHtml(index);
+        debugEvent('ui_recording_snapshot_captured', {
+          index,
+          recorded_at: recordedAt,
+          timeline_second: timelineSecond,
+          width: canvas.width,
+          height: canvas.height,
+        });
       }
 
       function pretty(value) {
@@ -3976,6 +4240,7 @@ INDEX_HTML = r"""<!doctype html>
           logBlock('Runtime edge.json', panelLogs.runtime_config_file || {}),
           logBlock('MediaMTX runtime config', panelLogs.runtime_mediamtx_config || 'missing'),
           logBlock('Janus streaming config', panelLogs.runtime_janus_streaming_config || 'missing'),
+          logBlock('Recording stream', panelLogs.recording_stream_log || 'empty'),
           logBlock('Last saved response', panelLogs.last_saved_config || {}),
           ...recordingLogs.map((item) => logBlock(`Recording ffmpeg: ${item.path}`, item.tail || 'empty'))
         ].join('');
@@ -4193,10 +4458,18 @@ INDEX_HTML = r"""<!doctype html>
         const selection = recordingOffsetForSelection(files, selected, seekSeconds);
         const timeline = selection.timeline;
         const timelineTotal = timeline.total;
-        const timelineValue = Math.max(0, Math.min(selection.value, Math.max(0, timelineTotal - 1)));
-        const player = selected
+        const timelineMax = Math.max(0, timelineTotal - 1);
+        const storedTimeline = Number(selectedRecordingTimeline[index]);
+        const timelineValue = Math.max(0, Math.min(Number.isFinite(storedTimeline) ? storedTimeline : selection.value, timelineMax));
+        if (!Number.isFinite(storedTimeline)) selectedRecordingTimeline[index] = timelineValue;
+        const storedStreamStart = Number(recordingStreamStartOffset[index]);
+        const streamStart = Math.max(0, Math.min(Number.isFinite(storedStreamStart) ? storedStreamStart : timelineValue, timelineMax));
+        if (!Number.isFinite(storedStreamStart)) recordingStreamStartOffset[index] = streamStart;
+        const playerSrc = timelineTotal ? recordingStreamUrl(status, index, streamStart) : '';
+        const playable = Boolean(timelineTotal && playerSrc);
+        const player = playable
           ? `<div class="recording-player-wrap" data-recording-wrap="${index}">
-              <video class="recording-player" src="${escapeHtml(panelPath(selected))}" controls preload="metadata" playsinline data-recording-player="${index}" data-recording-seek="${escapeHtml(selection.seek)}"></video>
+              <video class="recording-player" src="${escapeHtml(playerSrc)}" controls preload="metadata" playsinline data-recording-player="${index}" data-recording-seek="0" data-recording-stream-start="${escapeHtml(streamStart)}"></video>
               <button class="fullscreen-button" type="button" data-recording-fullscreen="${index}" aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>
             </div>`
           : `<div class="recording-empty">No video yet</div>`;
@@ -4204,7 +4477,7 @@ INDEX_HTML = r"""<!doctype html>
           ? `<div class="recording-timeline">
               <div class="timeline-row">
                 <span>Continuous video timeline</span>
-                <span data-recording-timeline-label="${index}">${escapeHtml(formatDuration(timelineValue))} / ${escapeHtml(formatDuration(timelineTotal))}</span>
+                <span data-recording-timeline-label="${index}">${escapeHtml(recordingTimelineLabel(index, timelineValue, timelineTotal))}</span>
               </div>
               <input type="range" min="0" max="${Math.max(0, timelineTotal - 1)}" step="1" value="${timelineValue}" data-recording-scrub="${index}" aria-label="Recording timeline">
               <div class="timeline-row">
@@ -4215,12 +4488,18 @@ INDEX_HTML = r"""<!doctype html>
           : '';
         const recordingList = files.length
           ? `<div class="recording-film-grid">${files.map((file) => `
-              <button class="recording-tile ${file.url === selected ? 'active' : ''}" type="button" data-play-recording="${escapeHtml(file.url)}" data-record-index="${index}">
+              <button class="recording-tile ${file.url === selected ? 'active' : ''}" type="button" data-play-recording="${escapeHtml(file.url)}" data-recording-offset="${escapeHtml(offsetForRecordingUrl(index, file.url))}" data-record-index="${index}">
                 <b>${escapeHtml(file.name)}</b>
                 <span class="recording-meta">${escapeHtml(formatDuration(file.duration_seconds || status.segment_seconds || 10))} | ${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatDate(file.start_at || file.modified_at))}</span>
               </button>
             `).join('')}</div>`
           : `<p class="notice">${desiredRecording ? 'Continuous video recording is scheduled. The first playable clip appears after the first' : 'Start continuous video recording. The first playable clip appears after the first'} ${escapeHtml(text(status.segment_seconds, 10))}-second segment closes.</p>`;
+        const snapshotPanel = playable
+          ? `<div class="actions">
+              <button type="button" data-recording-snapshot="${index}">Snapshot</button>
+            </div>
+            <div class="snapshot-strip" data-recording-snapshots="${index}">${recordingSnapshotsHtml(index)}</div>`
+          : '';
         const diagnostics = recordError
           ? `<p class="section-status state-offline">${escapeHtml(recordErrorText(recordError))}</p>`
           : `<p class="section-status">${escapeHtml(text(status.record_rtsp, 'Record RTSP not ready'))}</p>`;
@@ -4233,6 +4512,7 @@ INDEX_HTML = r"""<!doctype html>
               </div>
               ${player}
               ${timelineControl}
+              ${snapshotPanel}
               ${diagnostics}
               <div class="actions">
                 <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}" ${!isRecording && !canRecord ? 'disabled' : ''}>${isRecording ? 'Stop' : 'Record'}</button>
@@ -4962,10 +5242,18 @@ INDEX_HTML = r"""<!doctype html>
             if (files.length && !files.some((file) => file.url === selected)) {
               selectedRecording[item.index] = files[0].url;
               selectedRecordingSeek[item.index] = 0;
+              const selection = recordingOffsetForSelection(files, files[0].url, 0);
+              selectedRecordingTimeline[item.index] = selection.value;
+              if (!Number.isFinite(Number(recordingStreamStartOffset[item.index]))) {
+                recordingStreamStartOffset[item.index] = selection.value;
+              }
             }
             if (!files.length) {
               delete selectedRecording[item.index];
               delete selectedRecordingSeek[item.index];
+              delete selectedRecordingTimeline[item.index];
+              delete recordingStreamStartOffset[item.index];
+              delete recordingStreamNonce[item.index];
             }
           });
           const nextSignature = recordingStatusSignature();
@@ -4996,10 +5284,8 @@ INDEX_HTML = r"""<!doctype html>
         const next = direction === 'older'
           ? Math.min(files.length - 1, current + 1)
           : Math.max(0, current - 1);
-        selectedRecording[index] = files[next].url;
-        selectedRecordingSeek[index] = 0;
         recordingAutoplayAfterRender[index] = wasPlaying;
-        renderNvrGrid({ reason: `playback_${direction}` });
+        selectRecordingAtOffset(index, offsetForRecordingUrl(index, files[next].url));
       }
 
       function streamSettingsFromEditor(editor) {
@@ -5324,13 +5610,16 @@ INDEX_HTML = r"""<!doctype html>
           requestEdgeFullscreen(wrap, 'nvr_recording');
           return;
         }
+        const snapshotTarget = event.target.closest('[data-recording-snapshot]');
+        if (snapshotTarget) {
+          captureRecordingSnapshot(snapshotTarget.dataset.recordingSnapshot);
+          return;
+        }
         const playTarget = event.target.closest('[data-play-recording]');
         const playRecording = playTarget?.dataset?.playRecording;
         let index = playTarget?.dataset?.recordIndex;
         if (index !== undefined && playRecording) {
-          selectedRecording[index] = playRecording;
-          selectedRecordingSeek[index] = 0;
-          renderNvrGrid({ reason: 'recording_tile_click' });
+          selectRecordingAtOffset(index, playTarget.dataset.recordingOffset || offsetForRecordingUrl(index, playRecording));
           return;
         }
         const stepTarget = event.target.closest('[data-playback-step]');
@@ -5502,6 +5791,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/snapshots/"):
             self.serve_snapshot(path.removeprefix("/snapshots/"))
+            return
+        if path.startswith("/recordings-stream/") and path.endswith(".mp4"):
+            self.serve_recording_stream(path, parsed.query)
             return
         if path.startswith("/recordings/") and path.endswith(".mp4"):
             self.serve_recording(path)
@@ -5702,6 +5994,99 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         self.send_bytes(path.read_bytes(), "image/jpeg")
 
+    def serve_recording_stream(self, request_path: str, query: str) -> None:
+        key = Path(request_path.removeprefix("/recordings-stream/")).stem
+        params = parse_qs(query)
+        start_seconds = safe_int((params.get("start") or ["0"])[0], 0)
+        if not key:
+            self.send_json({"error": "recording_stream_missing_key"}, HTTPStatus.NOT_FOUND)
+            return
+        if shutil.which("ffmpeg") is None:
+            self.send_json({"error": "ffmpeg_not_installed_in_addon"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+
+        try:
+            plan = recording_stream_plan(key, start_seconds)
+        except FileNotFoundError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.NOT_FOUND)
+            return
+        except OSError as error:
+            write_debug_event("recording_stream_plan_error", {"key": key, "start_seconds": start_seconds, "error": str(error)})
+            self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        command = build_recording_stream_command(plan["concat_path"], plan["seek_seconds"])
+        write_debug_event("recording_stream_start", {
+            "client": self.client_address[0],
+            "path": request_path,
+            "query": params,
+            "plan": {name: value for name, value in plan.items() if name != "concat_path"},
+            "concat_path": str(plan["concat_path"]),
+            "command": redact_command(command),
+        })
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Edge-Version", APP_VERSION)
+        self.send_header("X-Edge-UI-Build", UI_BUILD)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        bytes_written = 0
+        chunks = 0
+        process = None
+        log_handle = None
+        result = "completed"
+        try:
+            RECORDING_STREAM_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = RECORDING_STREAM_LOG_PATH.open("ab")
+            log_handle.write(("\n=== Edge recording stream ===\n" + json.dumps({
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "key": key,
+                "start_seconds": start_seconds,
+                "plan": {name: value for name, value in plan.items() if name != "concat_path"},
+                "command": redact_command(command),
+            }, default=str) + "\n").encode("utf-8"))
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log_handle)
+            assert process.stdout is not None
+            while True:
+                chunk = process.stdout.read(256 * 1024)
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                    bytes_written += len(chunk)
+                    chunks += 1
+                except (BrokenPipeError, ConnectionResetError):
+                    result = "client_closed"
+                    break
+        except OSError as error:
+            result = f"os_error:{error}"
+            write_debug_event("recording_stream_error", {"key": key, "error": str(error), "type": type(error).__name__})
+        finally:
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            exit_code = process.poll() if process else None
+            if log_handle:
+                log_handle.close()
+            try:
+                plan["concat_path"].unlink(missing_ok=True)
+            except OSError:
+                pass
+            write_debug_event("recording_stream_end", {
+                "key": key,
+                "result": result,
+                "bytes": bytes_written,
+                "chunks": chunks,
+                "exit_code": exit_code,
+                "plan": {name: value for name, value in plan.items() if name != "concat_path"},
+            })
+
     def serve_recording(self, request_path: str) -> None:
         parts = request_path.removeprefix("/recordings/").split("/", 1)
         if len(parts) != 2:
@@ -5774,6 +6159,7 @@ def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     DATA_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    STREAM_LIST_DIR.mkdir(parents=True, exist_ok=True)
     clear_legacy_override_files()
     write_debug_event("boot_start", {
         "server_version": EdgeHandler.server_version,

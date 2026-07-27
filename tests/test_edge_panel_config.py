@@ -61,11 +61,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.17")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.17")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.17")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.17")
-        self.assertIn("v0.10.17", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.18")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.18")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.18")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.18")
+        self.assertIn("v0.10.18", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
@@ -388,10 +388,20 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("ui_recording_status_render_skipped", html)
         self.assertIn("function previewRecordingAtOffset", html)
         self.assertIn("function setCurrentRecordingTime", html)
+        self.assertIn("function recordingStreamUrl", html)
+        self.assertIn("recordings-stream/", html)
+        self.assertIn("data-recording-stream-start", html)
         self.assertIn("data-recording-timeline-label", html)
+        self.assertIn("function formatTimestampSeconds", html)
+        self.assertIn("data-recording-snapshot", html)
+        self.assertIn("data-recording-snapshots", html)
+        self.assertIn("function captureRecordingSnapshot", html)
+        self.assertIn("max-height: 232px", html)
         self.assertIn("nvrGrid.addEventListener('input'", html)
         self.assertIn("nvrGrid.addEventListener('timeupdate'", html)
         self.assertIn("nvrGrid.addEventListener('ended'", html)
+        self.assertIn("ui_recording_stream_ended", html)
+        self.assertNotIn("recording_auto_next_segment", html)
 
     def test_live_mobile_settings_are_normalized_and_preserved(self):
         panel = load_panel_module()
@@ -686,6 +696,33 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertTrue(status["desired_recording"])
         self.assertEqual(status["recording_status"], "scheduled_stopped")
 
+    def test_recording_status_uses_mediamtx_rebroadcast_source(self):
+        panel = load_panel_module()
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+
+        status = panel.recording_status_payload(payload)["cameras"][0]
+
+        self.assertEqual(status["record_source"], "mediamtx_rebroadcast")
+        self.assertIn("rtsp://127.0.0.1", status["record_rtsp"])
+        self.assertIn("hikvision_1_main", status["record_rtsp"])
+
     def test_recording_status_exposes_video_timeline_metadata(self):
         panel = load_panel_module()
         payload = panel.normalize_config(
@@ -722,6 +759,52 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(files[0]["kind"], "video_segment")
         self.assertEqual(files[0]["duration_seconds"], 12)
         self.assertIn("start_ts", files[0])
+
+    def test_recording_stream_plan_builds_continuous_concat_from_timeline(self):
+        panel = load_panel_module()
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "nvr": {"segment_seconds": 12},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+        panel.write_json(panel.CONFIG_PATH, payload)
+        directory = panel.recording_base_dir(payload["cameras"][0], 0)
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in ("20260727-173000.mp4", "20260727-173012.mp4", "20260727-173024.mp4"):
+            (directory / name).write_bytes(b"video")
+
+        key = panel.recording_key(payload["cameras"][0], 0)
+        plan = panel.recording_stream_plan(key, 13)
+        concat_text = plan["concat_path"].read_text(encoding="utf-8")
+
+        self.assertEqual(plan["seek_seconds"], 1)
+        self.assertEqual(plan["file_count"], 2)
+        self.assertEqual(plan["first_file"], "20260727-173012.mp4")
+        self.assertIn("20260727-173012.mp4", concat_text)
+        self.assertIn("20260727-173024.mp4", concat_text)
+
+    def test_recording_stream_command_outputs_fragmented_mp4(self):
+        panel = load_panel_module()
+        command = panel.build_recording_stream_command(panel.HOME_DIR / "stream.ffconcat", 4)
+
+        self.assertIn("frag_keyframe+empty_moov+default_base_moof", command)
+        self.assertIn("pipe:1", command)
+        self.assertIn("-f", command)
+        self.assertIn("concat", command)
 
     def test_ensure_configured_recordings_starts_enabled_record_camera(self):
         panel = load_panel_module()

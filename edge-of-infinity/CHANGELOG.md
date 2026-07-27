@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.18
+
+- Add a continuous NVR playback endpoint that streams a joined MP4 timeline from recorded segments, so playback no longer reloads at each 10-12 second segment boundary.
+- Show exact recording date/time with seconds next to the timeline slider.
+- Add playback snapshots below the NVR video with timestamped miniatures.
+- Limit the visible recording segment list to a scrollable panel instead of letting the NVR card grow indefinitely.
+- Route NVR recording through the MediaMTX rebroadcast path when the core is enabled, keeping the panel camera config as the single source of truth.
+
 ## 0.10.17
 
 - Stop the NVR status timer from rebuilding the video player while a recording is playing or the timeline scrubber is active.
