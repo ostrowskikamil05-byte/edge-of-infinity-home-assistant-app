@@ -17,9 +17,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.20"
+APP_VERSION = "0.10.21"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "mobile-nvr-native-player-v12"
+UI_BUILD = "always-on-live-core-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -758,6 +758,7 @@ def normalize_config(payload: dict) -> dict:
             "tile_fps": clamp_int(live.get("tile_fps"), 5, 1, 10),
             "tile_max_width": clamp_int(live.get("tile_max_width"), 960, 320, 1920),
             "prebuffer_enabled": safe_bool(live.get("prebuffer_enabled"), True),
+            "always_on_enabled": safe_bool(live.get("always_on_enabled"), True),
             "prebuffer_local_ms": clamp_int(live.get("prebuffer_local_ms"), 4000, 0, 10000),
             "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
             "mobile_webrtc_public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
@@ -1450,6 +1451,7 @@ def write_mediamtx_runtime_config(config: dict) -> dict:
         300,
     )
     prebuffer_enabled = safe_bool(live.get("prebuffer_enabled"), True)
+    always_on_enabled = safe_bool(live.get("always_on_enabled"), True)
     udp_address, tcp_address = mediamtx_ice_addresses(config)
     public_hosts = mediamtx_public_hosts(config)
     lines = [
@@ -1522,8 +1524,18 @@ def write_mediamtx_runtime_config(config: dict) -> dict:
         low_latency = safe_bool(camera.get("low_latency"), True)
         record_main = enabled and record and record_stream == "main"
         record_sub = enabled and record and record_stream == "sub"
-        warm_main = enabled and low_latency and prebuffer_enabled and (tile_stream == "main" or live_stream == "main" or record_main)
-        warm_sub = enabled and low_latency and prebuffer_enabled and (tile_stream == "sub" or live_stream == "sub" or record_sub)
+        warm_main = enabled and low_latency and prebuffer_enabled and (
+            always_on_enabled
+            or tile_stream == "main"
+            or live_stream == "main"
+            or record_main
+        )
+        warm_sub = enabled and low_latency and prebuffer_enabled and (
+            always_on_enabled
+            or tile_stream == "sub"
+            or live_stream == "sub"
+            or record_sub
+        )
         before = len(lines)
         add_mediamtx_path(lines, mediamtx_path(camera, index, "main"), camera.get("rtsp_main") or "", record_main, warm_main, recordings_dir, retention_days)
         if len(lines) > before:
@@ -1545,6 +1557,8 @@ def write_mediamtx_runtime_config(config: dict) -> dict:
         "ice_transport": normalize_webrtc_ice_transport(live.get("mobile_webrtc_ice_transport"), live.get("mobile_webrtc_tcp_only")),
         "recording_enabled": MEDIAMTX_RECORD,
         "segment_seconds": segment_seconds,
+        "prebuffer_enabled": prebuffer_enabled,
+        "always_on_enabled": always_on_enabled,
     }
 
 
@@ -1762,6 +1776,7 @@ def stream_capabilities(config: dict | None = None) -> dict:
             "ice_udp_port": MEDIAMTX_WEBRTC_UDP_PORT,
             "whep_port": MEDIAMTX_WEBRTC_PORT,
             "prebuffer_enabled": safe_bool(live.get("prebuffer_enabled"), True),
+            "always_on_enabled": safe_bool(live.get("always_on_enabled"), True),
             "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
             "diagnosis": "If LAN works but LTE fails, the browser usually cannot reach the advertised ICE host/ports. Nabu Casa exposes the HA panel, not MediaMTX WebRTC ports. Use a reachable DDNS/VPS relay public URL first; add TURN for CGNAT/firewalls.",
         },
@@ -5045,6 +5060,7 @@ INDEX_HTML = r"""<!doctype html>
               <label>Local prebuffer ms<input name="live-prebuffer-local-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_local_ms, 4000))}"></label>
               <label>Remote prebuffer ms<input name="live-prebuffer-remote-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_remote_ms, 2000))}"></label>
               <label class="check-row"><input name="live-prebuffer-enabled" type="checkbox" ${liveConfig.prebuffer_enabled !== false ? 'checked' : ''}> Keep selected low-latency streams warm</label>
+              <label class="check-row"><input name="live-always-on-enabled" type="checkbox" ${liveConfig.always_on_enabled !== false ? 'checked' : ''}> Keep all enabled camera streams always on</label>
               <label>WebRTC ICE transport<select name="live-mobile-ice-transport">
                 <option value="auto" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'auto' ? 'selected' : ''}>Auto UDP + TCP</option>
                 <option value="udp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'udp' ? 'selected' : ''}>UDP only</option>
@@ -5384,6 +5400,7 @@ INDEX_HTML = r"""<!doctype html>
             tile_fps: Number(get('live-tile-fps').value || 5),
             tile_max_width: Number(get('live-tile-max-width').value || 960),
             prebuffer_enabled: get('live-prebuffer-enabled').checked,
+            always_on_enabled: get('live-always-on-enabled').checked,
             prebuffer_local_ms: Number(get('live-prebuffer-local-ms').value || 4000),
             prebuffer_remote_ms: Number(get('live-prebuffer-remote-ms').value || 2000),
             mobile_webrtc_public_url: get('live-mobile-public-url').value.trim(),

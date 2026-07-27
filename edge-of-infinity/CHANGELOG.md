@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.21
+
+- Keep every enabled low-latency camera stream warm through MediaMTX when `always_on_enabled` is active, so live starts without waiting for a viewer to open the panel.
+- Add the Edge Settings `Keep all enabled camera streams always on` control and persist it in `/homeassistant/edge/edge.json`.
+- Add the Home Assistant add-on option `mediamtx_always_on_live` and startup logging so the generated MediaMTX config stays aligned after restarts.
+- Keep NVR autostart behavior intact while warming both main/sub live paths for faster phone reconnects.
+
 ## 0.10.20
 
 - Fix mobile fullscreen by falling back to an in-panel fullscreen mode when the Home Assistant mobile WebView blocks the browser Fullscreen API.
