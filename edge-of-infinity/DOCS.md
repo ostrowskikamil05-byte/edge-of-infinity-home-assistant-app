@@ -207,7 +207,9 @@ Starting with version `0.10.34`, active-day cache files are used only when they 
 
 Starting with version `0.10.35`, MP4 segment readiness accepts metadata at either the start or end of the file. Some valid FFmpeg segment files keep `moov` near the tail, so Edge no longer hides a whole day of recordings just because the metadata is not in the first read window.
 
-Starting with version `0.10.36`, the NVR list no longer depends on MP4 header probing. Segment playback visibility is based on file age and size, while header probing is used only by the thumbnail worker. This prevents a thumbnail/metadata edge case from making the whole NVR page look empty or OFF.
+Starting with version `0.10.36`, the NVR list no longer depends on MP4 header probing. Segment playback visibility is based on file age and size. This prevents a thumbnail/metadata edge case from making the whole NVR page look empty or OFF.
+
+Starting with version `0.10.37`, the NVR timeline infers segment duration from the next recording timestamp. This keeps short 4-second chunks playable as one continuous day stream and allows thumbnails to be generated directly from any ready recording segment.
 
 Starting with version `0.10.2`, `mobile_webrtc_ice_transport` can be `auto`, `udp`, or `tcp`. Use `auto` first because it exposes both UDP and TCP ICE on port `8189`. Use `udp` when everything is local and you want the simplest low-latency path. Use `tcp` when LTE, hotel Wi-Fi, or a friend's Wi-Fi blocks UDP, but remember that the public MediaMTX WebRTC address on `8889` and ICE port `8189` must still be reachable from that network. If the home network is behind CGNAT or cannot forward those ports, use a VPS or TURN relay instead of a LAN-only `192.168.x.x` address.
 

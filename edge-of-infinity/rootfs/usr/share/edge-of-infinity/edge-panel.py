@@ -20,9 +20,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.36"
+APP_VERSION = "0.10.37"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-playback-list-unblocked-v1"
+UI_BUILD = "nvr-continuous-short-segments-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -2390,6 +2390,22 @@ def recording_segments(camera: dict, index: int, limit: int = 24, segment_second
     return segments
 
 
+def recording_inferred_duration_seconds(start_ts: int | float, next_start_ts: int | float | None, fallback_seconds: int) -> int:
+    fallback = clamp_int(fallback_seconds, 10, 1, 3600)
+    try:
+        current = int(float(start_ts))
+        next_start = int(float(next_start_ts or 0))
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+    if next_start <= current:
+        return fallback
+    gap = next_start - current
+    max_gap = max(2, min(3600, fallback * 6))
+    if 1 <= gap <= max_gap:
+        return max(1, min(3600, gap))
+    return fallback
+
+
 def recording_day_key(start_ts: int | float) -> str:
     try:
         return time.strftime("%Y-%m-%d", time.localtime(float(start_ts)))
@@ -2422,14 +2438,21 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
     files = sorted(playable_recording_files(directory), key=lambda item: (recording_segment_start_ts(item, item.stat().st_mtime), item.name))
     entries = []
     offset = 0
-    duration_seconds = clamp_int(segment_seconds, 10, 1, 3600)
     selected_files = files if safe_int(limit, 0) <= 0 else files[-safe_int(limit, 0):]
+    items = []
     for path in selected_files:
         stat = path.stat()
         start_ts = recording_segment_start_ts(path, stat.st_mtime)
+        items.append({"path": path, "stat": stat, "start_ts": start_ts, "day": recording_day_key(start_ts)})
+    for position, item in enumerate(items):
+        path = item["path"]
+        start_ts = item["start_ts"]
         entry_day = recording_day_key(start_ts)
         if day_key and entry_day != day_key:
             continue
+        next_item = items[position + 1] if position + 1 < len(items) else None
+        next_start_ts = next_item.get("start_ts") if next_item and next_item.get("day") == entry_day else None
+        duration_seconds = recording_inferred_duration_seconds(start_ts, next_start_ts, segment_seconds)
         day_start_ts, _day_end_ts = recording_day_bounds(entry_day)
         day_offset = max(0, min(86399, start_ts - day_start_ts)) if day_start_ts else offset
         entries.append(
@@ -3110,7 +3133,7 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
     target = recording_thumbnail_path(key, filename)
     if recording_thumbnail_ready(target, source):
         return target
-    if not recording_file_ready(source) or not recording_file_has_playable_header(source):
+    if not recording_file_ready(source):
         try:
             source_size = source.stat().st_size
         except OSError:
@@ -5626,7 +5649,7 @@ INDEX_HTML = r"""<!doctype html>
         const target = recordingTargetForOffset(index, value);
         const recorded = Number(status.timeline?.recorded_seconds || status.timeline?.playback_total_seconds || 0);
         const gapNote = target && Number(target.input || 0) !== Number(target.requested || 0) ? ' -> nearest clip' : '';
-        return `${formatTimestampSeconds(wallClock)}${gapNote} | ${formatDuration(value)} / ${formatDuration(total)} | recorded ${formatDuration(recorded)}`;
+        return `${formatTimestampSeconds(wallClock)}${gapNote} | day ${formatDuration(value)} / ${formatDuration(total)} | recorded ${formatDuration(recorded)}`;
       }
 
       function recordingDayLabel(day) {
@@ -5688,7 +5711,8 @@ INDEX_HTML = r"""<!doctype html>
         if (cache.ready && cache.url && !cache.stale_active_day && Number(cache.total_seconds || 0) > 0) return 'server_cache_mp4';
         const playbackTotal = Number(timeline?.playbackTotal || status?.timeline?.playback_total_seconds || 0);
         const segmentSeconds = Math.max(1, Number(status?.segment_seconds || 10));
-        return playbackTotal > segmentSeconds ? 'recorded_day_stream' : 'server_file_sequence';
+        const fileCount = Array.isArray(status?.files) ? status.files.length : 0;
+        return fileCount > 1 || playbackTotal > segmentSeconds ? 'recorded_day_stream' : 'server_file_sequence';
       }
 
       function isRecordedDayStreamMode(playbackMode) {
@@ -6616,7 +6640,7 @@ INDEX_HTML = r"""<!doctype html>
         const cache = status.playback_cache || {};
         let playbackMode = recordingPlaybackModeForClient(status, timeline);
         if (playbackMode === 'server_cache_mp4' && !recordingCacheCoversTarget(status, targetForPoster) && selectedFile?.url) {
-          playbackMode = timeline.playbackTotal > Math.max(1, Number(status.segment_seconds || 10))
+          playbackMode = files.length > 1 || timeline.playbackTotal > Math.max(1, Number(status.segment_seconds || 10))
             ? 'recorded_day_stream'
             : 'server_file_sequence';
         }

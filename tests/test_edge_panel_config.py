@@ -70,11 +70,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.36")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.36")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.36")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.36")
-        self.assertIn("v0.10.36", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.37")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.37")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.37")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.37")
+        self.assertIn("v0.10.37", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -435,7 +435,8 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("nvr-playback-list-unblocked-v1", html)
+        self.assertIn("nvr-continuous-short-segments-v1", html)
+        self.assertIn("fileCount > 1", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
         self.assertIn("function markNvrInteraction", html)
@@ -1188,6 +1189,45 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(status["segments_total"], 2)
         self.assertEqual(status["segments"], 2)
         self.assertEqual([item["name"] for item in status["files"]], ["20260727-173010.mp4", "20260727-173000.mp4"])
+
+    def test_recording_entries_infer_real_short_segment_duration(self):
+        panel = load_panel_module()
+        panel.MIN_RECORDING_FILE_READY_SECONDS = 0
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "nvr": {"segment_seconds": 10},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+        panel.write_json(panel.CONFIG_PATH, payload)
+        directory = panel.recording_base_dir(payload["cameras"][0], 0)
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in ("20260727-173000.mp4", "20260727-173004.mp4", "20260727-173008.mp4"):
+            write_fake_mp4(directory / name)
+
+        entries = panel.recording_file_entries(payload["cameras"][0], 0, limit=0, segment_seconds=10, day_key="2026-07-27")
+
+        self.assertEqual([entry["name"] for entry in entries], ["20260727-173000.mp4", "20260727-173004.mp4", "20260727-173008.mp4"])
+        self.assertEqual([entry["duration_seconds"] for entry in entries], [4, 4, 10])
+        self.assertEqual([entry["playback_offset"] for entry in entries], [0, 4, 8])
+
+    def test_recording_thumbnail_generation_does_not_require_mp4_header_probe(self):
+        html = PANEL_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn("or not recording_file_has_playable_header(source)", html)
 
     def test_recording_file_ready_accepts_moov_at_tail(self):
         panel = load_panel_module()

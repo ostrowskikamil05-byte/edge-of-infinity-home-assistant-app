@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.37
+
+- Infer NVR segment duration from neighboring recording timestamps, so short 4-second camera-generated chunks still map into one continuous timeline instead of being treated as broken single clips.
+- Force multi-file NVR playback through the continuous recorded-day stream, even when each individual MP4 segment is shorter than the configured segment length.
+- Let recording thumbnail generation try any ready segment directly through FFmpeg instead of blocking on the legacy MP4 header probe.
+
 ## 0.10.36
 
 - Restore NVR recording lists even when saved MP4 segments have unusual metadata placement. Playback readiness now uses only age and size, while MP4 header checks are limited to thumbnail generation.
