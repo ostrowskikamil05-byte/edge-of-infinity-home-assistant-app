@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.29
+
+- Change the NVR timeline to a real wall-clock day view: selected days now expose a full `00:00 -> 24:00` timeline while still showing how many hours were actually recorded.
+- Add separate `timeline_offset` and `playback_offset` metadata so the UI can seek by time of day while the player seeks correctly inside the fast cached MP4.
+- Map playback progress from server cache and continuous streams back to the selected day's wall-clock timeline, avoiding jumps caused by gaps between recording clips.
+- Add colored panel diagnostics: green OK, yellow warnings, and red errors for FFmpeg/FFprobe, CPU load, memory, disk, recording workers, cache work, UI errors, and log tails.
+- Log global browser UI errors and unhandled promises into Edge debug diagnostics so mobile panel failures are visible from the Logs page.
+
 ## 0.10.28
 
 - Reduce NVR CPU spikes by building only one daily playback cache at a time and running the FFmpeg cache build at low OS priority.

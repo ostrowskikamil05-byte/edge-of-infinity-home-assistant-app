@@ -18,9 +18,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.28"
+APP_VERSION = "0.10.29"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "low-cpu-daily-cache-v1"
+UI_BUILD = "day-wall-clock-diagnostics-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -944,6 +944,211 @@ def safe_json_file(path: Path) -> dict:
     return {"value": redact_config(payload)}
 
 
+def disk_usage_payload(path: Path) -> dict:
+    requested = Path(path)
+    checked = requested
+    while not checked.exists() and checked != checked.parent:
+        checked = checked.parent
+    try:
+        usage = shutil.disk_usage(checked)
+    except OSError as error:
+        return {"path": str(requested), "checked_path": str(checked), "error": str(error)}
+    used_percent = round((usage.used / usage.total) * 100, 2) if usage.total else 0
+    free_percent = round((usage.free / usage.total) * 100, 2) if usage.total else 0
+    return {
+        "path": str(requested),
+        "checked_path": str(checked),
+        "total_bytes": usage.total,
+        "used_bytes": usage.used,
+        "free_bytes": usage.free,
+        "used_percent": used_percent,
+        "free_percent": free_percent,
+    }
+
+
+def proc_meminfo_payload() -> dict:
+    path = Path("/proc/meminfo")
+    if not path.exists():
+        return {}
+    values = {}
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if ":" not in line:
+                continue
+            key, raw_value = line.split(":", 1)
+            match = re.search(r"\d+", raw_value)
+            if match:
+                values[key] = int(match.group(0)) * 1024
+    except OSError as error:
+        return {"error": str(error)}
+    total = values.get("MemTotal", 0)
+    available = values.get("MemAvailable", values.get("MemFree", 0))
+    if total:
+        values["available_percent"] = round((available / total) * 100, 2)
+        values["used_percent"] = round(100 - values["available_percent"], 2)
+    return values
+
+
+def system_diagnostics_payload(recordings_dir: Path) -> dict:
+    cpu_count = os.cpu_count() or 1
+    try:
+        loadavg = [round(value, 3) for value in os.getloadavg()]
+    except (AttributeError, OSError):
+        loadavg = []
+    load_per_core = round(loadavg[0] / cpu_count, 3) if loadavg else None
+    active_recorders = []
+    for key, process in RECORDING_PROCESSES.items():
+        try:
+            if process and process.poll() is None:
+                active_recorders.append({"key": key, "pid": process.pid})
+        except Exception:
+            continue
+    return {
+        "cpu_count": cpu_count,
+        "loadavg": loadavg,
+        "load_per_core_1m": load_per_core,
+        "memory": proc_meminfo_payload(),
+        "recordings_disk": disk_usage_payload(recordings_dir),
+        "edge_disk": disk_usage_payload(HOME_DIR),
+        "ffmpeg_path": shutil.which("ffmpeg") or "",
+        "ffprobe_path": shutil.which("ffprobe") or "",
+        "active_recorders": active_recorders,
+        "recording_cache_workers": sorted(RECORDING_CACHE_WORKERS),
+        "recording_cache_worker_limit": 1,
+        "recording_thumbnail_worker_limit": 1,
+    }
+
+
+def diagnostic_item(severity: str, title: str, detail: str, payload: dict | None = None) -> dict:
+    return {
+        "severity": severity if severity in ("ok", "warning", "error") else "warning",
+        "title": title,
+        "detail": detail,
+        "payload": redact_config(payload or {}),
+    }
+
+
+def diagnostic_severity_from_text(text: str) -> str:
+    lowered = str(text or "").lower()
+    error_patterns = (
+        " error",
+        "error:",
+        "failed",
+        "exception",
+        "traceback",
+        "ui_global_error",
+        "ui_unhandled_rejection",
+        "ui_boot_error",
+        "ui_recording_video_error",
+        "cannot ",
+        "not found",
+    )
+    warning_patterns = (
+        "warning",
+        "stalled",
+        "waiting",
+        "timeout",
+        "too slow",
+        "non-monotonic",
+        "queue input is backward",
+        "discarding",
+        "stale",
+        "blocked",
+    )
+    if any(pattern in lowered for pattern in error_patterns):
+        return "error"
+    if any(pattern in lowered for pattern in warning_patterns):
+        return "warning"
+    return "ok"
+
+
+def diagnostic_from_tail(title: str, tail: str) -> dict:
+    severity = diagnostic_severity_from_text(tail)
+    detail = "No blocking issue detected." if severity == "ok" else "Recent log tail contains entries that need attention."
+    return diagnostic_item(severity, title, detail, {"tail": tail[-2000:] if tail else ""})
+
+
+def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording_logs: list[dict]) -> list[dict]:
+    diagnostics = []
+    ffmpeg_path = hardware.get("ffmpeg_path") or ""
+    ffprobe_path = hardware.get("ffprobe_path") or ""
+    diagnostics.append(
+        diagnostic_item(
+            "ok" if ffmpeg_path else "error",
+            "FFmpeg",
+            "FFmpeg is available for live, thumbnails, cache, and NVR recording." if ffmpeg_path else "FFmpeg is missing in the add-on runtime.",
+            {"path": ffmpeg_path},
+        )
+    )
+    diagnostics.append(
+        diagnostic_item(
+            "ok" if ffprobe_path else "warning",
+            "FFprobe",
+            "FFprobe is available for codec diagnostics." if ffprobe_path else "FFprobe is missing, so codec diagnostics will be limited.",
+            {"path": ffprobe_path},
+        )
+    )
+
+    load_per_core = hardware.get("load_per_core_1m")
+    if isinstance(load_per_core, (int, float)):
+        severity = "error" if load_per_core >= 1.25 else "warning" if load_per_core >= 0.75 else "ok"
+        diagnostics.append(
+            diagnostic_item(
+                severity,
+                "CPU load",
+                f"1 minute load per CPU core is {load_per_core}.",
+                {"loadavg": hardware.get("loadavg"), "cpu_count": hardware.get("cpu_count")},
+            )
+        )
+    else:
+        diagnostics.append(diagnostic_item("warning", "CPU load", "CPU load average is not available on this platform.", {}))
+
+    memory = hardware.get("memory") if isinstance(hardware.get("memory"), dict) else {}
+    available_percent = memory.get("available_percent")
+    if isinstance(available_percent, (int, float)):
+        severity = "error" if available_percent < 5 else "warning" if available_percent < 15 else "ok"
+        diagnostics.append(diagnostic_item(severity, "Memory", f"Available memory is {available_percent}%.", {"memory": memory}))
+
+    for title, disk in (("Recordings disk", hardware.get("recordings_disk")), ("Edge config disk", hardware.get("edge_disk"))):
+        if not isinstance(disk, dict):
+            continue
+        free_percent = disk.get("free_percent")
+        if isinstance(free_percent, (int, float)):
+            severity = "error" if free_percent < 5 else "warning" if free_percent < 15 else "ok"
+            diagnostics.append(diagnostic_item(severity, title, f"Free disk space is {free_percent}%.", disk))
+        elif disk.get("error"):
+            diagnostics.append(diagnostic_item("warning", title, f"Could not read disk usage: {disk.get('error')}", disk))
+
+    active_recorders = hardware.get("active_recorders") if isinstance(hardware.get("active_recorders"), list) else []
+    diagnostics.append(diagnostic_item("ok", "NVR recorders", f"{len(active_recorders)} active recorder process(es).", {"active_recorders": active_recorders}))
+    cache_workers = hardware.get("recording_cache_workers") if isinstance(hardware.get("recording_cache_workers"), list) else []
+    diagnostics.append(
+        diagnostic_item(
+            "warning" if cache_workers else "ok",
+            "Playback cache worker",
+            "Daily playback cache is being rebuilt; CPU may be higher until it finishes." if cache_workers else "No playback cache rebuild is running.",
+            {"workers": cache_workers},
+        )
+    )
+
+    nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
+    cache_segments = safe_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS)
+    diagnostics.append(
+        diagnostic_item(
+            "warning" if cache_segments < 8640 else "ok",
+            "Daily NVR cache window",
+            f"Playback cache segment budget is {cache_segments}; 8640 ten-second clips cover a full day.",
+            {"playback_cache_segments": cache_segments},
+        )
+    )
+
+    for title, tail in tails.items():
+        diagnostics.append(diagnostic_from_tail(title, tail))
+    for item in recording_logs[:4]:
+        diagnostics.append(diagnostic_from_tail(f"Recording FFmpeg {Path(item.get('path') or '').name}", item.get("tail") or ""))
+    return diagnostics
+
+
 def collect_panel_logs() -> dict:
     config = load_config()
     storage = config.get("storage") if isinstance(config.get("storage"), dict) else {}
@@ -957,6 +1162,13 @@ def collect_panel_logs() -> dict:
             })
     except OSError as error:
         recording_logs.append({"path": str(recordings_dir), "tail": f"recording_log_scan_error: {error}"})
+    tails = {
+        "Edge debug": redact_rtsp(read_text_tail(DEBUG_LOG_PATH, 16000)),
+        "Recording stream": redact_rtsp(read_text_tail(RECORDING_STREAM_LOG_PATH, 12000)),
+        "Recording cache": redact_rtsp(read_text_tail(RECORDING_CACHE_LOG_PATH, 12000)),
+        "Recording thumbnails": redact_rtsp(read_text_tail(RECORDING_THUMB_LOG_PATH, 12000)),
+    }
+    hardware = system_diagnostics_payload(recordings_dir)
 
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -966,7 +1178,9 @@ def collect_panel_logs() -> dict:
         "addon_config_mirror": str(ADDON_CONFIG_PATH),
         "panel_mirror_config": str(PANEL_CONFIG_PATH),
         "config_summary": config_summary(config),
-        "edge_debug": redact_rtsp(read_text_tail(DEBUG_LOG_PATH, 16000)),
+        "hardware": hardware,
+        "diagnostics": build_panel_diagnostics(config, hardware, tails, recording_logs),
+        "edge_debug": tails["Edge debug"],
         "last_save_debug": safe_json_file(HOME_DIR / "last-save-debug.json"),
         "last_runtime_sync": safe_json_file(HOME_DIR / "edge.last-runtime-sync.json"),
         "last_saved_config": safe_json_file(HOME_DIR / "edge.last-saved.json"),
@@ -976,9 +1190,9 @@ def collect_panel_logs() -> dict:
         "runtime_config": engine_runtime_status(),
         "runtime_mediamtx_config": redact_rtsp(read_text_tail(MEDIAMTX_CONFIG_PATH, 20000)),
         "runtime_janus_streaming_config": redact_rtsp(read_text_tail(JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg", 20000)),
-        "recording_stream_log": redact_rtsp(read_text_tail(RECORDING_STREAM_LOG_PATH, 12000)),
-        "recording_cache_log": redact_rtsp(read_text_tail(RECORDING_CACHE_LOG_PATH, 12000)),
-        "recording_thumbnail_log": redact_rtsp(read_text_tail(RECORDING_THUMB_LOG_PATH, 12000)),
+        "recording_stream_log": tails["Recording stream"],
+        "recording_cache_log": tails["Recording cache"],
+        "recording_thumbnail_log": tails["Recording thumbnails"],
         "recording_logs": recording_logs,
     }
 
@@ -1965,6 +2179,20 @@ def recording_day_key(start_ts: int | float) -> str:
         return ""
 
 
+def recording_day_start_ts(day_key: str) -> int:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day_key or "")):
+        return 0
+    try:
+        return int(time.mktime(time.strptime(day_key, "%Y-%m-%d")))
+    except (OverflowError, OSError, ValueError):
+        return 0
+
+
+def recording_day_bounds(day_key: str) -> tuple[int, int]:
+    start = recording_day_start_ts(day_key)
+    return (start, start + 86400) if start else (0, 0)
+
+
 def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_seconds: int = 10, day_key: str = "") -> list[dict]:
     directory = recording_base_dir(camera, index)
     if not directory.exists():
@@ -1980,6 +2208,8 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
         entry_day = recording_day_key(start_ts)
         if day_key and entry_day != day_key:
             continue
+        day_start_ts, _day_end_ts = recording_day_bounds(entry_day)
+        day_offset = max(0, min(86399, start_ts - day_start_ts)) if day_start_ts else offset
         entries.append(
             {
                 "path": path,
@@ -1988,6 +2218,8 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
                 "start_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(start_ts)),
                 "day": entry_day,
                 "offset": offset,
+                "playback_offset": offset,
+                "day_offset": day_offset,
                 "duration_seconds": duration_seconds,
             }
         )
@@ -2007,13 +2239,18 @@ def recording_day_groups(entries: list[dict], segment_seconds: int, key: str = "
                 "day": day,
                 "file_count": 0,
                 "total_seconds": 0,
+                "recorded_seconds": 0,
+                "day_start_ts": recording_day_bounds(day)[0],
+                "day_end_ts": recording_day_bounds(day)[1],
+                "day_total_seconds": 86400,
                 "oldest_at": entry.get("start_at") or "",
                 "newest_at": entry.get("start_at") or "",
                 "thumbnail_url": "",
             },
         )
         group["file_count"] += 1
-        group["total_seconds"] += safe_int(entry.get("duration_seconds"), segment_seconds)
+        group["recorded_seconds"] += safe_int(entry.get("duration_seconds"), segment_seconds)
+        group["total_seconds"] = group["day_total_seconds"]
         group["newest_at"] = entry.get("start_at") or group["newest_at"]
         if key and not group.get("thumbnail_url"):
             group["thumbnail_url"] = f"recording-thumbs/{key}/{Path(entry.get('name') or '').name}.jpg"
@@ -2044,6 +2281,8 @@ def recording_files_from_entries(key: str, entries: list[dict], segment_seconds:
                 "day": entry.get("day") or recording_day_key(start_ts),
                 "duration_seconds": duration_seconds,
                 "end_ts": start_ts + duration_seconds,
+                "timeline_offset": safe_int(entry.get("day_offset"), safe_int(entry.get("offset"), 0)),
+                "playback_offset": safe_int(entry.get("playback_offset"), safe_int(entry.get("offset"), 0)),
                 "kind": "video_segment",
             }
         )
@@ -2902,6 +3141,11 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
             day_entries = day_entries[-cache_limit:]
         segment_files = recording_files_from_entries(key, day_entries, segment_seconds)
         timeline_files = sorted(segment_files, key=lambda item: (item.get("start_ts") or 0, item.get("name") or ""))
+        day_start_ts, day_end_ts = recording_day_bounds(selected_day)
+        recorded_seconds = sum(safe_int(item.get("duration_seconds"), segment_seconds) for item in timeline_files)
+        timeline_total_seconds = 86400 if day_start_ts else recorded_seconds
+        available_start_ts = timeline_files[0].get("start_ts") if timeline_files else 0
+        available_end_ts = max((safe_int(item.get("end_ts"), 0) for item in timeline_files), default=0)
         playback_cache = recording_cache_status(key, day_entries, segment_seconds, auto_refresh=True, cache_name=selected_day)
         record_stream = camera.get("record_stream") or "main"
         direct_record_rtsp = camera_stream(camera, record_stream)
@@ -2948,8 +3192,17 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
                 "playback_cache": playback_cache,
                 "timeline": {
                     "continuous": True,
+                    "mode": "day_wall_clock",
+                    "day": selected_day,
+                    "day_start_ts": day_start_ts,
+                    "day_end_ts": day_end_ts,
+                    "day_total_seconds": timeline_total_seconds,
                     "file_count": len(timeline_files),
-                    "total_seconds": sum(safe_int(item.get("duration_seconds"), segment_seconds) for item in timeline_files),
+                    "recorded_seconds": recorded_seconds,
+                    "playback_total_seconds": recorded_seconds,
+                    "total_seconds": timeline_total_seconds,
+                    "available_start_ts": available_start_ts,
+                    "available_end_ts": available_end_ts,
                     "oldest_at": timeline_files[0].get("start_at") if timeline_files else "",
                     "newest_at": timeline_files[-1].get("start_at") if timeline_files else "",
                 },
@@ -4224,6 +4477,50 @@ INDEX_HTML = r"""<!doctype html>
         display: grid;
         gap: 12px;
       }
+      .diagnostic-list {
+        display: grid;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .diagnostic-item {
+        border: 1px solid var(--line);
+        border-left-width: 4px;
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: rgba(0,0,0,.16);
+      }
+      .diagnostic-item b {
+        display: block;
+        margin-bottom: 3px;
+      }
+      .diagnostic-item span {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .diagnostic-item pre {
+        margin: 8px 0 0;
+        max-height: 160px;
+        overflow: auto;
+        color: #b9d6d3;
+        font: 11px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+        white-space: pre-wrap;
+      }
+      .diag-ok {
+        border-color: rgba(86,214,181,.38);
+        border-left-color: #56d6b5;
+      }
+      .diag-ok b { color: #56d6b5; }
+      .diag-warning {
+        border-color: rgba(228,180,93,.38);
+        border-left-color: #e4b45d;
+      }
+      .diag-warning b { color: #e4b45d; }
+      .diag-error {
+        border-color: rgba(250,110,126,.42);
+        border-left-color: #fa6e7e;
+      }
+      .diag-error b { color: #fa6e7e; }
       .log-block {
         border: 1px solid var(--line);
         border-radius: 8px;
@@ -4827,15 +5124,32 @@ INDEX_HTML = r"""<!doctype html>
           });
       }
 
-      function recordingTimeline(files) {
-        let offset = 0;
+      function recordingTimeline(files, status = {}) {
+        let playbackOffset = 0;
+        const timelineMeta = status?.timeline || {};
+        const dayStart = Number(timelineMeta.day_start_ts || 0);
+        const requestedTotal = Number(timelineMeta.day_total_seconds || timelineMeta.total_seconds || 0);
         const entries = sortedRecordingFiles(files).map((file) => {
           const duration = Math.max(1, Math.floor(Number(file.duration_seconds || 10)));
-          const entry = { file, offset, duration };
-          offset += duration;
+          const rawTimelineOffset = Number(file.timeline_offset);
+          const rawPlaybackOffset = Number(file.playback_offset);
+          const offset = Number.isFinite(rawTimelineOffset)
+            ? Math.max(0, Math.floor(rawTimelineOffset))
+            : dayStart && Number(file.start_ts || 0)
+              ? Math.max(0, Math.min(86399, Math.floor(Number(file.start_ts || 0) - dayStart)))
+              : playbackOffset;
+          const entry = {
+            file,
+            offset,
+            duration,
+            playbackOffset: Number.isFinite(rawPlaybackOffset) ? Math.max(0, Math.floor(rawPlaybackOffset)) : playbackOffset,
+          };
+          playbackOffset += duration;
           return entry;
         });
-        return { entries, total: offset };
+        const maxEnd = entries.reduce((max, entry) => Math.max(max, entry.offset + entry.duration), 0);
+        const total = Math.max(0, Math.floor(requestedTotal || maxEnd || playbackOffset));
+        return { entries, total, playbackTotal: playbackOffset, dayStart };
       }
 
       function recordingFilmstripFiles(files, selectedUrl = '', maxItems = 72) {
@@ -4861,22 +5175,25 @@ INDEX_HTML = r"""<!doctype html>
         const entries = timeline.entries || [];
         if (!entries.length) return null;
         const timelineMax = Math.max(0, Number(timeline.total || 0) - 1);
-        const requested = Math.max(0, Math.min(Math.floor(Number(offset || 0)), timelineMax));
-        const target = entries.find((entry) => requested < entry.offset + entry.duration) || entries[entries.length - 1];
-        const seek = Math.max(0, Math.min(requested - target.offset, Math.max(0, target.duration - 1)));
-        return { timeline, target, requested, seek };
+        const input = Math.max(0, Math.min(Math.floor(Number(offset || 0)), timelineMax));
+        let target = entries.find((entry) => input >= entry.offset && input < entry.offset + entry.duration);
+        if (!target) target = entries.find((entry) => input < entry.offset) || entries[entries.length - 1];
+        const seek = Math.max(0, Math.min(input - target.offset, Math.max(0, target.duration - 1)));
+        const requested = target.offset + seek;
+        const playbackSeek = Math.max(0, Number(target.playbackOffset || 0) + seek);
+        return { timeline, target, requested, input, seek, playbackSeek };
       }
 
-      function recordingOffsetForSelection(files, selectedUrl, seekSeconds = 0) {
-        const timeline = recordingTimeline(files);
+      function recordingOffsetForSelection(files, selectedUrl, seekSeconds = 0, status = {}) {
+        const timeline = recordingTimeline(files, status);
         const entry = timeline.entries.find((item) => item.file.url === selectedUrl) || timeline.entries[timeline.entries.length - 1];
         if (!entry) return { timeline, value: 0, seek: 0 };
         const seek = Math.max(0, Math.min(Math.floor(Number(seekSeconds || 0)), Math.max(0, entry.duration - 1)));
-        return { timeline, value: entry.offset + seek, seek };
+        return { timeline, value: entry.offset + seek, seek, playbackValue: Number(entry.playbackOffset || 0) + seek };
       }
 
-      function recordingWallClockAtOffset(files, offset) {
-        const target = recordingTargetInTimeline(recordingTimeline(files), offset);
+      function recordingWallClockAtOffset(files, offset, status = {}) {
+        const target = recordingTargetInTimeline(recordingTimeline(files, status), offset);
         if (!target) return '';
         const baseTs = Number(target.target.file.start_ts || 0);
         return baseTs ? baseTs + target.seek : '';
@@ -4885,8 +5202,11 @@ INDEX_HTML = r"""<!doctype html>
       function recordingTimelineLabel(index, value, total) {
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
-        const wallClock = recordingWallClockAtOffset(files, value);
-        return `${formatTimestampSeconds(wallClock)} | ${formatDuration(value)} / ${formatDuration(total)}`;
+        const wallClock = recordingWallClockAtOffset(files, value, status);
+        const target = recordingTargetForOffset(index, value);
+        const recorded = Number(status.timeline?.recorded_seconds || status.timeline?.playback_total_seconds || 0);
+        const gapNote = target && Number(target.input || 0) !== Number(target.requested || 0) ? ' -> nearest clip' : '';
+        return `${formatTimestampSeconds(wallClock)}${gapNote} | ${formatDuration(value)} / ${formatDuration(total)} | recorded ${formatDuration(recorded)}`;
       }
 
       function recordingDayLabel(day) {
@@ -4955,11 +5275,11 @@ INDEX_HTML = r"""<!doctype html>
         return `${clean}#t=${seek.toFixed(3)}`;
       }
 
-      function recordingDefaultTarget(files) {
-        const timeline = recordingTimeline(files);
+      function recordingDefaultTarget(files, status = {}) {
+        const timeline = recordingTimeline(files, status);
         const first = timeline.entries[0];
         if (!first) return null;
-        return { timeline, target: first, requested: first.offset, seek: 0 };
+        return { timeline, target: first, requested: first.offset, input: first.offset, seek: 0, playbackSeek: Number(first.playbackOffset || 0) };
       }
 
       function markRecordingThumbnailFailed(image) {
@@ -5009,7 +5329,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function offsetForRecordingUrl(index, url) {
         const status = recordingStatus[index] || {};
-        const timeline = recordingTimeline(status.files || []);
+        const timeline = recordingTimeline(status.files || [], status);
         const entry = timeline.entries.find((item) => item.file.url === url);
         return entry ? entry.offset : 0;
       }
@@ -5035,6 +5355,7 @@ INDEX_HTML = r"""<!doctype html>
         recordingStreamStartOffset[index] = target.target.offset;
         video.dataset.recordingSeek = String(target.seek);
         video.dataset.recordingStreamStart = String(target.target.offset);
+        video.dataset.recordingPlaybackStart = String(target.target.playbackOffset || 0);
         video.dataset.recordingPlaybackMode = 'server_file_sequence';
         updateRecordingTimelineUi(index, target.requested, target.timeline.total);
         updateRecordingTileSelection(index, fileUrl);
@@ -5045,7 +5366,7 @@ INDEX_HTML = r"""<!doctype html>
             debugEvent('ui_recording_server_file_seek_error', { index, reason, message: error.message });
           }
           if (autoplay) video.play().catch((error) => debugEvent('ui_recording_server_file_autoplay_error', { index, reason, message: error.message }));
-          debugEvent('ui_recording_server_file_fast_seek', { index, reason, recording: target.target.file.name, timeline_second: target.requested, segment_second: target.seek });
+          debugEvent('ui_recording_server_file_fast_seek', { index, reason, recording: target.target.file.name, timeline_second: target.requested, playback_second: target.playbackSeek, segment_second: target.seek });
           return true;
         }
         video.src = nextSrc;
@@ -5054,7 +5375,7 @@ INDEX_HTML = r"""<!doctype html>
         if (autoplay) {
           video.play().catch((error) => debugEvent('ui_recording_server_file_autoplay_error', { index, reason, message: error.message }));
         }
-        debugEvent('ui_recording_server_file_switch', { index, reason, recording: target.target.file.name, timeline_second: target.requested, segment_second: target.seek });
+        debugEvent('ui_recording_server_file_switch', { index, reason, recording: target.target.file.name, timeline_second: target.requested, playback_second: target.playbackSeek, segment_second: target.seek });
         return true;
       }
 
@@ -5065,8 +5386,9 @@ INDEX_HTML = r"""<!doctype html>
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
         recordingStreamStartOffset[index] = 0;
-        video.dataset.recordingSeek = String(target.requested);
+        video.dataset.recordingSeek = String(target.playbackSeek);
         video.dataset.recordingStreamStart = '0';
+        video.dataset.recordingPlaybackStart = '0';
         video.dataset.recordingPlaybackMode = 'server_cache_mp4';
         updateRecordingTimelineUi(index, target.requested, target.timeline.total);
         updateRecordingTileSelection(index, target.target.file.url);
@@ -5079,6 +5401,7 @@ INDEX_HTML = r"""<!doctype html>
           reason,
           recording: target.target.file.name,
           timeline_second: target.requested,
+          playback_second: target.playbackSeek,
           segment_second: target.seek,
         });
         return true;
@@ -5117,17 +5440,38 @@ INDEX_HTML = r"""<!doctype html>
       function recordingTargetForOffset(index, offset) {
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
-        const timeline = recordingTimeline(files);
+        const timeline = recordingTimeline(files, status);
         const { entries } = timeline;
         if (!entries.length) return null;
         return recordingTargetInTimeline(timeline, offset);
       }
 
+      function recordingTargetForPlaybackOffset(index, playbackOffset) {
+        const status = recordingStatus[index] || {};
+        const files = Array.isArray(status.files) ? status.files : [];
+        const timeline = recordingTimeline(files, status);
+        const entries = timeline.entries || [];
+        if (!entries.length) return null;
+        const playbackMax = Math.max(0, Number(timeline.playbackTotal || 0) - 1);
+        const input = Math.max(0, Math.min(Math.floor(Number(playbackOffset || 0)), playbackMax));
+        const target = entries.find((entry) => input >= entry.playbackOffset && input < entry.playbackOffset + entry.duration) || entries[entries.length - 1];
+        const seek = Math.max(0, Math.min(input - target.playbackOffset, Math.max(0, target.duration - 1)));
+        const requested = target.offset + seek;
+        return { timeline, target, requested, input, seek, playbackSeek: target.playbackOffset + seek };
+      }
+
       function setCurrentRecordingTime(index, timelineSecond) {
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         if (!video) return false;
+        const playbackMode = video.dataset.recordingPlaybackMode || 'continuous_stream';
         const streamStart = Math.max(0, Number(video.dataset.recordingStreamStart || recordingStreamStartOffset[index] || 0));
-        const relativeSeek = Math.max(0, Math.floor(Number(timelineSecond || 0)) - streamStart);
+        const playbackStart = Math.max(0, Number(video.dataset.recordingPlaybackStart || 0));
+        const target = playbackMode === 'server_cache_mp4' || playbackMode === 'continuous_stream'
+          ? recordingTargetForOffset(index, timelineSecond)
+          : null;
+        const relativeSeek = playbackMode === 'server_cache_mp4' || playbackMode === 'continuous_stream'
+          ? Math.max(0, Number(target?.playbackSeek || 0) - playbackStart)
+          : Math.max(0, Math.floor(Number(timelineSecond || 0)) - streamStart);
         const applySeek = () => {
           try {
             video.currentTime = relativeSeek;
@@ -5166,14 +5510,22 @@ INDEX_HTML = r"""<!doctype html>
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         if (!video) return false;
         const streamStart = Math.max(0, Number(video.dataset.recordingStreamStart || recordingStreamStartOffset[index] || 0));
-        const relativeSeek = Math.floor(Number(timelineSecond || 0)) - streamStart;
+        const playbackMode = video.dataset.recordingPlaybackMode || 'continuous_stream';
+        const playbackStart = Math.max(0, Number(video.dataset.recordingPlaybackStart || 0));
+        const target = playbackMode === 'server_cache_mp4' || playbackMode === 'continuous_stream'
+          ? recordingTargetForOffset(index, timelineSecond)
+          : null;
+        const relativeSeek = playbackMode === 'server_cache_mp4' || playbackMode === 'continuous_stream'
+          ? Math.floor(Number(target?.playbackSeek || 0) - playbackStart)
+          : Math.floor(Number(timelineSecond || 0)) - streamStart;
         if (!canSeekBufferedVideo(video, relativeSeek)) return false;
         try {
           video.currentTime = Math.max(0, relativeSeek);
-          updateRecordingTimelineUi(index, timelineSecond, total);
+          updateRecordingTimelineUi(index, target?.requested ?? timelineSecond, total);
           debugEvent('ui_recording_fast_seek', {
             index,
-            timeline_second: timelineSecond,
+            timeline_second: target?.requested ?? timelineSecond,
+            playback_second: target?.playbackSeek,
             relative_seek: relativeSeek,
             stream_start: streamStart,
           });
@@ -5259,15 +5611,21 @@ INDEX_HTML = r"""<!doctype html>
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
         const streamStart = Math.max(0, Number(video.dataset.recordingStreamStart || recordingStreamStartOffset[index] || 0));
-        const timelineSecond = streamStart + Math.max(0, Math.floor(Number(video.currentTime || 0)));
-        const target = recordingTargetForOffset(index, timelineSecond);
+        const playbackMode = video.dataset.recordingPlaybackMode || 'continuous_stream';
+        const playbackStart = Math.max(0, Number(video.dataset.recordingPlaybackStart || 0));
+        const current = Math.max(0, Math.floor(Number(video.currentTime || 0)));
+        const playbackSecond = playbackStart + current;
+        const timelineSecond = streamStart + current;
+        const target = playbackMode === 'server_cache_mp4' || playbackMode === 'continuous_stream'
+          ? recordingTargetForPlaybackOffset(index, playbackSecond)
+          : recordingTargetForOffset(index, timelineSecond);
         if (target) {
           selectedRecording[index] = target.target.file.url;
           selectedRecordingSeek[index] = target.seek;
           selectedRecordingTimeline[index] = target.requested;
           updateRecordingTimelineUi(index, target.requested, target.timeline.total);
         } else {
-          updateRecordingTimelineUi(index, timelineSecond, recordingTimeline(files).total);
+          updateRecordingTimelineUi(index, timelineSecond, recordingTimeline(files, status).total);
         }
       }
 
@@ -5282,13 +5640,13 @@ INDEX_HTML = r"""<!doctype html>
         await loadRecordingStatus({ reason: 'recording_continuation_refresh' });
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
-        const timeline = recordingTimeline(files);
+        const timeline = recordingTimeline(files, status);
         const cacheTotal = Number(status.playback_cache?.total_seconds || 0);
         const hasNewCache = playbackMode === 'server_cache_mp4'
           ? Boolean(status.playback_cache?.ready && cacheTotal > previousTotal)
-          : timeline.total > previousTotal;
+          : timeline.playbackTotal > previousTotal;
         if (hasNewCache) {
-          const target = recordingTargetInTimeline(timeline, previousTotal);
+          const target = recordingTargetForPlaybackOffset(index, previousTotal);
           if (target) {
             selectedRecording[index] = target.target.file.url;
             selectedRecordingSeek[index] = target.seek;
@@ -5300,7 +5658,7 @@ INDEX_HTML = r"""<!doctype html>
               debugEvent('ui_recording_cache_resume', {
                 index,
                 previous_total: previousTotal,
-                new_total: timeline.total,
+                new_total: timeline.playbackTotal,
                 attempt,
                 cache: status.playback_cache || {},
               });
@@ -5315,7 +5673,7 @@ INDEX_HTML = r"""<!doctype html>
             debugEvent('ui_recording_continuous_resume', {
               index,
               previous_total: previousTotal,
-              new_total: timeline.total,
+              new_total: timeline.playbackTotal,
               attempt,
             });
             renderNvrGrid({ reason: 'continuous_recording_resume' });
@@ -5341,8 +5699,8 @@ INDEX_HTML = r"""<!doctype html>
       function playNextRecordingSegment(index, video = null) {
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
-        const timeline = recordingTimeline(files);
-        let previousTotal = timeline.total;
+        const timeline = recordingTimeline(files, status);
+        let previousTotal = timeline.playbackTotal;
         if (video?.dataset?.recordingPlaybackMode === 'server_cache_mp4') {
           previousTotal = Math.max(0, Number(status.playback_cache?.total_seconds || previousTotal));
         }
@@ -5357,7 +5715,7 @@ INDEX_HTML = r"""<!doctype html>
           const current = entries.findIndex((entry) => entry.file.url === selectedRecording[index]);
           if (current >= 0 && current < entries.length - 1) {
             const next = entries[current + 1];
-            switchRecordingVideoToFile(index, { timeline, target: next, requested: next.offset, seek: 0 }, true, 'server_file_next');
+            switchRecordingVideoToFile(index, { timeline, target: next, requested: next.offset, input: next.offset, seek: 0, playbackSeek: next.playbackOffset }, true, 'server_file_next');
             return;
           }
           if (status.recording || status.desired_recording) {
@@ -5391,6 +5749,7 @@ INDEX_HTML = r"""<!doctype html>
           playback_mode: video?.dataset?.recordingPlaybackMode || '',
           recording_seek: video?.dataset?.recordingSeek || '',
           stream_start: video?.dataset?.recordingStreamStart || '',
+          playback_start: video?.dataset?.recordingPlaybackStart || '',
           ready_state: video?.readyState,
           network_state: video?.networkState,
           current_time: Number(video?.currentTime || 0),
@@ -5420,6 +5779,24 @@ INDEX_HTML = r"""<!doctype html>
         `;
       }
 
+      function diagnosticClass(severity) {
+        if (severity === 'error') return 'diag-error';
+        if (severity === 'warning') return 'diag-warning';
+        return 'diag-ok';
+      }
+
+      function renderDiagnostics(items) {
+        const diagnostics = Array.isArray(items) ? items : [];
+        if (!diagnostics.length) return '<p class="notice">No diagnostics yet.</p>';
+        return `<div class="diagnostic-list">${diagnostics.map((item) => `
+          <div class="diagnostic-item ${diagnosticClass(item.severity)}">
+            <b>${escapeHtml(String(item.severity || 'ok').toUpperCase())}: ${escapeHtml(item.title || 'Diagnostic')}</b>
+            <span>${escapeHtml(item.detail || '')}</span>
+            ${item.payload && Object.keys(item.payload).length ? `<pre>${escapeHtml(pretty(item.payload))}</pre>` : ''}
+          </div>
+        `).join('')}</div>`;
+      }
+
       function renderLogs() {
         if (!panelLogs) {
           logsView.innerHTML = '<p class="notice">Click Refresh logs to load diagnostics.</p>';
@@ -5427,6 +5804,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         const recordingLogs = Array.isArray(panelLogs.recording_logs) ? panelLogs.recording_logs : [];
         logsView.innerHTML = [
+          renderDiagnostics(panelLogs.diagnostics || []),
           logBlock('Runtime summary', {
             generated_at: panelLogs.generated_at,
             server_version: panelLogs.server_version,
@@ -5435,6 +5813,7 @@ INDEX_HTML = r"""<!doctype html>
             runtime_config: panelLogs.runtime_config,
             config_summary: panelLogs.config_summary
           }),
+          logBlock('Hardware diagnostics', panelLogs.hardware || {}),
           logBlock('Edge debug', panelLogs.edge_debug || 'No debug log yet.'),
           logBlock('Last save debug', panelLogs.last_save_debug || {}),
           logBlock('Last runtime sync', panelLogs.last_runtime_sync || {}),
@@ -5663,7 +6042,7 @@ INDEX_HTML = r"""<!doctype html>
         const displayFiles = recordingFilmstripFiles(files, selected, 72);
         const seekSeconds = Number(selectedRecordingSeek[index] || 0);
         const selectedIndex = files.findIndex((file) => file.url === selected);
-        const selection = recordingOffsetForSelection(files, selected, seekSeconds);
+        const selection = recordingOffsetForSelection(files, selected, seekSeconds, status);
         const timeline = selection.timeline;
         const timelineTotal = timeline.total;
         const timelineMax = Math.max(0, timelineTotal - 1);
@@ -5679,19 +6058,24 @@ INDEX_HTML = r"""<!doctype html>
         const cache = status.playback_cache || {};
         let playerSeek = 0;
         let playerStreamStart = streamStart;
+        let playerPlaybackStart = 0;
         let rawPlayerSrc = '';
         if (timelineTotal) {
           if (playbackMode === 'server_cache_mp4' && cache.url) {
             const cacheTotal = Math.max(0, Number(cache.total_seconds || 0));
-            playerSeek = cacheTotal ? Math.min(timelineValue, Math.max(0, cacheTotal - 1)) : timelineValue;
+            playerSeek = cacheTotal ? Math.min(Number(targetForPoster?.playbackSeek || 0), Math.max(0, cacheTotal - 1)) : Number(targetForPoster?.playbackSeek || 0);
             playerStreamStart = 0;
+            playerPlaybackStart = 0;
             rawPlayerSrc = panelPath(cache.url);
           } else if (playbackMode === 'server_file_sequence' && selectedFile?.url) {
             playerSeek = Number(targetForPoster?.seek || 0);
             playerStreamStart = Number(targetForPoster?.target?.offset || 0);
+            playerPlaybackStart = Number(targetForPoster?.target?.playbackOffset || 0);
             rawPlayerSrc = panelPath(selectedFile.url);
           } else {
-            rawPlayerSrc = recordingStreamUrl(status, index, streamStart);
+            playerStreamStart = Number(targetForPoster?.requested || streamStart);
+            playerPlaybackStart = Number(targetForPoster?.playbackSeek || 0);
+            rawPlayerSrc = recordingStreamUrl(status, index, playerPlaybackStart);
           }
         }
         const playerSrc = playbackMode === 'server_file_sequence' || playbackMode === 'server_cache_mp4'
@@ -5708,7 +6092,7 @@ INDEX_HTML = r"""<!doctype html>
                   const thumb = day.thumbnail_url ? panelPath(day.thumbnail_url) : '';
                   return `<button class="recording-day-tile ${day.day === currentDay ? 'active' : ''}" type="button" data-recording-day="${escapeHtml(day.day)}" data-record-index="${index}">
                     <span class="recording-day-thumb">${thumb ? `<img src="${escapeHtml(thumb)}" alt="${escapeHtml(day.day)} preview" loading="lazy" decoding="async">` : ''}</span>
-                    <span><b>${escapeHtml(recordingDayLabel(day.day))}</b><small>${escapeHtml(formatDuration(day.total_seconds || 0))} | ${escapeHtml(text(day.file_count, 0))} clips</small></span>
+                    <span><b>${escapeHtml(recordingDayLabel(day.day))}</b><small>${escapeHtml(formatDuration(day.recorded_seconds || 0))} / ${escapeHtml(formatDuration(day.day_total_seconds || day.total_seconds || 86400))} | ${escapeHtml(text(day.file_count, 0))} clips</small></span>
                   </button>`;
                 }).join('')}
               </div>
@@ -5717,7 +6101,7 @@ INDEX_HTML = r"""<!doctype html>
           : '';
         const player = playable
           ? `<div class="recording-player-wrap" data-recording-wrap="${index}">
-              <video class="recording-player" src="${escapeHtml(playerSrc)}" ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ''} controls preload="${preloadMode}" playsinline webkit-playsinline data-recording-player="${index}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
+              <video class="recording-player" src="${escapeHtml(playerSrc)}" ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ''} controls preload="${preloadMode}" playsinline webkit-playsinline data-recording-player="${index}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-start="${escapeHtml(playerPlaybackStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
               <button class="fullscreen-button" type="button" data-recording-fullscreen="${index}" aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>
             </div>`
           : `<div class="recording-empty">No video yet</div>`;
@@ -6507,7 +6891,7 @@ INDEX_HTML = r"""<!doctype html>
             const files = Array.isArray(item.files) ? item.files : [];
             const selected = selectedRecording[item.index];
             if (files.length && !files.some((file) => file.url === selected)) {
-              const selection = recordingDefaultTarget(files);
+              const selection = recordingDefaultTarget(files, item);
               selectedRecording[item.index] = selection?.target?.file?.url || files[0].url;
               selectedRecordingSeek[item.index] = selection?.seek || 0;
               selectedRecordingTimeline[item.index] = selection?.requested || 0;
@@ -6995,6 +7379,24 @@ INDEX_HTML = r"""<!doctype html>
 
       document.addEventListener('webkitfullscreenchange', () => {
         if (!document.webkitFullscreenElement) debugEvent('ui_fullscreen_change', { active: false, webkit: true });
+      });
+
+      window.addEventListener('error', (event) => {
+        debugEvent('ui_global_error', {
+          message: event.message || '',
+          source: event.filename || '',
+          line: event.lineno || 0,
+          column: event.colno || 0,
+          stack: event.error?.stack || '',
+        });
+      });
+
+      window.addEventListener('unhandledrejection', (event) => {
+        const reason = event.reason || {};
+        debugEvent('ui_unhandled_rejection', {
+          message: reason.message || String(reason || ''),
+          stack: reason.stack || '',
+        });
       });
 
       restoreNavState();
