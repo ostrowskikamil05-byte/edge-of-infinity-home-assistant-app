@@ -20,9 +20,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.31"
+APP_VERSION = "0.10.32"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-recorded-playback-v1"
+UI_BUILD = "nvr-full-day-playback-v2"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -52,10 +52,16 @@ RECORDING_CACHE_MIN_REBUILD_SECONDS = 300
 RECORDING_CACHE_MIN_NEW_SEGMENTS = 30
 RECORDING_CACHE_MIN_TIMEOUT_SECONDS = 1800
 RECORDING_CACHE_MAX_TIMEOUT_SECONDS = 21600
+RECORDING_ENSURE_MIN_SECONDS = 30
+RECORDING_THUMBNAIL_WARMUP_INTERVAL_SECONDS = 300
+RECORDING_THUMBNAIL_WARMUP_PER_CAMERA = 4
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
 RECORDING_CACHE_WORKERS: set[str] = set()
 RECORDING_CACHE_LOOP_STARTED = False
+RECORDING_THUMBNAIL_WARMUP_LOOP_STARTED = False
+LAST_RECORDING_ENSURE_AT = 0.0
 DEBUG_LOCK = threading.Lock()
+RECORDING_ENSURE_LOCK = threading.Lock()
 RECORDING_CACHE_LOCK = threading.Lock()
 RECORDING_CACHE_BUILD_SEMAPHORE = threading.BoundedSemaphore(value=1)
 RECORDING_THUMBNAIL_SEMAPHORE = threading.BoundedSemaphore(value=1)
@@ -1191,8 +1197,11 @@ def runtime_parameters_payload(config: dict, hardware: dict, recordings_dir: Pat
                 "recording_cache_min_new_segments": RECORDING_CACHE_MIN_NEW_SEGMENTS,
                 "recording_cache_min_timeout_seconds": RECORDING_CACHE_MIN_TIMEOUT_SECONDS,
                 "recording_cache_max_timeout_seconds": RECORDING_CACHE_MAX_TIMEOUT_SECONDS,
+                "recording_ensure_min_seconds": RECORDING_ENSURE_MIN_SECONDS,
                 "recording_cache_worker_limit": hardware.get("recording_cache_worker_limit"),
                 "recording_thumbnail_worker_limit": hardware.get("recording_thumbnail_worker_limit"),
+                "recording_thumbnail_warmup_interval_seconds": RECORDING_THUMBNAIL_WARMUP_INTERVAL_SECONDS,
+                "recording_thumbnail_warmup_per_camera": RECORDING_THUMBNAIL_WARMUP_PER_CAMERA,
             },
             "runtime_state": {
                 "active_recorder_count": hardware.get("active_recorder_count"),
@@ -2309,6 +2318,15 @@ def playable_recording_files(directory: Path) -> list[Path]:
     return [path for path in directory.glob("*.mp4") if recording_file_ready(path, now)]
 
 
+def recording_thumbnail_url(key: str, path: Path) -> str:
+    base = f"recording-thumbs/{key}/{path.name}.jpg"
+    try:
+        stat = path.stat()
+    except OSError:
+        return base
+    return f"{base}?v={stat.st_size}-{stat.st_mtime_ns}"
+
+
 def recording_segments(camera: dict, index: int, limit: int = 24, segment_seconds: int = 10) -> list[dict]:
     directory = recording_base_dir(camera, index)
     if not directory.exists():
@@ -2324,7 +2342,7 @@ def recording_segments(camera: dict, index: int, limit: int = 24, segment_second
             {
                 "name": path.name,
                 "url": f"recordings/{key}/{path.name}",
-                "thumbnail_url": f"recording-thumbs/{key}/{path.name}.jpg",
+                "thumbnail_url": recording_thumbnail_url(key, path),
                 "size_bytes": stat.st_size,
                 "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(stat.st_mtime)),
                 "start_ts": start_ts,
@@ -2417,8 +2435,9 @@ def recording_day_groups(entries: list[dict], segment_seconds: int, key: str = "
         group["recorded_seconds"] += safe_int(entry.get("duration_seconds"), segment_seconds)
         group["total_seconds"] = group["day_total_seconds"]
         group["newest_at"] = entry.get("start_at") or group["newest_at"]
-        if key and not group.get("thumbnail_url"):
-            group["thumbnail_url"] = f"recording-thumbs/{key}/{Path(entry.get('name') or '').name}.jpg"
+        path = entry.get("path")
+        if key and not group.get("thumbnail_url") and isinstance(path, Path):
+            group["thumbnail_url"] = recording_thumbnail_url(key, path)
     return sorted(groups.values(), key=lambda item: item["day"], reverse=True)
 
 
@@ -2438,7 +2457,7 @@ def recording_files_from_entries(key: str, entries: list[dict], segment_seconds:
             {
                 "name": path.name,
                 "url": f"recordings/{key}/{path.name}",
-                "thumbnail_url": f"recording-thumbs/{key}/{path.name}.jpg",
+                "thumbnail_url": recording_thumbnail_url(key, path),
                 "size_bytes": stat.st_size,
                 "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(stat.st_mtime)),
                 "start_ts": start_ts,
@@ -3126,6 +3145,100 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
     return target
 
 
+def sampled_thumbnail_entries(entries: list[dict], max_items: int) -> list[dict]:
+    clean = [entry for entry in entries if isinstance(entry.get("path"), Path)]
+    if not clean:
+        return []
+    clean = sorted(clean, key=lambda item: (safe_int(item.get("start_ts"), 0), item.get("name") or ""))
+    limit = max(1, safe_int(max_items, RECORDING_THUMBNAIL_WARMUP_PER_CAMERA))
+    if len(clean) <= limit:
+        return clean
+    selected_indexes = {
+        0,
+        len(clean) - 1,
+    }
+    for slot in range(limit):
+        selected_indexes.add(round((slot * (len(clean) - 1)) / max(1, limit - 1)))
+    return [clean[index] for index in sorted(selected_indexes)[:limit]]
+
+
+def recording_thumbnail_warmup_paused() -> tuple[bool, str]:
+    try:
+        load_one = os.getloadavg()[0]
+    except (AttributeError, OSError):
+        return False, ""
+    cpu_count = os.cpu_count() or 1
+    load_per_core = load_one / max(1, cpu_count)
+    if load_per_core >= 1.35:
+        return True, f"cpu_load_per_core:{load_per_core:.2f}"
+    return False, ""
+
+
+def warm_recording_thumbnails(config: dict, reason: str) -> dict:
+    if shutil.which("ffmpeg") is None:
+        return {"generated": 0, "skipped": "ffmpeg_not_installed"}
+    paused, pause_reason = recording_thumbnail_warmup_paused()
+    if paused:
+        append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_warmup_deferred", {"reason": reason, "pause_reason": pause_reason})
+        return {"generated": 0, "skipped": pause_reason}
+    acquired = RECORDING_THUMBNAIL_SEMAPHORE.acquire(blocking=False)
+    if not acquired:
+        append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_warmup_deferred", {"reason": reason, "pause_reason": "thumbnail_worker_busy"})
+        return {"generated": 0, "skipped": "thumbnail_worker_busy"}
+    RECORDING_THUMBNAIL_SEMAPHORE.release()
+
+    nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
+    segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
+    generated = 0
+    errors = []
+    for index, camera in enumerate(config.get("cameras", [])):
+        key = recording_key(camera, index)
+        entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds)
+        newest_days = [item.get("day") for item in recording_day_groups(entries, segment_seconds, key)[:2]]
+        for day in newest_days:
+            day_entries = [entry for entry in entries if entry.get("day") == day]
+            for entry in sampled_thumbnail_entries(day_entries, RECORDING_THUMBNAIL_WARMUP_PER_CAMERA):
+                path = entry.get("path")
+                if not isinstance(path, Path):
+                    continue
+                target = recording_thumbnail_path(key, path.name)
+                if recording_thumbnail_ready(target, path):
+                    continue
+                try:
+                    ensure_recording_thumbnail(key, path, path.name)
+                    generated += 1
+                except Exception as error:  # noqa: BLE001
+                    errors.append({"key": key, "source": path.name, "error": str(error), "type": type(error).__name__})
+                    break
+    payload = {"reason": reason, "generated": generated, "errors": errors[:5]}
+    append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_warmup_done", payload)
+    write_debug_event("recording_thumbnail_warmup_done", payload)
+    return payload
+
+
+def recording_thumbnail_warmup_loop() -> None:
+    time.sleep(20)
+    while True:
+        try:
+            warm_recording_thumbnails(load_config(), "background_loop")
+        except Exception as error:  # noqa: BLE001
+            write_debug_event("recording_thumbnail_warmup_error", {"error": str(error), "type": type(error).__name__})
+        time.sleep(RECORDING_THUMBNAIL_WARMUP_INTERVAL_SECONDS)
+
+
+def start_recording_thumbnail_warmup_loop() -> None:
+    global RECORDING_THUMBNAIL_WARMUP_LOOP_STARTED
+    if RECORDING_THUMBNAIL_WARMUP_LOOP_STARTED:
+        return
+    RECORDING_THUMBNAIL_WARMUP_LOOP_STARTED = True
+    thread = threading.Thread(target=recording_thumbnail_warmup_loop, daemon=True)
+    thread.start()
+    write_debug_event("recording_thumbnail_warmup_loop_start", {
+        "interval_seconds": RECORDING_THUMBNAIL_WARMUP_INTERVAL_SECONDS,
+        "per_camera": RECORDING_THUMBNAIL_WARMUP_PER_CAMERA,
+    })
+
+
 def recording_log_path(camera: dict, index: int) -> Path:
     return recording_base_dir(camera, index) / "ffmpeg.log"
 
@@ -3437,6 +3550,13 @@ def ensure_configured_recordings(config: dict, reason: str) -> list[dict]:
 
 
 def schedule_recording_ensure(config: dict, reason: str) -> None:
+    global LAST_RECORDING_ENSURE_AT
+    if reason == "recording_status":
+        now = time.monotonic()
+        with RECORDING_ENSURE_LOCK:
+            if now - LAST_RECORDING_ENSURE_AT < RECORDING_ENSURE_MIN_SECONDS:
+                return
+            LAST_RECORDING_ENSURE_AT = now
     snapshot = json.loads(json.dumps(config))
     thread = threading.Thread(target=ensure_configured_recordings, args=(snapshot, reason), daemon=True)
     thread.start()
@@ -5466,13 +5586,14 @@ INDEX_HTML = r"""<!doctype html>
         if (nextDay && nextDay !== currentDay) selectRecordingDay(index, nextDay, reason);
       }
 
-      function recordingStreamUrl(status, index, offset) {
+      function recordingStreamUrl(status, index, playbackOffset, timelineOffset = 0) {
         const key = status?.key;
         if (!key) return '';
         if (!recordingStreamNonce[index]) recordingStreamNonce[index] = Date.now();
-        const start = Math.max(0, Math.floor(Number(offset || 0)));
+        const start = Math.max(0, Math.floor(Number(playbackOffset || 0)));
+        const timelineStart = Math.max(0, Math.floor(Number(timelineOffset || 0)));
         const day = status?.selected_day ? `&day=${encodeURIComponent(status.selected_day)}` : '';
-        return panelPath(`recordings-stream/${encodeURIComponent(key)}.mp4?start=${start}${day}&v=${recordingStreamNonce[index]}`);
+        return panelPath(`recordings-stream/${encodeURIComponent(key)}.mp4?start=${start}&timeline_start=${timelineStart}&mode=playback${day}&v=${recordingStreamNonce[index]}`);
       }
 
       function isMobileNvrPlayback() {
@@ -5480,10 +5601,16 @@ INDEX_HTML = r"""<!doctype html>
           || /Android|iPhone|iPad|iPod|Mobile|Home Assistant/i.test(navigator.userAgent || '');
       }
 
-      function recordingPlaybackModeForClient(status = {}) {
+      function recordingPlaybackModeForClient(status = {}, timeline = null) {
         const cache = status?.playback_cache || {};
         if (cache.ready && cache.url && Number(cache.total_seconds || 0) > 0) return 'server_cache_mp4';
-        return 'server_file_sequence';
+        const playbackTotal = Number(timeline?.playbackTotal || status?.timeline?.playback_total_seconds || 0);
+        const segmentSeconds = Math.max(1, Number(status?.segment_seconds || 10));
+        return playbackTotal > segmentSeconds ? 'recorded_day_stream' : 'server_file_sequence';
+      }
+
+      function isRecordedDayStreamMode(playbackMode) {
+        return playbackMode === 'recorded_day_stream' || playbackMode === 'continuous_stream';
       }
 
       function recordingCacheCoversTarget(status = {}, target = null) {
@@ -5707,13 +5834,14 @@ INDEX_HTML = r"""<!doctype html>
       function setCurrentRecordingTime(index, timelineSecond) {
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         if (!video) return false;
-        const playbackMode = video.dataset.recordingPlaybackMode || 'continuous_stream';
+        const playbackMode = video.dataset.recordingPlaybackMode || 'recorded_day_stream';
         const streamStart = Math.max(0, Number(video.dataset.recordingStreamStart || recordingStreamStartOffset[index] || 0));
         const playbackStart = Math.max(0, Number(video.dataset.recordingPlaybackStart || 0));
-        const target = playbackMode === 'server_cache_mp4' || playbackMode === 'continuous_stream'
+        const streamLike = playbackMode === 'server_cache_mp4' || isRecordedDayStreamMode(playbackMode);
+        const target = streamLike
           ? recordingTargetForOffset(index, timelineSecond)
           : null;
-        const relativeSeek = playbackMode === 'server_cache_mp4' || playbackMode === 'continuous_stream'
+        const relativeSeek = streamLike
           ? Math.max(0, Number(target?.playbackSeek || 0) - playbackStart)
           : Math.max(0, Math.floor(Number(timelineSecond || 0)) - streamStart);
         const applySeek = () => {
@@ -5754,12 +5882,13 @@ INDEX_HTML = r"""<!doctype html>
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         if (!video) return false;
         const streamStart = Math.max(0, Number(video.dataset.recordingStreamStart || recordingStreamStartOffset[index] || 0));
-        const playbackMode = video.dataset.recordingPlaybackMode || 'continuous_stream';
+        const playbackMode = video.dataset.recordingPlaybackMode || 'recorded_day_stream';
         const playbackStart = Math.max(0, Number(video.dataset.recordingPlaybackStart || 0));
-        const target = playbackMode === 'server_cache_mp4' || playbackMode === 'continuous_stream'
+        const streamLike = playbackMode === 'server_cache_mp4' || isRecordedDayStreamMode(playbackMode);
+        const target = streamLike
           ? recordingTargetForOffset(index, timelineSecond)
           : null;
-        const relativeSeek = playbackMode === 'server_cache_mp4' || playbackMode === 'continuous_stream'
+        const relativeSeek = streamLike
           ? Math.floor(Number(target?.playbackSeek || 0) - playbackStart)
           : Math.floor(Number(timelineSecond || 0)) - streamStart;
         if (!canSeekBufferedVideo(video, relativeSeek)) return false;
@@ -5799,7 +5928,18 @@ INDEX_HTML = r"""<!doctype html>
           if (recordingCacheCoversTarget(recordingStatus[index] || {}, target)) {
             seekRecordingCache(index, target, wasPlaying, 'server_cache_select');
           } else {
-            switchRecordingVideoToFile(index, target, wasPlaying, 'server_cache_tail_file_select');
+            recordingStreamStartOffset[index] = target.requested;
+            recordingStreamNonce[index] = Date.now();
+            recordingAutoplayAfterRender[index] = wasPlaying;
+            debugEvent('ui_recording_cache_tail_day_stream_select', {
+              index,
+              recording: target.target.file.name,
+              timeline_second: target.requested,
+              playback_second: target.playbackSeek,
+              segment_second: target.seek,
+              cache: recordingStatus[index]?.playback_cache || {},
+            });
+            renderNvrGrid({ reason: 'server_cache_tail_day_stream_select' });
           }
           return;
         }
@@ -5817,7 +5957,7 @@ INDEX_HTML = r"""<!doctype html>
           recording: target.target.file.name,
           timeline_second: target.requested,
           segment_second: selectedRecordingSeek[index],
-          continuous_stream_start: recordingStreamStartOffset[index],
+          recorded_day_stream_start: recordingStreamStartOffset[index],
         });
         recordingAutoplayAfterRender[index] = wasPlaying;
         renderNvrGrid({ reason: 'timeline_seek_continuous' });
@@ -5860,12 +6000,12 @@ INDEX_HTML = r"""<!doctype html>
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
         const streamStart = Math.max(0, Number(video.dataset.recordingStreamStart || recordingStreamStartOffset[index] || 0));
-        const playbackMode = video.dataset.recordingPlaybackMode || 'continuous_stream';
+        const playbackMode = video.dataset.recordingPlaybackMode || 'recorded_day_stream';
         const playbackStart = Math.max(0, Number(video.dataset.recordingPlaybackStart || 0));
         const current = Math.max(0, Math.floor(Number(video.currentTime || 0)));
         const playbackSecond = playbackStart + current;
         const timelineSecond = streamStart + current;
-        const target = playbackMode === 'server_cache_mp4' || playbackMode === 'continuous_stream'
+        const target = playbackMode === 'server_cache_mp4' || isRecordedDayStreamMode(playbackMode)
           ? recordingTargetForPlaybackOffset(index, playbackSecond)
           : recordingTargetForOffset(index, timelineSecond);
         if (target) {
@@ -5884,7 +6024,7 @@ INDEX_HTML = r"""<!doctype html>
         delete recordingContinueTimers[index];
       }
 
-      async function resumeRecordingWhenNextSegmentCloses(index, previousTotal, attempt = 0, playbackMode = 'continuous_stream') {
+      async function resumeRecordingWhenNextSegmentCloses(index, previousTotal, attempt = 0, playbackMode = 'recorded_day_stream') {
         clearRecordingContinuation(index);
         await loadRecordingStatus({ reason: 'recording_continuation_refresh' });
         const status = recordingStatus[index] || {};
@@ -5919,27 +6059,30 @@ INDEX_HTML = r"""<!doctype html>
               return;
             }
             recordingStreamNonce[index] = Date.now();
-            debugEvent('ui_recording_continuous_resume', {
+            debugEvent('ui_recording_day_stream_resume', {
               index,
               previous_total: previousTotal,
               new_total: timeline.playbackTotal,
               attempt,
             });
-            renderNvrGrid({ reason: 'continuous_recording_resume' });
+            renderNvrGrid({ reason: 'recorded_day_stream_resume' });
             return;
           }
         }
         if (playbackMode === 'server_cache_mp4' && timeline.playbackTotal > previousTotal) {
           const target = recordingTargetForPlaybackOffset(index, previousTotal);
           if (target) {
-            debugEvent('ui_recording_cache_tail_file_resume', {
+            recordingStreamStartOffset[index] = target.requested;
+            recordingStreamNonce[index] = Date.now();
+            recordingAutoplayAfterRender[index] = true;
+            debugEvent('ui_recording_cache_tail_day_stream_resume', {
               index,
               previous_total: previousTotal,
               new_total: timeline.playbackTotal,
               attempt,
               cache: status.playback_cache || {},
             });
-            switchRecordingVideoToFile(index, target, true, 'cache_tail_file_resume');
+            renderNvrGrid({ reason: 'cache_tail_day_stream_resume' });
             return;
           }
         }
@@ -5986,7 +6129,7 @@ INDEX_HTML = r"""<!doctype html>
             return;
           }
         }
-        if (video?.dataset?.recordingPlaybackMode === 'continuous_stream' && (status.recording || status.desired_recording)) {
+        if (isRecordedDayStreamMode(video?.dataset?.recordingPlaybackMode) && (status.recording || status.desired_recording)) {
           resumeRecordingWhenNextSegmentCloses(index, previousTotal, 0);
           return;
         }
@@ -5994,7 +6137,7 @@ INDEX_HTML = r"""<!doctype html>
           index,
           timeline_second: selectedRecordingTimeline[index],
           stream_start: recordingStreamStartOffset[index],
-          playback_mode: video?.dataset?.recordingPlaybackMode || 'continuous_stream',
+          playback_mode: video?.dataset?.recordingPlaybackMode || 'recorded_day_stream',
           previous_total: previousTotal,
         });
       }
@@ -6383,9 +6526,11 @@ INDEX_HTML = r"""<!doctype html>
         const targetForPoster = recordingTargetForOffset(index, timelineValue);
         const selectedFile = targetForPoster?.target?.file || null;
         const cache = status.playback_cache || {};
-        let playbackMode = recordingPlaybackModeForClient(status);
+        let playbackMode = recordingPlaybackModeForClient(status, timeline);
         if (playbackMode === 'server_cache_mp4' && !recordingCacheCoversTarget(status, targetForPoster) && selectedFile?.url) {
-          playbackMode = 'server_file_sequence';
+          playbackMode = timeline.playbackTotal > Math.max(1, Number(status.segment_seconds || 10))
+            ? 'recorded_day_stream'
+            : 'server_file_sequence';
         }
         let playerSeek = 0;
         let playerStreamStart = streamStart;
@@ -6406,7 +6551,7 @@ INDEX_HTML = r"""<!doctype html>
           } else {
             playerStreamStart = Number(targetForPoster?.requested || streamStart);
             playerPlaybackStart = Number(targetForPoster?.playbackSeek || 0);
-            rawPlayerSrc = recordingStreamUrl(status, index, playerPlaybackStart);
+            rawPlayerSrc = recordingStreamUrl(status, index, playerPlaybackStart, playerStreamStart);
           }
         }
         const playerSrc = playbackMode === 'server_file_sequence' || playbackMode === 'server_cache_mp4'
@@ -7857,7 +8002,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.send_json({"presets": load_presets()})
             return
         if path == "/api/recording/status":
-            self.send_json(recording_status_payload(day_selection=parse_recording_day_query(parse_qs(parsed.query))))
+            config = load_config()
+            schedule_recording_ensure(config, "recording_status")
+            self.send_json(recording_status_payload(config, day_selection=parse_recording_day_query(parse_qs(parsed.query))))
             return
         if path == "/api/logs":
             self.send_json(collect_panel_logs())
@@ -8114,6 +8261,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
         key = Path(request_path.removeprefix("/recordings-stream/")).stem
         params = parse_qs(query)
         start_seconds = safe_int((params.get("start") or ["0"])[0], 0)
+        timeline_start_seconds = safe_int((params.get("timeline_start") or ["0"])[0], 0)
+        start_mode = (params.get("mode") or ["playback"])[0] or "playback"
         day_key = (params.get("day") or [""])[0]
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_key or ""):
             day_key = ""
@@ -8139,6 +8288,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "client": self.client_address[0],
             "path": request_path,
             "query": params,
+            "start_mode": start_mode,
+            "timeline_start_seconds": timeline_start_seconds,
             "plan": {name: value for name, value in plan.items() if name != "concat_path"},
             "concat_path": str(plan["concat_path"]),
             "command": redact_command(command),
@@ -8164,6 +8315,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "key": key,
                 "start_seconds": start_seconds,
+                "start_mode": start_mode,
+                "timeline_start_seconds": timeline_start_seconds,
                 "plan": {name: value for name, value in plan.items() if name != "concat_path"},
                 "command": redact_command(command),
             }, default=str) + "\n").encode("utf-8"))
@@ -8397,6 +8550,7 @@ def main() -> None:
         write_debug_event("boot_refresh_status_done", {"camera_summary": config_summary(status_payload)})
         schedule_recording_ensure(config, "boot")
         start_recording_cache_refresh_loop()
+        start_recording_thumbnail_warmup_loop()
     except Exception as error:
         write_debug_event("boot_refresh_status_error", {"error": str(error), "type": type(error).__name__})
         raise

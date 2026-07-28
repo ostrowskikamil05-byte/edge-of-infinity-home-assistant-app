@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.32
+
+- Restore full-day NVR playback fallback: when the daily playback cache is missing, stale, or too short, the panel now uses the recorded-day stream built from saved clips instead of dropping to a single 10-12 second MP4 segment.
+- Keep NVR seek math explicit by sending both playback offset and wall-clock timeline offset to `/recordings-stream/...`, making logs easier to read and preventing day-offset/playback-offset confusion.
+- Preserve compatibility with older `continuous_stream` browser state while new renders use the clearer `recorded_day_stream` playback mode.
+- Add cache-busting thumbnail URLs and a low-impact background thumbnail warmup loop so recording lists can recover from stale or missing preview images without overloading the CPU.
+- Expose thumbnail warmup limits in runtime diagnostics.
+
 ## 0.10.31
 
 - Keep NVR playback on recorded media only: when the daily cache is not ready, the panel now falls back to saved MP4 segments instead of the continuous live-style stream.
