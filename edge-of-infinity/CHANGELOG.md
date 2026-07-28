@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.27
+
+- Change the NVR recording list into a sampled full-day filmstrip so the list covers the selected day without loading hundreds of thumbnails at once.
+- Load recording-list thumbnails through the existing lazy hydration path instead of assigning all JPEG URLs immediately.
+- Validate cached recording thumbnails as real JPEG files and regenerate corrupt or stale thumbnail files.
+- Throttle thumbnail generation to one FFmpeg process at a time to reduce CPU spikes while browsing dense recording days.
+- Add `/homeassistant/edge/recording-thumbnail.log` to the panel Logs view with thumbnail cache, generation, timeout, and request diagnostics.
+
 ## 0.10.26
 
 - Switch NVR playback cache from a rolling window to calendar-day timelines, so each camera can build a `00:00 -> 23:59:59` playback file per day.

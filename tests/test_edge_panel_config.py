@@ -62,11 +62,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.26")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.26")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.26")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.26")
-        self.assertIn("v0.10.26", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.27")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.27")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.27")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.27")
+        self.assertIn("v0.10.27", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
@@ -392,11 +392,12 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("daily-cache-nvr-v1", html)
+        self.assertIn("daily-filmstrip-nvr-v1", html)
         self.assertIn("server_cache_mp4", html)
         self.assertIn("selectedRecordingDay", html)
         self.assertIn("function selectRecordingDay", html)
         self.assertIn("function moveRecordingDay", html)
+        self.assertIn("function recordingFilmstripFiles", html)
         self.assertIn("data-recording-day-swipe", html)
         self.assertIn("recording-day-tile", html)
         self.assertIn("function seekRecordingCache", html)
@@ -428,6 +429,8 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function scheduleRecordingThumbnailHydration", html)
         self.assertIn("thumbnail_url", html)
         self.assertIn("max-height: 232px", html)
+        self.assertIn("Recording thumbnails", html)
+        self.assertIn("recording_thumbnail_log", html)
         self.assertNotIn("data-recording-scrub", html)
         self.assertNotIn("nvrGrid.addEventListener('input'", html)
         self.assertIn("nvrGrid.addEventListener('timeupdate'", html)
@@ -1170,6 +1173,22 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("-vcodec", command)
         self.assertIn("mjpeg", command)
         self.assertIn("thumb.jpg", command[-1])
+
+    def test_recording_thumbnail_ready_rejects_corrupt_cached_file(self):
+        panel = load_panel_module()
+        source = panel.HOME_DIR / "recording.mp4"
+        thumbnail = panel.HOME_DIR / "recording.jpg"
+        panel.HOME_DIR.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"video-source")
+        thumbnail.write_bytes(b"not a jpeg cache file")
+        os.utime(thumbnail, (source.stat().st_mtime + 5, source.stat().st_mtime + 5))
+
+        self.assertFalse(panel.recording_thumbnail_ready(thumbnail, source))
+
+        thumbnail.write_bytes(b"\xff\xd8\xff" + (b"x" * 1024))
+        os.utime(thumbnail, (source.stat().st_mtime + 5, source.stat().st_mtime + 5))
+
+        self.assertTrue(panel.recording_thumbnail_ready(thumbnail, source))
 
     def test_ensure_configured_recordings_starts_enabled_record_camera(self):
         panel = load_panel_module()

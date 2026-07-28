@@ -18,9 +18,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.26"
+APP_VERSION = "0.10.27"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "daily-cache-nvr-v1"
+UI_BUILD = "daily-filmstrip-nvr-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -40,6 +40,7 @@ RECORDING_THUMB_DIR = HOME_DIR / "recording-thumbs"
 RECORDING_CACHE_DIR = HOME_DIR / "recording-cache"
 RECORDING_STREAM_LOG_PATH = HOME_DIR / "recording-stream.log"
 RECORDING_CACHE_LOG_PATH = HOME_DIR / "recording-cache.log"
+RECORDING_THUMB_LOG_PATH = HOME_DIR / "recording-thumbnail.log"
 MIN_RECORDING_FILE_READY_SECONDS = 2.0
 RECORDING_CACHE_REFRESH_SECONDS = 12
 RECORDING_CACHE_MAX_SEGMENTS = 10000
@@ -49,6 +50,7 @@ RECORDING_CACHE_WORKERS: set[str] = set()
 RECORDING_CACHE_LOOP_STARTED = False
 DEBUG_LOCK = threading.Lock()
 RECORDING_CACHE_LOCK = threading.Lock()
+RECORDING_THUMBNAIL_SEMAPHORE = threading.BoundedSemaphore(value=1)
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
 STREAM_FALLBACK_CHANNELS = {"main": HIKVISION_MAIN_CHANNEL, "sub": HIKVISION_SUB_CHANNEL}
@@ -243,6 +245,22 @@ def write_debug_event(event: str, payload: dict | None = None) -> None:
                 handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
     except OSError as error:
         print(f"[edge-panel] debug log write failed: {error}")
+
+
+def append_jsonl_log(path: Path, event: str, payload: dict | None = None) -> None:
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "event": event,
+        "server_version": SERVER_VERSION,
+        "ui_build": UI_BUILD,
+        **redact_for_log(payload or {}),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except OSError as error:
+        print(f"[edge-panel] jsonl log write failed: {error}")
 
 
 def route_path(raw_path: str) -> str:
@@ -957,6 +975,7 @@ def collect_panel_logs() -> dict:
         "runtime_janus_streaming_config": redact_rtsp(read_text_tail(JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg", 20000)),
         "recording_stream_log": redact_rtsp(read_text_tail(RECORDING_STREAM_LOG_PATH, 12000)),
         "recording_cache_log": redact_rtsp(read_text_tail(RECORDING_CACHE_LOG_PATH, 12000)),
+        "recording_thumbnail_log": redact_rtsp(read_text_tail(RECORDING_THUMB_LOG_PATH, 12000)),
         "recording_logs": recording_logs,
     }
 
@@ -2518,34 +2537,102 @@ def build_recording_thumbnail_command(source: Path, target: Path, seek_seconds: 
     ]
 
 
+def recording_thumbnail_ready(target: Path, source: Path) -> bool:
+    try:
+        target_stat = target.stat()
+        source_stat = source.stat()
+    except OSError:
+        return False
+    if target_stat.st_mtime < source_stat.st_mtime or target_stat.st_size < 512:
+        return False
+    try:
+        with target.open("rb") as handle:
+            return handle.read(3).startswith(b"\xff\xd8\xff")
+    except OSError:
+        return False
+
+
 def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
     target = recording_thumbnail_path(key, filename)
-    try:
-        if target.exists() and target.stat().st_mtime >= source.stat().st_mtime and target.stat().st_size > 0:
-            return target
-    except OSError:
-        pass
+    if recording_thumbnail_ready(target, source):
+        return target
+    if target.exists():
+        append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_cache_invalid", {
+            "key": key,
+            "source": source.name,
+            "target": str(target),
+        })
+        try:
+            target.unlink(missing_ok=True)
+        except OSError as error:
+            append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_cache_unlink_error", {
+                "key": key,
+                "source": source.name,
+                "target": str(target),
+                "error": str(error),
+            })
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg_not_installed_in_addon")
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(".jpg.tmp")
     command = build_recording_thumbnail_command(source, tmp)
+    acquired = RECORDING_THUMBNAIL_SEMAPHORE.acquire(timeout=20)
+    if not acquired:
+        append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_busy", {
+            "key": key,
+            "source": source.name,
+            "target": str(target),
+        })
+        raise RuntimeError("thumbnail_generation_busy")
     started_at = time.monotonic()
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
-    if result.returncode != 0 or not tmp.exists() or tmp.stat().st_size <= 0:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-600:] or f"thumbnail_ffmpeg_exit_{result.returncode}")
-    tmp.replace(target)
-    write_debug_event("recording_thumbnail_generated", {
+    append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_start", {
         "key": key,
         "source": source.name,
         "target": str(target),
-        "duration_ms": int((time.monotonic() - started_at) * 1000),
         "command": redact_command(command),
     })
+    try:
+        try:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
+        except subprocess.TimeoutExpired as error:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_timeout", {
+                "key": key,
+                "source": source.name,
+                "target": str(target),
+                "timeout": error.timeout,
+                "command": redact_command(command),
+            })
+            raise
+        if result.returncode != 0 or not recording_thumbnail_ready(tmp, source):
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            error_text = result.stderr.decode("utf-8", errors="replace")[-600:] or f"thumbnail_ffmpeg_exit_{result.returncode}"
+            append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_error", {
+                "key": key,
+                "source": source.name,
+                "target": str(target),
+                "exit_code": result.returncode,
+                "error": error_text,
+            })
+            raise RuntimeError(error_text)
+        tmp.replace(target)
+        payload = {
+            "key": key,
+            "source": source.name,
+            "target": str(target),
+            "duration_ms": int((time.monotonic() - started_at) * 1000),
+            "command": redact_command(command),
+        }
+        append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_done", payload)
+        write_debug_event("recording_thumbnail_generated", payload)
+    finally:
+        RECORDING_THUMBNAIL_SEMAPHORE.release()
     return target
 
 
@@ -4683,6 +4770,25 @@ INDEX_HTML = r"""<!doctype html>
         return { entries, total: offset };
       }
 
+      function recordingFilmstripFiles(files, selectedUrl = '', maxItems = 72) {
+        const sorted = sortedRecordingFiles(files);
+        const limit = Math.max(1, Math.floor(Number(maxItems || 72)));
+        if (sorted.length <= limit) return sorted;
+        const selectedIndex = sorted.findIndex((file) => file.url === selectedUrl);
+        const used = new Set();
+        const addIndex = (index) => {
+          const safeIndex = Math.max(0, Math.min(sorted.length - 1, Math.floor(Number(index || 0))));
+          used.add(safeIndex);
+        };
+        for (let slot = 0; slot < limit; slot += 1) {
+          addIndex(Math.round((slot * (sorted.length - 1)) / Math.max(1, limit - 1)));
+        }
+        if (selectedIndex >= 0) addIndex(selectedIndex);
+        return Array.from(used)
+          .sort((a, b) => a - b)
+          .map((index) => sorted[index]);
+      }
+
       function recordingTargetInTimeline(timeline, offset) {
         const entries = timeline.entries || [];
         if (!entries.length) return null;
@@ -5270,6 +5376,7 @@ INDEX_HTML = r"""<!doctype html>
           logBlock('Janus streaming config', panelLogs.runtime_janus_streaming_config || 'missing'),
           logBlock('Recording stream', panelLogs.recording_stream_log || 'empty'),
           logBlock('Recording cache', panelLogs.recording_cache_log || 'empty'),
+          logBlock('Recording thumbnails', panelLogs.recording_thumbnail_log || 'empty'),
           logBlock('Last saved response', panelLogs.last_saved_config || {}),
           ...recordingLogs.map((item) => logBlock(`Recording ffmpeg: ${item.path}`, item.tail || 'empty'))
         ].join('');
@@ -5475,17 +5582,17 @@ INDEX_HTML = r"""<!doctype html>
           ? 'RECORDING'
           : recordingState === 'blocked'
             ? 'BLOCKED'
-            : desiredRecording
+          : desiredRecording
               ? 'SCHEDULED'
               : 'OFF';
         const canRecord = status.can_record !== false;
         const recordError = status.record_error || status.last_error || '';
         const files = Array.isArray(status.files) ? status.files : [];
-        const displayFiles = files.slice(0, 240);
         const days = Array.isArray(status.days) ? status.days : [];
         const currentDay = selectedRecordingDay[index] || status.selected_day || days[0]?.day || '';
         const currentDayIndex = Math.max(0, days.findIndex((day) => day.day === currentDay));
         const selected = selectedRecording[index] || '';
+        const displayFiles = recordingFilmstripFiles(files, selected, 72);
         const seekSeconds = Number(selectedRecordingSeek[index] || 0);
         const selectedIndex = files.findIndex((file) => file.url === selected);
         const selection = recordingOffsetForSelection(files, selected, seekSeconds);
@@ -5562,7 +5669,7 @@ INDEX_HTML = r"""<!doctype html>
           ? `<div class="recording-film-grid">${displayFiles.map((file) => `
               <button class="recording-tile ${file.url === selected ? 'active' : ''}" type="button" data-play-recording="${escapeHtml(file.url)}" data-recording-offset="${escapeHtml(offsetForRecordingUrl(index, file.url))}" data-record-index="${index}">
                 <span class="recording-thumb-wrap">
-                  <img class="recording-thumb" src="${escapeHtml(file.thumbnail_url ? panelPath(file.thumbnail_url) : THUMB_PLACEHOLDER)}" alt="${escapeHtml(file.name)} snapshot" loading="lazy" decoding="async" fetchpriority="low">
+                  <img class="recording-thumb" src="${THUMB_PLACEHOLDER}" ${file.thumbnail_url ? `data-recording-thumb-src="${escapeHtml(panelPath(file.thumbnail_url))}"` : ''} alt="${escapeHtml(file.name)} snapshot" loading="lazy" decoding="async" fetchpriority="low">
                   <span class="recording-thumb-time">${escapeHtml(formatTimestampSeconds(file.start_ts || file.start_at || file.modified_at))}</span>
                 </span>
                 <b>${escapeHtml(file.name)}</b>
@@ -7259,12 +7366,14 @@ class EdgeHandler(BaseHTTPRequestHandler):
         try:
             thumb = ensure_recording_thumbnail(key, source, filename)
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
-            write_debug_event("recording_thumbnail_error", {
+            payload = {
                 "key": key,
                 "filename": Path(filename).name,
                 "error": str(error),
                 "type": type(error).__name__,
-            })
+            }
+            append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_request_error", payload)
+            write_debug_event("recording_thumbnail_error", payload)
             self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
             return
         self.send_bytes(thumb.read_bytes(), "image/jpeg")
