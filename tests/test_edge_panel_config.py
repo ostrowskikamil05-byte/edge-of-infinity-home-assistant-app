@@ -70,11 +70,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.34")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.34")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.34")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.34")
-        self.assertIn("v0.10.34", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.35")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.35")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.35")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.35")
+        self.assertIn("v0.10.35", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -435,7 +435,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("nvr-active-day-cache-safe-v1", html)
+        self.assertIn("nvr-mp4-tail-ready-v1", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
         self.assertIn("function markNvrInteraction", html)
@@ -1188,6 +1188,15 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(status["segments_total"], 2)
         self.assertEqual(status["segments"], 1)
         self.assertEqual([item["name"] for item in status["files"]], ["20260727-173000.mp4"])
+
+    def test_recording_file_ready_accepts_moov_at_tail(self):
+        panel = load_panel_module()
+        panel.MIN_RECORDING_FILE_READY_SECONDS = 0
+        source = panel.HOME_DIR / "recordings" / "20260727-173000.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + (b"x" * (panel.RECORDING_FILE_HEADER_CHECK_BYTES + 2048)) + b"moov")
+
+        self.assertTrue(panel.recording_file_ready(source))
 
     def test_recording_stream_command_outputs_fragmented_mp4(self):
         panel = load_panel_module()

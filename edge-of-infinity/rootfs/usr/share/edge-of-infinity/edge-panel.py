@@ -20,9 +20,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.34"
+APP_VERSION = "0.10.35"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-active-day-cache-safe-v1"
+UI_BUILD = "nvr-mp4-tail-ready-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -47,6 +47,7 @@ RECORDING_LIVE_EDGE_DELAY_SECONDS = 1.0
 MIN_RECORDING_FILE_READY_SECONDS = RECORDING_LIVE_EDGE_DELAY_SECONDS
 RECORDING_FILE_MIN_PLAYABLE_BYTES = 1024
 RECORDING_FILE_HEADER_CHECK_BYTES = 65536
+RECORDING_FILE_HEADER_GRACE_SECONDS = 30.0
 RECORDING_CACHE_REFRESH_SECONDS = 60
 RECORDING_CACHE_MAX_SEGMENTS = 10000
 RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS = 50000
@@ -1204,6 +1205,7 @@ def runtime_parameters_payload(config: dict, hardware: dict, recordings_dir: Pat
                 "recording_live_edge_delay_seconds": RECORDING_LIVE_EDGE_DELAY_SECONDS,
                 "recording_file_min_playable_bytes": RECORDING_FILE_MIN_PLAYABLE_BYTES,
                 "recording_file_header_check_bytes": RECORDING_FILE_HEADER_CHECK_BYTES,
+                "recording_file_header_grace_seconds": RECORDING_FILE_HEADER_GRACE_SECONDS,
                 "recording_cache_refresh_seconds": RECORDING_CACHE_REFRESH_SECONDS,
                 "recording_cache_max_segments": RECORDING_CACHE_MAX_SEGMENTS,
                 "recording_cache_absolute_max_segments": RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS,
@@ -2323,20 +2325,27 @@ def recording_file_ready(path: Path, now: float | None = None, min_age_seconds: 
     min_age_seconds = MIN_RECORDING_FILE_READY_SECONDS if min_age_seconds is None else min_age_seconds
     if min_age_seconds > 0 and (now or time.time()) - stat.st_mtime < min_age_seconds:
         return False
-    if not recording_file_has_playable_header(path):
+    if not recording_file_has_playable_header(path, stat, now or time.time()):
         return False
     return True
 
 
-def recording_file_has_playable_header(path: Path) -> bool:
+def recording_file_has_playable_header(path: Path, stat: os.stat_result | None = None, now: float | None = None) -> bool:
     try:
+        stat = stat or path.stat()
         with path.open("rb") as handle:
             header = handle.read(RECORDING_FILE_HEADER_CHECK_BYTES)
+            if stat.st_size > RECORDING_FILE_HEADER_CHECK_BYTES:
+                handle.seek(max(0, stat.st_size - RECORDING_FILE_HEADER_CHECK_BYTES))
+                header += handle.read(RECORDING_FILE_HEADER_CHECK_BYTES)
     except OSError:
         return False
     if b"ftyp" not in header[:64]:
         return False
-    return b"moov" in header or b"moof" in header
+    if b"moov" in header or b"moof" in header:
+        return True
+    age = (now or time.time()) - stat.st_mtime
+    return age >= RECORDING_FILE_HEADER_GRACE_SECONDS
 
 
 def playable_recording_files(directory: Path) -> list[Path]:

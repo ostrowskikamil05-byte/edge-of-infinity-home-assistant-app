@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.35
+
+- Relax MP4 readiness after the 0.10.34 safety check: Edge now scans both the beginning and end of each recording segment for MP4 metadata, and older `ftyp` segments are allowed after a short grace window. This restores NVR playback for valid files whose `moov` atom is not at the beginning.
+- Expose the MP4 header grace window in diagnostics so future NVR OFF/empty-list issues are easier to confirm from logs.
+
 ## 0.10.34
 
 - Stop treating stale active-day NVR cache files as playable. Today's view now falls back to the recorded-day stream whenever the daily cache is not current, preventing old cache timelines from mixing yesterday/today or starting at the wrong offset.
