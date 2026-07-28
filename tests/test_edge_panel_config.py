@@ -62,11 +62,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.25")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.25")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.25")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.25")
-        self.assertIn("v0.10.25", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.26")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.26")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.26")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.26")
+        self.assertIn("v0.10.26", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
@@ -392,8 +392,13 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("unified-cache-nvr-v1", html)
+        self.assertIn("daily-cache-nvr-v1", html)
         self.assertIn("server_cache_mp4", html)
+        self.assertIn("selectedRecordingDay", html)
+        self.assertIn("function selectRecordingDay", html)
+        self.assertIn("function moveRecordingDay", html)
+        self.assertIn("data-recording-day-swipe", html)
+        self.assertIn("recording-day-tile", html)
         self.assertIn("function seekRecordingCache", html)
         self.assertIn("ui_recording_cache_seek", html)
         self.assertIn("ui_recording_cache_resume", html)
@@ -907,6 +912,45 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("start_ts", files[0])
         self.assertIn("playback_cache", status)
         self.assertIn("source_count", status["playback_cache"])
+        self.assertEqual(status["selected_day"], "2026-07-27")
+        self.assertEqual(status["days"][0]["day"], "2026-07-27")
+        self.assertIn("thumbnail_url", status["days"][0])
+
+    def test_recording_status_can_select_calendar_day(self):
+        panel = load_panel_module()
+        panel.MIN_RECORDING_FILE_READY_SECONDS = 0
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "nvr": {"segment_seconds": 10},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+        panel.write_json(panel.CONFIG_PATH, payload)
+        directory = panel.recording_base_dir(payload["cameras"][0], 0)
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in ("20260727-235950.mp4", "20260728-000000.mp4", "20260728-000010.mp4"):
+            (directory / name).write_bytes(b"video")
+
+        status = panel.recording_status_payload(payload, {"0": "2026-07-27"})["cameras"][0]
+
+        self.assertEqual(status["selected_day"], "2026-07-27")
+        self.assertEqual(status["timeline"]["file_count"], 1)
+        self.assertEqual(status["files"][0]["day"], "2026-07-27")
+        self.assertEqual(status["playback_cache"]["cache_name"], "2026-07-27")
+        self.assertIn("recording-cache/", status["playback_cache"]["url"] or "recording-cache/")
 
     def test_recording_stream_plan_builds_continuous_concat_from_timeline(self):
         panel = load_panel_module()
@@ -1023,15 +1067,17 @@ class EdgePanelConfigTests(unittest.TestCase):
         for name in ("20260727-173000.mp4", "20260727-173010.mp4"):
             (directory / name).write_bytes(b"x" * 2048)
         key = panel.recording_key(payload["cameras"][0], 0)
-        cache_dir = panel.recording_cache_dir(key)
+        day = "2026-07-27"
+        cache_dir = panel.recording_cache_dir(key, day)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        entries = panel.recording_file_entries(payload["cameras"][0], 0, limit=240, segment_seconds=10)
+        entries = panel.recording_file_entries(payload["cameras"][0], 0, limit=240, segment_seconds=10, day_key=day)
         signature = panel.recording_cache_source_signature(entries, 10)
-        panel.recording_cache_video_path(key).write_bytes(b"cached mp4")
+        panel.recording_cache_video_path(key, day).write_bytes(b"cached mp4")
         panel.write_json(
-            panel.recording_cache_meta_path(key),
+            panel.recording_cache_meta_path(key, day),
             {
                 "cache_id": "cache-test",
+                "cache_name": day,
                 "source_hash": signature["hash"],
                 "source_count": len(signature["items"]),
                 "file_count": 2,
@@ -1046,8 +1092,9 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertTrue(status["raw_ready"])
         self.assertTrue(status["current"])
         self.assertFalse(status["too_short_for_sources"])
+        self.assertEqual(status["cache_name"], day)
         self.assertEqual(status["total_seconds"], 20)
-        self.assertIn(f"recording-cache/{key}/timeline.mp4", status["url"])
+        self.assertIn(f"recording-cache/{key}/{day}/timeline.mp4", status["url"])
 
     def test_recording_cache_status_hides_short_stale_cache_when_many_segments_exist(self):
         panel = load_panel_module()
@@ -1077,12 +1124,14 @@ class EdgePanelConfigTests(unittest.TestCase):
         for name in ("20260727-173000.mp4", "20260727-173010.mp4", "20260727-173020.mp4"):
             (directory / name).write_bytes(b"x" * 32)
         key = panel.recording_key(payload["cameras"][0], 0)
-        panel.recording_cache_dir(key).mkdir(parents=True, exist_ok=True)
-        panel.recording_cache_video_path(key).write_bytes(b"short cached mp4")
+        day = "2026-07-27"
+        panel.recording_cache_dir(key, day).mkdir(parents=True, exist_ok=True)
+        panel.recording_cache_video_path(key, day).write_bytes(b"short cached mp4")
         panel.write_json(
-            panel.recording_cache_meta_path(key),
+            panel.recording_cache_meta_path(key, day),
             {
                 "cache_id": "old-short-cache",
+                "cache_name": day,
                 "source_hash": "old",
                 "source_count": 1,
                 "file_count": 1,
@@ -1117,7 +1166,9 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         self.assertIn("-frames:v", command)
         self.assertEqual(command[command.index("-frames:v") + 1], "1")
-        self.assertIn("scale='min(480,iw)':-2", command)
+        self.assertIn("scale=480:-2:force_original_aspect_ratio=decrease", command)
+        self.assertIn("-vcodec", command)
+        self.assertIn("mjpeg", command)
         self.assertIn("thumb.jpg", command[-1])
 
     def test_ensure_configured_recordings_starts_enabled_record_camera(self):

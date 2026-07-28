@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.26
+
+- Switch NVR playback cache from a rolling window to calendar-day timelines, so each camera can build a `00:00 -> 23:59:59` playback file per day.
+- Add a day strip in the NVR panel with date thumbnails, Day back/Day forward controls, and horizontal swipe support for moving to yesterday or the next day.
+- Increase the default playback cache segment budget to 10000 so a full day of 10-second clips fits in one timeline.
+- Serve day-specific cache files from `/recording-cache/<camera>/<YYYY-MM-DD>/timeline.mp4`.
+- Load recording thumbnails directly and generate them with a more explicit MJPEG ffmpeg command, with UI diagnostics when a thumbnail fails.
+
 ## 0.10.25
 
 - Use the server-side NVR playback cache as the primary playback path on desktop and mobile when it is ready, so rewind/forward uses one longer range-enabled MP4 timeline instead of a short live pipe.
