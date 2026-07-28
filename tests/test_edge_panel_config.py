@@ -62,11 +62,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.32")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.32")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.32")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.32")
-        self.assertIn("v0.10.32", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.33")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.33")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.33")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.33")
+        self.assertIn("v0.10.33", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -81,6 +81,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("recording_cache_backlog", logs["hardware"])
         self.assertEqual(logs["runtime_parameters"]["runtime_limits"]["recording_live_edge_delay_seconds"], 1.0)
         self.assertIn("recording_cache_max_timeout_seconds", logs["runtime_parameters"]["runtime_limits"])
+        self.assertEqual(logs["runtime_parameters"]["runtime_limits"]["active_day_cache_defer_reason"], "active_day_deferred_until_midnight")
         self.assertTrue(any(item.get("title") == "FFmpeg" for item in logs["diagnostics"]))
         self.assertTrue(any(item.get("title") == "Panel process" for item in logs["diagnostics"]))
         self.assertTrue(any(item.get("title") == "Playback cache worker" for item in logs["diagnostics"]))
@@ -426,7 +427,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("nvr-full-day-playback-v2", html)
+        self.assertIn("nvr-day-offset-fix-v1", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
         self.assertIn("function markNvrInteraction", html)
@@ -1025,6 +1026,50 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(status["playback_cache"]["cache_name"], "2026-07-27")
         self.assertIn("recording-cache/", status["playback_cache"]["url"] or "recording-cache/")
 
+    def test_recording_status_resets_playback_offsets_per_selected_day(self):
+        panel = load_panel_module()
+        panel.MIN_RECORDING_FILE_READY_SECONDS = 0
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "nvr": {"segment_seconds": 10},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+        panel.write_json(panel.CONFIG_PATH, payload)
+        directory = panel.recording_base_dir(payload["cameras"][0], 0)
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in ("20260727-235950.mp4", "20260728-000000.mp4", "20260728-000010.mp4"):
+            (directory / name).write_bytes(b"video")
+
+        today_status = panel.recording_status_payload(payload)["cameras"][0]
+        previous_status = panel.recording_status_payload(payload, {"0": "2026-07-27"})["cameras"][0]
+        key = panel.recording_key(payload["cameras"][0], 0)
+        today_plan = panel.recording_stream_plan(key, 10, "2026-07-28")
+
+        self.assertEqual(today_status["selected_day"], "2026-07-28")
+        self.assertEqual([(item["name"], item["playback_offset"]) for item in today_status["files"]], [
+            ("20260728-000010.mp4", 10),
+            ("20260728-000000.mp4", 0),
+        ])
+        self.assertEqual(previous_status["selected_day"], "2026-07-27")
+        self.assertEqual(previous_status["files"][0]["playback_offset"], 0)
+        self.assertEqual(previous_status["files"][0]["timeline_offset"], 86390)
+        self.assertEqual(today_plan["first_file"], "20260728-000010.mp4")
+        self.assertEqual(today_plan["seek_seconds"], 0)
+
     def test_recording_stream_plan_builds_continuous_concat_from_timeline(self):
         panel = load_panel_module()
         panel.MIN_RECORDING_FILE_READY_SECONDS = 0
@@ -1293,6 +1338,32 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertTrue(status["rebuild_deferred"])
         self.assertEqual(status["new_source_count"], 1)
         self.assertIn("batching_new_segments", status["rebuild_defer_reason"])
+
+    def test_recording_cache_status_defers_active_day_rebuilds(self):
+        panel = load_panel_module()
+        active_day = panel.recording_day_key(time.time())
+        filename = f"{active_day.replace('-', '')}-000000.mp4"
+        source = panel.HOME_DIR / "recordings" / filename
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"x" * 2048)
+        start_ts = panel.recording_day_start_ts(active_day)
+        key = "hikvision_1_0"
+        entries = [
+            {
+                "path": source,
+                "name": filename,
+                "start_ts": start_ts,
+                "duration_seconds": 10,
+            }
+        ]
+
+        status = panel.recording_cache_status(key, entries, 10, auto_refresh=True, cache_name=active_day)
+
+        self.assertTrue(status["active_day"])
+        self.assertFalse(status["current"])
+        self.assertTrue(status["rebuild_deferred"])
+        self.assertEqual(status["rebuild_defer_reason"], "active_day_deferred_until_midnight")
+        self.assertNotIn(panel.recording_cache_worker_id(key, active_day), panel.RECORDING_CACHE_WORKERS)
 
     def test_recording_thumbnail_command_generates_small_jpeg(self):
         panel = load_panel_module()

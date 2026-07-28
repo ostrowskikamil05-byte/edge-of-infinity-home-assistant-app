@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.33
+
+- Fix NVR day/playback offset mixing: selected-day status now recalculates playback offsets from that day instead of inheriting offsets from older days.
+- Stop rebuilding the huge playback cache for the active recording day; today's NVR view uses the saved segment stream while closed days can be cached after midnight.
+- Make the NVR player derive `timeline_start` and `playback_start` from the same selected target, preventing yesterday/today jumps and wrong seek starts.
+- Reduce false red diagnostics for successful recording-cache builds and expose the active-day cache defer reason in runtime parameters.
+
 ## 0.10.32
 
 - Restore full-day NVR playback fallback: when the daily playback cache is missing, stale, or too short, the panel now uses the recorded-day stream built from saved clips instead of dropping to a single 10-12 second MP4 segment.

@@ -20,9 +20,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.32"
+APP_VERSION = "0.10.33"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-full-day-playback-v2"
+UI_BUILD = "nvr-day-offset-fix-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -52,6 +52,7 @@ RECORDING_CACHE_MIN_REBUILD_SECONDS = 300
 RECORDING_CACHE_MIN_NEW_SEGMENTS = 30
 RECORDING_CACHE_MIN_TIMEOUT_SECONDS = 1800
 RECORDING_CACHE_MAX_TIMEOUT_SECONDS = 21600
+ACTIVE_DAY_CACHE_DEFER_REASON = "active_day_deferred_until_midnight"
 RECORDING_ENSURE_MIN_SECONDS = 30
 RECORDING_THUMBNAIL_WARMUP_INTERVAL_SECONDS = 300
 RECORDING_THUMBNAIL_WARMUP_PER_CAMERA = 4
@@ -1164,7 +1165,16 @@ def diagnostic_severity_from_text(text: str) -> str:
 
 
 def diagnostic_from_tail(title: str, tail: str) -> dict:
-    severity = diagnostic_severity_from_text(tail)
+    if title == "Recording cache" and tail:
+        lowered = tail.lower()
+        if "recording_cache_build_error" in lowered or "edge recording cache error" in lowered:
+            severity = "error"
+        elif "recording_cache_build_done" in lowered or "recording_cache_build_scheduled" in lowered:
+            severity = "ok"
+        else:
+            severity = diagnostic_severity_from_text(tail)
+    else:
+        severity = diagnostic_severity_from_text(tail)
     detail = "No blocking issue detected." if severity == "ok" else "Recent log tail contains entries that need attention."
     return diagnostic_item(severity, title, detail, {"tail": tail[-2000:] if tail else ""})
 
@@ -1197,6 +1207,7 @@ def runtime_parameters_payload(config: dict, hardware: dict, recordings_dir: Pat
                 "recording_cache_min_new_segments": RECORDING_CACHE_MIN_NEW_SEGMENTS,
                 "recording_cache_min_timeout_seconds": RECORDING_CACHE_MIN_TIMEOUT_SECONDS,
                 "recording_cache_max_timeout_seconds": RECORDING_CACHE_MAX_TIMEOUT_SECONDS,
+                "active_day_cache_defer_reason": ACTIVE_DAY_CACHE_DEFER_REASON,
                 "recording_ensure_min_seconds": RECORDING_ENSURE_MIN_SECONDS,
                 "recording_cache_worker_limit": hardware.get("recording_cache_worker_limit"),
                 "recording_thumbnail_worker_limit": hardware.get("recording_thumbnail_worker_limit"),
@@ -2376,6 +2387,10 @@ def recording_day_bounds(day_key: str) -> tuple[int, int]:
     return (start, start + 86400) if start else (0, 0)
 
 
+def recording_day_is_today(day_key: str) -> bool:
+    return bool(day_key) and day_key == recording_day_key(time.time())
+
+
 def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_seconds: int = 10, day_key: str = "") -> list[dict]:
     directory = recording_base_dir(camera, index)
     if not directory.exists():
@@ -2739,6 +2754,7 @@ def recording_cache_status(
         and metadata.get("source_hash") == signature["hash"]
         and safe_int(metadata.get("source_count"), -1) == len(signature["items"])
     )
+    active_day_cache = recording_day_is_today(cache_name)
     metadata_file_count = safe_int(metadata.get("file_count"), 0)
     cache_too_short_for_sources = bool(raw_ready and not current and len(signature["items"]) > 1 and metadata_file_count <= 1)
     ready = bool(raw_ready and not cache_too_short_for_sources)
@@ -2753,6 +2769,8 @@ def recording_cache_status(
         len(signature["items"]),
         video_modified_ts,
     )
+    if auto_refresh and active_day_cache and not current:
+        defer_reason = ACTIVE_DAY_CACHE_DEFER_REASON
     if auto_refresh and signature["items"] and not current and not defer_reason:
         schedule_recording_cache_refresh(key, entries, segment_seconds, signature, reason="recording_status", cache_name=cache_name)
 
@@ -2766,6 +2784,7 @@ def recording_cache_status(
         "ready": ready,
         "raw_ready": raw_ready,
         "current": current,
+        "active_day": active_day_cache,
         "building": building,
         "stale": bool(ready and not current),
         "rebuild_deferred": bool(defer_reason),
@@ -2969,7 +2988,7 @@ def refresh_recording_caches(config: dict, reason: str) -> None:
         all_entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds)
         days = recording_day_groups(all_entries, segment_seconds, key)
         active_day = days[0]["day"] if days else ""
-        entries = [entry for entry in all_entries if not active_day or entry.get("day") == active_day]
+        entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds, day_key=active_day) if active_day else all_entries
         if cache_limit > 0:
             entries = entries[-cache_limit:]
         if entries and active_day:
@@ -3432,7 +3451,7 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
         selected_day = day_selection.get(str(index)) or day_selection.get(str(camera.get("id") or "")) or (days[0]["day"] if days else "")
         if selected_day and not any(day.get("day") == selected_day for day in days):
             selected_day = days[0]["day"] if days else ""
-        day_entries = [entry for entry in all_entries if not selected_day or entry.get("day") == selected_day]
+        day_entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds, day_key=selected_day) if selected_day else all_entries
         if cache_limit > 0:
             day_entries = day_entries[-cache_limit:]
         segment_files = recording_files_from_entries(key, day_entries, segment_seconds)
@@ -6518,12 +6537,18 @@ INDEX_HTML = r"""<!doctype html>
         const timelineTotal = timeline.total;
         const timelineMax = Math.max(0, timelineTotal - 1);
         const storedTimeline = Number(selectedRecordingTimeline[index]);
-        const timelineValue = Math.max(0, Math.min(Number.isFinite(storedTimeline) ? storedTimeline : selection.value, timelineMax));
-        if (!Number.isFinite(storedTimeline)) selectedRecordingTimeline[index] = timelineValue;
-        const storedStreamStart = Number(recordingStreamStartOffset[index]);
-        const streamStart = Math.max(0, Math.min(Number.isFinite(storedStreamStart) ? storedStreamStart : timelineValue, timelineMax));
-        if (!Number.isFinite(storedStreamStart)) recordingStreamStartOffset[index] = streamStart;
-        const targetForPoster = recordingTargetForOffset(index, timelineValue);
+        let timelineValue = Math.max(0, Math.min(Number.isFinite(storedTimeline) ? storedTimeline : selection.value, timelineMax));
+        let targetForPoster = recordingTargetForOffset(index, timelineValue) || recordingDefaultTarget(files, status);
+        if (targetForPoster) {
+          timelineValue = Math.max(0, Math.min(Number(targetForPoster.requested || 0), timelineMax));
+          selectedRecording[index] = targetForPoster.target.file.url;
+          selectedRecordingSeek[index] = targetForPoster.seek;
+          selectedRecordingTimeline[index] = timelineValue;
+          recordingStreamStartOffset[index] = timelineValue;
+        } else if (!Number.isFinite(storedTimeline)) {
+          selectedRecordingTimeline[index] = timelineValue;
+          recordingStreamStartOffset[index] = timelineValue;
+        }
         const selectedFile = targetForPoster?.target?.file || null;
         const cache = status.playback_cache || {};
         let playbackMode = recordingPlaybackModeForClient(status, timeline);
@@ -6533,7 +6558,7 @@ INDEX_HTML = r"""<!doctype html>
             : 'server_file_sequence';
         }
         let playerSeek = 0;
-        let playerStreamStart = streamStart;
+        let playerStreamStart = Number(targetForPoster?.requested || timelineValue || 0);
         let playerPlaybackStart = 0;
         let rawPlayerSrc = '';
         if (timelineTotal) {
@@ -6549,7 +6574,7 @@ INDEX_HTML = r"""<!doctype html>
             playerPlaybackStart = Number(targetForPoster?.target?.playbackOffset || 0);
             rawPlayerSrc = panelPath(selectedFile.url);
           } else {
-            playerStreamStart = Number(targetForPoster?.requested || streamStart);
+            playerStreamStart = Number(targetForPoster?.requested || timelineValue || 0);
             playerPlaybackStart = Number(targetForPoster?.playbackSeek || 0);
             rawPlayerSrc = recordingStreamUrl(status, index, playerPlaybackStart, playerStreamStart);
           }
