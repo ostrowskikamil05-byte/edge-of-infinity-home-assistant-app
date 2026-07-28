@@ -203,6 +203,8 @@ Starting with version `0.10.31`, NVR playback stays on recorded files. The panel
 
 Starting with version `0.10.32`, the NVR fallback is a full recorded-day stream again, not a single short segment. `/recordings-stream/...` is explicitly treated as recorded media assembled from saved MP4 clips, and the panel logs both the wall-clock day offset and the compressed playback offset so seek bugs are easier to diagnose. Recording thumbnails also use source-file cache-busting and a low-impact background warmup, so existing and future camera days can recover missing preview images without forcing a heavy thumbnail burst.
 
+Starting with version `0.10.34`, active-day cache files are used only when they match the current set of recording segments. If today's `timeline.mp4` is stale, Edge hides it and uses the recorded-day stream assembled from verified MP4 segments instead. Recording segments must also contain a playable MP4 header before they appear in the NVR list or thumbnail worker, which avoids `moov atom not found` thumbnails and bad mobile playback.
+
 Starting with version `0.10.2`, `mobile_webrtc_ice_transport` can be `auto`, `udp`, or `tcp`. Use `auto` first because it exposes both UDP and TCP ICE on port `8189`. Use `udp` when everything is local and you want the simplest low-latency path. Use `tcp` when LTE, hotel Wi-Fi, or a friend's Wi-Fi blocks UDP, but remember that the public MediaMTX WebRTC address on `8889` and ICE port `8189` must still be reachable from that network. If the home network is behind CGNAT or cannot forward those ports, use a VPS or TURN relay instead of a LAN-only `192.168.x.x` address.
 
 The `WebRTC public URL` field must point to the public MediaMTX WHEP/WebRTC endpoint, for example:

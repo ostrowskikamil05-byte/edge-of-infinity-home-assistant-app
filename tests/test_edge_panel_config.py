@@ -46,6 +46,14 @@ def camera(camera_id, host, snapshot_stream):
     }
 
 
+def fake_mp4_bytes(payload: bytes = b"x" * 2048) -> bytes:
+    return b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + payload + b"moov"
+
+
+def write_fake_mp4(path: Path, payload: bytes = b"x" * 2048) -> None:
+    path.write_bytes(fake_mp4_bytes(payload))
+
+
 class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_save_uses_dom_snapshot_and_prevents_plain_form_submit(self):
         html = PANEL_PATH.read_text(encoding="utf-8")
@@ -62,11 +70,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.33")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.33")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.33")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.33")
-        self.assertIn("v0.10.33", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.34")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.34")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.34")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.34")
+        self.assertIn("v0.10.34", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -427,7 +435,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("nvr-day-offset-fix-v1", html)
+        self.assertIn("nvr-active-day-cache-safe-v1", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
         self.assertIn("function markNvrInteraction", html)
@@ -959,8 +967,8 @@ class EdgePanelConfigTests(unittest.TestCase):
         panel.write_json(panel.CONFIG_PATH, payload)
         directory = panel.recording_base_dir(payload["cameras"][0], 0)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "20260727-173000.mp4").write_bytes(b"video")
-        (directory / "20260727-173012.mp4").write_bytes(b"video")
+        write_fake_mp4(directory / "20260727-173000.mp4")
+        write_fake_mp4(directory / "20260727-173012.mp4")
 
         status = panel.recording_status_payload(payload)["cameras"][0]
         files = status["files"]
@@ -1014,7 +1022,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         directory = panel.recording_base_dir(payload["cameras"][0], 0)
         directory.mkdir(parents=True, exist_ok=True)
         for name in ("20260727-235950.mp4", "20260728-000000.mp4", "20260728-000010.mp4"):
-            (directory / name).write_bytes(b"video")
+            write_fake_mp4(directory / name)
 
         status = panel.recording_status_payload(payload, {"0": "2026-07-27"})["cameras"][0]
 
@@ -1052,7 +1060,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         directory = panel.recording_base_dir(payload["cameras"][0], 0)
         directory.mkdir(parents=True, exist_ok=True)
         for name in ("20260727-235950.mp4", "20260728-000000.mp4", "20260728-000010.mp4"):
-            (directory / name).write_bytes(b"video")
+            write_fake_mp4(directory / name)
 
         today_status = panel.recording_status_payload(payload)["cameras"][0]
         previous_status = panel.recording_status_payload(payload, {"0": "2026-07-27"})["cameras"][0]
@@ -1096,7 +1104,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         directory = panel.recording_base_dir(payload["cameras"][0], 0)
         directory.mkdir(parents=True, exist_ok=True)
         for name in ("20260727-173000.mp4", "20260727-173012.mp4", "20260727-173024.mp4"):
-            (directory / name).write_bytes(b"video")
+            write_fake_mp4(directory / name)
 
         key = panel.recording_key(payload["cameras"][0], 0)
         plan = panel.recording_stream_plan(key, 13)
@@ -1135,8 +1143,8 @@ class EdgePanelConfigTests(unittest.TestCase):
         directory.mkdir(parents=True, exist_ok=True)
         old_file = directory / "20260727-173000.mp4"
         pending_file = directory / "20260727-173010.mp4"
-        old_file.write_bytes(b"video")
-        pending_file.write_bytes(b"video")
+        write_fake_mp4(old_file)
+        write_fake_mp4(pending_file)
         old_ts = time.time() - 10
         os.utime(old_file, (old_ts, old_ts))
 
@@ -1145,6 +1153,40 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(status["segments_total"], 2)
         self.assertEqual(status["segments"], 1)
         self.assertEqual(status["segments_pending"], 1)
+        self.assertEqual([item["name"] for item in status["files"]], ["20260727-173000.mp4"])
+
+    def test_recording_status_hides_unplayable_mp4_without_moov_header(self):
+        panel = load_panel_module()
+        panel.MIN_RECORDING_FILE_READY_SECONDS = 0
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "nvr": {"segment_seconds": 10},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+        panel.write_json(panel.CONFIG_PATH, payload)
+        directory = panel.recording_base_dir(payload["cameras"][0], 0)
+        directory.mkdir(parents=True, exist_ok=True)
+        write_fake_mp4(directory / "20260727-173000.mp4")
+        (directory / "20260727-173010.mp4").write_bytes(b"x" * 4096)
+
+        status = panel.recording_status_payload(payload)["cameras"][0]
+
+        self.assertEqual(status["segments_total"], 2)
+        self.assertEqual(status["segments"], 1)
         self.assertEqual([item["name"] for item in status["files"]], ["20260727-173000.mp4"])
 
     def test_recording_stream_command_outputs_fragmented_mp4(self):
@@ -1183,7 +1225,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         directory = panel.recording_base_dir(payload["cameras"][0], 0)
         directory.mkdir(parents=True, exist_ok=True)
         for name in ("20260727-173000.mp4", "20260727-173010.mp4"):
-            (directory / name).write_bytes(b"x" * 2048)
+            write_fake_mp4(directory / name)
         key = panel.recording_key(payload["cameras"][0], 0)
         day = "2026-07-27"
         cache_dir = panel.recording_cache_dir(key, day)
@@ -1240,7 +1282,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         directory = panel.recording_base_dir(payload["cameras"][0], 0)
         directory.mkdir(parents=True, exist_ok=True)
         for name in ("20260727-173000.mp4", "20260727-173010.mp4", "20260727-173020.mp4"):
-            (directory / name).write_bytes(b"x" * 32)
+            write_fake_mp4(directory / name)
         key = panel.recording_key(payload["cameras"][0], 0)
         day = "2026-07-27"
         panel.recording_cache_dir(key, day).mkdir(parents=True, exist_ok=True)
@@ -1313,7 +1355,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         directory = panel.recording_base_dir(payload["cameras"][0], 0)
         directory.mkdir(parents=True, exist_ok=True)
         for name in ("20260727-173000.mp4", "20260727-173010.mp4", "20260727-173020.mp4"):
-            (directory / name).write_bytes(b"x" * 2048)
+            write_fake_mp4(directory / name)
         key = panel.recording_key(payload["cameras"][0], 0)
         day = "2026-07-27"
         panel.recording_cache_dir(key, day).mkdir(parents=True, exist_ok=True)
@@ -1345,7 +1387,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         filename = f"{active_day.replace('-', '')}-000000.mp4"
         source = panel.HOME_DIR / "recordings" / filename
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_bytes(b"x" * 2048)
+        write_fake_mp4(source)
         start_ts = panel.recording_day_start_ts(active_day)
         key = "hikvision_1_0"
         entries = [
@@ -1364,6 +1406,48 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertTrue(status["rebuild_deferred"])
         self.assertEqual(status["rebuild_defer_reason"], "active_day_deferred_until_midnight")
         self.assertNotIn(panel.recording_cache_worker_id(key, active_day), panel.RECORDING_CACHE_WORKERS)
+
+    def test_recording_cache_status_hides_stale_active_day_cache_from_playback(self):
+        panel = load_panel_module()
+        active_day = panel.recording_day_key(time.time())
+        start_ts = panel.recording_day_start_ts(active_day)
+        key = "hikvision_1_0"
+        source_dir = panel.HOME_DIR / "recordings"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        entries = []
+        for offset in (0, 10):
+            filename = f"{active_day.replace('-', '')}-{offset:06d}.mp4"
+            source = source_dir / filename
+            write_fake_mp4(source)
+            entries.append({
+                "path": source,
+                "name": filename,
+                "start_ts": start_ts + offset,
+                "duration_seconds": 10,
+            })
+        panel.recording_cache_dir(key, active_day).mkdir(parents=True, exist_ok=True)
+        panel.recording_cache_video_path(key, active_day).write_bytes(b"cached mp4")
+        panel.write_json(
+            panel.recording_cache_meta_path(key, active_day),
+            {
+                "cache_id": "active-stale-cache",
+                "cache_name": active_day,
+                "source_hash": "old",
+                "source_count": 1,
+                "file_count": 1,
+                "total_seconds": 10,
+                "built_at": "2026-07-28T12:00:00+0000",
+            },
+        )
+
+        status = panel.recording_cache_status(key, entries, 10, auto_refresh=True, cache_name=active_day)
+
+        self.assertTrue(status["active_day"])
+        self.assertTrue(status["stale_active_day"])
+        self.assertFalse(status["ready"])
+        self.assertTrue(status["raw_ready"])
+        self.assertEqual(status["url"], "")
+        self.assertTrue(status["rebuild_deferred"])
 
     def test_recording_thumbnail_command_generates_small_jpeg(self):
         panel = load_panel_module()

@@ -20,9 +20,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.33"
+APP_VERSION = "0.10.34"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-day-offset-fix-v1"
+UI_BUILD = "nvr-active-day-cache-safe-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -45,6 +45,8 @@ RECORDING_CACHE_LOG_PATH = HOME_DIR / "recording-cache.log"
 RECORDING_THUMB_LOG_PATH = HOME_DIR / "recording-thumbnail.log"
 RECORDING_LIVE_EDGE_DELAY_SECONDS = 1.0
 MIN_RECORDING_FILE_READY_SECONDS = RECORDING_LIVE_EDGE_DELAY_SECONDS
+RECORDING_FILE_MIN_PLAYABLE_BYTES = 1024
+RECORDING_FILE_HEADER_CHECK_BYTES = 65536
 RECORDING_CACHE_REFRESH_SECONDS = 60
 RECORDING_CACHE_MAX_SEGMENTS = 10000
 RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS = 50000
@@ -1200,6 +1202,8 @@ def runtime_parameters_payload(config: dict, hardware: dict, recordings_dir: Pat
             "runtime_limits": {
                 "min_recording_file_ready_seconds": MIN_RECORDING_FILE_READY_SECONDS,
                 "recording_live_edge_delay_seconds": RECORDING_LIVE_EDGE_DELAY_SECONDS,
+                "recording_file_min_playable_bytes": RECORDING_FILE_MIN_PLAYABLE_BYTES,
+                "recording_file_header_check_bytes": RECORDING_FILE_HEADER_CHECK_BYTES,
                 "recording_cache_refresh_seconds": RECORDING_CACHE_REFRESH_SECONDS,
                 "recording_cache_max_segments": RECORDING_CACHE_MAX_SEGMENTS,
                 "recording_cache_absolute_max_segments": RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS,
@@ -2314,12 +2318,25 @@ def recording_file_ready(path: Path, now: float | None = None, min_age_seconds: 
         stat = path.stat()
     except OSError:
         return False
-    if stat.st_size <= 0:
+    if stat.st_size < RECORDING_FILE_MIN_PLAYABLE_BYTES:
         return False
     min_age_seconds = MIN_RECORDING_FILE_READY_SECONDS if min_age_seconds is None else min_age_seconds
     if min_age_seconds > 0 and (now or time.time()) - stat.st_mtime < min_age_seconds:
         return False
+    if not recording_file_has_playable_header(path):
+        return False
     return True
+
+
+def recording_file_has_playable_header(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(RECORDING_FILE_HEADER_CHECK_BYTES)
+    except OSError:
+        return False
+    if b"ftyp" not in header[:64]:
+        return False
+    return b"moov" in header or b"moof" in header
 
 
 def playable_recording_files(directory: Path) -> list[Path]:
@@ -2757,7 +2774,8 @@ def recording_cache_status(
     active_day_cache = recording_day_is_today(cache_name)
     metadata_file_count = safe_int(metadata.get("file_count"), 0)
     cache_too_short_for_sources = bool(raw_ready and not current and len(signature["items"]) > 1 and metadata_file_count <= 1)
-    ready = bool(raw_ready and not cache_too_short_for_sources)
+    stale_active_day_cache = bool(raw_ready and active_day_cache and not current)
+    ready = bool(raw_ready and not cache_too_short_for_sources and not stale_active_day_cache)
     worker_id = recording_cache_worker_id(key, cache_name)
     with RECORDING_CACHE_LOCK:
         building = worker_id in RECORDING_CACHE_WORKERS
@@ -2785,6 +2803,7 @@ def recording_cache_status(
         "raw_ready": raw_ready,
         "current": current,
         "active_day": active_day_cache,
+        "stale_active_day": stale_active_day_cache,
         "building": building,
         "stale": bool(ready and not current),
         "rebuild_deferred": bool(defer_reason),
@@ -3084,6 +3103,20 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
     target = recording_thumbnail_path(key, filename)
     if recording_thumbnail_ready(target, source):
         return target
+    if not recording_file_ready(source):
+        try:
+            source_size = source.stat().st_size
+        except OSError:
+            source_size = 0
+        payload = {
+            "key": key,
+            "source": source.name,
+            "target": str(target),
+            "size_bytes": source_size,
+            "reason": "recording_source_not_ready",
+        }
+        append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_source_not_ready", payload)
+        raise RuntimeError("recording_source_not_ready")
     if target.exists():
         append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_cache_invalid", {
             "key": key,
@@ -4764,11 +4797,14 @@ INDEX_HTML = r"""<!doctype html>
       }
       .recording-thumb {
         width: 100%;
+        height: 100%;
         aspect-ratio: 16 / 9;
         display: block;
         object-fit: cover;
         background: #05080a;
         border-bottom: 1px solid var(--line);
+        opacity: 0;
+        transition: opacity .12s ease;
       }
       .recording-thumb-time {
         position: absolute;
@@ -4784,6 +4820,26 @@ INDEX_HTML = r"""<!doctype html>
         position: relative;
         background: #05080a;
         display: block;
+        aspect-ratio: 16 / 9;
+        overflow: hidden;
+      }
+      .recording-thumb-wrap::before {
+        content: "Preview";
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        font-size: 12px;
+        background:
+          linear-gradient(135deg, rgba(86,214,181,.10), rgba(255,255,255,.02)),
+          repeating-linear-gradient(0deg, rgba(255,255,255,.04), rgba(255,255,255,.04) 1px, transparent 1px, transparent 8px);
+      }
+      .recording-thumb-wrap.thumb-loaded::before {
+        display: none;
+      }
+      .recording-thumb-wrap.thumb-loaded .recording-thumb {
+        opacity: 1;
       }
       .recording-thumb-wrap.thumb-error::after {
         content: "No preview";
@@ -5622,7 +5678,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function recordingPlaybackModeForClient(status = {}, timeline = null) {
         const cache = status?.playback_cache || {};
-        if (cache.ready && cache.url && Number(cache.total_seconds || 0) > 0) return 'server_cache_mp4';
+        if (cache.ready && cache.url && !cache.stale_active_day && Number(cache.total_seconds || 0) > 0) return 'server_cache_mp4';
         const playbackTotal = Number(timeline?.playbackTotal || status?.timeline?.playback_total_seconds || 0);
         const segmentSeconds = Math.max(1, Number(status?.segment_seconds || 10));
         return playbackTotal > segmentSeconds ? 'recorded_day_stream' : 'server_file_sequence';
@@ -5634,7 +5690,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function recordingCacheCoversTarget(status = {}, target = null) {
         const cache = status?.playback_cache || {};
-        if (!target || !cache.ready || !cache.url) return false;
+        if (!target || !cache.ready || !cache.url || cache.stale_active_day) return false;
         const cacheTotal = Number(cache.total_seconds || 0);
         return cacheTotal > 0 && Number(target.playbackSeek || 0) <= Math.max(0, cacheTotal - 1);
       }

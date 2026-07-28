@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.34
+
+- Stop treating stale active-day NVR cache files as playable. Today's view now falls back to the recorded-day stream whenever the daily cache is not current, preventing old cache timelines from mixing yesterday/today or starting at the wrong offset.
+- Require closed browser-playable MP4 headers before a recording segment appears in NVR playback or thumbnail generation. This avoids `moov atom not found` segments and prevents corrupt/incomplete files from breaking the filmstrip.
+- Improve the mobile NVR filmstrip placeholder so missing thumbnails render as a clear preview/loading state instead of a stack of thin empty lines.
+- Expose MP4 readiness thresholds and active-day stale-cache state in diagnostics.
+
 ## 0.10.33
 
 - Fix NVR day/playback offset mixing: selected-day status now recalculates playback offsets from that day instead of inheriting offsets from older days.
