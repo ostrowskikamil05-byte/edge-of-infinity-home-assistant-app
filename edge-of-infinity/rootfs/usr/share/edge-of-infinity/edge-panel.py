@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import hashlib
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -17,9 +18,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.23"
+APP_VERSION = "0.10.24"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "mobile-server-file-nvr-v1"
+UI_BUILD = "server-cache-nvr-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -36,10 +37,17 @@ SNAPSHOT_DIR = HOME_DIR / "snapshots"
 DATA_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 STREAM_LIST_DIR = HOME_DIR / "stream-lists"
 RECORDING_THUMB_DIR = HOME_DIR / "recording-thumbs"
+RECORDING_CACHE_DIR = HOME_DIR / "recording-cache"
 RECORDING_STREAM_LOG_PATH = HOME_DIR / "recording-stream.log"
+RECORDING_CACHE_LOG_PATH = HOME_DIR / "recording-cache.log"
 MIN_RECORDING_FILE_READY_SECONDS = 2.0
+RECORDING_CACHE_REFRESH_SECONDS = 12
+RECORDING_CACHE_MAX_SEGMENTS = 240
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
+RECORDING_CACHE_WORKERS: set[str] = set()
+RECORDING_CACHE_LOOP_STARTED = False
 DEBUG_LOCK = threading.Lock()
+RECORDING_CACHE_LOCK = threading.Lock()
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
 STREAM_FALLBACK_CHANNELS = {"main": HIKVISION_MAIN_CHANNEL, "sub": HIKVISION_SUB_CHANNEL}
@@ -946,6 +954,7 @@ def collect_panel_logs() -> dict:
         "runtime_mediamtx_config": redact_rtsp(read_text_tail(MEDIAMTX_CONFIG_PATH, 20000)),
         "runtime_janus_streaming_config": redact_rtsp(read_text_tail(JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg", 20000)),
         "recording_stream_log": redact_rtsp(read_text_tail(RECORDING_STREAM_LOG_PATH, 12000)),
+        "recording_cache_log": redact_rtsp(read_text_tail(RECORDING_CACHE_LOG_PATH, 12000)),
         "recording_logs": recording_logs,
     }
 
@@ -2030,6 +2039,305 @@ def build_recording_stream_command(concat_path: Path, seek_seconds: int = 0) -> 
     return command
 
 
+def recording_cache_dir(key: str) -> Path:
+    return RECORDING_CACHE_DIR / safe_id(key)
+
+
+def recording_cache_video_path(key: str) -> Path:
+    return recording_cache_dir(key) / "timeline.mp4"
+
+
+def recording_cache_meta_path(key: str) -> Path:
+    return recording_cache_dir(key) / "timeline.json"
+
+
+def recording_cache_concat_path(key: str) -> Path:
+    return recording_cache_dir(key) / "timeline.ffconcat"
+
+
+def recording_cache_tmp_path(key: str) -> Path:
+    return recording_cache_dir(key) / "timeline.tmp.mp4"
+
+
+def recording_cache_source_signature(entries: list[dict], segment_seconds: int) -> dict:
+    items = []
+    for entry in entries:
+        path = entry.get("path")
+        if not isinstance(path, Path):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        items.append(
+            {
+                "name": entry.get("name") or path.name,
+                "start_ts": safe_int(entry.get("start_ts"), int(stat.st_mtime)),
+                "duration_seconds": safe_int(entry.get("duration_seconds"), segment_seconds),
+                "size_bytes": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        )
+    raw = json.dumps(items, sort_keys=True, separators=(",", ":"))
+    return {"hash": hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20], "items": items}
+
+
+def build_recording_cache_command(concat_path: Path, output_path: Path) -> list[str]:
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-nostdin",
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c",
+        "copy",
+        "-avoid_negative_ts",
+        "make_zero",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+
+def recording_cache_status(key: str, entries: list[dict], segment_seconds: int, auto_refresh: bool = True) -> dict:
+    signature = recording_cache_source_signature(entries, segment_seconds)
+    meta_path = recording_cache_meta_path(key)
+    video_path = recording_cache_video_path(key)
+    metadata = read_json(meta_path, {}) if meta_path.exists() else {}
+    try:
+        stat = video_path.stat()
+        ready = stat.st_size > 0
+        file_size = stat.st_size
+        modified_at = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(stat.st_mtime))
+    except OSError:
+        ready = False
+        file_size = 0
+        modified_at = ""
+
+    current = bool(
+        ready
+        and metadata.get("source_hash") == signature["hash"]
+        and safe_int(metadata.get("source_count"), -1) == len(signature["items"])
+    )
+    with RECORDING_CACHE_LOCK:
+        building = key in RECORDING_CACHE_WORKERS
+    if auto_refresh and signature["items"] and not current:
+        schedule_recording_cache_refresh(key, entries, segment_seconds, signature, reason="recording_status")
+
+    cache_id = metadata.get("cache_id") or metadata.get("source_hash") or str(int(time.time()))
+    total_seconds = safe_int(
+        metadata.get("total_seconds"),
+        sum(safe_int(entry.get("duration_seconds"), segment_seconds) for entry in entries),
+    )
+    return {
+        "enabled": True,
+        "ready": ready,
+        "current": current,
+        "building": building,
+        "stale": bool(ready and not current),
+        "source_count": len(signature["items"]),
+        "source_hash": signature["hash"],
+        "cache_id": cache_id,
+        "url": f"recording-cache/{safe_id(key)}/timeline.mp4?v={cache_id}" if ready else "",
+        "file_size": file_size,
+        "file_count": safe_int(metadata.get("file_count"), len(signature["items"])),
+        "total_seconds": total_seconds,
+        "modified_at": modified_at,
+        "built_at": metadata.get("built_at") or "",
+        "log_path": str(RECORDING_CACHE_LOG_PATH),
+    }
+
+
+def schedule_recording_cache_refresh(
+    key: str,
+    entries: list[dict],
+    segment_seconds: int,
+    signature: dict | None = None,
+    reason: str = "manual",
+) -> bool:
+    if shutil.which("ffmpeg") is None or not entries:
+        return False
+    worker_entries = []
+    for entry in entries:
+        path = entry.get("path")
+        if not isinstance(path, Path):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if stat.st_size <= 1024:
+            continue
+        worker_entries.append(
+            {
+                "path": path,
+                "name": entry.get("name") or path.name,
+                "start_ts": safe_int(entry.get("start_ts"), int(stat.st_mtime)),
+                "duration_seconds": safe_int(entry.get("duration_seconds"), segment_seconds),
+            }
+        )
+    if not worker_entries:
+        return False
+    source_signature = signature or recording_cache_source_signature(worker_entries, segment_seconds)
+    with RECORDING_CACHE_LOCK:
+        if key in RECORDING_CACHE_WORKERS:
+            return False
+        RECORDING_CACHE_WORKERS.add(key)
+    thread = threading.Thread(
+        target=build_recording_cache_worker,
+        args=(key, worker_entries, segment_seconds, source_signature, reason),
+        daemon=True,
+    )
+    thread.start()
+    return True
+
+
+def build_recording_cache_worker(
+    key: str,
+    entries: list[dict],
+    segment_seconds: int,
+    signature: dict,
+    reason: str,
+) -> None:
+    started = time.time()
+    cache_dir = recording_cache_dir(key)
+    concat_path = recording_cache_concat_path(key)
+    tmp_path = recording_cache_tmp_path(key)
+    video_path = recording_cache_video_path(key)
+    meta_path = recording_cache_meta_path(key)
+    command: list[str] = []
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        concat_payload = "\n".join(ffconcat_file_line(entry["path"]) for entry in entries) + "\n"
+        concat_path.write_text(concat_payload, encoding="utf-8")
+        tmp_path.unlink(missing_ok=True)
+        command = build_recording_cache_command(concat_path, tmp_path)
+        write_debug_event("recording_cache_build_start", {
+            "key": key,
+            "reason": reason,
+            "file_count": len(entries),
+            "total_seconds": sum(safe_int(entry.get("duration_seconds"), segment_seconds) for entry in entries),
+            "source_hash": signature.get("hash"),
+            "command": redact_command(command),
+        })
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=240)
+        stderr = result.stderr.decode("utf-8", errors="replace")[-8000:]
+        stdout = result.stdout.decode("utf-8", errors="replace")[-4000:]
+        if result.returncode != 0:
+            raise RuntimeError(f"recording_cache_ffmpeg_failed exit={result.returncode}: {stderr[-1200:]}")
+        if not tmp_path.exists() or tmp_path.stat().st_size <= 0:
+            raise RuntimeError("recording_cache_output_empty")
+        tmp_path.replace(video_path)
+        total_seconds = sum(safe_int(entry.get("duration_seconds"), segment_seconds) for entry in entries)
+        metadata = {
+            "key": key,
+            "cache_id": f"{signature.get('hash')}-{int(time.time())}",
+            "source_hash": signature.get("hash"),
+            "source_count": len(signature.get("items") or entries),
+            "file_count": len(entries),
+            "total_seconds": total_seconds,
+            "segment_seconds": segment_seconds,
+            "first_file": entries[0]["name"] if entries else "",
+            "last_file": entries[-1]["name"] if entries else "",
+            "built_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "duration_ms": int((time.time() - started) * 1000),
+            "video_path": str(video_path),
+        }
+        write_json(meta_path, metadata)
+        RECORDING_CACHE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with RECORDING_CACHE_LOG_PATH.open("ab") as log_file:
+            log_file.write(("\n=== Edge recording cache ===\n" + json.dumps({
+                "event": "recording_cache_build_done",
+                **metadata,
+                "stdout": stdout,
+                "stderr": stderr,
+            }, default=str) + "\n").encode("utf-8"))
+        write_debug_event("recording_cache_build_done", {
+            "key": key,
+            "file_count": len(entries),
+            "total_seconds": total_seconds,
+            "size_bytes": video_path.stat().st_size,
+            "duration_ms": metadata["duration_ms"],
+            "source_hash": signature.get("hash"),
+        })
+    except Exception as error:  # noqa: BLE001
+        write_debug_event("recording_cache_build_error", {
+            "key": key,
+            "reason": reason,
+            "error": str(error),
+            "type": type(error).__name__,
+            "command": redact_command(command),
+        })
+        try:
+            RECORDING_CACHE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with RECORDING_CACHE_LOG_PATH.open("ab") as log_file:
+                log_file.write(("\n=== Edge recording cache error ===\n" + json.dumps({
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "key": key,
+                    "reason": reason,
+                    "error": str(error),
+                    "type": type(error).__name__,
+                    "command": redact_command(command),
+                }, default=str) + "\n").encode("utf-8"))
+        except OSError:
+            pass
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        with RECORDING_CACHE_LOCK:
+            RECORDING_CACHE_WORKERS.discard(key)
+
+
+def refresh_recording_caches(config: dict, reason: str) -> None:
+    nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
+    segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
+    cache_limit = clamp_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS, 12, 1440)
+    for index, camera in enumerate(config.get("cameras", [])):
+        if not camera_should_record(camera):
+            continue
+        key = recording_key(camera, index)
+        entries = recording_file_entries(camera, index, limit=cache_limit, segment_seconds=segment_seconds)
+        if entries:
+            recording_cache_status(key, entries, segment_seconds, auto_refresh=True)
+
+
+def recording_cache_refresh_loop() -> None:
+    while True:
+        try:
+            refresh_recording_caches(load_config(), "background_loop")
+        except Exception as error:  # noqa: BLE001
+            write_debug_event("recording_cache_loop_error", {"error": str(error), "type": type(error).__name__})
+        time.sleep(RECORDING_CACHE_REFRESH_SECONDS)
+
+
+def start_recording_cache_refresh_loop() -> None:
+    global RECORDING_CACHE_LOOP_STARTED
+    if RECORDING_CACHE_LOOP_STARTED:
+        return
+    RECORDING_CACHE_LOOP_STARTED = True
+    thread = threading.Thread(target=recording_cache_refresh_loop, daemon=True)
+    thread.start()
+    write_debug_event("recording_cache_loop_start", {
+        "interval_seconds": RECORDING_CACHE_REFRESH_SECONDS,
+        "max_segments": RECORDING_CACHE_MAX_SEGMENTS,
+    })
+
+
 def recording_file_for_key(key: str, filename: str) -> Path | None:
     safe_name = Path(filename).name
     if safe_name.endswith(".jpg"):
@@ -2291,8 +2599,11 @@ def recording_status_payload(config: dict | None = None) -> dict:
         segment_count = len(playable_recording_files(directory))
         nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
         segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
-        segment_files = recording_segments(camera, index, limit=240, segment_seconds=segment_seconds)
+        cache_limit = clamp_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS, 12, 1440)
+        segment_files = recording_segments(camera, index, limit=cache_limit, segment_seconds=segment_seconds)
         timeline_files = sorted(segment_files, key=lambda item: (item.get("start_ts") or 0, item.get("name") or ""))
+        cache_entries = recording_file_entries(camera, index, limit=cache_limit, segment_seconds=segment_seconds)
+        playback_cache = recording_cache_status(key, cache_entries, segment_seconds, auto_refresh=True)
         record_stream = camera.get("record_stream") or "main"
         direct_record_rtsp = camera_stream(camera, record_stream)
         record_rtsp, record_source = recording_source_stream(camera, index, record_stream)
@@ -2333,6 +2644,7 @@ def recording_status_payload(config: dict | None = None) -> dict:
                 "segments_pending": max(0, total_segment_count - segment_count),
                 "files": segment_files,
                 "segment_seconds": segment_seconds,
+                "playback_cache": playback_cache,
                 "timeline": {
                     "continuous": True,
                     "file_count": len(timeline_files),
@@ -4213,8 +4525,10 @@ INDEX_HTML = r"""<!doctype html>
           || /Android|iPhone|iPad|iPod|Mobile|Home Assistant/i.test(navigator.userAgent || '');
       }
 
-      function recordingPlaybackModeForClient() {
-        return isMobileNvrPlayback() ? 'server_file_sequence' : 'continuous_stream';
+      function recordingPlaybackModeForClient(status = {}) {
+        if (!isMobileNvrPlayback()) return 'continuous_stream';
+        const cache = status?.playback_cache || {};
+        return cache.ready && cache.url && Number(cache.total_seconds || 0) > 0 ? 'server_cache_mp4' : 'server_file_sequence';
       }
 
       function mediaUrlWithTimeFragment(url, seekSeconds) {
@@ -4327,13 +4641,41 @@ INDEX_HTML = r"""<!doctype html>
         return true;
       }
 
+      function seekRecordingCache(index, target, autoplay = false, reason = 'server_cache_seek') {
+        const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+        if (!video || !target) return false;
+        selectedRecording[index] = target.target.file.url;
+        selectedRecordingSeek[index] = target.seek;
+        selectedRecordingTimeline[index] = target.requested;
+        recordingStreamStartOffset[index] = 0;
+        video.dataset.recordingSeek = String(target.requested);
+        video.dataset.recordingStreamStart = '0';
+        video.dataset.recordingPlaybackMode = 'server_cache_mp4';
+        updateRecordingTimelineUi(index, target.requested, target.timeline.total);
+        updateRecordingTileSelection(index, target.target.file.url);
+        setCurrentRecordingTime(index, target.requested);
+        if (autoplay) {
+          video.play().catch((error) => debugEvent('ui_recording_cache_autoplay_error', { index, reason, message: error.message }));
+        }
+        debugEvent('ui_recording_cache_seek', {
+          index,
+          reason,
+          recording: target.target.file.name,
+          timeline_second: target.requested,
+          segment_second: target.seek,
+        });
+        return true;
+      }
+
       function recordingStatusSignature() {
         return Object.values(recordingStatus)
           .sort((a, b) => Number(a.index || 0) - Number(b.index || 0))
           .map((item) => {
             const files = Array.isArray(item.files) ? item.files : [];
             const fileSignature = files.map((file) => `${file.url}:${file.size_bytes}:${file.start_ts}`).join(',');
-            return `${item.index}:${item.recording_status}:${item.recording}:${item.segments}:${fileSignature}`;
+            const cache = item.playback_cache || {};
+            const cacheSignature = `${cache.ready}:${cache.current}:${cache.building}:${cache.cache_id}:${cache.source_hash}`;
+            return `${item.index}:${item.recording_status}:${item.recording}:${item.segments}:${cacheSignature}:${fileSignature}`;
           })
           .join('|');
       }
@@ -4438,6 +4780,10 @@ INDEX_HTML = r"""<!doctype html>
         selectedRecording[index] = target.target.file.url;
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
+        if (video?.dataset?.recordingPlaybackMode === 'server_cache_mp4') {
+          seekRecordingCache(index, target, wasPlaying, 'server_cache_select');
+          return;
+        }
         if (video?.dataset?.recordingPlaybackMode === 'server_file_sequence') {
           switchRecordingVideoToFile(index, target, wasPlaying, 'server_file_select');
           return;
@@ -4519,14 +4865,30 @@ INDEX_HTML = r"""<!doctype html>
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
         const timeline = recordingTimeline(files);
-        if (timeline.total > previousTotal) {
+        const cacheTotal = Number(status.playback_cache?.total_seconds || 0);
+        const hasNewCache = playbackMode === 'server_cache_mp4'
+          ? Boolean(status.playback_cache?.ready && cacheTotal > previousTotal)
+          : timeline.total > previousTotal;
+        if (hasNewCache) {
           const target = recordingTargetInTimeline(timeline, previousTotal);
           if (target) {
             selectedRecording[index] = target.target.file.url;
             selectedRecordingSeek[index] = target.seek;
             selectedRecordingTimeline[index] = target.requested;
-            recordingStreamStartOffset[index] = target.requested;
+            recordingStreamStartOffset[index] = playbackMode === 'server_cache_mp4' ? 0 : target.requested;
             recordingAutoplayAfterRender[index] = true;
+            if (playbackMode === 'server_cache_mp4') {
+              recordingStreamNonce[index] = Date.now();
+              debugEvent('ui_recording_cache_resume', {
+                index,
+                previous_total: previousTotal,
+                new_total: timeline.total,
+                attempt,
+                cache: status.playback_cache || {},
+              });
+              renderNvrGrid({ reason: 'recording_cache_resume' });
+              return;
+            }
             if (playbackMode === 'server_file_sequence') {
               switchRecordingVideoToFile(index, target, true, 'server_file_resume');
               return;
@@ -4552,7 +4914,7 @@ INDEX_HTML = r"""<!doctype html>
           index,
           timeline_second: selectedRecordingTimeline[index],
           stream_start: recordingStreamStartOffset[index],
-          playback_mode: 'continuous_stream',
+          playback_mode: playbackMode,
           previous_total: previousTotal,
           attempt,
         });
@@ -4562,7 +4924,16 @@ INDEX_HTML = r"""<!doctype html>
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
         const timeline = recordingTimeline(files);
-        const previousTotal = timeline.total;
+        let previousTotal = timeline.total;
+        if (video?.dataset?.recordingPlaybackMode === 'server_cache_mp4') {
+          previousTotal = Math.max(0, Number(status.playback_cache?.total_seconds || previousTotal));
+        }
+        if (video?.dataset?.recordingPlaybackMode === 'server_cache_mp4') {
+          if (status.recording || status.desired_recording) {
+            resumeRecordingWhenNextSegmentCloses(index, previousTotal, 0, 'server_cache_mp4');
+            return;
+          }
+        }
         if (video?.dataset?.recordingPlaybackMode === 'server_file_sequence') {
           const entries = timeline.entries || [];
           const current = entries.findIndex((entry) => entry.file.url === selectedRecording[index]);
@@ -4880,13 +5251,28 @@ INDEX_HTML = r"""<!doctype html>
         if (!Number.isFinite(storedStreamStart)) recordingStreamStartOffset[index] = streamStart;
         const targetForPoster = recordingTargetForOffset(index, timelineValue);
         const selectedFile = targetForPoster?.target?.file || null;
-        const playbackMode = recordingPlaybackModeForClient();
-        const playerSeek = playbackMode === 'server_file_sequence' ? Number(targetForPoster?.seek || 0) : 0;
-        const playerStreamStart = playbackMode === 'server_file_sequence' ? Number(targetForPoster?.target?.offset || 0) : streamStart;
-        const rawPlayerSrc = timelineTotal
-          ? (playbackMode === 'server_file_sequence' && selectedFile?.url ? panelPath(selectedFile.url) : recordingStreamUrl(status, index, streamStart))
-          : '';
-        const playerSrc = playbackMode === 'server_file_sequence' ? mediaUrlWithTimeFragment(rawPlayerSrc, playerSeek) : rawPlayerSrc;
+        const playbackMode = recordingPlaybackModeForClient(status);
+        const cache = status.playback_cache || {};
+        let playerSeek = 0;
+        let playerStreamStart = streamStart;
+        let rawPlayerSrc = '';
+        if (timelineTotal) {
+          if (playbackMode === 'server_cache_mp4' && cache.url) {
+            const cacheTotal = Math.max(0, Number(cache.total_seconds || 0));
+            playerSeek = cacheTotal ? Math.min(timelineValue, Math.max(0, cacheTotal - 1)) : timelineValue;
+            playerStreamStart = 0;
+            rawPlayerSrc = panelPath(cache.url);
+          } else if (playbackMode === 'server_file_sequence' && selectedFile?.url) {
+            playerSeek = Number(targetForPoster?.seek || 0);
+            playerStreamStart = Number(targetForPoster?.target?.offset || 0);
+            rawPlayerSrc = panelPath(selectedFile.url);
+          } else {
+            rawPlayerSrc = recordingStreamUrl(status, index, streamStart);
+          }
+        }
+        const playerSrc = playbackMode === 'server_file_sequence' || playbackMode === 'server_cache_mp4'
+          ? mediaUrlWithTimeFragment(rawPlayerSrc, playerSeek)
+          : rawPlayerSrc;
         const posterUrl = targetForPoster?.target?.file?.thumbnail_url ? panelPath(targetForPoster.target.file.thumbnail_url) : '';
         const preloadMode = 'auto';
         const playable = Boolean(timelineTotal && playerSrc);
@@ -5660,7 +6046,8 @@ INDEX_HTML = r"""<!doctype html>
               recording_status: item.recording_status,
               segments: item.segments,
               record_stream: item.record_stream,
-              record_error: item.record_error || item.last_error || ''
+              record_error: item.record_error || item.last_error || '',
+              playback_cache: item.playback_cache || {}
             }))
           });
           recordingStatus = {};
@@ -6226,6 +6613,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path.startswith("/recordings-stream/") and path.endswith(".mp4"):
             self.serve_recording_stream(path, parsed.query)
             return
+        if path.startswith("/recording-cache/") and path.endswith("/timeline.mp4"):
+            self.serve_recording_cache(path)
+            return
         if path.startswith("/recording-thumbs/") and path.endswith(".jpg"):
             self.serve_recording_thumbnail(path)
             return
@@ -6238,6 +6628,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = route_path(parsed.path)
+        if path.startswith("/recording-cache/") and path.endswith("/timeline.mp4"):
+            self.serve_recording_cache(path, send_body=False)
+            return
         if path.startswith("/recordings/") and path.endswith(".mp4"):
             self.serve_recording(path, send_body=False)
             return
@@ -6555,28 +6948,15 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         self.send_bytes(thumb.read_bytes(), "image/jpeg")
 
-    def serve_recording(self, request_path: str, send_body: bool = True) -> None:
-        parts = request_path.removeprefix("/recordings/").split("/", 1)
-        if len(parts) != 2:
-            self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
-            return
-        key, filename = parts
-        safe_name = Path(filename).name
-        if not safe_name.endswith(".mp4"):
-            self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
-            return
-
-        config = load_config()
-        target = None
-        for index, camera in enumerate(config.get("cameras", [])):
-            if recording_key(camera, index) == key:
-                target = recording_base_dir(camera, index) / safe_name
-                break
-
-        if target is None or not target.exists():
-            self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
-            return
-
+    def serve_mp4_file(
+        self,
+        target: Path,
+        request_path: str,
+        disposition_name: str,
+        debug_event_name: str,
+        debug_payload: dict,
+        send_body: bool = True,
+    ) -> None:
         file_size = target.stat().st_size
         if file_size <= 0:
             self.send_json({"error": "recording_empty"}, HTTPStatus.NOT_FOUND)
@@ -6600,12 +6980,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 return
 
         length = end - start + 1
-        disposition_name = safe_name.replace('"', "_")
+        safe_disposition = disposition_name.replace('"', "_")
         self.send_response(status)
         self.send_header("Content-Type", "video/mp4")
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(length))
-        self.send_header("Content-Disposition", f'inline; filename="{disposition_name}"')
+        self.send_header("Content-Disposition", f'inline; filename="{safe_disposition}"')
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         self.send_header("Cache-Control", "no-store")
@@ -6614,11 +6994,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
-        write_debug_event("recording_file_request", {
+        write_debug_event(debug_event_name, {
             "method": self.command,
             "path": request_path,
-            "key": key,
-            "filename": safe_name,
             "range": range_header,
             "status": int(status),
             "start": start,
@@ -6626,6 +7004,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             "length": length,
             "file_size": file_size,
             "send_body": send_body,
+            **debug_payload,
         })
         if not send_body:
             return
@@ -6643,6 +7022,61 @@ class EdgeHandler(BaseHTTPRequestHandler):
                     break
                 remaining -= len(chunk)
 
+    def serve_recording_cache(self, request_path: str, send_body: bool = True) -> None:
+        parts = request_path.removeprefix("/recording-cache/").split("/", 1)
+        if len(parts) != 2 or parts[1] != "timeline.mp4":
+            self.send_json({"error": "recording_cache_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+        key = safe_id(parts[0])
+        config = load_config()
+        if camera_for_recording_key(config, key) is None:
+            self.send_json({"error": "recording_camera_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+        target = recording_cache_video_path(key)
+        if not target.exists():
+            self.send_json({"error": "recording_cache_not_ready"}, HTTPStatus.NOT_FOUND)
+            return
+        metadata = read_json(recording_cache_meta_path(key), {}) if recording_cache_meta_path(key).exists() else {}
+        self.serve_mp4_file(
+            target,
+            request_path,
+            f"{key}-timeline.mp4",
+            "recording_cache_request",
+            {"key": key, "cache_id": metadata.get("cache_id") or "", "source_hash": metadata.get("source_hash") or ""},
+            send_body=send_body,
+        )
+
+    def serve_recording(self, request_path: str, send_body: bool = True) -> None:
+        parts = request_path.removeprefix("/recordings/").split("/", 1)
+        if len(parts) != 2:
+            self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+        key, filename = parts
+        safe_name = Path(filename).name
+        if not safe_name.endswith(".mp4"):
+            self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+
+        config = load_config()
+        target = None
+        for index, camera in enumerate(config.get("cameras", [])):
+            if recording_key(camera, index) == key:
+                target = recording_base_dir(camera, index) / safe_name
+                break
+
+        if target is None or not target.exists():
+            self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
+            return
+
+        self.serve_mp4_file(
+            target,
+            request_path,
+            safe_name,
+            "recording_file_request",
+            {"key": key, "filename": safe_name},
+            send_body=send_body,
+        )
+
 def main() -> None:
     HOME_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -6650,6 +7084,7 @@ def main() -> None:
     DATA_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     STREAM_LIST_DIR.mkdir(parents=True, exist_ok=True)
     RECORDING_THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    RECORDING_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     clear_legacy_override_files()
     write_debug_event("boot_start", {
         "server_version": EdgeHandler.server_version,
@@ -6666,6 +7101,7 @@ def main() -> None:
         status_payload = refresh_status()
         write_debug_event("boot_refresh_status_done", {"camera_summary": config_summary(status_payload)})
         schedule_recording_ensure(config, "boot")
+        start_recording_cache_refresh_loop()
     except Exception as error:
         write_debug_event("boot_refresh_status_error", {"error": str(error), "type": type(error).__name__})
         raise

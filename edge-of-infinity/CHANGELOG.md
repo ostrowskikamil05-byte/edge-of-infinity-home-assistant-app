@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.24
+
+- Add a server-side NVR playback cache under `/homeassistant/edge/recording-cache`, built from closed MP4 recording segments into a single range-enabled `timeline.mp4`.
+- Prefer the cached MP4 timeline on mobile NVR playback so phones can seek through one longer buffered file instead of stopping at each 8-10 second recording segment.
+- Start a background recording-cache refresh loop with the panel server, and expose cache build/request diagnostics in the Logs page.
+
 ## 0.10.23
 
 - Use direct saved MP4 files for mobile NVR playback through the existing range-enabled `/recordings/...` route instead of the ffmpeg concat pipe, improving Home Assistant mobile WebView compatibility.

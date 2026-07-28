@@ -62,11 +62,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.23")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.23")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.23")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.23")
-        self.assertIn("v0.10.23", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.24")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.24")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.24")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.24")
+        self.assertIn("v0.10.24", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
@@ -392,6 +392,11 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
+        self.assertIn("server_cache_mp4", html)
+        self.assertIn("function seekRecordingCache", html)
+        self.assertIn("ui_recording_cache_seek", html)
+        self.assertIn("ui_recording_cache_resume", html)
+        self.assertIn("recording-cache/", html)
         self.assertIn("server_file_sequence", html)
         self.assertIn("function switchRecordingVideoToFile", html)
         self.assertIn("ui_recording_server_file_switch", html)
@@ -428,6 +433,9 @@ class EdgePanelConfigTests(unittest.TestCase):
         html = PANEL_PATH.read_text(encoding="utf-8")
 
         self.assertIn("def do_HEAD", html)
+        self.assertIn("self.serve_recording_cache(path, send_body=False)", html)
+        self.assertIn("def serve_recording_cache", html)
+        self.assertIn("recording_cache_request", html)
         self.assertIn("self.serve_recording(path, send_body=False)", html)
         self.assertIn("Accept-Ranges", html)
         self.assertIn("Content-Range", html)
@@ -894,6 +902,8 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(files[0]["duration_seconds"], 12)
         self.assertIn("recording-thumbs/", files[0]["thumbnail_url"])
         self.assertIn("start_ts", files[0])
+        self.assertIn("playback_cache", status)
+        self.assertIn("source_count", status["playback_cache"])
 
     def test_recording_stream_plan_builds_continuous_concat_from_timeline(self):
         panel = load_panel_module()
@@ -981,6 +991,68 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("-f", command)
         self.assertIn("concat", command)
         self.assertGreater(command.index("-ss"), command.index("-i"))
+
+    def test_recording_cache_status_exposes_server_timeline_mp4(self):
+        panel = load_panel_module()
+        panel.MIN_RECORDING_FILE_READY_SECONDS = 0
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "nvr": {"segment_seconds": 10},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+        panel.write_json(panel.CONFIG_PATH, payload)
+        directory = panel.recording_base_dir(payload["cameras"][0], 0)
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in ("20260727-173000.mp4", "20260727-173010.mp4"):
+            (directory / name).write_bytes(b"x" * 2048)
+        key = panel.recording_key(payload["cameras"][0], 0)
+        cache_dir = panel.recording_cache_dir(key)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        entries = panel.recording_file_entries(payload["cameras"][0], 0, limit=240, segment_seconds=10)
+        signature = panel.recording_cache_source_signature(entries, 10)
+        panel.recording_cache_video_path(key).write_bytes(b"cached mp4")
+        panel.write_json(
+            panel.recording_cache_meta_path(key),
+            {
+                "cache_id": "cache-test",
+                "source_hash": signature["hash"],
+                "source_count": len(signature["items"]),
+                "file_count": 2,
+                "total_seconds": 20,
+                "built_at": "2026-07-28T12:00:00+0000",
+            },
+        )
+
+        status = panel.recording_status_payload(payload)["cameras"][0]["playback_cache"]
+
+        self.assertTrue(status["ready"])
+        self.assertTrue(status["current"])
+        self.assertEqual(status["total_seconds"], 20)
+        self.assertIn(f"recording-cache/{key}/timeline.mp4", status["url"])
+
+    def test_recording_cache_command_creates_faststart_mp4_file(self):
+        panel = load_panel_module()
+        command = panel.build_recording_cache_command(panel.HOME_DIR / "timeline.ffconcat", panel.HOME_DIR / "timeline.mp4")
+
+        self.assertIn("+faststart", command)
+        self.assertIn("-c", command)
+        self.assertIn("copy", command)
+        self.assertIn("-f", command)
+        self.assertIn("concat", command)
 
     def test_recording_thumbnail_command_generates_small_jpeg(self):
         panel = load_panel_module()
