@@ -20,9 +20,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.35"
+APP_VERSION = "0.10.36"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-mp4-tail-ready-v1"
+UI_BUILD = "nvr-playback-list-unblocked-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -2325,8 +2325,6 @@ def recording_file_ready(path: Path, now: float | None = None, min_age_seconds: 
     min_age_seconds = MIN_RECORDING_FILE_READY_SECONDS if min_age_seconds is None else min_age_seconds
     if min_age_seconds > 0 and (now or time.time()) - stat.st_mtime < min_age_seconds:
         return False
-    if not recording_file_has_playable_header(path, stat, now or time.time()):
-        return False
     return True
 
 
@@ -3112,7 +3110,7 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
     target = recording_thumbnail_path(key, filename)
     if recording_thumbnail_ready(target, source):
         return target
-    if not recording_file_ready(source):
+    if not recording_file_ready(source) or not recording_file_has_playable_header(source):
         try:
             source_size = source.stat().st_size
         except OSError:

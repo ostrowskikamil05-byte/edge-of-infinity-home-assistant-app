@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.36
+
+- Restore NVR recording lists even when saved MP4 segments have unusual metadata placement. Playback readiness now uses only age and size, while MP4 header checks are limited to thumbnail generation.
+- Keep thumbnail safety for incomplete/corrupt MP4 files without allowing thumbnail failures to hide the actual recordings.
+
 ## 0.10.35
 
 - Relax MP4 readiness after the 0.10.34 safety check: Edge now scans both the beginning and end of each recording segment for MP4 metadata, and older `ftyp` segments are allowed after a short grace window. This restores NVR playback for valid files whose `moov` atom is not at the beginning.

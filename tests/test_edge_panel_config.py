@@ -70,11 +70,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.35")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.35")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.35")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.35")
-        self.assertIn("v0.10.35", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.36")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.36")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.36")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.36")
+        self.assertIn("v0.10.36", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -435,7 +435,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("nvr-mp4-tail-ready-v1", html)
+        self.assertIn("nvr-playback-list-unblocked-v1", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
         self.assertIn("function markNvrInteraction", html)
@@ -1155,7 +1155,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(status["segments_pending"], 1)
         self.assertEqual([item["name"] for item in status["files"]], ["20260727-173000.mp4"])
 
-    def test_recording_status_hides_unplayable_mp4_without_moov_header(self):
+    def test_recording_status_keeps_mp4_visible_when_thumbnail_header_probe_fails(self):
         panel = load_panel_module()
         panel.MIN_RECORDING_FILE_READY_SECONDS = 0
         payload = panel.normalize_config(
@@ -1186,8 +1186,8 @@ class EdgePanelConfigTests(unittest.TestCase):
         status = panel.recording_status_payload(payload)["cameras"][0]
 
         self.assertEqual(status["segments_total"], 2)
-        self.assertEqual(status["segments"], 1)
-        self.assertEqual([item["name"] for item in status["files"]], ["20260727-173000.mp4"])
+        self.assertEqual(status["segments"], 2)
+        self.assertEqual([item["name"] for item in status["files"]], ["20260727-173010.mp4", "20260727-173000.mp4"])
 
     def test_recording_file_ready_accepts_moov_at_tail(self):
         panel = load_panel_module()
