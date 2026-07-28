@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.30
+
+- Protect the NVR video element while the user is seeking, paused, or interacting with playback controls so timer refreshes do not rebuild the player and jump back to the original position.
+- Slow the NVR status timer from 5 seconds to 15 seconds and throttle timer debug events to reduce UI, disk, and CPU load while playback is stable.
+- Add seek/play/pause/ratechange diagnostics that preserve playback state and make accidental NVR rerenders visible in the Logs tab.
+- Color every raw Logs tab block as OK, WARNING, or ERROR instead of only coloring the top diagnostics list.
+- Expand runtime diagnostics with panel process status, thread/file descriptor counts, system and process uptime, active recorder details, cache backlog, runtime limits, and engine ports.
+
 ## 0.10.29
 
 - Change the NVR timeline to a real wall-clock day view: selected days now expose a full `00:00 -> 24:00` timeline while still showing how many hours were actually recorded.

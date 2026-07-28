@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
+import sys
 import hashlib
 import threading
 import time
@@ -18,9 +20,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.29"
+APP_VERSION = "0.10.30"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "day-wall-clock-diagnostics-v1"
+UI_BUILD = "nvr-seek-log-diagnostics-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -989,6 +991,79 @@ def proc_meminfo_payload() -> dict:
     return values
 
 
+def proc_status_payload(pid: int | str = "self") -> dict:
+    path = Path("/proc") / str(pid) / "status"
+    if not path.exists():
+        return {}
+    wanted = {
+        "Name",
+        "State",
+        "VmPeak",
+        "VmSize",
+        "VmRSS",
+        "VmData",
+        "VmStk",
+        "Threads",
+        "voluntary_ctxt_switches",
+        "nonvoluntary_ctxt_switches",
+    }
+    values = {}
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if ":" not in line:
+                continue
+            key, raw_value = line.split(":", 1)
+            if key not in wanted:
+                continue
+            value = raw_value.strip()
+            if value.endswith(" kB"):
+                match = re.search(r"\d+", value)
+                values[key] = int(match.group(0)) * 1024 if match else value
+            elif re.fullmatch(r"\d+", value):
+                values[key] = int(value)
+            else:
+                values[key] = value
+    except OSError as error:
+        return {"error": str(error)}
+    return values
+
+
+def proc_uptime_seconds() -> float | None:
+    path = Path("/proc/uptime")
+    if not path.exists():
+        return None
+    try:
+        raw_value = path.read_text(encoding="utf-8", errors="replace").split()[0]
+        return round(float(raw_value), 2)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def process_uptime_seconds(pid: int | str = "self") -> float | None:
+    stat_path = Path("/proc") / str(pid) / "stat"
+    system_uptime = proc_uptime_seconds()
+    if not stat_path.exists() or system_uptime is None:
+        return None
+    try:
+        raw_stat = stat_path.read_text(encoding="utf-8", errors="replace")
+        fields = raw_stat[raw_stat.rfind(")") + 2:].split()
+        start_ticks = int(fields[19])
+        clock_ticks = os.sysconf("SC_CLK_TCK")
+        return round(max(0.0, system_uptime - (start_ticks / clock_ticks)), 2)
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+
+
+def open_file_descriptor_count() -> int | None:
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.exists():
+        return None
+    try:
+        return len(list(fd_dir.iterdir()))
+    except OSError:
+        return None
+
+
 def system_diagnostics_payload(recordings_dir: Path) -> dict:
     cpu_count = os.cpu_count() or 1
     try:
@@ -1000,9 +1075,15 @@ def system_diagnostics_payload(recordings_dir: Path) -> dict:
     for key, process in RECORDING_PROCESSES.items():
         try:
             if process and process.poll() is None:
-                active_recorders.append({"key": key, "pid": process.pid})
+                active_recorders.append({
+                    "key": key,
+                    "pid": process.pid,
+                    "returncode": process.returncode,
+                    "status": proc_status_payload(process.pid),
+                })
         except Exception:
             continue
+    cache_workers = sorted(RECORDING_CACHE_WORKERS)
     return {
         "cpu_count": cpu_count,
         "loadavg": loadavg,
@@ -1013,9 +1094,20 @@ def system_diagnostics_payload(recordings_dir: Path) -> dict:
         "ffmpeg_path": shutil.which("ffmpeg") or "",
         "ffprobe_path": shutil.which("ffprobe") or "",
         "active_recorders": active_recorders,
-        "recording_cache_workers": sorted(RECORDING_CACHE_WORKERS),
+        "active_recorder_count": len(active_recorders),
+        "recording_cache_workers": cache_workers,
+        "recording_cache_backlog": len(cache_workers),
         "recording_cache_worker_limit": 1,
         "recording_thumbnail_worker_limit": 1,
+        "system_uptime_seconds": proc_uptime_seconds(),
+        "process": {
+            "pid": os.getpid(),
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "uptime_seconds": process_uptime_seconds(),
+            "open_file_descriptors": open_file_descriptor_count(),
+            "status": proc_status_payload(),
+        },
     }
 
 
@@ -1068,6 +1160,55 @@ def diagnostic_from_tail(title: str, tail: str) -> dict:
     return diagnostic_item(severity, title, detail, {"tail": tail[-2000:] if tail else ""})
 
 
+def runtime_parameters_payload(config: dict, hardware: dict, recordings_dir: Path) -> dict:
+    storage = config.get("storage") if isinstance(config.get("storage"), dict) else {}
+    live = config.get("live") if isinstance(config.get("live"), dict) else {}
+    nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
+    return redact_config(
+        {
+            "paths": {
+                "home_dir": str(HOME_DIR),
+                "data_dir": str(DATA_DIR),
+                "config_path": str(CONFIG_PATH),
+                "addon_config_path": str(ADDON_CONFIG_PATH),
+                "recordings_dir": str(recordings_dir),
+                "recording_cache_dir": str(RECORDING_CACHE_DIR),
+                "recording_thumb_dir": str(RECORDING_THUMB_DIR),
+            },
+            "storage": storage,
+            "live": live,
+            "nvr": nvr,
+            "runtime_limits": {
+                "min_recording_file_ready_seconds": MIN_RECORDING_FILE_READY_SECONDS,
+                "recording_cache_refresh_seconds": RECORDING_CACHE_REFRESH_SECONDS,
+                "recording_cache_max_segments": RECORDING_CACHE_MAX_SEGMENTS,
+                "recording_cache_absolute_max_segments": RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS,
+                "recording_cache_min_rebuild_seconds": RECORDING_CACHE_MIN_REBUILD_SECONDS,
+                "recording_cache_min_new_segments": RECORDING_CACHE_MIN_NEW_SEGMENTS,
+                "recording_cache_worker_limit": hardware.get("recording_cache_worker_limit"),
+                "recording_thumbnail_worker_limit": hardware.get("recording_thumbnail_worker_limit"),
+            },
+            "runtime_state": {
+                "active_recorder_count": hardware.get("active_recorder_count"),
+                "active_recorders": hardware.get("active_recorders"),
+                "recording_cache_backlog": hardware.get("recording_cache_backlog"),
+                "recording_cache_workers": hardware.get("recording_cache_workers"),
+            },
+            "engines": {
+                "mediamtx_enabled": MEDIAMTX_ENABLED,
+                "mediamtx_record": MEDIAMTX_RECORD,
+                "janus_enabled": JANUS_ENABLED,
+                "rtsp_port": MEDIAMTX_RTSP_PORT,
+                "hls_port": MEDIAMTX_HLS_PORT,
+                "webrtc_whep_port": MEDIAMTX_WEBRTC_PORT,
+                "webrtc_ice_udp_port": MEDIAMTX_WEBRTC_UDP_PORT,
+                "srt_port": MEDIAMTX_SRT_PORT,
+                "api_port": MEDIAMTX_API_PORT,
+            },
+        }
+    )
+
+
 def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording_logs: list[dict]) -> list[dict]:
     diagnostics = []
     ffmpeg_path = hardware.get("ffmpeg_path") or ""
@@ -1109,6 +1250,20 @@ def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording
         severity = "error" if available_percent < 5 else "warning" if available_percent < 15 else "ok"
         diagnostics.append(diagnostic_item(severity, "Memory", f"Available memory is {available_percent}%.", {"memory": memory}))
 
+    process_payload = hardware.get("process") if isinstance(hardware.get("process"), dict) else {}
+    process_status = process_payload.get("status") if isinstance(process_payload.get("status"), dict) else {}
+    thread_count = process_status.get("Threads")
+    fd_count = process_payload.get("open_file_descriptors")
+    process_severity = "warning" if isinstance(thread_count, int) and thread_count > 80 else "ok"
+    diagnostics.append(
+        diagnostic_item(
+            process_severity,
+            "Panel process",
+            f"Panel process has {thread_count if thread_count is not None else 'unknown'} thread(s) and {fd_count if fd_count is not None else 'unknown'} open file descriptor(s).",
+            process_payload,
+        )
+    )
+
     for title, disk in (("Recordings disk", hardware.get("recordings_disk")), ("Edge config disk", hardware.get("edge_disk"))):
         if not isinstance(disk, dict):
             continue
@@ -1122,12 +1277,15 @@ def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording
     active_recorders = hardware.get("active_recorders") if isinstance(hardware.get("active_recorders"), list) else []
     diagnostics.append(diagnostic_item("ok", "NVR recorders", f"{len(active_recorders)} active recorder process(es).", {"active_recorders": active_recorders}))
     cache_workers = hardware.get("recording_cache_workers") if isinstance(hardware.get("recording_cache_workers"), list) else []
+    cache_limit = safe_int(hardware.get("recording_cache_worker_limit"), 1)
+    cache_backlog = safe_int(hardware.get("recording_cache_backlog"), len(cache_workers))
+    cache_severity = "warning" if cache_backlog > cache_limit else "ok"
     diagnostics.append(
         diagnostic_item(
-            "warning" if cache_workers else "ok",
+            cache_severity,
             "Playback cache worker",
-            "Daily playback cache is being rebuilt; CPU may be higher until it finishes." if cache_workers else "No playback cache rebuild is running.",
-            {"workers": cache_workers},
+            f"{cache_backlog} daily playback cache job(s) queued/running; worker limit is {cache_limit}." if cache_workers else "No playback cache rebuild is running.",
+            {"workers": cache_workers, "backlog": cache_backlog, "worker_limit": cache_limit},
         )
     )
 
@@ -1179,6 +1337,7 @@ def collect_panel_logs() -> dict:
         "panel_mirror_config": str(PANEL_CONFIG_PATH),
         "config_summary": config_summary(config),
         "hardware": hardware,
+        "runtime_parameters": runtime_parameters_payload(config, hardware, recordings_dir),
         "diagnostics": build_panel_diagnostics(config, hardware, tails, recording_logs),
         "edge_debug": tails["Edge debug"],
         "last_save_debug": safe_json_file(HOME_DIR / "last-save-debug.json"),
@@ -4523,6 +4682,7 @@ INDEX_HTML = r"""<!doctype html>
       .diag-error b { color: #fa6e7e; }
       .log-block {
         border: 1px solid var(--line);
+        border-left-width: 4px;
         border-radius: 8px;
         background: rgba(0,0,0,.16);
         overflow: hidden;
@@ -4532,6 +4692,34 @@ INDEX_HTML = r"""<!doctype html>
         padding: 10px 12px;
         border-bottom: 1px solid var(--line);
         font-size: 15px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .log-block.log-ok {
+        border-color: rgba(86,214,181,.36);
+        border-left-color: #56d6b5;
+      }
+      .log-block.log-ok h2 { color: #56d6b5; }
+      .log-block.log-warning {
+        border-color: rgba(228,180,93,.38);
+        border-left-color: #e4b45d;
+      }
+      .log-block.log-warning h2 { color: #e4b45d; }
+      .log-block.log-error {
+        border-color: rgba(250,110,126,.42);
+        border-left-color: #fa6e7e;
+      }
+      .log-block.log-error h2 { color: #fa6e7e; }
+      .log-severity {
+        border: 1px solid currentColor;
+        border-radius: 999px;
+        padding: 2px 8px;
+        font-size: 11px;
+        line-height: 1.4;
+        letter-spacing: 0;
+        opacity: .9;
       }
       .log-output {
         margin: 0;
@@ -4732,6 +4920,9 @@ INDEX_HTML = r"""<!doctype html>
       let recordingContinueTimers = {};
       let recordingSwipeStart = {};
       let lastNvrRenderSignature = '';
+      let nvrInteractionUntil = 0;
+      let lastRecordingStatusLogAt = 0;
+      let lastNvrRenderSkipLogAt = 0;
       let configDirty = false;
       let lastFormDraft = null;
       let lastFormDraftAt = 0;
@@ -4742,6 +4933,9 @@ INDEX_HTML = r"""<!doctype html>
       let thumbnailHydrationTimer = 0;
       let thumbnailObserver = null;
       const THUMB_PLACEHOLDER = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270"%3E%3Crect width="480" height="270" fill="%2305080a"/%3E%3Ctext x="240" y="136" fill="%238ea4a1" font-family="Arial" font-size="18" text-anchor="middle"%3EPreview loading%3C/text%3E%3C/svg%3E';
+      const NVR_STATUS_REFRESH_MS = 15000;
+      const NVR_INTERACTION_PROTECT_MS = 30000;
+      const NVR_TIMER_LOG_THROTTLE_MS = 30000;
       const liveFrameTimers = new Map();
 
       const panelBase = window.location.pathname.endsWith('/')
@@ -5427,6 +5621,25 @@ INDEX_HTML = r"""<!doctype html>
         });
       }
 
+      function markNvrInteraction(reason = 'interaction', payload = {}) {
+        nvrInteractionUntil = Math.max(nvrInteractionUntil, Date.now() + NVR_INTERACTION_PROTECT_MS);
+        if (reason !== 'timeupdate') {
+          debugEvent('ui_nvr_interaction_protected', {
+            reason,
+            protected_until_ms: nvrInteractionUntil,
+            ...payload,
+          });
+        }
+      }
+
+      function isNvrPlaybackProtected() {
+        if (activePage !== 'nvr') return false;
+        if (Date.now() < nvrInteractionUntil) return true;
+        return Array.from(nvrGrid.querySelectorAll('video[data-recording-player]')).some((video) => {
+          return video.readyState >= 1 && !video.ended;
+        });
+      }
+
       function updateRecordingTimelineUi(index, value, total) {
         const safeValue = Math.max(0, Math.floor(Number(value || 0)));
         const safeTotal = Math.max(0, Math.floor(Number(total || 0)));
@@ -5543,6 +5756,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function selectRecordingAtOffset(index, offset) {
+        markNvrInteraction('select_recording_offset', { index, offset });
         const target = recordingTargetForOffset(index, offset);
         if (!target) return;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
@@ -5770,10 +5984,64 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
 
-      function logBlock(title, value) {
+      function severityRank(severity) {
+        if (severity === 'error') return 3;
+        if (severity === 'warning') return 2;
+        return 1;
+      }
+
+      function strongestSeverity(items, titles = []) {
+        const allowed = new Set(titles);
+        return (Array.isArray(items) ? items : []).reduce((strongest, item) => {
+          if (allowed.size && !allowed.has(item?.title)) return strongest;
+          const severity = ['ok', 'warning', 'error'].includes(item?.severity) ? item.severity : 'ok';
+          return severityRank(severity) > severityRank(strongest) ? severity : strongest;
+        }, 'ok');
+      }
+
+      function logSeverityFromText(text) {
+        const lowered = String(text || '').toLowerCase();
+        const errorPatterns = [
+          /(^|\n|\s)error[:\s(]/,
+          /"severity"\s*:\s*"error"/,
+          /"event"\s*:\s*"[^"]*error"/,
+          /\bfailed\b/,
+          /\bexception\b/,
+          /\btraceback\b/,
+          /\bcannot\b/,
+          /\bnot found\b/,
+          /\bunsupported\b/,
+          /\bfatal\b/,
+        ];
+        const warningPatterns = [
+          /(^|\n|\s)warning[:\s(]/,
+          /"severity"\s*:\s*"warning"/,
+          /\btimeout\b/,
+          /\bdeadline exceeded\b/,
+          /\bstalled\b/,
+          /\bwaiting\b/,
+          /\btoo slow\b/,
+          /\bstale\b/,
+          /\bblocked\b/,
+          /\bdeferred\b/,
+          /\bdiscarding\b/,
+          /\bbroken pipe\b/,
+          /\bbacklog\b/,
+        ];
+        if (errorPatterns.some((pattern) => pattern.test(lowered))) return 'error';
+        if (warningPatterns.some((pattern) => pattern.test(lowered))) return 'warning';
+        return 'ok';
+      }
+
+      function logSeverityFromValue(value) {
+        return logSeverityFromText(pretty(value));
+      }
+
+      function logBlock(title, value, severity = '') {
+        const resolvedSeverity = ['ok', 'warning', 'error'].includes(severity) ? severity : logSeverityFromValue(value);
         return `
-          <div class="log-block">
-            <h2>${escapeHtml(title)}</h2>
+          <div class="log-block log-${resolvedSeverity}">
+            <h2><span>${escapeHtml(title)}</span><span class="log-severity">${escapeHtml(resolvedSeverity.toUpperCase())}</span></h2>
             <pre class="log-output">${escapeHtml(pretty(value))}</pre>
           </div>
         `;
@@ -5803,6 +6071,16 @@ INDEX_HTML = r"""<!doctype html>
           return;
         }
         const recordingLogs = Array.isArray(panelLogs.recording_logs) ? panelLogs.recording_logs : [];
+        const hardwareSeverity = strongestSeverity(panelLogs.diagnostics, [
+          'CPU load',
+          'Memory',
+          'Panel process',
+          'Recordings disk',
+          'Edge config disk',
+          'NVR recorders',
+          'Playback cache worker',
+          'Daily NVR cache window',
+        ]);
         logsView.innerHTML = [
           renderDiagnostics(panelLogs.diagnostics || []),
           logBlock('Runtime summary', {
@@ -5812,8 +6090,9 @@ INDEX_HTML = r"""<!doctype html>
             authoritative_config: panelLogs.authoritative_config,
             runtime_config: panelLogs.runtime_config,
             config_summary: panelLogs.config_summary
-          }),
-          logBlock('Hardware diagnostics', panelLogs.hardware || {}),
+          }, 'ok'),
+          logBlock('Hardware diagnostics', panelLogs.hardware || {}, hardwareSeverity),
+          logBlock('Runtime parameters', panelLogs.runtime_parameters || {}, 'ok'),
           logBlock('Edge debug', panelLogs.edge_debug || 'No debug log yet.'),
           logBlock('Last save debug', panelLogs.last_save_debug || {}),
           logBlock('Last runtime sync', panelLogs.last_runtime_sync || {}),
@@ -6867,21 +7146,26 @@ INDEX_HTML = r"""<!doctype html>
           const statusPath = dayQuery ? `api/recording/status?days=${dayQuery}` : 'api/recording/status';
           const response = await fetch(panelPath(statusPath), { cache: 'no-store' });
           const data = await response.json();
-          debugEvent('ui_recording_status_loaded', {
-            count: Array.isArray(data.cameras) ? data.cameras.length : 0,
-            cameras: (Array.isArray(data.cameras) ? data.cameras : []).map((item) => ({
-              index: item.index,
-              id: item.id,
-              recording: item.recording,
-              desired_recording: item.desired_recording,
-              recording_status: item.recording_status,
-              segments: item.segments,
-              record_stream: item.record_stream,
-              record_error: item.record_error || item.last_error || '',
-              selected_day: item.selected_day || '',
-              playback_cache: item.playback_cache || {}
-            }))
-          });
+          const shouldLogStatus = options.reason !== 'timer' || Date.now() - lastRecordingStatusLogAt > NVR_TIMER_LOG_THROTTLE_MS;
+          if (shouldLogStatus) {
+            lastRecordingStatusLogAt = Date.now();
+            debugEvent('ui_recording_status_loaded', {
+              reason: options.reason || 'recording_status',
+              count: Array.isArray(data.cameras) ? data.cameras.length : 0,
+              cameras: (Array.isArray(data.cameras) ? data.cameras : []).map((item) => ({
+                index: item.index,
+                id: item.id,
+                recording: item.recording,
+                desired_recording: item.desired_recording,
+                recording_status: item.recording_status,
+                segments: item.segments,
+                record_stream: item.record_stream,
+                record_error: item.record_error || item.last_error || '',
+                selected_day: item.selected_day || '',
+                playback_cache: item.playback_cache || {}
+              }))
+            });
+          }
           recordingStatus = {};
           (Array.isArray(data.cameras) ? data.cameras : []).forEach((item) => {
             recordingStatus[item.index] = item;
@@ -6908,18 +7192,23 @@ INDEX_HTML = r"""<!doctype html>
             }
           });
           const nextSignature = recordingStatusSignature();
+          const protectedPlayback = isNvrPlaybackProtected();
           const shouldRender = Boolean(options.forceRender)
             || activePage !== 'nvr'
             || !lastNvrRenderSignature
-            || (nextSignature !== lastNvrRenderSignature && !isNvrPlaybackBusy());
+            || (nextSignature !== lastNvrRenderSignature && !protectedPlayback);
           if (shouldRender) {
             renderNvrGrid({ reason: options.reason || 'recording_status' });
           } else {
-            debugEvent('ui_recording_status_render_skipped', {
-              reason: options.reason || 'recording_status',
-              signature_changed: nextSignature !== lastNvrRenderSignature,
-              active_playback: isNvrPlaybackBusy(),
-            });
+            if (options.reason !== 'timer' || Date.now() - lastNvrRenderSkipLogAt > NVR_TIMER_LOG_THROTTLE_MS) {
+              lastNvrRenderSkipLogAt = Date.now();
+              debugEvent('ui_recording_status_render_skipped', {
+                reason: options.reason || 'recording_status',
+                signature_changed: nextSignature !== lastNvrRenderSignature,
+                active_playback: isNvrPlaybackBusy(),
+                protected_playback: protectedPlayback,
+              });
+            }
           }
         } finally {
           nvrLoading = false;
@@ -6927,6 +7216,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function moveRecording(index, direction) {
+        markNvrInteraction('move_recording', { index, direction });
         const files = Array.isArray(recordingStatus[index]?.files) ? recordingStatus[index].files : [];
         if (!files.length) return;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
@@ -7033,7 +7323,7 @@ INDEX_HTML = r"""<!doctype html>
           loadRecordingStatus({ reason: 'timer' }).catch((error) => {
             debugEvent('ui_recording_status_error', { message: error.message });
           });
-        }, 5000);
+        }, NVR_STATUS_REFRESH_MS);
       }
 
       document.querySelectorAll('[data-page-target]').forEach((button) => {
@@ -7305,6 +7595,11 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       nvrGrid.addEventListener('pointerdown', (event) => {
+        const video = event.target?.closest?.('video[data-recording-player], .recording-player-wrap');
+        if (video) {
+          const player = video.matches?.('video[data-recording-player]') ? video : video.querySelector?.('video[data-recording-player]');
+          markNvrInteraction('recording_pointerdown', recordingVideoDiagnostics(player));
+        }
         const swipe = event.target.closest('[data-recording-day-swipe]');
         if (!swipe) return;
         recordingSwipeStart[swipe.dataset.recordingDaySwipe] = { x: event.clientX, y: event.clientY };
@@ -7325,7 +7620,41 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('timeupdate', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if (video) syncRecordingVideoProgress(video);
+        if (video) {
+          nvrInteractionUntil = Math.max(nvrInteractionUntil, Date.now() + 5000);
+          syncRecordingVideoProgress(video);
+        }
+      }, true);
+
+      nvrGrid.addEventListener('seeking', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) {
+          markNvrInteraction('recording_video_seeking', recordingVideoDiagnostics(video));
+          syncRecordingVideoProgress(video);
+        }
+      }, true);
+
+      nvrGrid.addEventListener('seeked', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) {
+          markNvrInteraction('recording_video_seeked', recordingVideoDiagnostics(video));
+          syncRecordingVideoProgress(video);
+        }
+      }, true);
+
+      nvrGrid.addEventListener('play', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) markNvrInteraction('recording_video_play', recordingVideoDiagnostics(video));
+      }, true);
+
+      nvrGrid.addEventListener('pause', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) markNvrInteraction('recording_video_pause', recordingVideoDiagnostics(video));
+      }, true);
+
+      nvrGrid.addEventListener('ratechange', (event) => {
+        const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if (video) markNvrInteraction('recording_video_ratechange', recordingVideoDiagnostics(video));
       }, true);
 
       nvrGrid.addEventListener('ended', (event) => {
