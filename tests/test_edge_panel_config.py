@@ -62,11 +62,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.27")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.27")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.27")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.27")
-        self.assertIn("v0.10.27", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.28")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.28")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.28")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.28")
+        self.assertIn("v0.10.28", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
@@ -369,9 +369,18 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("edge.example.com", mediamtx_config)
         self.assertIn("hikvision_1_sub:", mediamtx_config)
         self.assertIn("rtsp://admin:secret@192.168.33.136:554/Streaming/Channels/102", mediamtx_config)
-        self.assertIn("record: yes", mediamtx_config)
+        self.assertIn("sourceOnDemand: no", mediamtx_config)
+        self.assertIn("record: no", mediamtx_config)
+        self.assertFalse(result["mediamtx"]["recording_enabled"])
         self.assertIn("audio = true", janus_config)
         self.assertIn("hikvision_1_sub", janus_config)
+
+        second = panel.sync_runtime_engine_config(payload, "test-unchanged")
+
+        self.assertFalse(second["mediamtx"]["written"])
+        self.assertTrue(second["mediamtx"]["unchanged"])
+        self.assertFalse(second["janus"]["written"])
+        self.assertTrue(second["janus"]["unchanged"])
 
     def test_panel_has_fullscreen_and_recording_timeline_controls(self):
         html = PANEL_PATH.read_text(encoding="utf-8")
@@ -392,7 +401,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("daily-filmstrip-nvr-v1", html)
+        self.assertIn("low-cpu-daily-cache-v1", html)
         self.assertIn("server_cache_mp4", html)
         self.assertIn("selectedRecordingDay", html)
         self.assertIn("function selectRecordingDay", html)
@@ -453,6 +462,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("Content-Disposition", html)
         self.assertIn("recording_file_request", html)
         self.assertIn("Access-Control-Allow-Origin", html)
+        self.assertIn("public, max-age=86400, immutable", html)
 
     def test_live_mobile_settings_are_normalized_and_preserved(self):
         panel = load_panel_module()
@@ -1155,13 +1165,65 @@ class EdgePanelConfigTests(unittest.TestCase):
         command = panel.build_recording_cache_command(panel.HOME_DIR / "timeline.ffconcat", panel.HOME_DIR / "timeline.mp4")
 
         self.assertIn("+faststart", command)
-        self.assertIn("-c:v", command)
-        self.assertIn("copy", command)
-        self.assertIn("-c:a", command)
-        self.assertIn("aac", command)
-        self.assertIn("aresample=async=1:first_pts=0", command)
+        self.assertIn("-c", command)
+        self.assertEqual(command[command.index("-c") + 1], "copy")
+        self.assertNotIn("-c:v", command)
+        self.assertNotIn("-c:a", command)
+        self.assertNotIn("aresample=async=1:first_pts=0", command)
         self.assertIn("-f", command)
         self.assertIn("concat", command)
+
+    def test_recording_cache_status_batches_rebuilds_for_fresh_stale_cache(self):
+        panel = load_panel_module()
+        panel.MIN_RECORDING_FILE_READY_SECONDS = 0
+        payload = panel.normalize_config(
+            {
+                "server": {},
+                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
+                "nvr": {"segment_seconds": 10},
+                "cameras": [
+                    {
+                        "id": "hikvision_1",
+                        "vendor": "hikvision",
+                        "host": "192.168.33.21",
+                        "username": "admin",
+                        "password": "secret",
+                        "record_stream": "main",
+                        "enabled": True,
+                        "record": True,
+                    }
+                ],
+            }
+        )
+        panel.write_json(panel.CONFIG_PATH, payload)
+        directory = panel.recording_base_dir(payload["cameras"][0], 0)
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in ("20260727-173000.mp4", "20260727-173010.mp4", "20260727-173020.mp4"):
+            (directory / name).write_bytes(b"x" * 2048)
+        key = panel.recording_key(payload["cameras"][0], 0)
+        day = "2026-07-27"
+        panel.recording_cache_dir(key, day).mkdir(parents=True, exist_ok=True)
+        panel.recording_cache_video_path(key, day).write_bytes(b"cached mp4")
+        panel.write_json(
+            panel.recording_cache_meta_path(key, day),
+            {
+                "cache_id": "fresh-stale-cache",
+                "cache_name": day,
+                "source_hash": "old",
+                "source_count": 2,
+                "file_count": 2,
+                "total_seconds": 20,
+                "built_at": "2026-07-28T12:00:00+0000",
+            },
+        )
+
+        status = panel.recording_status_payload(payload)["cameras"][0]["playback_cache"]
+
+        self.assertTrue(status["ready"])
+        self.assertTrue(status["stale"])
+        self.assertTrue(status["rebuild_deferred"])
+        self.assertEqual(status["new_source_count"], 1)
+        self.assertIn("batching_new_segments", status["rebuild_defer_reason"])
 
     def test_recording_thumbnail_command_generates_small_jpeg(self):
         panel = load_panel_module()

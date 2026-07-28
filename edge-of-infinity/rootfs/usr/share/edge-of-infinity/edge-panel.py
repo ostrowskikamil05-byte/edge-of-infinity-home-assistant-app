@@ -18,9 +18,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.27"
+APP_VERSION = "0.10.28"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "daily-filmstrip-nvr-v1"
+UI_BUILD = "low-cpu-daily-cache-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -42,14 +42,17 @@ RECORDING_STREAM_LOG_PATH = HOME_DIR / "recording-stream.log"
 RECORDING_CACHE_LOG_PATH = HOME_DIR / "recording-cache.log"
 RECORDING_THUMB_LOG_PATH = HOME_DIR / "recording-thumbnail.log"
 MIN_RECORDING_FILE_READY_SECONDS = 2.0
-RECORDING_CACHE_REFRESH_SECONDS = 12
+RECORDING_CACHE_REFRESH_SECONDS = 60
 RECORDING_CACHE_MAX_SEGMENTS = 10000
 RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS = 50000
+RECORDING_CACHE_MIN_REBUILD_SECONDS = 300
+RECORDING_CACHE_MIN_NEW_SEGMENTS = 30
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
 RECORDING_CACHE_WORKERS: set[str] = set()
 RECORDING_CACHE_LOOP_STARTED = False
 DEBUG_LOCK = threading.Lock()
 RECORDING_CACHE_LOCK = threading.Lock()
+RECORDING_CACHE_BUILD_SEMAPHORE = threading.BoundedSemaphore(value=1)
 RECORDING_THUMBNAIL_SEMAPHORE = threading.BoundedSemaphore(value=1)
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
@@ -105,7 +108,7 @@ MEDIAMTX_WEBRTC_ICE_TRANSPORT = os.environ.get(
 MEDIAMTX_SRT_PORT = int(os.environ.get("EDGE_MEDIAMTX_SRT_PORT", "8890"))
 MEDIAMTX_API_PORT = int(os.environ.get("EDGE_MEDIAMTX_API_PORT", "9997"))
 MEDIAMTX_CONFIG_PATH = Path(os.environ.get("EDGE_MEDIAMTX_CONFIG", "/tmp/edge-runtime/mediamtx.yml"))
-MEDIAMTX_RECORD = os.environ.get("EDGE_MEDIAMTX_RECORD", "true").lower() == "true"
+MEDIAMTX_RECORD = os.environ.get("EDGE_MEDIAMTX_RECORD", "false").lower() == "true"
 JANUS_ENABLED = os.environ.get("EDGE_JANUS_ENABLED", "true").lower() == "true"
 JANUS_HOST = os.environ.get("EDGE_JANUS_HOST", "127.0.0.1")
 JANUS_HTTP_PORT = int(os.environ.get("EDGE_JANUS_HTTP_PORT", "8192"))
@@ -1468,6 +1471,19 @@ def add_mediamtx_path(lines: list[str], path_name: str, source_url: str, should_
         ]
 
 
+def write_runtime_config_if_changed(path: Path, content: str) -> bool:
+    try:
+        if path.exists() and path.read_text(encoding="utf-8", errors="replace") == content:
+            return False
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
+    return True
+
+
 def write_mediamtx_runtime_config(config: dict) -> dict:
     if not MEDIAMTX_ENABLED:
         return {"enabled": False, "written": False, "path_count": 0}
@@ -1591,13 +1607,11 @@ def write_mediamtx_runtime_config(config: dict) -> dict:
         add_mediamtx_path(lines, mediamtx_path(camera, index, "sub"), camera.get("rtsp_sub") or "", record_sub, warm_sub, recordings_dir, retention_days)
         if len(lines) > before:
             path_count += 1
-    MEDIAMTX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = MEDIAMTX_CONFIG_PATH.with_suffix(MEDIAMTX_CONFIG_PATH.suffix + ".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    tmp.replace(MEDIAMTX_CONFIG_PATH)
+    written = write_runtime_config_if_changed(MEDIAMTX_CONFIG_PATH, "\n".join(lines) + "\n")
     return {
         "enabled": True,
-        "written": True,
+        "written": written,
+        "unchanged": not written,
         "path": str(MEDIAMTX_CONFIG_PATH),
         "path_count": path_count,
         "public_hosts": public_hosts,
@@ -1649,16 +1663,14 @@ def write_janus_streaming_runtime_config(config: dict) -> dict:
                 "}",
             ]
             mounts += 1
-    JANUS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = streaming_config.with_suffix(streaming_config.suffix + ".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    tmp.replace(streaming_config)
+    written = write_runtime_config_if_changed(streaming_config, "\n".join(lines) + "\n")
     return {
         "enabled": True,
-        "written": True,
+        "written": written,
+        "unchanged": not written,
         "path": str(streaming_config),
         "mounts": mounts,
-        "restart_required": True,
+        "restart_required": written,
     }
 
 
@@ -2186,12 +2198,32 @@ def recording_cache_source_signature(entries: list[dict], segment_seconds: int) 
     return {"hash": hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20], "items": items}
 
 
+def low_priority_preexec():
+    if os.name != "posix":
+        return None
+
+    def apply_priority() -> None:
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+
+    return apply_priority
+
+
+def subprocess_run_low_priority(command: list[str], **kwargs):
+    preexec_fn = low_priority_preexec()
+    if preexec_fn:
+        kwargs["preexec_fn"] = preexec_fn
+    return subprocess.run(command, **kwargs)
+
+
 def build_recording_cache_command(concat_path: Path, output_path: Path) -> list[str]:
     return [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
-        "warning",
+        "error",
         "-nostdin",
         "-y",
         "-fflags",
@@ -2206,18 +2238,8 @@ def build_recording_cache_command(concat_path: Path, output_path: Path) -> list[
         "0:v:0",
         "-map",
         "0:a?",
-        "-c:v",
+        "-c",
         "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "96k",
-        "-ar",
-        "48000",
-        "-ac",
-        "1",
-        "-af",
-        "aresample=async=1:first_pts=0",
         "-avoid_negative_ts",
         "make_zero",
         "-movflags",
@@ -2236,6 +2258,25 @@ def recording_cache_worker_id(key: str, cache_name: str = "") -> str:
     return f"{safe_id(key)}:{safe_id(cache_name)}" if cache_name else safe_id(key)
 
 
+def recording_cache_rebuild_defer_reason(
+    raw_ready: bool,
+    current: bool,
+    metadata: dict,
+    metadata_file_count: int,
+    source_count: int,
+    video_modified_at: float,
+) -> str:
+    if current or not raw_ready:
+        return ""
+    if metadata_file_count <= 1 and source_count > 1:
+        return ""
+    new_segments = max(0, source_count - metadata_file_count)
+    age = max(0, int(time.time() - video_modified_at)) if video_modified_at else RECORDING_CACHE_MIN_REBUILD_SECONDS
+    if new_segments < RECORDING_CACHE_MIN_NEW_SEGMENTS and age < RECORDING_CACHE_MIN_REBUILD_SECONDS:
+        return f"batching_new_segments:{new_segments}/{RECORDING_CACHE_MIN_NEW_SEGMENTS};age:{age}/{RECORDING_CACHE_MIN_REBUILD_SECONDS}"
+    return ""
+
+
 def recording_cache_status(
     key: str,
     entries: list[dict],
@@ -2251,10 +2292,12 @@ def recording_cache_status(
         stat = video_path.stat()
         raw_ready = stat.st_size > 0
         file_size = stat.st_size
+        video_modified_ts = stat.st_mtime
         modified_at = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(stat.st_mtime))
     except OSError:
         raw_ready = False
         file_size = 0
+        video_modified_ts = 0.0
         modified_at = ""
 
     current = bool(
@@ -2268,7 +2311,15 @@ def recording_cache_status(
     worker_id = recording_cache_worker_id(key, cache_name)
     with RECORDING_CACHE_LOCK:
         building = worker_id in RECORDING_CACHE_WORKERS
-    if auto_refresh and signature["items"] and not current:
+    defer_reason = recording_cache_rebuild_defer_reason(
+        raw_ready,
+        current,
+        metadata,
+        metadata_file_count,
+        len(signature["items"]),
+        video_modified_ts,
+    )
+    if auto_refresh and signature["items"] and not current and not defer_reason:
         schedule_recording_cache_refresh(key, entries, segment_seconds, signature, reason="recording_status", cache_name=cache_name)
 
     cache_id = metadata.get("cache_id") or metadata.get("source_hash") or str(int(time.time()))
@@ -2283,6 +2334,9 @@ def recording_cache_status(
         "current": current,
         "building": building,
         "stale": bool(ready and not current),
+        "rebuild_deferred": bool(defer_reason),
+        "rebuild_defer_reason": defer_reason,
+        "new_source_count": max(0, len(signature["items"]) - metadata_file_count),
         "too_short_for_sources": cache_too_short_for_sources,
         "source_count": len(signature["items"]),
         "source_hash": signature["hash"],
@@ -2335,6 +2389,13 @@ def schedule_recording_cache_refresh(
         if worker_id in RECORDING_CACHE_WORKERS:
             return False
         RECORDING_CACHE_WORKERS.add(worker_id)
+    write_debug_event("recording_cache_build_scheduled", {
+        "key": key,
+        "cache_name": cache_name,
+        "reason": reason,
+        "file_count": len(worker_entries),
+        "source_hash": source_signature.get("hash"),
+    })
     thread = threading.Thread(
         target=build_recording_cache_worker,
         args=(key, worker_entries, segment_seconds, source_signature, reason, cache_name, worker_id),
@@ -2360,7 +2421,11 @@ def build_recording_cache_worker(
     video_path = recording_cache_video_path(key, cache_name)
     meta_path = recording_cache_meta_path(key, cache_name)
     command: list[str] = []
+    acquired = False
     try:
+        acquired = RECORDING_CACHE_BUILD_SEMAPHORE.acquire(timeout=7200)
+        if not acquired:
+            raise RuntimeError("recording_cache_global_worker_timeout")
         cache_dir.mkdir(parents=True, exist_ok=True)
         concat_payload = "\n".join(ffconcat_file_line(entry["path"]) for entry in entries) + "\n"
         concat_path.write_text(concat_payload, encoding="utf-8")
@@ -2374,8 +2439,9 @@ def build_recording_cache_worker(
             "total_seconds": sum(safe_int(entry.get("duration_seconds"), segment_seconds) for entry in entries),
             "source_hash": signature.get("hash"),
             "command": redact_command(command),
+            "global_worker": "acquired",
         })
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
+        result = subprocess_run_low_priority(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
         stderr = result.stderr.decode("utf-8", errors="replace")[-8000:]
         stdout = result.stdout.decode("utf-8", errors="replace")[-4000:]
         if result.returncode != 0:
@@ -2447,6 +2513,8 @@ def build_recording_cache_worker(
             pass
         with RECORDING_CACHE_LOCK:
             RECORDING_CACHE_WORKERS.discard(worker_id or recording_cache_worker_id(key, cache_name))
+        if acquired:
+            RECORDING_CACHE_BUILD_SEMAPHORE.release()
 
 
 def refresh_recording_caches(config: dict, reason: str) -> None:
@@ -7386,6 +7454,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         debug_event_name: str,
         debug_payload: dict,
         send_body: bool = True,
+        cache_control: str = "public, max-age=86400, immutable",
     ) -> None:
         file_size = target.stat().st_size
         if file_size <= 0:
@@ -7418,7 +7487,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", f'inline; filename="{safe_disposition}"')
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.send_header("X-Edge-Version", APP_VERSION)
         self.send_header("X-Edge-UI-Build", UI_BUILD)
         self.send_header("Access-Control-Allow-Origin", "*")

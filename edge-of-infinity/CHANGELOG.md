@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.28
+
+- Reduce NVR CPU spikes by building only one daily playback cache at a time and running the FFmpeg cache build at low OS priority.
+- Rebuild stale daily playback cache files in batches instead of after every new 10-second recording segment.
+- Switch daily playback cache assembly to stream-copy remuxing because recorded segments are already browser-oriented MP4 files.
+- Stop enabling MediaMTX's built-in recorder by default, avoiding duplicate recording work while the Edge NVR recorder remains the single source used by the panel.
+- Avoid rewriting unchanged MediaMTX and Janus runtime configs so saves do not unnecessarily reload the live core and interrupt NVR/live paths.
+- Serve saved MP4 recordings and cache timelines with immutable range-friendly cache headers for faster seeking and less repeated disk/network work.
+
 ## 0.10.27
 
 - Change the NVR recording list into a sampled full-day filmstrip so the list covers the selected day without loading hundreds of thumbnails at once.
