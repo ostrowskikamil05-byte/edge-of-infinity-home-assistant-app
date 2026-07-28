@@ -187,6 +187,8 @@ Starting with version `0.10.23`, mobile NVR playback opens saved MP4 segment fil
 
 Starting with version `0.10.24`, the server builds a playback cache from closed NVR MP4 segments under `/homeassistant/edge/recording-cache/<camera>/timeline.mp4`. Mobile playback prefers this cached range-enabled MP4 timeline, so seeking forward/back uses one already prepared server file instead of reloading a new 8-10 second segment on every jump. Recording still writes short segments for crash-safe storage; the cache is the fast playback layer.
 
+Starting with version `0.10.25`, desktop and mobile NVR playback both prefer the same server-side cache when it is ready. The default cache window is 1000 recording segments and can be changed in Edge Settings with `Playback cache segments`. If an old one-segment cache is found while many newer recordings exist, the panel hides it and lets the background builder create a fresh longer timeline instead of limiting rewind to a few seconds. Cache builds also remux audio to AAC with timestamp resampling while keeping the camera video stream-copy path.
+
 Starting with version `0.10.2`, `mobile_webrtc_ice_transport` can be `auto`, `udp`, or `tcp`. Use `auto` first because it exposes both UDP and TCP ICE on port `8189`. Use `udp` when everything is local and you want the simplest low-latency path. Use `tcp` when LTE, hotel Wi-Fi, or a friend's Wi-Fi blocks UDP, but remember that the public MediaMTX WebRTC address on `8889` and ICE port `8189` must still be reachable from that network. If the home network is behind CGNAT or cannot forward those ports, use a VPS or TURN relay instead of a LAN-only `192.168.x.x` address.
 
 The `WebRTC public URL` field must point to the public MediaMTX WHEP/WebRTC endpoint, for example:

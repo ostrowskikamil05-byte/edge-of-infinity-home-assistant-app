@@ -18,9 +18,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.24"
+APP_VERSION = "0.10.25"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "server-cache-nvr-v1"
+UI_BUILD = "unified-cache-nvr-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -42,7 +42,7 @@ RECORDING_STREAM_LOG_PATH = HOME_DIR / "recording-stream.log"
 RECORDING_CACHE_LOG_PATH = HOME_DIR / "recording-cache.log"
 MIN_RECORDING_FILE_READY_SECONDS = 2.0
 RECORDING_CACHE_REFRESH_SECONDS = 12
-RECORDING_CACHE_MAX_SEGMENTS = 240
+RECORDING_CACHE_MAX_SEGMENTS = 1000
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
 RECORDING_CACHE_WORKERS: set[str] = set()
 RECORDING_CACHE_LOOP_STARTED = False
@@ -787,6 +787,7 @@ def normalize_config(payload: dict) -> dict:
         "nvr": {
             "segment_seconds": clamp_int(nvr.get("segment_seconds"), 10, 2, 300),
             "retention_days": clamp_int(nvr.get("retention_days"), safe_int(storage.get("retention_days"), 14), 1, 365),
+            "playback_cache_segments": clamp_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS, 12, 2880),
             "copy_all_streams": bool(nvr.get("copy_all_streams", True)),
             "browser_playback": nvr.get("browser_playback") if nvr.get("browser_playback") in ("auto_h264", "copy", "h264") else "auto_h264",
         },
@@ -2102,8 +2103,18 @@ def build_recording_cache_command(concat_path: Path, output_path: Path) -> list[
         "0:v:0",
         "-map",
         "0:a?",
-        "-c",
+        "-c:v",
         "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "96k",
+        "-ar",
+        "48000",
+        "-ac",
+        "1",
+        "-af",
+        "aresample=async=1:first_pts=0",
         "-avoid_negative_ts",
         "make_zero",
         "-movflags",
@@ -2119,19 +2130,22 @@ def recording_cache_status(key: str, entries: list[dict], segment_seconds: int, 
     metadata = read_json(meta_path, {}) if meta_path.exists() else {}
     try:
         stat = video_path.stat()
-        ready = stat.st_size > 0
+        raw_ready = stat.st_size > 0
         file_size = stat.st_size
         modified_at = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(stat.st_mtime))
     except OSError:
-        ready = False
+        raw_ready = False
         file_size = 0
         modified_at = ""
 
     current = bool(
-        ready
+        raw_ready
         and metadata.get("source_hash") == signature["hash"]
         and safe_int(metadata.get("source_count"), -1) == len(signature["items"])
     )
+    metadata_file_count = safe_int(metadata.get("file_count"), 0)
+    cache_too_short_for_sources = bool(raw_ready and not current and len(signature["items"]) > 1 and metadata_file_count <= 1)
+    ready = bool(raw_ready and not cache_too_short_for_sources)
     with RECORDING_CACHE_LOCK:
         building = key in RECORDING_CACHE_WORKERS
     if auto_refresh and signature["items"] and not current:
@@ -2145,15 +2159,17 @@ def recording_cache_status(key: str, entries: list[dict], segment_seconds: int, 
     return {
         "enabled": True,
         "ready": ready,
+        "raw_ready": raw_ready,
         "current": current,
         "building": building,
         "stale": bool(ready and not current),
+        "too_short_for_sources": cache_too_short_for_sources,
         "source_count": len(signature["items"]),
         "source_hash": signature["hash"],
         "cache_id": cache_id,
         "url": f"recording-cache/{safe_id(key)}/timeline.mp4?v={cache_id}" if ready else "",
         "file_size": file_size,
-        "file_count": safe_int(metadata.get("file_count"), len(signature["items"])),
+        "file_count": metadata_file_count or len(signature["items"]),
         "total_seconds": total_seconds,
         "modified_at": modified_at,
         "built_at": metadata.get("built_at") or "",
@@ -2306,7 +2322,7 @@ def build_recording_cache_worker(
 def refresh_recording_caches(config: dict, reason: str) -> None:
     nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
     segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
-    cache_limit = clamp_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS, 12, 1440)
+    cache_limit = clamp_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS, 12, 2880)
     for index, camera in enumerate(config.get("cameras", [])):
         if not camera_should_record(camera):
             continue
@@ -2599,7 +2615,7 @@ def recording_status_payload(config: dict | None = None) -> dict:
         segment_count = len(playable_recording_files(directory))
         nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
         segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
-        cache_limit = clamp_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS, 12, 1440)
+        cache_limit = clamp_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS, 12, 2880)
         segment_files = recording_segments(camera, index, limit=cache_limit, segment_seconds=segment_seconds)
         timeline_files = sorted(segment_files, key=lambda item: (item.get("start_ts") or 0, item.get("name") or ""))
         cache_entries = recording_file_entries(camera, index, limit=cache_limit, segment_seconds=segment_seconds)
@@ -4526,9 +4542,9 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function recordingPlaybackModeForClient(status = {}) {
-        if (!isMobileNvrPlayback()) return 'continuous_stream';
         const cache = status?.playback_cache || {};
-        return cache.ready && cache.url && Number(cache.total_seconds || 0) > 0 ? 'server_cache_mp4' : 'server_file_sequence';
+        if (cache.ready && cache.url && Number(cache.total_seconds || 0) > 0) return 'server_cache_mp4';
+        return isMobileNvrPlayback() ? 'server_file_sequence' : 'continuous_stream';
       }
 
       function mediaUrlWithTimeFragment(url, seekSeconds) {
@@ -5025,6 +5041,7 @@ INDEX_HTML = r"""<!doctype html>
           logBlock('MediaMTX runtime config', panelLogs.runtime_mediamtx_config || 'missing'),
           logBlock('Janus streaming config', panelLogs.runtime_janus_streaming_config || 'missing'),
           logBlock('Recording stream', panelLogs.recording_stream_log || 'empty'),
+          logBlock('Recording cache', panelLogs.recording_cache_log || 'empty'),
           logBlock('Last saved response', panelLogs.last_saved_config || {}),
           ...recordingLogs.map((item) => logBlock(`Recording ffmpeg: ${item.path}`, item.tail || 'empty'))
         ].join('');
@@ -5546,6 +5563,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="form-grid">
               <label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label>
               <label>NVR retention days<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label>
+              <label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="2880" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 1000))}"></label>
               <label>Browser recording<select name="nvr-browser-playback">
                 <option value="auto_h264" ${nvrConfig.browser_playback !== 'copy' && nvrConfig.browser_playback !== 'h264' ? 'selected' : ''}>Auto H264 for HEVC</option>
                 <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Copy original</option>
@@ -5943,6 +5961,7 @@ INDEX_HTML = r"""<!doctype html>
           nvr: {
             segment_seconds: Number(get('nvr-segment-seconds').value || 10),
             retention_days: Number(get('nvr-retention-days').value || get('storage-retention-days').value || 14),
+            playback_cache_segments: Number(get('nvr-playback-cache-segments').value || 1000),
             browser_playback: get('nvr-browser-playback').value
           }
         };

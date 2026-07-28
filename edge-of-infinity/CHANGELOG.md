@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.25
+
+- Use the server-side NVR playback cache as the primary playback path on desktop and mobile when it is ready, so rewind/forward uses one longer range-enabled MP4 timeline instead of a short live pipe.
+- Increase the default playback cache window to 1000 recording segments and expose `Playback cache segments` in Edge Settings.
+- Hide stale one-segment cache files when many newer recording segments exist, preventing the NVR player from being limited to a few seconds of rewind.
+- Remux cache audio to AAC with timestamp resampling while keeping video stream-copy, reducing DTS/audio timeline issues in browser playback.
+- Show the recording-cache build log in the Logs tab.
+
 ## 0.10.24
 
 - Add a server-side NVR playback cache under `/homeassistant/edge/recording-cache`, built from closed MP4 recording segments into a single range-enabled `timeline.mp4`.
