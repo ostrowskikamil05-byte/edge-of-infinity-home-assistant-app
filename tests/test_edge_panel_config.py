@@ -62,11 +62,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.30")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.30")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.30")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.30")
-        self.assertIn("v0.10.30", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.31")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.31")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.31")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.31")
+        self.assertIn("v0.10.31", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -79,6 +79,8 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("runtime_parameters", logs)
         self.assertIn("process", logs["hardware"])
         self.assertIn("recording_cache_backlog", logs["hardware"])
+        self.assertEqual(logs["runtime_parameters"]["runtime_limits"]["recording_live_edge_delay_seconds"], 1.0)
+        self.assertIn("recording_cache_max_timeout_seconds", logs["runtime_parameters"]["runtime_limits"])
         self.assertTrue(any(item.get("title") == "FFmpeg" for item in logs["diagnostics"]))
         self.assertTrue(any(item.get("title") == "Panel process" for item in logs["diagnostics"]))
         self.assertTrue(any(item.get("title") == "Playback cache worker" for item in logs["diagnostics"]))
@@ -424,11 +426,15 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("nvr-seek-log-diagnostics-v1", html)
+        self.assertIn("nvr-recorded-playback-v1", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
         self.assertIn("function markNvrInteraction", html)
         self.assertIn("function isNvrPlaybackProtected", html)
+        self.assertIn("function recordingCacheCoversTarget", html)
+        self.assertIn("return 'server_file_sequence'", html)
+        self.assertIn("server_cache_tail_file_select", html)
+        self.assertIn("ui_recording_cache_tail_file_resume", html)
         self.assertIn("data-recording-playback-start", html)
         self.assertIn("function recordingTargetForPlaybackOffset", html)
         self.assertIn("server_cache_mp4", html)
@@ -1218,6 +1224,15 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertNotIn("aresample=async=1:first_pts=0", command)
         self.assertIn("-f", command)
         self.assertIn("concat", command)
+
+    def test_recording_cache_timeout_scales_for_full_day_timelines(self):
+        panel = load_panel_module()
+        entries = [{"duration_seconds": 10} for _ in range(3600)]
+
+        timeout_seconds = panel.recording_cache_timeout_seconds(entries, 10)
+
+        self.assertGreater(timeout_seconds, panel.RECORDING_CACHE_MIN_TIMEOUT_SECONDS)
+        self.assertLessEqual(timeout_seconds, panel.RECORDING_CACHE_MAX_TIMEOUT_SECONDS)
 
     def test_recording_cache_status_batches_rebuilds_for_fresh_stale_cache(self):
         panel = load_panel_module()

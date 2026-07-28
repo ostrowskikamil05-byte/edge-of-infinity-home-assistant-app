@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.31
+
+- Keep NVR playback on recorded media only: when the daily cache is not ready, the panel now falls back to saved MP4 segments instead of the continuous live-style stream.
+- Use saved MP4 segments for the tail of a stale daily cache, so today's newest recorded clips remain playable while the full-day cache catches up.
+- Preserve a user-selected recording day during timer refreshes so older days cannot be silently replaced by the newest day.
+- Scale the recording cache FFmpeg timeout by file count and recorded duration, preventing multi-thousand-segment camera timelines from being killed too early.
+- Expose cache timeout and one-second recording live-edge delay values in runtime diagnostics.
+
 ## 0.10.30
 
 - Protect the NVR video element while the user is seeking, paused, or interacting with playback controls so timer refreshes do not rebuild the player and jump back to the original position.

@@ -20,9 +20,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.30"
+APP_VERSION = "0.10.31"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-seek-log-diagnostics-v1"
+UI_BUILD = "nvr-recorded-playback-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -43,12 +43,15 @@ RECORDING_CACHE_DIR = HOME_DIR / "recording-cache"
 RECORDING_STREAM_LOG_PATH = HOME_DIR / "recording-stream.log"
 RECORDING_CACHE_LOG_PATH = HOME_DIR / "recording-cache.log"
 RECORDING_THUMB_LOG_PATH = HOME_DIR / "recording-thumbnail.log"
-MIN_RECORDING_FILE_READY_SECONDS = 2.0
+RECORDING_LIVE_EDGE_DELAY_SECONDS = 1.0
+MIN_RECORDING_FILE_READY_SECONDS = RECORDING_LIVE_EDGE_DELAY_SECONDS
 RECORDING_CACHE_REFRESH_SECONDS = 60
 RECORDING_CACHE_MAX_SEGMENTS = 10000
 RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS = 50000
 RECORDING_CACHE_MIN_REBUILD_SECONDS = 300
 RECORDING_CACHE_MIN_NEW_SEGMENTS = 30
+RECORDING_CACHE_MIN_TIMEOUT_SECONDS = 1800
+RECORDING_CACHE_MAX_TIMEOUT_SECONDS = 21600
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
 RECORDING_CACHE_WORKERS: set[str] = set()
 RECORDING_CACHE_LOOP_STARTED = False
@@ -1180,11 +1183,14 @@ def runtime_parameters_payload(config: dict, hardware: dict, recordings_dir: Pat
             "nvr": nvr,
             "runtime_limits": {
                 "min_recording_file_ready_seconds": MIN_RECORDING_FILE_READY_SECONDS,
+                "recording_live_edge_delay_seconds": RECORDING_LIVE_EDGE_DELAY_SECONDS,
                 "recording_cache_refresh_seconds": RECORDING_CACHE_REFRESH_SECONDS,
                 "recording_cache_max_segments": RECORDING_CACHE_MAX_SEGMENTS,
                 "recording_cache_absolute_max_segments": RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS,
                 "recording_cache_min_rebuild_seconds": RECORDING_CACHE_MIN_REBUILD_SECONDS,
                 "recording_cache_min_new_segments": RECORDING_CACHE_MIN_NEW_SEGMENTS,
+                "recording_cache_min_timeout_seconds": RECORDING_CACHE_MIN_TIMEOUT_SECONDS,
+                "recording_cache_max_timeout_seconds": RECORDING_CACHE_MAX_TIMEOUT_SECONDS,
                 "recording_cache_worker_limit": hardware.get("recording_cache_worker_limit"),
                 "recording_thumbnail_worker_limit": hardware.get("recording_thumbnail_worker_limit"),
             },
@@ -2646,6 +2652,17 @@ def build_recording_cache_command(concat_path: Path, output_path: Path) -> list[
     ]
 
 
+def recording_cache_timeout_seconds(entries: list[dict], segment_seconds: int) -> int:
+    file_count = max(1, len(entries))
+    total_seconds = sum(safe_int(entry.get("duration_seconds"), segment_seconds) for entry in entries)
+    estimated = max(
+        RECORDING_CACHE_MIN_TIMEOUT_SECONDS,
+        int(file_count * 2),
+        int(total_seconds * 0.12),
+    )
+    return max(RECORDING_CACHE_MIN_TIMEOUT_SECONDS, min(RECORDING_CACHE_MAX_TIMEOUT_SECONDS, estimated))
+
+
 def recording_cache_url(key: str, cache_name: str, cache_id: str) -> str:
     if cache_name:
         return f"recording-cache/{safe_id(key)}/{safe_id(cache_name)}/timeline.mp4?v={cache_id}"
@@ -2819,6 +2836,7 @@ def build_recording_cache_worker(
     video_path = recording_cache_video_path(key, cache_name)
     meta_path = recording_cache_meta_path(key, cache_name)
     command: list[str] = []
+    timeout_seconds = 0
     acquired = False
     try:
         acquired = RECORDING_CACHE_BUILD_SEMAPHORE.acquire(timeout=7200)
@@ -2829,17 +2847,20 @@ def build_recording_cache_worker(
         concat_path.write_text(concat_payload, encoding="utf-8")
         tmp_path.unlink(missing_ok=True)
         command = build_recording_cache_command(concat_path, tmp_path)
+        total_seconds = sum(safe_int(entry.get("duration_seconds"), segment_seconds) for entry in entries)
+        timeout_seconds = recording_cache_timeout_seconds(entries, segment_seconds)
         write_debug_event("recording_cache_build_start", {
             "key": key,
             "cache_name": cache_name,
             "reason": reason,
             "file_count": len(entries),
-            "total_seconds": sum(safe_int(entry.get("duration_seconds"), segment_seconds) for entry in entries),
+            "total_seconds": total_seconds,
+            "timeout_seconds": timeout_seconds,
             "source_hash": signature.get("hash"),
             "command": redact_command(command),
             "global_worker": "acquired",
         })
-        result = subprocess_run_low_priority(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
+        result = subprocess_run_low_priority(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_seconds)
         stderr = result.stderr.decode("utf-8", errors="replace")[-8000:]
         stdout = result.stdout.decode("utf-8", errors="replace")[-4000:]
         if result.returncode != 0:
@@ -2847,7 +2868,6 @@ def build_recording_cache_worker(
         if not tmp_path.exists() or tmp_path.stat().st_size <= 0:
             raise RuntimeError("recording_cache_output_empty")
         tmp_path.replace(video_path)
-        total_seconds = sum(safe_int(entry.get("duration_seconds"), segment_seconds) for entry in entries)
         metadata = {
             "key": key,
             "cache_name": cache_name,
@@ -2861,6 +2881,7 @@ def build_recording_cache_worker(
             "last_file": entries[-1]["name"] if entries else "",
             "built_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "duration_ms": int((time.time() - started) * 1000),
+            "timeout_seconds": timeout_seconds,
             "video_path": str(video_path),
         }
         write_json(meta_path, metadata)
@@ -2879,6 +2900,7 @@ def build_recording_cache_worker(
             "total_seconds": total_seconds,
             "size_bytes": video_path.stat().st_size,
             "duration_ms": metadata["duration_ms"],
+            "timeout_seconds": timeout_seconds,
             "source_hash": signature.get("hash"),
         })
     except Exception as error:  # noqa: BLE001
@@ -2888,6 +2910,7 @@ def build_recording_cache_worker(
             "reason": reason,
             "error": str(error),
             "type": type(error).__name__,
+            "timeout_seconds": timeout_seconds,
             "command": redact_command(command),
         })
         try:
@@ -2900,6 +2923,7 @@ def build_recording_cache_worker(
                     "reason": reason,
                     "error": str(error),
                     "type": type(error).__name__,
+                    "timeout_seconds": timeout_seconds,
                     "command": redact_command(command),
                 }, default=str) + "\n").encode("utf-8"))
         except OSError:
@@ -5459,7 +5483,14 @@ INDEX_HTML = r"""<!doctype html>
       function recordingPlaybackModeForClient(status = {}) {
         const cache = status?.playback_cache || {};
         if (cache.ready && cache.url && Number(cache.total_seconds || 0) > 0) return 'server_cache_mp4';
-        return isMobileNvrPlayback() ? 'server_file_sequence' : 'continuous_stream';
+        return 'server_file_sequence';
+      }
+
+      function recordingCacheCoversTarget(status = {}, target = null) {
+        const cache = status?.playback_cache || {};
+        if (!target || !cache.ready || !cache.url) return false;
+        const cacheTotal = Number(cache.total_seconds || 0);
+        return cacheTotal > 0 && Number(target.playbackSeek || 0) <= Math.max(0, cacheTotal - 1);
       }
 
       function mediaUrlWithTimeFragment(url, seekSeconds) {
@@ -5765,7 +5796,11 @@ INDEX_HTML = r"""<!doctype html>
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
         if (video?.dataset?.recordingPlaybackMode === 'server_cache_mp4') {
-          seekRecordingCache(index, target, wasPlaying, 'server_cache_select');
+          if (recordingCacheCoversTarget(recordingStatus[index] || {}, target)) {
+            seekRecordingCache(index, target, wasPlaying, 'server_cache_select');
+          } else {
+            switchRecordingVideoToFile(index, target, wasPlaying, 'server_cache_tail_file_select');
+          }
           return;
         }
         if (video?.dataset?.recordingPlaybackMode === 'server_file_sequence') {
@@ -5891,6 +5926,20 @@ INDEX_HTML = r"""<!doctype html>
               attempt,
             });
             renderNvrGrid({ reason: 'continuous_recording_resume' });
+            return;
+          }
+        }
+        if (playbackMode === 'server_cache_mp4' && timeline.playbackTotal > previousTotal) {
+          const target = recordingTargetForPlaybackOffset(index, previousTotal);
+          if (target) {
+            debugEvent('ui_recording_cache_tail_file_resume', {
+              index,
+              previous_total: previousTotal,
+              new_total: timeline.playbackTotal,
+              attempt,
+              cache: status.playback_cache || {},
+            });
+            switchRecordingVideoToFile(index, target, true, 'cache_tail_file_resume');
             return;
           }
         }
@@ -6333,8 +6382,11 @@ INDEX_HTML = r"""<!doctype html>
         if (!Number.isFinite(storedStreamStart)) recordingStreamStartOffset[index] = streamStart;
         const targetForPoster = recordingTargetForOffset(index, timelineValue);
         const selectedFile = targetForPoster?.target?.file || null;
-        const playbackMode = recordingPlaybackModeForClient(status);
         const cache = status.playback_cache || {};
+        let playbackMode = recordingPlaybackModeForClient(status);
+        if (playbackMode === 'server_cache_mp4' && !recordingCacheCoversTarget(status, targetForPoster) && selectedFile?.url) {
+          playbackMode = 'server_file_sequence';
+        }
         let playerSeek = 0;
         let playerStreamStart = streamStart;
         let playerPlaybackStart = 0;
@@ -7169,7 +7221,9 @@ INDEX_HTML = r"""<!doctype html>
           recordingStatus = {};
           (Array.isArray(data.cameras) ? data.cameras : []).forEach((item) => {
             recordingStatus[item.index] = item;
-            if (item.selected_day && selectedRecordingDay[item.index] !== item.selected_day) {
+            const knownDays = Array.isArray(item.days) ? item.days.map((day) => day.day).filter(Boolean) : [];
+            const pinnedDay = selectedRecordingDay[item.index];
+            if (item.selected_day && (!pinnedDay || (knownDays.length && !knownDays.includes(pinnedDay)))) {
               selectedRecordingDay[item.index] = item.selected_day;
             }
             const files = Array.isArray(item.files) ? item.files : [];
