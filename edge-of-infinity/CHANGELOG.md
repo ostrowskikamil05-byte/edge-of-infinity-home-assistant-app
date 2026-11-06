@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.39
+
+- Save both camera and Edge forms together, verify the full persisted response, and keep the form on request failures. Serialize configuration saves and mirror updates and use unique, flushed temporary files for atomic JSON writes.
+- Keep an existing edge.json authoritative, including an empty camera list. Report damaged JSON instead of automatically restoring stale mirror/backup settings. Preserve explicit empty optional WebRTC settings.
+- Browse recordings as calendar days with a full-day seek bar, day navigation and sampled video previews. Keep every segment of the selected day visible regardless of the optional playback-cache limit.
+- Measure irregular legacy clip lengths and the final clip with cached FFprobe results, fix continuous-stream seeking, and reject stale day caches whose offsets may refer to only a portion of a day.
+- Load day thumbnails with bounded concurrency, retry missing short-clip thumbnails at the first frame, and use independent temporary thumbnail files.
+- Handle local calendar-day boundaries across daylight-saving changes. Retention remains unchanged at 14 days by default.
+
 ## 0.10.38
 
 - Run recording retention at startup and every hour, even while FFmpeg records continuously or cameras are disabled/removed.

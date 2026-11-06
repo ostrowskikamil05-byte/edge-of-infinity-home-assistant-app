@@ -349,3 +349,13 @@ After the add-on updates this folder, restart Home Assistant Core so the integra
 Recordings are checked at panel startup and every hour, without opening the UI or restarting recording. The default recordings directory is `/media/edge-of-infinity/recordings`. MP4 segments older than 14 days (by last modification time) are removed, including subdirectories of disabled or removed cameras. Files exactly 14 days old remain until a later check.
 
 `nvr.retention_days` takes precedence over `storage.retention_days`; the default is 14 days. Changes are read at the next hourly check. Only FFmpeg/MediaMTX recording filenames are eligible; unrelated media and symlinks are skipped. Retention results and errors appear as `recording_retention_done` / `recording_retention_error` in the debug log.
+
+### Settings persistence and full-day playback (0.10.39)
+
+Both **Save cameras** and **Save Edge settings** save the current values from both forms. The buttons are disabled while saving. The panel confirms success after checking the complete saved configuration. Failed requests keep the form values.
+
+`/homeassistant/edge/edge.json` is authoritative. `panel-config.json` and `/config/edge.json` are mirrors; backup and legacy override files cannot replace an existing authoritative file on load or restart. If edge.json contains invalid JSON, the add-on reports the error instead of silently restoring old settings. Repair that JSON file (or deliberately restore a chosen backup) before restarting. Existing backup files remain available for manual recovery. Missing authoritative files can still be migrated from valid legacy files.
+
+In **NVR**, select a calendar day, then use the **Day timeline** slider or a sampled preview to start at a specific time. Previous/next-day buttons navigate dates. The main timeline spans midnight to midnight in the add-on's local timezone (normally 24 hours; 23 or 25 hours on daylight-saving transitions). Missing periods jump to an available recording; they are not fabricated video. A day in progress contains only footage recorded so far.
+
+Recordings remain small MP4 segments on disk to limit data loss if power fails. The player joins them into one continuous day stream, so there is no need to open individual seven-minute files. Existing older clips are included; irregular clip durations are measured using FFprobe. The playback-cache segment setting limits optional cache generation, not how much of the selected day can be watched. Old or partial caches are bypassed until they match the selected day's source files. Retention still defaults to 14 days.

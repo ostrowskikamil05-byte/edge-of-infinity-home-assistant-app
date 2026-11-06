@@ -12,7 +12,9 @@ import subprocess
 import sys
 import hashlib
 import threading
+import tempfile
 import time
+from datetime import date, timedelta
 import xml.etree.ElementTree as ET
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,7 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.38"
+APP_VERSION = "0.10.39"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
 UI_BUILD = "nvr-continuous-short-segments-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
@@ -68,6 +70,10 @@ RECORDING_THUMBNAIL_WARMUP_LOOP_STARTED = False
 LAST_RECORDING_ENSURE_AT = 0.0
 DEBUG_LOCK = threading.Lock()
 RECORDING_ENSURE_LOCK = threading.Lock()
+CONFIG_LOCK = threading.RLock()
+CONFIG_SAVE_LOCK = threading.Lock()
+RECORDING_DURATION_CACHE: dict[str, tuple[int, int, int]] = {}
+RECORDING_DURATION_LOCK = threading.Lock()
 RECORDING_CACHE_LOCK = threading.Lock()
 RECORDING_CACHE_BUILD_SEMAPHORE = threading.BoundedSemaphore(value=1)
 RECORDING_THUMBNAIL_SEMAPHORE = threading.BoundedSemaphore(value=1)
@@ -181,9 +187,19 @@ def read_json(path: Path, fallback):
 
 def write_json(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    # Each writer owns its temporary file; readers only see a complete JSON file.
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=f".{path.name}.", suffix=".tmp", delete=False) as handle:
+            tmp_path = Path(handle.name)
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(path)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def read_chunked_body_from_stream(stream, max_bytes: int = MAX_REQUEST_BODY_BYTES) -> bytes:
@@ -815,11 +831,11 @@ def normalize_config(payload: dict) -> dict:
             "prebuffer_local_ms": clamp_int(live.get("prebuffer_local_ms"), 4000, 0, 10000),
             "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
             "mobile_webrtc_public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
-            "mobile_webrtc_public_url": (live.get("mobile_webrtc_public_url") or MEDIAMTX_WEBRTC_PUBLIC_URL).rstrip("/"),
+            "mobile_webrtc_public_url": (live.get("mobile_webrtc_public_url", MEDIAMTX_WEBRTC_PUBLIC_URL)).rstrip("/"),
             "mobile_webrtc_stun_url": live.get("mobile_webrtc_stun_url") if live.get("mobile_webrtc_stun_url") is not None else MEDIAMTX_WEBRTC_STUN_URL,
-            "mobile_webrtc_turn_url": live.get("mobile_webrtc_turn_url") or MEDIAMTX_WEBRTC_TURN_URL,
-            "mobile_webrtc_turn_username": live.get("mobile_webrtc_turn_username") or MEDIAMTX_WEBRTC_TURN_USERNAME,
-            "mobile_webrtc_turn_password": live.get("mobile_webrtc_turn_password") or MEDIAMTX_WEBRTC_TURN_PASSWORD,
+            "mobile_webrtc_turn_url": live.get("mobile_webrtc_turn_url", MEDIAMTX_WEBRTC_TURN_URL),
+            "mobile_webrtc_turn_username": live.get("mobile_webrtc_turn_username", MEDIAMTX_WEBRTC_TURN_USERNAME),
+            "mobile_webrtc_turn_password": live.get("mobile_webrtc_turn_password", MEDIAMTX_WEBRTC_TURN_PASSWORD),
             "mobile_webrtc_ice_transport": webrtc_ice_transport,
             "mobile_webrtc_tcp_only": webrtc_ice_transport == "tcp",
         },
@@ -1510,45 +1526,64 @@ def authoritative_config_from_payload(raw_payload: dict) -> dict:
 
 
 def load_config() -> dict:
-    config = effective_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
-    if config.get("cameras"):
-        if read_json(PANEL_CONFIG_PATH, {}) != config:
-            write_json(PANEL_CONFIG_PATH, config)
-        return config
+    with CONFIG_LOCK:
+        if CONFIG_PATH.exists():
+            # An existing authoritative file must never silently roll back to a mirror/backup.
+            raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or not isinstance(raw.get("cameras"), list):
+                raise ValueError("Invalid authoritative config; repair edge.json instead of restoring old settings automatically.")
+            config = effective_config_from_payload(raw)
+            try:
+                if read_json(PANEL_CONFIG_PATH, {}) != config:
+                    write_json(PANEL_CONFIG_PATH, config)
+            except OSError as error:
+                write_debug_event("config_mirror_error", {"path": str(PANEL_CONFIG_PATH), "error": str(error)})
+            return config
 
-    panel_config = authoritative_config_from_payload(read_json(PANEL_CONFIG_PATH, {"cameras": []}))
-    if panel_config.get("cameras"):
-        write_debug_event("config_source_selected", {
-            "source": "panel_config_fallback",
-            "runtime_config": str(CONFIG_PATH),
-            "panel_config": str(PANEL_CONFIG_PATH),
-            "summary": config_summary(panel_config),
-        })
-        write_json(CONFIG_PATH, panel_config)
-        return panel_config
-
-    if CONFIG_BACKUP_PATH.exists():
-        backup = effective_config_from_payload(read_json(CONFIG_BACKUP_PATH, {"cameras": []}))
-        if backup.get("cameras"):
-            write_json(CONFIG_PATH, backup)
-            write_json(PANEL_CONFIG_PATH, backup)
-            return backup
-    return config
+        for source in (PANEL_CONFIG_PATH, ADDON_CONFIG_PATH, CONFIG_BACKUP_PATH):
+            raw = read_json(source, None)
+            if not isinstance(raw, dict) or not isinstance(raw.get("cameras"), list):
+                continue
+            config = authoritative_config_from_payload(raw)
+            if config.get("cameras"):
+                write_debug_event("config_source_selected", {"source": str(source), "runtime_config": str(CONFIG_PATH)})
+                return commit_panel_config(config)
+        return normalize_config({"cameras": []})
 
 
 def commit_panel_config(payload: dict) -> dict:
-    committed = authoritative_config_from_payload(payload)
-    write_json(CONFIG_PATH, committed)
-    write_json(PANEL_CONFIG_PATH, committed)
-    if ADDON_CONFIG_PATH != CONFIG_PATH:
+    with CONFIG_LOCK:
+        committed = authoritative_config_from_payload(payload)
+        write_json(CONFIG_PATH, committed)
+        for mirror in dict.fromkeys((PANEL_CONFIG_PATH, ADDON_CONFIG_PATH)):
+            if mirror == CONFIG_PATH:
+                continue
+            try:
+                write_json(mirror, committed)
+            except OSError as error:
+                # The authoritative file is already saved; a diagnostic mirror is best effort.
+                write_debug_event("config_mirror_error", {"path": str(mirror), "error": str(error)})
+        clear_legacy_override_files()
+        return committed
+
+
+def persist_config_payload(request_payload: dict) -> tuple[dict, dict, dict, dict, dict]:
+    with CONFIG_LOCK:
+        raw, merged, normalized, final = prepare_config_for_save(request_payload)
+        backup_config()
         try:
-            write_json(ADDON_CONFIG_PATH, committed)
+            backup_panel_config()
         except OSError as error:
-            write_debug_event("addon_config_mirror_error", {"path": str(ADDON_CONFIG_PATH), "error": str(error)})
-        else:
-            write_debug_event("addon_config_mirror_updated", {"path": str(ADDON_CONFIG_PATH)})
-    clear_legacy_override_files()
-    return committed
+            write_debug_event("config_mirror_backup_error", {"error": str(error)})
+        committed = commit_panel_config(final)
+        saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if saved != committed:
+            raise OSError("Configuration verification failed; saved settings differ from submitted settings.")
+        try:
+            write_json(HOME_DIR / "edge.last-saved.json", saved)
+        except OSError as error:
+            write_debug_event("config_last_saved_mirror_error", {"error": str(error)})
+        return raw, merged, normalized, final, saved
 
 
 def prepare_config_for_save(raw_payload: dict) -> tuple[dict, dict, dict, dict]:
@@ -2231,7 +2266,7 @@ def stream_capabilities(config: dict | None = None) -> dict:
             "public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
             "public_url": live.get("mobile_webrtc_public_url") or "",
             "stun_url": live.get("mobile_webrtc_stun_url") if live.get("mobile_webrtc_stun_url") is not None else MEDIAMTX_WEBRTC_STUN_URL,
-            "turn_configured": bool(live.get("mobile_webrtc_turn_url") or MEDIAMTX_WEBRTC_TURN_URL),
+            "turn_configured": bool(live.get("mobile_webrtc_turn_url", MEDIAMTX_WEBRTC_TURN_URL)),
             "ice_transport": normalize_webrtc_ice_transport(
                 live.get("mobile_webrtc_ice_transport"),
                 live.get("mobile_webrtc_tcp_only"),
@@ -2408,6 +2443,25 @@ def recording_inferred_duration_seconds(start_ts: int | float, next_start_ts: in
     return fallback
 
 
+def recording_duration_seconds(path: Path, stat: os.stat_result, fallback: int) -> int:
+    cache_key = str(path)
+    with RECORDING_DURATION_LOCK:
+        cached = RECORDING_DURATION_CACHE.get(cache_key)
+    if cached and cached[:2] == (stat.st_mtime_ns, stat.st_size):
+        return cached[2] or fallback
+    probe = run_json(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)], timeout=4) or {}
+    try:
+        duration = float((probe.get("format") or {}).get("duration") or 0)
+        measured = max(1, round(duration)) if 0 < duration <= 86400 else 0
+    except (TypeError, ValueError, OverflowError):
+        measured = 0
+    with RECORDING_DURATION_LOCK:
+        if len(RECORDING_DURATION_CACHE) >= RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS:
+            RECORDING_DURATION_CACHE.clear()
+        RECORDING_DURATION_CACHE[cache_key] = (stat.st_mtime_ns, stat.st_size, measured)
+    return measured or fallback
+
+
 def recording_day_key(start_ts: int | float) -> str:
     try:
         return time.strftime("%Y-%m-%d", time.localtime(float(start_ts)))
@@ -2426,7 +2480,10 @@ def recording_day_start_ts(day_key: str) -> int:
 
 def recording_day_bounds(day_key: str) -> tuple[int, int]:
     start = recording_day_start_ts(day_key)
-    return (start, start + 86400) if start else (0, 0)
+    if not start:
+        return 0, 0
+    next_day = (date.fromisoformat(day_key) + timedelta(days=1)).isoformat()
+    return start, recording_day_start_ts(next_day)
 
 
 def recording_day_is_today(day_key: str) -> bool:
@@ -2437,14 +2494,19 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
     directory = recording_base_dir(camera, index)
     if not directory.exists():
         return []
-    files = sorted(playable_recording_files(directory), key=lambda item: (recording_segment_start_ts(item, item.stat().st_mtime), item.name))
+    candidates = []
+    for path in playable_recording_files(directory):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        candidates.append((path, stat, recording_segment_start_ts(path, stat.st_mtime)))
+    candidates.sort(key=lambda item: (item[2], item[0].name))
     entries = []
     offset = 0
-    selected_files = files if safe_int(limit, 0) <= 0 else files[-safe_int(limit, 0):]
+    selected_files = candidates if safe_int(limit, 0) <= 0 else candidates[-safe_int(limit, 0):]
     items = []
-    for path in selected_files:
-        stat = path.stat()
-        start_ts = recording_segment_start_ts(path, stat.st_mtime)
+    for path, stat, start_ts in selected_files:
         items.append({"path": path, "stat": stat, "start_ts": start_ts, "day": recording_day_key(start_ts)})
     for position, item in enumerate(items):
         path = item["path"]
@@ -2455,8 +2517,10 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
         next_item = items[position + 1] if position + 1 < len(items) else None
         next_start_ts = next_item.get("start_ts") if next_item and next_item.get("day") == entry_day else None
         duration_seconds = recording_inferred_duration_seconds(start_ts, next_start_ts, segment_seconds)
+        if next_start_ts is None or next_start_ts - start_ts > max(2, min(3600, segment_seconds * 6)):
+            duration_seconds = recording_duration_seconds(path, item["stat"], duration_seconds)
         day_start_ts, _day_end_ts = recording_day_bounds(entry_day)
-        day_offset = max(0, min(86399, start_ts - day_start_ts)) if day_start_ts else offset
+        day_offset = max(0, min(_day_end_ts - day_start_ts - 1, start_ts - day_start_ts)) if day_start_ts else offset
         entries.append(
             {
                 "path": path,
@@ -2489,7 +2553,7 @@ def recording_day_groups(entries: list[dict], segment_seconds: int, key: str = "
                 "recorded_seconds": 0,
                 "day_start_ts": recording_day_bounds(day)[0],
                 "day_end_ts": recording_day_bounds(day)[1],
-                "day_total_seconds": 86400,
+                "day_total_seconds": recording_day_bounds(day)[1] - recording_day_bounds(day)[0],
                 "oldest_at": entry.get("start_at") or "",
                 "newest_at": entry.get("start_at") or "",
                 "thumbnail_url": "",
@@ -2619,13 +2683,13 @@ def build_recording_stream_command(concat_path: Path, seek_seconds: int = 0) -> 
         "concat",
         "-safe",
         "0",
-        "-i",
-        str(concat_path),
     ]
     seek = max(0, safe_int(seek_seconds, 0))
     if seek:
         command += ["-ss", str(seek)]
     command += [
+        "-i",
+        str(concat_path),
         "-map",
         "0:v:0",
         "-map",
@@ -2807,7 +2871,8 @@ def recording_cache_status(
     metadata_file_count = safe_int(metadata.get("file_count"), 0)
     cache_too_short_for_sources = bool(raw_ready and not current and len(signature["items"]) > 1 and metadata_file_count <= 1)
     stale_active_day_cache = bool(raw_ready and active_day_cache and not current)
-    ready = bool(raw_ready and not cache_too_short_for_sources and not stale_active_day_cache)
+    # A stale cache can be only the tail of a day, so its offsets are unsafe.
+    ready = current
     worker_id = recording_cache_worker_id(key, cache_name)
     with RECORDING_CACHE_LOCK:
         building = worker_id in RECORDING_CACHE_WORKERS
@@ -2837,7 +2902,7 @@ def recording_cache_status(
         "active_day": active_day_cache,
         "stale_active_day": stale_active_day_cache,
         "building": building,
-        "stale": bool(ready and not current),
+        "stale": bool(raw_ready and not current),
         "rebuild_deferred": bool(defer_reason),
         "rebuild_defer_reason": defer_reason,
         "new_source_count": max(0, len(signature["items"]) - metadata_file_count),
@@ -3040,9 +3105,7 @@ def refresh_recording_caches(config: dict, reason: str) -> None:
         days = recording_day_groups(all_entries, segment_seconds, key)
         active_day = days[0]["day"] if days else ""
         entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds, day_key=active_day) if active_day else all_entries
-        if cache_limit > 0:
-            entries = entries[-cache_limit:]
-        if entries and active_day:
+        if entries and active_day and len(entries) <= cache_limit:
             recording_cache_status(key, entries, segment_seconds, auto_refresh=True, cache_name=active_day)
 
 
@@ -3167,7 +3230,7 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg_not_installed_in_addon")
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".jpg.tmp")
+    tmp = target.with_name(f".{target.name}.{time.time_ns()}.tmp")
     command = build_recording_thumbnail_command(source, tmp)
     acquired = RECORDING_THUMBNAIL_SEMAPHORE.acquire(timeout=20)
     if not acquired:
@@ -3187,6 +3250,9 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
     try:
         try:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
+            if result.returncode == 0 and not recording_thumbnail_ready(tmp, source):
+                command = build_recording_thumbnail_command(source, tmp, seek_seconds=0)
+                result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
         except subprocess.TimeoutExpired as error:
             try:
                 tmp.unlink(missing_ok=True)
@@ -3225,7 +3291,10 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
         append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_done", payload)
         write_debug_event("recording_thumbnail_generated", payload)
     finally:
-        RECORDING_THUMBNAIL_SEMAPHORE.release()
+        try:
+            tmp.unlink(missing_ok=True)
+        finally:
+            RECORDING_THUMBNAIL_SEMAPHORE.release()
     return target
 
 
@@ -3564,16 +3633,14 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
         if selected_day and not any(day.get("day") == selected_day for day in days):
             selected_day = days[0]["day"] if days else ""
         day_entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds, day_key=selected_day) if selected_day else all_entries
-        if cache_limit > 0:
-            day_entries = day_entries[-cache_limit:]
         segment_files = recording_files_from_entries(key, day_entries, segment_seconds)
         timeline_files = sorted(segment_files, key=lambda item: (item.get("start_ts") or 0, item.get("name") or ""))
         day_start_ts, day_end_ts = recording_day_bounds(selected_day)
         recorded_seconds = sum(safe_int(item.get("duration_seconds"), segment_seconds) for item in timeline_files)
-        timeline_total_seconds = 86400 if day_start_ts else recorded_seconds
+        timeline_total_seconds = day_end_ts - day_start_ts if day_start_ts else recorded_seconds
         available_start_ts = timeline_files[0].get("start_ts") if timeline_files else 0
         available_end_ts = max((safe_int(item.get("end_ts"), 0) for item in timeline_files), default=0)
-        playback_cache = recording_cache_status(key, day_entries, segment_seconds, auto_refresh=True, cache_name=selected_day)
+        playback_cache = recording_cache_status(key, day_entries, segment_seconds, auto_refresh=len(day_entries) <= cache_limit, cache_name=selected_day)
         record_stream = camera.get("record_stream") or "main"
         direct_record_rtsp = camera_stream(camera, record_stream)
         record_rtsp, record_source = recording_source_stream(camera, index, record_stream)
@@ -4757,6 +4824,7 @@ INDEX_HTML = r"""<!doctype html>
       .recording-player-wrap .recording-player {
         border-radius: 8px;
       }
+      .recording-day-seek { width: 100%; accent-color: #22c55e; cursor: pointer; }
       .recording-timeline {
         display: grid;
         gap: 6px;
@@ -5957,6 +6025,8 @@ INDEX_HTML = r"""<!doctype html>
         const safeValue = Math.max(0, Math.floor(Number(value || 0)));
         const safeTotal = Math.max(0, Math.floor(Number(total || 0)));
         selectedRecordingTimeline[index] = Math.min(safeValue, Math.max(0, safeTotal - 1));
+        const slider = nvrGrid.querySelector(`[data-recording-day-seek="${index}"]`);
+        if (slider && document.activeElement !== slider) slider.value = String(selectedRecordingTimeline[index]);
         const label = nvrGrid.querySelector(`[data-recording-timeline-label="${index}"]`);
         if (label) {
           label.textContent = recordingTimelineLabel(index, safeValue, safeTotal);
@@ -6665,7 +6735,7 @@ INDEX_HTML = r"""<!doctype html>
         const currentDay = selectedRecordingDay[index] || status.selected_day || days[0]?.day || '';
         const currentDayIndex = Math.max(0, days.findIndex((day) => day.day === currentDay));
         const selected = selectedRecording[index] || '';
-        const displayFiles = recordingFilmstripFiles(files, selected, 72);
+        const displayFiles = recordingFilmstripFiles(files, selected, 24);
         const seekSeconds = Number(selectedRecordingSeek[index] || 0);
         const selectedIndex = files.findIndex((file) => file.url === selected);
         const selection = recordingOffsetForSelection(files, selected, seekSeconds, status);
@@ -6728,8 +6798,8 @@ INDEX_HTML = r"""<!doctype html>
                 ${days.map((day) => {
                   const thumb = day.thumbnail_url ? panelPath(day.thumbnail_url) : '';
                   return `<button class="recording-day-tile ${day.day === currentDay ? 'active' : ''}" type="button" data-recording-day="${escapeHtml(day.day)}" data-record-index="${index}">
-                    <span class="recording-day-thumb">${thumb ? `<img src="${escapeHtml(thumb)}" alt="${escapeHtml(day.day)} preview" loading="lazy" decoding="async">` : ''}</span>
-                    <span><b>${escapeHtml(recordingDayLabel(day.day))}</b><small>${escapeHtml(formatDuration(day.recorded_seconds || 0))} / ${escapeHtml(formatDuration(day.day_total_seconds || day.total_seconds || 86400))} | ${escapeHtml(text(day.file_count, 0))} clips</small></span>
+                    <span class="recording-day-thumb">${thumb ? `<img class="recording-thumb" src="${THUMB_PLACEHOLDER}" data-recording-thumb-src="${escapeHtml(thumb)}" alt="${escapeHtml(day.day)} preview" loading="lazy" decoding="async">` : ''}</span>
+                    <span><b>${escapeHtml(recordingDayLabel(day.day))}</b><small>${escapeHtml(formatDuration(day.recorded_seconds || 0))} / ${escapeHtml(formatDuration(day.day_total_seconds || day.total_seconds || 86400))} | 00:00–24:00</small></span>
                   </button>`;
                 }).join('')}
               </div>
@@ -6744,6 +6814,11 @@ INDEX_HTML = r"""<!doctype html>
           : `<div class="recording-empty">No video yet</div>`;
         const timelineControl = timelineTotal
           ? `<div class="recording-timeline recording-native-timeline">
+              <label>Day timeline
+                <input class="recording-day-seek" type="range" min="0" max="${timelineMax}" step="1" value="${timelineValue}" data-recording-day-seek="${index}" aria-label="Seek within selected recording day">
+              </label>
+              <div class="timeline-row"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+              <p class="notice">${escapeHtml(recordingDayLabel(currentDay))}: one continuous day. Empty periods jump to the next available recording.</p>
               <div class="timeline-row">
                 <span>Recording time</span>
                 <span data-recording-timeline-label="${index}">${escapeHtml(recordingTimelineLabel(index, timelineValue, timelineTotal))}</span>
@@ -6761,8 +6836,8 @@ INDEX_HTML = r"""<!doctype html>
                   <img class="recording-thumb" src="${THUMB_PLACEHOLDER}" ${file.thumbnail_url ? `data-recording-thumb-src="${escapeHtml(panelPath(file.thumbnail_url))}"` : ''} alt="${escapeHtml(file.name)} snapshot" loading="lazy" decoding="async" fetchpriority="low">
                   <span class="recording-thumb-time">${escapeHtml(formatTimestampSeconds(file.start_ts || file.start_at || file.modified_at))}</span>
                 </span>
-                <b>${escapeHtml(file.name)}</b>
-                <span class="recording-meta">${escapeHtml(formatDuration(file.duration_seconds || status.segment_seconds || 10))} | ${escapeHtml(formatBytes(file.size_bytes))} | ${escapeHtml(formatTimestampSeconds(file.start_ts || file.start_at || file.modified_at))}</span>
+                <b>${escapeHtml(formatTimestampSeconds(file.start_ts))}</b>
+                <span class="recording-meta">Preview — click to watch from this time</span>
               </button>
             `).join('')}</div>`
           : `<p class="notice">${desiredRecording ? 'Continuous video recording is scheduled. The first playable clip appears after the first' : 'Start continuous video recording. The first playable clip appears after the first'} ${escapeHtml(text(status.segment_seconds, 10))}-second segment closes.</p>`;
@@ -6782,8 +6857,8 @@ INDEX_HTML = r"""<!doctype html>
               ${diagnostics}
               <div class="actions">
                 <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}" ${!isRecording && !canRecord ? 'disabled' : ''}>${isRecording ? 'Stop' : 'Record'}</button>
-                <button data-playback-step="older" data-record-index="${index}" ${selectedIndex >= 0 && selectedIndex < files.length - 1 ? '' : 'disabled'}>Back</button>
-                <button data-playback-step="newer" data-record-index="${index}" ${selectedIndex > 0 ? '' : 'disabled'}>Forward</button>
+                <button data-recording-day-step="older" data-record-index="${index}" ${currentDayIndex < days.length - 1 ? '' : 'disabled'}>Previous day</button>
+                <button data-recording-day-step="newer" data-record-index="${index}" ${currentDayIndex > 0 ? '' : 'disabled'}>Next day</button>
               </div>
               ${recordingList}
             </div>
@@ -7252,6 +7327,7 @@ INDEX_HTML = r"""<!doctype html>
           const rtspMain = vendor === 'hikvision' ? refreshHikvisionRtsp(rtspMainRaw, host, username, password, rtspMainChannel) : rtspMainRaw;
           const rtspSub = vendor === 'hikvision' ? refreshHikvisionRtsp(rtspSubRaw, host, username, password, rtspSubChannel) : rtspSubRaw;
           return {
+            ...existingCameras[index],
             id: existingCameras[index]?.id || `${get('vendor').value}_${index + 1}`,
             name: get('name').value,
             vendor,
@@ -7281,7 +7357,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function syncConfigDraftFromForm() {
         try {
-          config = collectConfig({ refreshGenerated: false });
+          config = collectEdgeSettings({ refreshGenerated: false });
           lastFormDraft = config;
           lastFormDraftAt = Date.now();
           configDirty = true;
@@ -7368,9 +7444,9 @@ INDEX_HTML = r"""<!doctype html>
         saveState.textContent = 'Generic ONVIF/RTSP cameras need manual RTSP URLs for now.';
       }
 
-      function collectEdgeSettings() {
+      function collectEdgeSettings(options = {}) {
         const get = (name) => edgeForm.elements[name];
-        const cameraConfig = collectConfig();
+        const cameraConfig = collectConfig(options);
         return {
           ...cameraConfig,
           server: {
@@ -7447,6 +7523,7 @@ INDEX_HTML = r"""<!doctype html>
 
       async function loadConfig() {
         const response = await fetch(panelPath('api/config'), { cache: 'no-store' });
+        if (!response.ok) { const data = await response.json(); throw new Error(data.error || 'Could not load configuration.'); }
         config = await response.json();
         debugEvent('ui_config_loaded', { summary: saveSummary(config) });
         renderConfig();
@@ -7731,56 +7808,59 @@ INDEX_HTML = r"""<!doctype html>
         addCamera();
       });
 
+      let configSaveInFlight = false;
+      function canonicalConfig(value) {
+        if (Array.isArray(value)) return value.map(canonicalConfig);
+        if (value && typeof value === 'object') {
+          return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalConfig(value[key])]));
+        }
+        return value;
+      }
+
+      async function saveAllSettings(state, reason) {
+        if (configSaveInFlight) return;
+        const buttons = ['save-config', 'save-edge-settings'].map((id) => document.getElementById(id));
+        configSaveInFlight = true;
+        [form, edgeForm].forEach((element) => { element.inert = true; });
+        buttons.forEach((button) => { button.disabled = true; });
+        try {
+          const payload = collectEdgeSettings({ refreshGenerated: true });
+          if (!hasMeaningfulCameras(payload)) throw new Error('At least one camera needs a host/IP or RTSP URL.');
+          state.textContent = 'Saving all current camera and Edge settings...';
+          const response = await fetch(panelPath('api/config'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || 'Could not save configuration.');
+          const verified = await fetchSavedConfig();
+          if (JSON.stringify(canonicalConfig(data)) !== JSON.stringify(canonicalConfig(verified))) {
+            throw new Error('Saved settings changed during verification. Your form has been kept; reload before retrying.');
+          }
+          config = verified;
+          lastFormDraft = verified;
+          lastFormDraftAt = Date.now();
+          renderConfig();
+          configDirty = false;
+          state.textContent = `Saved and verified. ${saveSummary(verified)}`;
+          debugEvent(`ui_${reason}_done`, { savedSummary: saveSummary(verified) });
+          if (liveTimer) { window.clearInterval(liveTimer); liveTimer = null; updateLiveTimer(); }
+          // Auxiliary refresh errors must not be presented as a failed settings save.
+          await Promise.allSettled([loadPresets(), loadCameras(), ...(panelLogs ? [loadLogs()] : [])]);
+        } catch (error) {
+          state.textContent = error.message || 'Could not save configuration. Your form has been kept.';
+          debugEvent(`ui_${reason}_error`, { message: error.message });
+        } finally {
+          configSaveInFlight = false;
+          [form, edgeForm].forEach((element) => { element.inert = false; });
+          buttons.forEach((button) => { button.disabled = false; });
+        }
+      }
+
       document.getElementById('save-config').addEventListener('click', async () => {
-        const beforeSnapshot = cameraFormSnapshot();
-        const draftAgeMs = lastFormDraftAt ? Date.now() - lastFormDraftAt : null;
-        const payload = collectConfig({ refreshGenerated: true });
-        config = payload;
-        lastFormDraft = payload;
-        lastFormDraftAt = Date.now();
-        const afterSnapshot = cameraFormSnapshot();
-        debugEvent('ui_save_config_click', {
-          summary: saveSummary(payload),
-          cameras: payload.cameras,
-          form_before_collect: beforeSnapshot,
-          form_after_collect: afterSnapshot,
-          draft_age_ms: draftAgeMs
-        });
-        if (!hasMeaningfulCameras(payload)) {
-          saveState.textContent = 'Save blocked: at least one camera needs host/IP or RTSP, so existing configuration was not overwritten.';
-          debugEvent('ui_save_config_blocked', { reason: 'empty_camera_configuration' });
-          return;
-        }
-        saveState.textContent = `Saving cameras... ${saveSummary(payload)}`;
-        const response = await fetch(panelPath('api/config'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const data = await response.json();
-        if (!response.ok) {
-          saveState.textContent = data.error || 'Could not save configuration.';
-          debugEvent('ui_save_config_error', { status: response.status, data });
-          return;
-        }
-        const verified = await fetchSavedConfig();
-        config = verified;
-        renderConfig();
-        configDirty = false;
-        await loadPresets();
-        await loadCameras();
-        if (panelLogs) await loadLogs();
-        const sentSummary = saveSummary(payload);
-        const savedSummary = saveSummary(verified);
-        saveState.textContent = sentSummary === savedSummary
-          ? `Saved and runtime synced. ${savedSummary}`
-          : `Saved and runtime synced, but server normalized values. Sent: ${sentSummary} | Server: ${savedSummary}`;
-        debugEvent('ui_save_config_done', {
-          sentSummary,
-          serverSummary: saveSummary(data),
-          savedSummary,
-          normalized: sentSummary !== savedSummary
-        });
+        debugEvent('ui_save_config_click', { form: cameraFormSnapshot() });
+        await saveAllSettings(saveState, 'save_config');
       });
 
       form.addEventListener('submit', (event) => {
@@ -7789,54 +7869,14 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       document.getElementById('save-edge-settings').addEventListener('click', async () => {
-        const edgeBeforeSnapshot = edgeFormSnapshot();
-        const camerasBeforeSnapshot = cameraFormSnapshot();
-        const payload = collectEdgeSettings();
-        debugEvent('ui_save_edge_settings_click', {
-          summary: saveSummary(payload),
-          edge_form: edgeBeforeSnapshot,
-          camera_form: camerasBeforeSnapshot,
-          live: payload.live,
-          storage: payload.storage,
-          nvr: payload.nvr,
-          cameras: payload.cameras,
-        });
-        if (!hasMeaningfulCameras(payload)) {
-          edgeSaveState.textContent = 'Save blocked: camera configuration is empty, so existing settings were not overwritten.';
-          debugEvent('ui_save_edge_settings_blocked', { reason: 'empty_camera_configuration' });
-          return;
-        }
-        edgeSaveState.textContent = 'Saving Edge settings...';
-        const response = await fetch(panelPath('api/config'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const data = await response.json();
-        if (!response.ok) {
-          edgeSaveState.textContent = data.error || 'Could not save Edge settings.';
-          debugEvent('ui_save_edge_settings_error', { status: response.status, data });
-          return;
-        }
-        config = await fetchSavedConfig();
-        renderConfig();
-        if (liveTimer) {
-          window.clearInterval(liveTimer);
-          liveTimer = null;
-          updateLiveTimer();
-        }
-        if (panelLogs) await loadLogs();
-        edgeSaveState.textContent = 'Saved and runtime synced. Edge settings are stored in /homeassistant/edge/edge.json and mirrored to /config/edge.json plus panel-config.json.';
-        debugEvent('ui_save_edge_settings_done', {
-          sentSummary: saveSummary(payload),
-          savedSummary: saveSummary(config),
-          live: config.live,
-          storage: config.storage,
-          nvr: config.nvr,
-        });
+        debugEvent('ui_save_edge_settings_click', { form: edgeFormSnapshot() });
+        await saveAllSettings(edgeSaveState, 'save_edge_settings');
       });
 
       document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);
+
+      edgeForm.addEventListener('input', syncConfigDraftFromForm);
+      edgeForm.addEventListener('change', syncConfigDraftFromForm);
 
       form.addEventListener('input', () => {
         syncConfigDraftFromForm();
@@ -7900,6 +7940,19 @@ INDEX_HTML = r"""<!doctype html>
         live[liveKey] = nextLive;
         updateLiveTimer();
         await loadCameras();
+      });
+
+      nvrGrid.addEventListener('input', (event) => {
+        const slider = event.target.closest('[data-recording-day-seek]');
+        if (!slider) return;
+        const index = slider.dataset.recordingDaySeek;
+        markNvrInteraction('day_timeline_preview', { index });
+        const label = nvrGrid.querySelector(`[data-recording-timeline-label="${index}"]`);
+        if (label) label.textContent = recordingTimelineLabel(index, Number(slider.value), Number(slider.max) + 1);
+      });
+      nvrGrid.addEventListener('change', (event) => {
+        const slider = event.target.closest('[data-recording-day-seek]');
+        if (slider) selectRecordingAtOffset(slider.dataset.recordingDaySeek, Number(slider.value));
       });
 
       nvrGrid.addEventListener('click', async (event) => {
@@ -8157,7 +8210,10 @@ class EdgeHandler(BaseHTTPRequestHandler):
             })
             return
         if path == "/api/config":
-            self.send_json(load_config())
+            try:
+                self.send_json(load_config())
+            except (OSError, ValueError) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         if path == "/api/presets":
             self.send_json({"presets": load_presets()})
@@ -8304,6 +8360,10 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
 
     def save_config(self) -> None:
+        with CONFIG_SAVE_LOCK:
+            self._save_config()
+
+    def _save_config(self) -> None:
         try:
             request_payload = self.read_body_json()
             body_info = getattr(self, "_last_body_info", {})
@@ -8319,19 +8379,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 })
                 self.send_json({"error": "empty_request_body", "body": body_info}, HTTPStatus.BAD_REQUEST)
                 return
-            raw_payload, merged_payload, normalized_payload, final_payload = prepare_config_for_save(request_payload)
-            backup_config()
-            backup_panel_config()
-            committed_payload = commit_panel_config(final_payload)
-            saved_payload = authoritative_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
-            if config_summary(saved_payload) != config_summary(committed_payload):
-                write_debug_event("config_save_rewrite_after_verify", {
-                    "expected_summary": config_summary(committed_payload),
-                    "loaded_summary": config_summary(saved_payload),
-                })
-                committed_payload = commit_panel_config(committed_payload)
-                saved_payload = authoritative_config_from_payload(read_json(CONFIG_PATH, {"cameras": []}))
-            write_json(HOME_DIR / "edge.last-saved.json", saved_payload)
+            raw_payload, merged_payload, normalized_payload, final_payload, saved_payload = persist_config_payload(request_payload)
+            committed_payload = saved_payload
             save_debug_payload(raw_payload, merged_payload, normalized_payload, saved_payload)
             write_debug_event("config_save", {
                 "raw_summary": config_summary(raw_payload),
@@ -8340,7 +8389,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "final_summary": config_summary(final_payload),
                 "committed_summary": config_summary(committed_payload),
                 "saved_summary": config_summary(saved_payload),
-                "verified": config_summary(committed_payload) == config_summary(saved_payload),
+                "verified": committed_payload == saved_payload,
                 "changed_by": self.client_address[0],
                 "request_body": body_info,
                 "authoritative_path": str(CONFIG_PATH),
