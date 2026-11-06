@@ -9,22 +9,26 @@ export function edgeRTCPlaybackSupport(language=globalThis.navigator?.language||
 export class EdgeRTCClient {
   constructor(options){this.options=options;this.canvas=options.canvas;this.closed=false;this.playing=false;this.connectionState='connecting';this.waitKey=true;this.firstFrameMS=null;this.frames=0;this.started=performance.now();}
   async start(){
-    const support=edgeRTCPlaybackSupport(this.options.language||this.options.hass?.locale?.language||this.options.hass?.language||globalThis.navigator?.language||'en');
+    this.language=this.options.language||this.options.hass?.locale?.language||this.options.hass?.language||globalThis.navigator?.language||'en';const support=edgeRTCPlaybackSupport(this.language);
     if(!support.supported){const error=new Error(support.message);error.code=support.code;error.retryable=false;this.close();throw error;}
     this.connectTimer=setTimeout(()=>this.fail('EdgeRTC camera timed out.'),15000);let url=this.options.url;
     if(!url){const path=`/api/edge/rtc/${this.options.entity}?microphone=${this.options.microphone?1:0}`;const signed=await this.options.hass.callWS({type:'auth/sign_path',path});if(this.closed)return;url=this.options.hass.hassUrl?this.options.hass.hassUrl(signed.path):new URL(signed.path,location.href).href;}
     if(this.closed)return;url=url.replace(/^http:/,'ws:').replace(/^https:/,'wss:');
-    this.ws=new WebSocket(url);this.ws.binaryType='arraybuffer';this.ws.onmessage=e=>this.message(e.data);this.ws.onerror=()=>this.fail('EdgeRTC connection failed.');this.ws.onclose=()=>{if(!this.closed)this.fail('EdgeRTC source disconnected.');};
+    this.ws=new WebSocket(url);this.ws.binaryType='arraybuffer';this.messageChain=Promise.resolve();this.pendingMessages=0;this.ws.onmessage=e=>{if(this.closed)return;if(++this.pendingMessages>256){this.fail('EdgeRTC decoder cannot keep up.');return;}this.messageChain=this.messageChain.then(()=>this.message(e.data)).catch(error=>this.fail(error.message)).finally(()=>this.pendingMessages--);};this.ws.onerror=()=>this.fail('EdgeRTC connection failed.');this.ws.onclose=()=>{if(!this.closed)this.fail('EdgeRTC source disconnected.');};
   }
-  fail(message){if(this.closed)return;this.options.onError?.(message);this.close();}
+  fail(message,retryable=true){if(this.closed)return;this.options.onError?.(message,{retryable});this.close();}
   async message(data){
     if(this.closed)return;
     try{
       if(typeof data==='string'){
         const msg=JSON.parse(data);if(msg.type==='error'){this.fail(`EdgeRTC: ${msg.code}`);return;}if(msg.type!=='hello'||msg.protocol!=='edgertc/1')return;
         this.audioInfo=msg.audio;this.microphoneSupported=Boolean(msg.microphone?.supported);
+        const configuration={codec:msg.video.codec,optimizeForLatency:true,hardwareAcceleration:'no-preference'};
+        const supported=await VideoDecoder.isConfigSupported(configuration);
+        if(this.closed)return;
+        if(!supported.supported){const hevc=/^(hev1|hvc1)\./.test(msg.video.codec);this.fail(hevc?'EdgeRTC: this browser/device cannot decode this H.265 profile. Select H.264 in the camera recording profile, or use a device/browser with HEVC decoding. H.265 recording remains available.':'EdgeRTC: this browser cannot decode the camera H.264 profile.',false);return;}
         this.video=new VideoDecoder({output:frame=>this.render(frame),error:error=>this.fail('EdgeRTC video decoder: '+error.message)});
-        this._codec=msg.video.codec;this.video.configure({codec:msg.video.codec,optimizeForLatency:true,hardwareAcceleration:'no-preference'});
+        this._codec=msg.video.codec;this.videoCodecName=msg.video.codec_name||(/^(hev1|hvc1)\./.test(msg.video.codec)?'h265':'h264');this.video.configure(configuration);
         this.connectionState='connected';this.options.onReady?.();
         if(this.options.microphone){if(!msg.microphone?.active)throw new Error('Camera microphone is unavailable.');await this.startMicrophone();}
         return;
@@ -52,6 +56,6 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   playAudio(buffer){if(this.closed||this.muted)return;const now=this.audio.currentTime;this.audioTime=Math.max(now+0.04,this.audioTime||0);if(this.audioTime>now+0.25)this.audioTime=now+0.04;const source=this.audio.createBufferSource();source.buffer=buffer;source.connect(this.gain);source.start(this.audioTime);this.audioTime+=buffer.duration;}
-  async startMicrophone(){this.micTimer=setTimeout(()=>this.fail('Microphone initialization timed out.'),10000);for(const track of this.options.microphone.getTracks())track.addEventListener('ended',()=>this.fail('Microphone device disconnected.'),{once:true});const audio=this.ensureAudio();await audio.audioWorklet.addModule('/edge/edge-pcm-worklet.js?v=0.10.48');if(this.closed)return;this.micSource=audio.createMediaStreamSource(this.options.microphone);this.worklet=new AudioWorkletNode(audio,'edge-pcm');this.silence=audio.createGain();this.silence.gain.value=0;this.micSource.connect(this.worklet);this.worklet.connect(this.silence);this.silence.connect(audio.destination);this.worklet.port.onmessage=event=>{if(this.closed||this.ws.readyState!==WebSocket.OPEN)return;if(this.ws.bufferedAmount>6400){this.fail('Microphone connection is too slow.');return;}const packet=new Uint8Array(321);packet[0]=3;packet.set(new Uint8Array(event.data),1);this.ws.send(packet);};clearTimeout(this.micTimer);this.options.onMicrophone?.(true);}
+  async startMicrophone(){this.micTimer=setTimeout(()=>this.fail('Microphone initialization timed out.'),10000);for(const track of this.options.microphone.getTracks())track.addEventListener('ended',()=>this.fail('Microphone device disconnected.'),{once:true});const audio=this.ensureAudio();await audio.audioWorklet.addModule('/edge/edge-pcm-worklet.js?v=0.11.0');if(this.closed)return;this.micSource=audio.createMediaStreamSource(this.options.microphone);this.worklet=new AudioWorkletNode(audio,'edge-pcm');this.silence=audio.createGain();this.silence.gain.value=0;this.micSource.connect(this.worklet);this.worklet.connect(this.silence);this.silence.connect(audio.destination);this.worklet.port.onmessage=event=>{if(this.closed||this.ws.readyState!==WebSocket.OPEN)return;if(this.ws.bufferedAmount>6400){this.fail('Microphone connection is too slow.');return;}const packet=new Uint8Array(321);packet[0]=3;packet.set(new Uint8Array(event.data),1);this.ws.send(packet);};clearTimeout(this.micTimer);this.options.onMicrophone?.(true);}
   close(){if(this.closed)return;this.closed=true;clearTimeout(this.connectTimer);clearTimeout(this.micTimer);this.options.microphone?.getTracks().forEach(track=>track.stop());this.playing=false;this.connectionState='closed';this.ws?.close();if(this.video?.state!=='closed')this.video?.close();if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.latest?.close();this.latest=null;this.worklet?.port.close();this.micSource?.disconnect();this.worklet?.disconnect();this.silence?.disconnect();this.audio?.close().catch(()=>{});}
 }

@@ -213,7 +213,20 @@ func frame(kind byte, key bool, stamp int64, payload []byte) []byte {
 	copy(out[10:], payload)
 	return out
 }
-func (s *source) setVideo(v map[string]any) { s.mu.Lock(); s.video = v; s.mu.Unlock() }
+func (s *source) setVideo(v map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.video != nil && s.video["codec"] != v["codec"] {
+		s.gop = nil
+		s.gopBytes = 0
+		for viewer := range s.viewers {
+			viewer.close()
+		}
+		s.viewers = map[*viewer]bool{}
+		s.mic = nil
+	}
+	s.video = v
+}
 func (s *source) setAudio(v map[string]any) { s.mu.Lock(); s.audio = v; s.mu.Unlock() }
 func (s *source) makeHandler(c *gortsplib.Client, media *description.Media, f format.Format) func(*rtp.Packet) {
 	pts := func(p *rtp.Packet) int64 {
@@ -225,6 +238,8 @@ func (s *source) makeHandler(c *gortsplib.Client, media *description.Media, f fo
 		return (v/rate)*1000000 + (v%rate)*1000000/rate
 	}
 	switch f := f.(type) {
+	case *format.H265:
+		return s.makeH265Handler(c, media, f)
 	case *format.H264:
 		decoder, e := f.CreateDecoder()
 		if e != nil {
@@ -235,8 +250,10 @@ func (s *source) makeHandler(c *gortsplib.Client, media *description.Media, f fo
 		if len(sps) >= 4 {
 			codec = "avc1." + hex.EncodeToString(sps[1:4])
 		}
-		s.setVideo(map[string]any{"codec": codec, "format": "annexb"})
+		s.setVideo(map[string]any{"codec": codec, "codec_name": "h264", "format": "annexb"})
 		return func(p *rtp.Packet) {
+			// Initialize timestamp tracking on the first fragment, not only the last.
+			stamp := pts(p)
 			aus, e := decoder.Decode(p)
 			if e != nil {
 				return
@@ -266,7 +283,7 @@ func (s *source) makeHandler(c *gortsplib.Client, media *description.Media, f fo
 				payload = append(payload, 0, 0, 0, 1)
 				payload = append(payload, n...)
 			}
-			s.broadcast(frame(1, key, pts(p), payload), key)
+			s.broadcast(frame(1, key, stamp, payload), key)
 		}
 	case *format.G711:
 		if f.ClockRate() != 8000 || f.ChannelCount != 1 {
@@ -348,7 +365,7 @@ func (s *source) attach(microphone bool) (*viewer, map[string]any, [][]byte, err
 		return nil, nil, nil, errors.New("camera_connecting")
 	}
 	if s.video == nil {
-		return nil, nil, nil, errors.New("h264_profile_required")
+		return nil, nil, nil, errors.New("h264_or_h265_video_metadata_required")
 	}
 	if len(s.viewers) >= 32 {
 		return nil, nil, nil, errors.New("viewer_limit")

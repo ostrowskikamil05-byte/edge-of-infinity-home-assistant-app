@@ -102,7 +102,7 @@ class OnvifTests(unittest.TestCase):
     def test_profile_resolution_order_selects_main_and_sub_stream(self):
         caps = soap('<Media><XAddr>http://192.0.2.8/onvif/media</XAddr></Media>')
         profiles = soap('<Profiles token="small"><Resolution><Width>640</Width><Height>360</Height></Resolution></Profiles><Profiles token="large"><Resolution><Width>1920</Width><Height>1080</Height></Resolution></Profiles>')
-        with patch.object(self.p, 'onvif_request', side_effect=[caps, profiles, soap('<Uri>rtsp://192.0.2.8/customMain</Uri>'), soap('<Uri>rtsp://192.0.2.8/customSub</Uri>')]) as request:
+        with patch.object(self.p, 'onvif_request', side_effect=[caps, profiles, soap('<Uri>rtsp://192.0.2.8/customMain</Uri>'), soap('<Uri>rtsp://192.0.2.8/customSub</Uri>'), soap('<GetDeviceInformationResponse><Manufacturer>UNV</Manufacturer><Model>IPC3618SB-ADF28KMC-I0</Model><FirmwareVersion>test</FirmwareVersion></GetDeviceInformationResponse>')]) as request:
             result = self.p.fetch_onvif_camera_config(self.camera)
         self.assertTrue(result['ok'])
         self.assertEqual(urlparse(result['camera']['rtsp_main']).path, '/customMain')

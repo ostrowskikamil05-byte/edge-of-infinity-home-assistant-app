@@ -48,6 +48,62 @@ jobs:
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
           node tests/browser/remote_live.cjs
           node tests/browser/edge_rtc_support.cjs
+      - name: Install fixture media tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Test detection settings, history and NVR seeking
+        run: |
+          export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
+          EDGE_TEST_DETECTION_FIXTURE=1 python tests/browser/fixture_server.py > "${RUNNER_TEMP}/detection-ui.log" 2>&1 &
+          edge_fixture_pid=$!
+          trap 'kill "${edge_fixture_pid}" || true' EXIT
+          python - <<'PY'
+          import time, urllib.request
+          deadline = time.monotonic() + 20
+          while True:
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:18088/api/version', timeout=1).close()
+                  break
+              except OSError:
+                  if time.monotonic() > deadline:
+                      raise
+                  time.sleep(.1)
+          PY
+          node tests/browser/detection_ui.cjs
+
+  detection-media:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: edge-of-infinity/edge-rtc/go.sum
+      - name: Install inference and media test dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install opencv-python-headless==4.12.0.88 aiohttp==3.14.4
+      - name: Fetch and verify public model/test fixture
+        run: |
+          python - <<'PY'
+          import hashlib, os, pathlib, urllib.request
+          folder = pathlib.Path(os.environ['RUNNER_TEMP'])
+          files = {
+              'nanodet.onnx': 'https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/object_detection_nanodet/object_detection_nanodet_2022nov.onnx',
+              'test-vehicle.png': 'https://raw.githubusercontent.com/opencv/opencv_extra/4.x/testdata/dnn/dog416.png',
+          }
+          for name, url in files.items():
+              (folder / name).write_bytes(urllib.request.urlopen(url, timeout=30).read())
+          assert hashlib.sha256((folder / 'nanodet.onnx').read_bytes()).hexdigest() == '4b82da9944b88577175ee23a459dce2e26e6e4be573def65b1055dc2d9720186'
+          PY
+      - name: Test actual model and HEVC shared-source pipeline
+        run: |
+          export EDGE_TEST_MODEL="${RUNNER_TEMP}/nanodet.onnx" EDGE_TEST_IMAGE="${RUNNER_TEMP}/test-vehicle.png" EDGE_DETECTION_MODEL="${RUNNER_TEMP}/nanodet.onnx" EDGE_RTC_TEST_BINARY="${RUNNER_TEMP}/edge-rtc-fixture"
+          python -m unittest discover -s tests -p test_detection.py
+          go -C edge-of-infinity/edge-rtc test -c -o "${EDGE_RTC_TEST_BINARY}" .
+          python tests/run_detection_media.py
 
 
   edge-rtc:

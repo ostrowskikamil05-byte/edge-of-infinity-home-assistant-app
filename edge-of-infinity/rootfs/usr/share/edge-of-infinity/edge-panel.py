@@ -25,10 +25,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlunparse, quote, unquote
 from xml.sax.saxutils import escape as xml_escape
 
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
+from edge_detection import DetectionService, settings as detection_settings
 
-APP_VERSION = "0.10.48"
+DETECTION_SERVICE = None
+
+
+APP_VERSION = "0.11.0"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "native-remote-routing-v10"
+UI_BUILD = "hevc-detection-v11"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -105,7 +111,12 @@ CAMERA_OVERRIDE_FIELDS = (
     "rtsp_sub_channel",
     "onvif_url",
     "isapi_base_url",
+    "manufacturer",
+    "model",
+    "firmware",
     "enabled",
+    "events_enabled",
+    "local_detection_enabled",
     "record",
     "low_latency",
     *STREAM_ROLE_FIELDS,
@@ -828,6 +839,9 @@ def normalize_camera(raw: dict, index: int) -> dict:
         "id": camera_id,
         "name": name,
         "vendor": vendor,
+        "manufacturer": str(raw.get("manufacturer") or "")[:120],
+        "model": str(raw.get("model") or "")[:120],
+        "firmware": str(raw.get("firmware") or "")[:120],
         "host": host,
         "username": username,
         "password": password,
@@ -841,6 +855,8 @@ def normalize_camera(raw: dict, index: int) -> dict:
         "onvif_url": onvif_url,
         "isapi_base_url": isapi_base_url,
         "enabled": bool(raw.get("enabled")),
+        "events_enabled": safe_bool(raw.get("events_enabled"), False),
+        "local_detection_enabled": safe_bool(raw.get("local_detection_enabled"), False),
         "record": bool(raw.get("record", True)),
         "low_latency": bool(raw.get("low_latency", True)),
         "snapshot_stream": snapshot_stream,
@@ -902,6 +918,7 @@ def normalize_config(payload: dict) -> dict:
             "browser_playback": nvr.get("browser_playback") if nvr.get("browser_playback") in ("auto_h264", "copy", "h264") else "auto_h264",
         },
         "cameras": normalized,
+        "detection": detection_settings(payload.get("detection")),
         "future_vendors": payload.get("future_vendors") or ["dahua", "onvif", "rtsp"],
     }
 
@@ -2269,8 +2286,11 @@ def supervisor_self_request(path: str, payload: dict | None = None) -> dict:
 
 def addon_options_from_config(config: dict, existing: dict) -> dict:
     options = dict(existing)
-    cameras = [{key: camera.get(key) for key in ("id", "name", "vendor", "host", "username", "password", "rtsp_main", "rtsp_sub", "camera_number", "access_protocol", "rtsp_transport", "onvif_url", "isapi_base_url", "enabled", "record", "low_latency", "snapshot_stream", "live_stream", "tile_stream", "record_stream")} for camera in config.get("cameras", [])]
+    cameras = [{key: camera.get(key) for key in ("id", "name", "vendor", "host", "username", "password", "rtsp_main", "rtsp_sub", "camera_number", "access_protocol", "rtsp_transport", "onvif_url", "isapi_base_url", "manufacturer", "model", "firmware", "enabled", "events_enabled", "local_detection_enabled", "record", "low_latency", "snapshot_stream", "live_stream", "tile_stream", "record_stream")} for camera in config.get("cameras", [])]
     options["cameras"] = cameras
+    detect = detection_settings(config.get("detection"))
+    for option, field in (("camera_events_enabled", "camera_events_enabled"), ("local_detection_enabled", "local_enabled"), ("detection_fps", "max_fps"), ("detection_confidence", "confidence"), ("detection_hold_seconds", "hold_seconds")):
+        options[option] = detect[field]
     for index in range(2):
         camera = cameras[index] if index < len(cameras) else {}
         prefix = f"hikvision_{index + 1}_"
@@ -2443,7 +2463,7 @@ def edge_rtc_status() -> dict:
 
 def engine_runtime_status() -> dict:
     if EDGE_RTC_ENABLED:
-        return {"architecture": "camera RTSP -> EdgeRTC registry -> encoded frames/WebCodecs + RTSP recorder; one recording profile per camera", "edge_rtc": edge_rtc_status(), "mediamtx": {"api_reachable": False, "config_exists": False}, "janus": {"api_reachable": False, "streaming_config_exists": False}, "codec_notes": {"h264": "Native EdgeRTC/1 encoded frames, no WebRTC or MSE.", "microphone": "PCM over authenticated WS -> RTSP G711 backchannel on the existing source session."}}
+        return {"architecture": "camera RTSP -> EdgeRTC registry -> encoded frames/WebCodecs + RTSP recorder; one recording profile per camera", "edge_rtc": edge_rtc_status(), "mediamtx": {"api_reachable": False, "config_exists": False}, "janus": {"api_reachable": False, "streaming_config_exists": False}, "codec_notes": {"h264": "Native EdgeRTC/1 encoded frames, no WebRTC or MSE.", "h265": "Native HEVC Annex B; browser profile support is checked before decoding.", "microphone": "PCM over authenticated WS -> RTSP G711 backchannel on the existing source session."}}
     return {
         "architecture": "camera RTSP -> MediaMTX core -> Janus Streaming Plugin -> browser WebRTC. MediaMTX also exposes LL-HLS, WHEP, SRT, RTSP proxy, and fMP4 recording paths.",
         "mediamtx": mediamtx_status(),
@@ -4444,8 +4464,9 @@ def autoconfig_endpoints(camera: dict) -> dict[str, str]:
     }
 
 
-def onvif_request(camera: dict, endpoint: str, action: str, body: str) -> ET.Element:
+def onvif_request(camera: dict, endpoint: str, action: str, body: str, reference_headers: str = "") -> ET.Element:
     import urllib.request
+    import uuid
     endpoint_url = urlparse(endpoint)
     configured = urlparse(camera.get("onvif_url") or "")
     allowed_hosts = {configured.hostname, urlparse("http://" + (camera.get("host") or "")).hostname}
@@ -4457,11 +4478,15 @@ def onvif_request(camera: dict, endpoint: str, action: str, body: str) -> ET.Ele
     digest = base64.b64encode(hashlib.sha1(nonce + created.encode() + password.encode()).digest()).decode()
     username = camera.get("username") or ""
     security = f'<wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"><wsse:UsernameToken><wsse:Username>{xml_escape(username)}</wsse:Username><wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">{digest}</wsse:Password><wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">{base64.b64encode(nonce).decode()}</wsse:Nonce><wsu:Created>{created}</wsu:Created></wsse:UsernameToken></wsse:Security>'
-    envelope = f'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><s:Header>{security}</s:Header><s:Body>{body}</s:Body></s:Envelope>'
+    addressing = f'<wsa:Action>{xml_escape(action)}</wsa:Action><wsa:To>{xml_escape(endpoint)}</wsa:To><wsa:MessageID>urn:uuid:{uuid.uuid4()}</wsa:MessageID>'
+    envelope = f'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:tev="http://www.onvif.org/ver10/events/wsdl" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2" xmlns:wsa="http://www.w3.org/2005/08/addressing"><s:Header>{security}{addressing}{reference_headers}</s:Header><s:Body>{body}</s:Body></s:Envelope>'
     request = urllib.request.Request(endpoint, data=envelope.encode(), headers={"Content-Type": f'application/soap+xml; charset=utf-8; action="{action}"'}, method="POST")
     passwords = urllib.request.HTTPPasswordMgrWithDefaultRealm()
     passwords.add_password(None, endpoint, username, password)
-    opener = urllib.request.build_opener(urllib.request.HTTPDigestAuthHandler(passwords))
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            raise ValueError("ONVIF redirects are not allowed.")
+    opener = urllib.request.build_opener(urllib.request.HTTPDigestAuthHandler(passwords), NoRedirect())
     try:
         with opener.open(request, timeout=8) as response:
             payload = response.read(2_000_001)
@@ -4485,7 +4510,7 @@ def fetch_onvif_camera_config(camera: dict) -> dict:
         raise ValueError("Enter the camera ONVIF device-service URL first.")
     capabilities = onvif_request(camera, endpoint, "http://www.onvif.org/ver10/device/wsdl/GetCapabilities", '<tds:GetCapabilities><tds:Category>Media</tds:Category></tds:GetCapabilities>')
     media = next((node for node in capabilities.iter() if node.tag.rsplit("}", 1)[-1] == "Media"), None)
-    media_url = onvif_value(media, "XAddr") if media is not None else ""
+    media_url = (media.get("XAddr") or onvif_value(media, "XAddr")) if media is not None else ""
     if not media_url:
         raise RuntimeError("Camera did not expose an ONVIF Media service; use manual RTSP URLs.")
     profiles_xml = onvif_request(camera, media_url, "http://www.onvif.org/ver10/media/wsdl/GetProfiles", '<trt:GetProfiles/>')
@@ -4505,7 +4530,17 @@ def fetch_onvif_camera_config(camera: dict) -> dict:
         if urlparse(uri).scheme not in ("rtsp", "rtsps"):
             raise RuntimeError("Camera did not return a playable RTSP URL.")
         discovered[f"rtsp_{stream}"] = rebind_camera_rtsp(uri, camera.get("host") or urlparse(endpoint).hostname or "", camera.get("username") or "", camera.get("password") or "")
-    return {"ok": True, "camera": discovered, "device": {"manufacturer": CAMERA_VENDORS.get(camera.get("vendor"), "ONVIF")}, "streams": {}, "channels": [], "sections": {"onvif": {"ok": True}}, "effective_streams": effective_streams(discovered), "recommendations": [{"severity": "notice", "stream": "all", "message": "ONVIF main/sub streams loaded into the form. Save cameras to apply them."}]}
+    device = {"manufacturer": CAMERA_VENDORS.get(camera.get("vendor"), "ONVIF")}
+    try:
+        identity = onvif_request(camera, endpoint, "http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation", '<tds:GetDeviceInformation/>')
+        for key, field in (("manufacturer", "Manufacturer"), ("model", "Model"), ("firmware", "FirmwareVersion")):
+            value = onvif_value(identity, field)[:120]
+            if value:
+                device[key] = value
+                discovered[key] = value
+    except (RuntimeError, ValueError):
+        pass
+    return {"ok": True, "camera": discovered, "device": device, "streams": {}, "channels": [], "sections": {"onvif": {"ok": True}}, "effective_streams": effective_streams(discovered), "recommendations": [{"severity": "notice", "stream": "all", "message": "ONVIF main/sub streams loaded into the form. Save cameras to apply them."}]}
 
 
 def fetch_camera_autoconfig(camera: dict) -> dict:
@@ -4886,7 +4921,7 @@ def health_payload() -> dict:
 EDGE_RTC_PLAYER_HTML = r"""<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;height:100%;background:#080e15;color:#d9e7ee;font:13px system-ui}canvas{width:100%;height:100%;object-fit:contain}button{position:absolute;bottom:12px;right:12px;padding:10px;border:0;border-radius:8px;background:#20384b;color:white}p{position:absolute;top:8px;left:10px}</style><canvas></canvas><p>EdgeRTC · connecting…</p><button>Sound</button><script type="module">
 import{EdgeRTCClient}from'../client.js';
 const path=location.pathname.split('/').pop(),url=new URL('../stream/'+path,location.href);let client,timer,retries=0,muted=true;
-function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,canvas:document.querySelector('canvas'),onError:m=>{document.querySelector('p').textContent=m;if(!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;document.querySelector('p').textContent='EdgeRTC · '+f.width+' × '+f.height;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
+function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;document.querySelector('p').textContent='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264');}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
 connect();document.querySelector('button').onclick=()=>{muted=!muted;client?.setAudio(.6,muted);document.querySelector('button').textContent=muted?'Sound':'Mute';};document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(document.hidden)client?.close();else connect();});window.addEventListener('pagehide',()=>{clearTimeout(timer);client?.close();});
 </script>"""
 
@@ -5718,6 +5753,7 @@ INDEX_HTML = r"""<!doctype html>
           <button class="active" data-page-target="home"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg></span><span class="nav-label">Live view</span></button>
           <button data-page-target="nvr"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/></svg></span><span class="nav-label">Recordings</span></button>
           <div class="nav-section-label">SETUP</div>
+          <button data-page-target="events"><span class="nav-icon">◉</span><span class="nav-label">Zdarzenia / Events</span></button>
           <button data-page-target="camera-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h11l5 4-5 4H4z"/><circle cx="9" cy="12" r="2"/></svg></span><span class="nav-label">Cameras</span></button>
           <button data-page-target="edge-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a8 8 0 0 0 .1-6"/><path d="M4.5 9a8 8 0 0 0 .1 6"/><path d="M15 4.6a8 8 0 0 0-6 0"/><path d="M9 19.4a8 8 0 0 0 6 0"/></svg></span><span class="nav-label">Settings</span></button>
           <button data-page-target="ha-dashboard"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg></span><span class="nav-label">Home Assistant</span></button>
@@ -5755,6 +5791,11 @@ INDEX_HTML = r"""<!doctype html>
           <section class="panel">
             <div id="nvr-grid" class="grid"></div>
           </section>
+        </section>
+
+        <section class="page" data-page="events" hidden>
+          <header><div><p class="eyebrow">DETECTION</p><h1>Zdarzenia / Events</h1><p>Ruch, osoby i pojazdy z kamery oraz lokalnej analizy.</p></div><div class="toolbar"><button id="refresh-events" type="button">Odśwież / Refresh</button><button data-page-target="edge-settings">Ustawienia detekcji</button></div></header>
+          <section class="panel"><p id="detection-runtime" role="status"></p><div id="detection-cameras" class="grid"></div><div class="form-grid"><label>Kamera<select id="event-camera-filter"><option value="">Wszystkie / All</option></select></label><label>Typ<select id="event-kind-filter"><option value="">Wszystkie / All</option><option value="motion">Ruch / Motion</option><option value="person">Osoba / Person</option><option value="vehicle">Pojazd / Vehicle</option></select></label></div><div id="event-list" aria-live="polite"></div></section>
         </section>
 
         <section class="page" data-page="camera-settings" hidden>
@@ -5799,7 +5840,7 @@ INDEX_HTML = r"""<!doctype html>
               <label>Silnik / Engine<select id="core-engine-select" disabled><option value="mediamtx_janus">MediaMTX + Janus</option><option value="edge_rtc">EdgeRTC (beta)</option><option value="mediamtx">MediaMTX</option></select></label>
               <div class="actions"><button class="primary" id="save-core-engine" type="button" disabled>Zapisz silnik / Save engine</button><button id="reload-core-engine" type="button">Refresh engine</button></div>
               <p id="core-engine-state" class="notice" role="status" aria-live="polite">Engine selection is saved separately from camera and recording settings.</p>
-              <p class="field-help">Po zmianie zrestartuj aplikację Edge, a następnie Home Assistant Core. EdgeRTC beta wymaga H264, HTTPS i przeglądarki z WebCodecs. / After changing the engine, restart the Edge app and then Home Assistant Core.</p>
+              <p class="field-help">Po zmianie zrestartuj aplikację Edge, a następnie Home Assistant Core. EdgeRTC wymaga HTTPS i WebCodecs; H.265 wymaga także dekodera HEVC w przeglądarce. / After changing the engine, restart the Edge app and then Home Assistant Core.</p>
             </section>
             <div class="settings-jumps"><button type="button" data-settings-jump="recording-settings">Recording</button><button type="button" data-settings-jump="network-settings">Network</button><button type="button" data-settings-jump="storage-settings">Storage</button><button type="button" data-settings-jump="advanced-settings">Advanced</button></div>
             <form id="edge-settings-form"></form>
@@ -7408,7 +7449,7 @@ INDEX_HTML = r"""<!doctype html>
               url,
               path: frame.dataset.livePath || '',
               timeout_ms: 12000,
-              hint: EDGE_NATIVE_RTC ? 'Check the EdgeRTC core/source status, H264, browser WebCodecs and the Home Assistant HTTPS/WebSocket connection.' : 'If this happens only on LTE or another Wi-Fi, check WebRTC public URL, ICE candidates, TCP 8889, and ICE TCP/UDP 8189.',
+              hint: EDGE_NATIVE_RTC ? 'Check the EdgeRTC core/source status, H264/H265 profile, browser WebCodecs and the Home Assistant HTTPS/WebSocket connection.' : 'If this happens only on LTE or another Wi-Fi, check WebRTC public URL, ICE candidates, TCP 8889, and ICE TCP/UDP 8189.',
             });
           }, 12000);
           liveFrameTimers.set(liveKey, timer);
@@ -7802,7 +7843,7 @@ INDEX_HTML = r"""<!doctype html>
                 ${Object.entries(CAMERA_VENDORS).map(([value, label]) => option(value, camera.vendor, label)).join('')}
               </select></label><label>Host/IP<input name="${prefix}-host" value="${escapeHtml(camera.host || '')}"></label><label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label><label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label></div></fieldset>
               ${cameraAutoconfig(index)}
-              <fieldset class="field-section"><legend>Live & recording</legend><p class="field-help">Sub stream is lighter for live tiles. Main stream gives the best recording detail.</p><div class="form-grid"><label class="check-row"><input name="${prefix}-enabled" type="checkbox" ${camera.enabled ? 'checked' : ''}> Camera enabled</label><label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record continuously</label><label>Live stream<select name="${prefix}-live-stream">
+              <fieldset class="field-section"><legend>Detekcja / Detection</legend><div class="form-grid"><label class="check-row"><input name="${prefix}-events-enabled" type="checkbox" ${camera.events_enabled ? 'checked' : ''}> Zdarzenia ONVIF: ruch, osoba, pojazd</label><label class="check-row"><input name="${prefix}-local-detection-enabled" type="checkbox" ${camera.local_detection_enabled ? 'checked' : ''}> Lokalne AI na tej kamerze</label></div><p class="field-help">Włącz także odpowiedni moduł w Settings → Detection. Typy zdarzeń i mikrofon zależą od modelu kamery.</p></fieldset><fieldset class="field-section"><legend>Live & recording</legend><p class="field-help">Sub stream is lighter for live tiles. Main stream gives the best recording detail.</p><div class="form-grid"><label class="check-row"><input name="${prefix}-enabled" type="checkbox" ${camera.enabled ? 'checked' : ''}> Camera enabled</label><label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record continuously</label><label>Live stream<select name="${prefix}-live-stream">
                 <option value="sub" ${camera.live_stream !== 'main' ? 'selected' : ''}>sub</option>
                 <option value="main" ${camera.live_stream === 'main' ? 'selected' : ''}>main</option>
               </select></label><label>Tile stream<select name="${prefix}-tile-stream">
@@ -7926,7 +7967,9 @@ INDEX_HTML = r"""<!doctype html>
         const storage = config.storage || {};
         const liveConfig = config.live || {};
         const nvrConfig = config.nvr || {};
+        const detection = config.detection || {};
         edgeForm.innerHTML = `
+          <section class="field-section" id="detection-settings"><h2>Detekcja / Detection</h2><p class="field-help">Zdarzenia ONVIF wykonuje kamera. Lokalne AI korzysta ze wspólnego strumienia Edge. Włącz wybrane kamery w ich ustawieniach. / Enable detection separately on each camera.</p><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-camera-events" ${detection.camera_events_enabled ? 'checked' : ''}> Zdarzenia z kamer / Camera events</label><label class="check-row"><input type="checkbox" name="detection-local" ${detection.local_enabled ? 'checked' : ''}> Lokalne AI: osoba i pojazd / Local AI</label><label>Łączny limit klatek/s / Total FPS<input type="number" name="detection-fps" min="0.2" max="3" step="0.2" value="${escapeHtml(detection.max_fps || 1)}"></label><label>Pewność / Confidence<input type="number" name="detection-confidence" min="0.1" max="0.95" step="0.05" value="${escapeHtml(detection.confidence || 0.45)}"></label><label>Podtrzymanie alarmu AI (s)<input type="number" name="detection-hold" min="1" max="120" value="${escapeHtml(detection.hold_seconds || 10)}"></label></div><p class="field-help">HP t530: zacznij od jednej kamery i 1 klatki/s łącznie. Analiza działa kolejno, na jednym wątku CPU. / One CPU worker, no cloud inference.</p></section>
           <section class="field-section settings-main" id="recording-settings"><div class="section-heading"><span class="step-number">01</span><div><h2>Recording</h2><p>How long to keep footage and how it plays in the browser.</p></div></div><div class="form-grid"><label>Keep recordings (days)<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label><label>Recording compatibility<select name="nvr-browser-playback">
                 <option value="auto_h264" ${nvrConfig.browser_playback !== 'copy' && nvrConfig.browser_playback !== 'h264' ? 'selected' : ''}>Automatic (recommended)</option>
                 <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Keep original codec</option>
@@ -8186,6 +8229,8 @@ INDEX_HTML = r"""<!doctype html>
             onvif_url: get('onvif').value.trim(),
             isapi_base_url: get('isapi').value.trim(),
             enabled: get('enabled').checked,
+            events_enabled: get('events-enabled').checked,
+            local_detection_enabled: get('local-detection-enabled').checked,
             record: get('record').checked,
             low_latency: get('low-latency').checked,
             snapshot_stream: get('snapshot-stream').value,
@@ -8335,6 +8380,13 @@ INDEX_HTML = r"""<!doctype html>
             mobile_webrtc_turn_password: get('live-mobile-turn-password').value,
             mobile_webrtc_ice_transport: get('live-mobile-ice-transport').value,
             mobile_webrtc_tcp_only: get('live-mobile-ice-transport').value === 'tcp'
+          },
+          detection: {
+            camera_events_enabled: get('detection-camera-events').checked,
+            local_enabled: get('detection-local').checked,
+            max_fps: Number(get('detection-fps').value || 1),
+            confidence: Number(get('detection-confidence').value || 0.45),
+            hold_seconds: Number(get('detection-hold').value || 10)
           },
           nvr: {
             segment_seconds: Number(get('nvr-segment-seconds').value || 10),
@@ -8665,6 +8717,58 @@ INDEX_HTML = r"""<!doctype html>
         renderConfig();
       }
 
+      let detectionData = {cameras: [], recent_events: []};
+      let detectionTimer = null;
+      async function loadDetection() {
+        const response = await fetch(panelPath('api/detection'), {cache:'no-store'});
+        if (!response.ok) throw new Error('Could not read detection status.');
+        detectionData = await response.json();
+        const cameras = detectionData.cameras || [];
+        const select = document.getElementById('event-camera-filter');
+        const selected = select.value;
+        select.innerHTML = '<option value="">Wszystkie / All</option>' + cameras.map(camera => `<option value="${escapeHtml(camera.id)}">${escapeHtml(camera.name)}</option>`).join('');
+        select.value = selected;
+        document.getElementById('detection-runtime').textContent = `${detectionData.model || 'Detection'} · ${detectionData.backend || 'CPU'} · limit ${detectionData.max_fps || 1} FPS total · analysis ${detectionData.analysis_ms || 0} ms. Model: ${detectionData.model_installed ? 'ready' : 'not installed / starting'}`;
+        document.getElementById('detection-cameras').innerHTML = cameras.map(camera => `<article class="camera"><div class="body"><b>${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
+        renderDetectionEvents();
+      }
+      function renderDetectionEvents() {
+        const cameraId = document.getElementById('event-camera-filter').value;
+        const kind = document.getElementById('event-kind-filter').value;
+        const cameras = detectionData.cameras || [];
+        const rows = (detectionData.recent_events || []).filter(item => (!cameraId || item.camera_id === cameraId) && (!kind || item.kind === kind));
+        document.getElementById('event-list').innerHTML = rows.length ? rows.map(item => {
+          const camera = cameras.find(camera => camera.id === item.camera_id);
+          return `<article class="field-section"><div class="row"><b>${escapeHtml(camera?.name || item.camera_id)} · ${escapeHtml(item.kind)}</b><span>${escapeHtml(new Date(item.timestamp * 1000).toLocaleString())}</span></div><p>${item.source === 'local' ? 'Local AI' : 'Camera / ONVIF'}${item.score ? ` · ${Math.round(item.score * 100)}%` : ''}</p><button type="button" data-event-recording="${item.id}" ${camera ? '' : 'disabled'}>Otwórz nagranie / Open recording</button></article>`;
+        }).join('') : '<p class="notice">Brak zdarzeń. Włącz moduł w Settings → Detection i wybierz kamery. Typy zdarzeń ONVIF zależą od kamery i jej konfiguracji analityki.</p>';
+      }
+      document.getElementById('refresh-events').addEventListener('click', () => loadDetection().catch(error => {document.getElementById('detection-runtime').textContent = error.message;}));
+      for (const id of ['event-camera-filter', 'event-kind-filter']) document.getElementById(id).addEventListener('change', renderDetectionEvents);
+      document.getElementById('event-list').addEventListener('click', async event => {
+        const button = event.target.closest('[data-event-recording]');
+        if (!button) return;
+        const item = (detectionData.recent_events || []).find(row => String(row.id) === button.dataset.eventRecording);
+        const camera = (detectionData.cameras || []).find(row => row.id === item?.camera_id);
+        if (!item || !camera) return;
+        const index = camera.index;
+        selectedRecordingDay[index] = item.day;
+        delete selectedRecording[index];delete selectedRecordingSeek[index];delete selectedRecordingTimeline[index];delete recordingStreamStartOffset[index];
+        showPage('nvr');
+        try {
+          const waitDeadline = Date.now() + 12000;
+          while (nvrLoading && Date.now() < waitDeadline) await new Promise(resolve => setTimeout(resolve, 50));
+          if (nvrLoading) throw new Error('Recording status is busy; try the event again.');
+          await loadRecordingStatus({forceRender:true,reason:'detection_event'});
+          const target = recordingTargetForOffset(index, item.day_seconds);
+          if (!target || recordingStatus[index]?.selected_day !== item.day || Math.abs(target.requested - item.day_seconds) > 2) throw new Error('No recording at the event time. Check whether recording was enabled.');
+          selectRecordingAtOffset(index, item.day_seconds);
+          recordingAutoplayAfterRender[index] = true;
+        } catch (error) {
+          document.getElementById('event-list').textContent = error.message;
+          showPage('events');
+        }
+      });
+
       function showPage(pageName) {
         activePage = pageName;
         document.querySelectorAll('[data-page]').forEach((page) => {
@@ -8674,6 +8778,11 @@ INDEX_HTML = r"""<!doctype html>
           button.classList.toggle('active', button.dataset.pageTarget === pageName);
         });
         debugEvent('ui_page_change', { page: pageName });
+        if (detectionTimer) {clearInterval(detectionTimer);detectionTimer=null;}
+        if (pageName === 'events') {
+          const refresh = () => loadDetection().catch(error => {document.getElementById('detection-runtime').textContent=error.message;});
+          refresh();detectionTimer=setInterval(refresh,5000);
+        }
         if (pageName === 'ha-dashboard') loadDashboardEntities();
         if (pageName === 'home') loadCameras().catch((error) => debugEvent('ui_cameras_refresh_error', { message: error.message }));
         if (pageName === 'logs') {
@@ -9301,6 +9410,17 @@ class EdgeHandler(BaseHTTPRequestHandler):
             except (OSError, ValueError) as error:
                 self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
+        if path == "/api/detection":
+            self.send_json(DETECTION_SERVICE.snapshot() if DETECTION_SERVICE else {"cameras": [], "recent_events": [], "status": "starting"})
+            return
+        if path == "/api/events":
+            try:
+                query = parse_qs(parsed.query)
+                events = DETECTION_SERVICE.store.recent((query.get("camera") or [None])[0], int((query.get("limit") or [200])[0])) if DETECTION_SERVICE else []
+                self.send_json({"events": events})
+            except ValueError:
+                self.send_json({"error": "invalid_event_query"}, HTTPStatus.BAD_REQUEST)
+            return
         if path == "/api/presets":
             self.send_json({"presets": load_presets()})
             return
@@ -9500,6 +9620,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
             restart_changed_recordings(previous_config, saved_payload)
             stop_orphan_recordings(saved_payload)
             sync_runtime_engine_config(saved_payload, "config_save")
+            if DETECTION_SERVICE:
+                DETECTION_SERVICE.apply(saved_payload)
             schedule_recording_ensure(saved_payload, "config_save")
             remember_camera_presets(saved_payload.get("cameras", []))
             publish_pending_camera_status(saved_payload)
@@ -9840,6 +9962,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         )
 
 def main() -> None:
+    global DETECTION_SERVICE
     HOME_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -9866,13 +9989,21 @@ def main() -> None:
         start_recording_retention_loop()
         start_recording_cache_refresh_loop()
         start_recording_thumbnail_warmup_loop()
+        DETECTION_SERVICE = DetectionService(HOME_DIR, onvif_request,
+            lambda camera, index: mediamtx_rtsp_url(camera, index, camera.get("record_stream") or "main") if EDGE_RTC_ENABLED or MEDIAMTX_ENABLED else "",
+            write_json)
+        DETECTION_SERVICE.apply(config)
     except Exception as error:
         write_debug_event("boot_refresh_status_error", {"error": str(error), "type": type(error).__name__})
         raise
     server = ThreadingHTTPServer(("0.0.0.0", PORT), EdgeHandler)
     print(f"[edge-panel] listening on 0.0.0.0:{PORT}")
     write_debug_event("boot_server_listening", {"listen": f"0.0.0.0:{PORT}"})
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        if DETECTION_SERVICE:
+            DETECTION_SERVICE.close()
 
 
 if __name__ == "__main__":

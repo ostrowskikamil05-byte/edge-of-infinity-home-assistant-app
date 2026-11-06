@@ -252,15 +252,25 @@ func TestBrowserFixture(t *testing.T) {
 	}
 	var frames [][][]byte
 	var current [][]byte
-	var sps, pps []byte
+	var vps, sps, pps []byte
+	hevc := os.Getenv("EDGE_RTC_TEST_CODEC") == "h265"
 	for _, n := range nalus {
-		if n[0]&31 == 7 {
+		typ := n[0] & 31
+		aud := byte(9)
+		if hevc {
+			typ = (n[0] >> 1) & 63
+			aud = 35
+		}
+		if (!hevc && typ == 7) || (hevc && typ == 33) {
 			sps = n
 		}
-		if n[0]&31 == 8 {
+		if (!hevc && typ == 8) || (hevc && typ == 34) {
 			pps = n
 		}
-		if n[0]&31 == 9 && len(current) > 0 {
+		if hevc && typ == 32 {
+			vps = n
+		}
+		if typ == aud && len(current) > 0 {
 			frames = append(frames, current)
 			current = nil
 		}
@@ -270,8 +280,23 @@ func TestBrowserFixture(t *testing.T) {
 		frames = append(frames, current)
 	}
 	c := &fakeCamera{done: make(chan struct{})}
-	f := &format.H264{PayloadTyp: 96, PacketizationMode: 1, SPS: sps, PPS: pps}
-	c.direct = &description.Media{Type: description.MediaTypeVideo, Formats: []format.Format{f}}
+	var videoFormat format.Format
+	var encoder interface {
+		Encode([][]byte) ([]*rtp.Packet, error)
+	}
+	if hevc {
+		f := &format.H265{PayloadTyp: 96, VPS: vps, SPS: sps, PPS: pps}
+		videoFormat = f
+		encoder, e = f.CreateEncoder()
+	} else {
+		f := &format.H264{PayloadTyp: 96, PacketizationMode: 1, SPS: sps, PPS: pps}
+		videoFormat = f
+		encoder, e = f.CreateEncoder()
+	}
+	if e != nil {
+		t.Fatal(e)
+	}
+	c.direct = &description.Media{Type: description.MediaTypeVideo, Formats: []format.Format{videoFormat}}
 	audio := &description.Media{Type: description.MediaTypeAudio, Formats: []format.Format{&format.G711{PayloadTyp: 8, SampleRate: 8000, ChannelCount: 1}}}
 	c.back = &description.Media{Type: description.MediaTypeAudio, IsBackChannel: true, Formats: []format.Format{&format.G711{PayloadTyp: 8, SampleRate: 8000, ChannelCount: 1}}}
 	c.server = &gortsplib.Server{RTSPAddress: freeAddress(), Handler: c}
@@ -284,10 +309,6 @@ func TestBrowserFixture(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer c.stream.Close()
-	encoder, e := f.CreateEncoder()
-	if e != nil {
-		t.Fatal(e)
-	}
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()

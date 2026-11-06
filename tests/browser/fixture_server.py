@@ -17,6 +17,15 @@ p.schedule_recording_cache_refresh=lambda *a,**kw: False
 p.refresh_status=lambda: {}
 p.remember_camera_presets=lambda *a: None
 p.write_json(p.DATA_DIR/'cameras.json', {'cameras': []})
+if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
+ from edge_detection import DetectionService
+ from datetime import datetime
+ def fixture_soap(*args):
+  raise RuntimeError('No physical ONVIF camera in this fixture')
+ p.DETECTION_SERVICE=DetectionService(p.HOME_DIR,fixture_soap,lambda *args:'',p.write_json)
+ p.DETECTION_SERVICE.store.prune=lambda *args:None
+ p.DETECTION_SERVICE.apply(config)
+ p.DETECTION_SERVICE.store.add('front','person','local',datetime(2026,7,27,0,0,8).timestamp(),{'score':.91})
 d=p.recording_base_dir(config['cameras'][0],0); d.mkdir(parents=True)
 import subprocess
 sample=d/'sample.mp4'
