@@ -60,7 +60,7 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         self.assertIn("function cameraFormSnapshot()", html)
         self.assertIn("function edgeFormSnapshot()", html)
-        self.assertIn("collectConfig({ refreshGenerated: true })", html)
+        self.assertIn("collectEdgeSettings({ refreshGenerated: true })", html)
         self.assertIn("form.addEventListener('submit'", html)
         self.assertIn("event.preventDefault()", html)
         self.assertIn("host=${host}", html)
@@ -70,11 +70,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.38")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.38")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.38")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.38")
-        self.assertIn("v0.10.38", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.39")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.39")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.39")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.39")
+        self.assertIn("v0.10.39", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -495,7 +495,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("diag-ok", html)
         self.assertIn("ui_global_error", html)
         self.assertNotIn("data-recording-scrub", html)
-        self.assertNotIn("nvrGrid.addEventListener('input'", html)
+        self.assertIn("data-recording-day-seek", html)
         self.assertIn("nvrGrid.addEventListener('timeupdate'", html)
         self.assertIn("nvrGrid.addEventListener('seeking'", html)
         self.assertIn("nvrGrid.addEventListener('seeked'", html)
@@ -1246,7 +1246,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("pipe:1", command)
         self.assertIn("-f", command)
         self.assertIn("concat", command)
-        self.assertGreater(command.index("-ss"), command.index("-i"))
+        self.assertLess(command.index("-ss"), command.index("-i"))
 
     def test_recording_cache_status_exposes_server_timeline_mp4(self):
         panel = load_panel_module()
@@ -1424,7 +1424,8 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         status = panel.recording_status_payload(payload)["cameras"][0]["playback_cache"]
 
-        self.assertTrue(status["ready"])
+        self.assertFalse(status["ready"])
+        self.assertEqual(status["url"], "")
         self.assertTrue(status["stale"])
         self.assertTrue(status["rebuild_deferred"])
         self.assertEqual(status["new_source_count"], 1)

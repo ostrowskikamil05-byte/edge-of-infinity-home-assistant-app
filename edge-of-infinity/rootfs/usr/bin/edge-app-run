@@ -934,7 +934,12 @@ if [[ -f "${ADDON_OPTIONS_HASH_PATH}" ]]; then
   PREVIOUS_ADDON_OPTIONS_HASH="$(cat "${ADDON_OPTIONS_HASH_PATH}")"
 fi
 
-if [[ -f "${EDGE_HOME_CONFIG}" ]] && jq -e '.cameras | type == "array" and length > 0' "${EDGE_HOME_CONFIG}" >/dev/null 2>&1; then
+if [[ -f "${EDGE_HOME_CONFIG}" ]] && ! jq -e 'type == "object" and (.cameras | type == "array")' "${EDGE_HOME_CONFIG}" >/dev/null 2>&1; then
+  bashio::log.error "Invalid authoritative config ${EDGE_HOME_CONFIG}. Refusing to restore stale settings from mirrors; repair the JSON file."
+  exit 1
+fi
+
+if [[ -f "${EDGE_HOME_CONFIG}" ]] && jq -e '.cameras | type == "array"' "${EDGE_HOME_CONFIG}" >/dev/null 2>&1; then
   EDGE_CONFIG="${EDGE_HOME_CONFIG}"
   cp "${EDGE_HOME_CONFIG}" "${EDGE_PANEL_CONFIG}"
   bashio::log.info "Using ${EDGE_HOME_CONFIG} as the authoritative camera config. Mirroring it to ${EDGE_PANEL_CONFIG} for diagnostics."
@@ -1066,3 +1071,4 @@ export EDGE_JANUS_HTTP_PORT="${JANUS_HTTP_PORT}"
 export EDGE_JANUS_WS_PORT="${JANUS_WS_PORT}"
 
 exec python3 /usr/share/edge-of-infinity/edge-panel.py
+
