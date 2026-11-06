@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.40
+
+- Show one playback counter and seek bar for all video recorded in the selected day, with play/pause, skip, mute and speed controls. Load the required segment and continue through the day on the same video element instead of showing a seven-second native clip timeline.
+- Keep existing players, pause state, speed and position during timer/manual status refreshes and live-tail updates. Switching one camera's day leaves other players intact, and day selections made during an in-flight refresh are queued.
+- Fix invisible day thumbnails, incorrectly quoted placeholder image URLs, lingering error overlays and collapsed preview sizing. Queue at most two thumbnail loads per client.
+- Use wider NVR cards, fixed 16:9 previews, touch-sized controls and responsive grids. Fix horizontal overflow on landscape tablets and support small 320px screens.
+- Read MP4 movie-header duration directly to synchronize the recorded-day length with actual footage instead of gaps between filename timestamps, while caching duration lookups and retaining FFprobe fallback.
+- Add MP4 metadata regression tests and a reproducible five-viewport browser suite covering real playback, all segment transitions, refresh stability, growing days and thumbnails.
+
 ## 0.10.39
 
 - Save both camera and Edge forms together, verify the full persisted response, and keep the form on request failures. Serialize configuration saves and mirror updates and use unique, flushed temporary files for atomic JSON writes.
