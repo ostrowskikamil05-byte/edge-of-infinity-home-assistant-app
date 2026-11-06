@@ -35,3 +35,10 @@ The bundled Home Assistant integration exposes cameras and sensors, and automati
 
 The app is the engine. The integration is the bridge.
 
+
+## Native EdgeRTC beta
+
+The optional `core_engine: edge_rtc` mode uses our EdgeRTC/1 frame protocol over
+WebSocket and browser WebCodecs, with no WebRTC or MSE on that path. One recording
+profile is shared with native live, NVR and supported RTSP G711 microphone audio.
+See [setup and current limits](edge-of-infinity/DOCS.md#native-edgertc-beta-01045).

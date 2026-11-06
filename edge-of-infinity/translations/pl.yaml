@@ -1,4 +1,7 @@
 configuration:
+  core_engine:
+    name: Silnik obrazu
+    description: "EdgeRTC beta: własne klatki H264 przez WebSocket i WebCodecs, jeden profil nagrywania na kamerę. Wymaga HTTPS i zgodnej przeglądarki. Po zmianie zrestartuj dodatek i Home Assistant Core."
   log_level:
     name: Poziom logow
     description: Okresla ile informacji Edge Core zapisuje w logach aplikacji.
@@ -100,3 +103,4 @@ configuration:
     description: Wybiera czy NVR nagrywa main czy sub.
 network:
   8088/TCP: API Edge Core i interfejs webowy
+

@@ -987,12 +987,19 @@ if [[ -f "${EDGE_CONFIG}" && "${EDGE_CONFIG}" != "${EDGE_ADDON_CONFIG}" ]]; then
   fi
 fi
 
+EDGE_RTC_CONFIG=/tmp/edge-runtime/edge-rtc.json
+EDGE_RTC_PID=""
+
+
 MEDIAMTX_CONFIG=/tmp/edge-runtime/mediamtx.yml
 JANUS_CONFIG_DIR=/tmp/edge-runtime/janus
 MEDIAMTX_PID=""
 JANUS_PID=""
 
 cleanup_children() {
+  if [[ -n "${EDGE_RTC_PID}" ]] && kill -0 "${EDGE_RTC_PID}" >/dev/null 2>&1; then
+    kill "${EDGE_RTC_PID}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${JANUS_PID}" ]] && kill -0 "${JANUS_PID}" >/dev/null 2>&1; then
     kill "${JANUS_PID}" >/dev/null 2>&1 || true
   fi
@@ -1001,6 +1008,33 @@ cleanup_children() {
   fi
 }
 trap cleanup_children EXIT TERM INT
+
+if [[ "${CORE_ENGINE}" == "edge_rtc" ]]; then
+  MEDIAMTX_ENABLED=false
+  JANUS_ENABLED=false
+  python3 /usr/share/edge-of-infinity/edge_rtc_config.py "${EDGE_CONFIG}" /homeassistant/edge "${EDGE_RTC_CONFIG}" "${MEDIAMTX_RTSP_PORT}" "${MEDIAMTX_API_PORT}"
+  bashio::log.info "Starting experimental EdgeRTC/1 (WebCodecs, one upstream per camera)."
+  if ! command -v edge-rtc >/dev/null 2>&1; then
+    bashio::log.error "EdgeRTC binary is missing."
+    exit 1
+  fi
+  edge-rtc --config "${EDGE_RTC_CONFIG}" &
+  EDGE_RTC_PID="$!"
+  for _edge_wait in $(seq 1 10); do
+    if ! kill -0 "${EDGE_RTC_PID}" >/dev/null 2>&1; then
+      bashio::log.error "EdgeRTC stopped before its listener became ready."
+      exit 1
+    fi
+    if nc -z 127.0.0.1 "${MEDIAMTX_RTSP_PORT}" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if ! nc -z 127.0.0.1 "${MEDIAMTX_RTSP_PORT}" 2>/dev/null; then
+    bashio::log.error "EdgeRTC RTSP listener did not start."
+    exit 1
+  fi
+fi
 
 if [[ "${MEDIAMTX_ENABLED}" == "true" ]]; then
   if command -v mediamtx >/dev/null 2>&1; then
@@ -1040,10 +1074,16 @@ else
   bashio::log.warning "Janus WebRTC gateway is disabled in add-on options."
 fi
 
-bashio::log.info "Running Edge panel as controller for MediaMTX + Janus."
+if [[ "${CORE_ENGINE}" == "edge_rtc" ]]; then
+  bashio::log.info "Running Edge panel with native EdgeRTC beta."
+else
+  bashio::log.info "Running Edge panel as controller for MediaMTX + Janus."
+fi
 
 # The Python panel refreshes camera status before serving requests.
 
+export EDGE_CORE_ENGINE="${CORE_ENGINE}"
+export EDGE_RTC_CONFIG
 export EDGE_CONFIG
 export EDGE_HOME_CONFIG
 export EDGE_ADDON_CONFIG

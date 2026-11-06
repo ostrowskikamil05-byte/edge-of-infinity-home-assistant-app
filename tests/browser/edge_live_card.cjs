@@ -37,7 +37,9 @@ const path=require('node:path');
      },connection:{async subscribeMessage(callback,msg){
       if(msg.type!=='camera/webrtc/offer')throw new Error('Unexpected subscription');
       const target=fixture.players.find(player=>player._pc&&!player._pc.remoteDescription&&player._activeEntity===msg.entity_id);const localPC=target._pc;
-      const pc=new RTCPeerConnection({iceServers:[]});const id=String(++seq);const session={pc,received:[]};sessions.set(id,session);
+      const pc=new RTCPeerConnection({iceServers:[]});const id=String(++seq);const session={pc,received:[],entity:msg.entity_id,localPC,target};sessions.set(id,session);
+      // HA acknowledges the subscription before provider negotiation completes.
+      (async()=>{try {
       pc.ontrack=event=>session.received.push(event.track);
       await pc.setRemoteDescription({type:'offer',sdp:msg.offer});
       const at=pc.getTransceivers().find(t=>t.receiver.track.kind==='audio');
@@ -48,7 +50,8 @@ const path=require('node:path');
       callback({type:'session',session_id:id});
       const answer=await pc.createAnswer();await pc.setLocalDescription(answer);await callback({type:'answer',answer:answer.sdp});
       if(signalingOnly&&target._pc===localPC){for(const t of target._remoteStream.getTracks())target._remoteStream.removeTrack(t);const stream=new MediaStream([...videoStream.getVideoTracks(),...sink.stream.getAudioTracks()].map(t=>t.clone()));target._pc.ontrack({streams:[stream],track:stream.getVideoTracks()[0]});}
-      return ()=>{session.closed=true;pc.close();};
+      } catch(error) {session.closed=true;pc.close();if(target._pc===localPC)callback({type:'error',message:error.message});}})();
+      session.unsubCreated=true;return ()=>{session.closed=true;pc.close();};
      }}};
     for(const id of ['camera.front_high','camera.front_low','camera.front_talk'])hass.states[id]={state:'idle',attributes:{friendly_name:id}};
     fixture.originalCallWS=hass.callWS;window.hass=hass;window.card=document.createElement('edge-live-player');
@@ -126,7 +129,7 @@ const path=require('node:path');
    await allMics.nth(1).click();await page.waitForFunction(()=>[...multi._players.values()].every(p=>!p._micStream&&p._activeEntity===p._config.entity));
    if(process.env.EDGE_NVR_SCREENSHOT_DIR)await page.screenshot({path:`${process.env.EDGE_NVR_SCREENSHOT_DIR}/edge-live-${label}.png`,fullPage:true});
    const editorResult=await page.evaluate(()=>{const editor=document.querySelector('edge-live-card-editor');let config;editor.addEventListener('config-changed',e=>config=e.detail.config);const count=editor.shadowRoot.querySelector('[data-config="count"]');count.value='4';count.dispatchEvent(new Event('change'));return {count:config.cameras.length,fields:editor.shadowRoot.querySelectorAll('[data-config^="entity-"]').length};});assert.deepEqual(editorResult,{count:4,fields:4});
-   await page.evaluate(()=>multi.remove());await page.waitForFunction(()=>[...fixture.sessions.values()].every(s=>s.closed));
+   await page.evaluate(()=>multi.remove());try{await page.waitForFunction(()=>[...fixture.sessions.values()].every(s=>s.closed));}catch(error){console.error(await page.evaluate(()=>[...fixture.sessions.values()].filter(s=>!s.closed).map(s=>({entity:s.entity,unsub:s.unsubCreated,local:s.localPC.connectionState,remote:s.pc.connectionState,generation:s.target._generation,owns:s.target._pc===s.localPC,hasUnsubscribe:Boolean(s.target._unsubscribe),starting:s.target._starting,connected:s.target.isConnected}))));throw error;}
    assert.equal(errors.length,0,errors.join('\n'));console.log(`PASS ${label}: ${process.env.EDGE_WEBRTC_SIGNALING_ONLY==='1'?'real SDP + synthetic local media (transport NOT tested)':'real WebRTC video/audio loopback'}, NVR/main/sub routing, direct talk cleanup, 1–4 cameras/focus, controls and editor`);
    await context.close();
   }

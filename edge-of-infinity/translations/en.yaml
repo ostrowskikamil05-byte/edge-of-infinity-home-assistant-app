@@ -1,4 +1,7 @@
 configuration:
+  core_engine:
+    name: Streaming engine
+    description: EdgeRTC beta uses native H264 frames over WebSocket/WebCodecs, with one recording profile per camera. Requires HTTPS and a compatible browser. Restart the add-on and Home Assistant Core after changing engines.
   log_level:
     name: Log level
     description: Controls how much Edge Core writes to the app logs.
@@ -100,3 +103,4 @@ configuration:
     description: Selects whether NVR recordings use main or sub.
 network:
   8088/TCP: Edge Core API and web interface
+
