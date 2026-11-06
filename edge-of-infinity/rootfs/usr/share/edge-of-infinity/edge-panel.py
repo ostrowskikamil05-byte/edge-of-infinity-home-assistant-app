@@ -26,9 +26,9 @@ from urllib.parse import parse_qs, urlparse, urlunparse, quote, unquote
 from xml.sax.saxutils import escape as xml_escape
 
 
-APP_VERSION = "0.10.45"
+APP_VERSION = "0.10.46"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "native-edgertc-webcodecs-v7"
+UI_BUILD = "settings-save-engine-v8"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -75,6 +75,7 @@ LAST_RECORDING_ENSURE_AT = 0.0
 DEBUG_LOCK = threading.Lock()
 RECORDING_ENSURE_LOCK = threading.Lock()
 CONFIG_LOCK = threading.RLock()
+SUPERVISOR_OPTIONS_LOCK = threading.RLock()
 CONFIG_SAVE_LOCK = threading.Lock()
 RECORDING_CONTROL_LOCK = threading.RLock()
 JANUS_RELOAD_LOCK = threading.Lock()
@@ -110,6 +111,7 @@ CAMERA_OVERRIDE_FIELDS = (
     *STREAM_ROLE_FIELDS,
 )
 STREAM_ENGINES = ("janus_webrtc", "mediamtx", "ll_hls", "srt")
+CORE_ENGINES = ("edge_rtc", "mediamtx_janus", "mediamtx")
 REMOTE_ACCESS_MODES = ("local_only", "direct_public", "vps_relay", "turn_relay")
 ALWAYS_ON_STREAM_SCOPES = ("tile", "live", "tile_live", "all")
 EDGE_RTC_ENABLED = os.environ.get("EDGE_CORE_ENGINE", "") == "edge_rtc"
@@ -2283,6 +2285,35 @@ def addon_options_from_config(config: dict, existing: dict) -> dict:
 
 
 def sync_supervisor_options(config: dict) -> dict:
+    with SUPERVISOR_OPTIONS_LOCK:
+        return _sync_supervisor_options(config)
+
+
+def core_engine_settings(options: dict | None = None) -> dict:
+    running = os.environ.get("EDGE_CORE_ENGINE", "mediamtx_janus")
+    if options is None:
+        try:
+            options = supervisor_self_request("/addons/self/info").get("options") or {}
+        except (OSError, ValueError, RuntimeError):
+            return {"available": False, "running_engine": running, "core_engine": running, "restart_required": False}
+    selected = options.get("core_engine", "mediamtx_janus")
+    return {"available": True, "running_engine": running, "core_engine": selected, "restart_required": selected != running}
+
+
+def save_core_engine(engine: str) -> dict:
+    if engine not in CORE_ENGINES:
+        raise ValueError("Choose EdgeRTC, MediaMTX + Janus or MediaMTX.")
+    with SUPERVISOR_OPTIONS_LOCK:
+        current = supervisor_self_request("/addons/self/info").get("options") or {}
+        if current.get("core_engine") != engine:
+            supervisor_self_request("/addons/self/options", {"options": {**current, "core_engine": engine}})
+        observed = supervisor_self_request("/addons/self/info").get("options") or {}
+        if observed.get("core_engine") != engine:
+            raise RuntimeError("engine_verification_failed")
+        return core_engine_settings(observed)
+
+
+def _sync_supervisor_options(config: dict) -> dict:
     if not os.environ.get("SUPERVISOR_TOKEN"):
         return {"synced": False, "status": "unavailable"}
     try:
@@ -5761,6 +5792,14 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </header>
           <section class="settings">
+            <section class="field-section" id="core-engine-settings">
+              <h2>Silnik obrazu / Streaming engine</h2>
+              <p id="core-engine-running" class="notice">Loading streaming engine...</p>
+              <label>Silnik / Engine<select id="core-engine-select" disabled><option value="mediamtx_janus">MediaMTX + Janus</option><option value="edge_rtc">EdgeRTC (beta)</option><option value="mediamtx">MediaMTX</option></select></label>
+              <div class="actions"><button class="primary" id="save-core-engine" type="button" disabled>Zapisz silnik / Save engine</button><button id="reload-core-engine" type="button">Refresh engine</button></div>
+              <p id="core-engine-state" class="notice" role="status" aria-live="polite">Engine selection is saved separately from camera and recording settings.</p>
+              <p class="field-help">Po zmianie zrestartuj aplikację Edge, a następnie Home Assistant Core. EdgeRTC beta wymaga H264, HTTPS i przeglądarki z WebCodecs. / After changing the engine, restart the Edge app and then Home Assistant Core.</p>
+            </section>
             <div class="settings-jumps"><button type="button" data-settings-jump="recording-settings">Recording</button><button type="button" data-settings-jump="network-settings">Network</button><button type="button" data-settings-jump="storage-settings">Storage</button><button type="button" data-settings-jump="advanced-settings">Advanced</button></div>
             <form id="edge-settings-form"></form>
             <div class="actions save-bar">
@@ -8335,12 +8374,80 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       async function fetchSavedConfig() {
-        const response = await fetch(panelPath('api/config'), { cache: 'no-store' });
+        const { response, data } = await settingsRequest('api/config', { cache: 'no-store' }, 15000);
         if (!response.ok) {
           throw new Error(`Could not verify saved config: ${response.status}`);
         }
-        return response.json();
+        return data;
       }
+
+      async function settingsRequest(path, options = {}, timeoutMs = 45000) {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetch(panelPath(path), { ...options, signal: controller.signal });
+          const data = await response.json();
+          return { response, data };
+        } catch (error) {
+          if (error.name === 'AbortError') throw new Error('Save or verification timed out. Your form was kept. Refresh saved settings before retrying.');
+          throw error;
+        } finally {
+          window.clearTimeout(timer);
+        }
+      }
+
+      let engineSettings = null;
+      let engineSaveInFlight = false;
+      let engineLoadInFlight = false;
+      const engineSelect = document.getElementById('core-engine-select');
+      const engineSave = document.getElementById('save-core-engine');
+      const engineState = document.getElementById('core-engine-state');
+      function updateEngineControls() {
+        engineSelect.disabled = engineSaveInFlight || engineLoadInFlight || !engineSettings?.available;
+        engineSave.disabled = engineSelect.disabled || engineSelect.value === engineSettings.core_engine;
+        document.getElementById('reload-core-engine').disabled = engineSaveInFlight || engineLoadInFlight;
+      }
+      function showEngineSettings(data) {
+        engineSettings = data;
+        engineSelect.value = data.core_engine;
+        document.getElementById('core-engine-running').textContent = `Active engine: ${data.running_engine}. Saved engine: ${data.core_engine}.`;
+        engineState.textContent = !data.available ? 'Cannot access this app configuration in Home Assistant. Check the Supervisor connection and press Refresh engine.' : data.restart_required ? 'Zapisano. Restart required: restart the Edge app, then Home Assistant Core.' : 'Zapisano. Selected engine is already active.';
+        updateEngineControls();
+      }
+      async function loadEngineSettings() {
+        if (engineLoadInFlight || engineSaveInFlight) return;
+        engineLoadInFlight = true;
+        updateEngineControls();
+        try {
+          const { response, data } = await settingsRequest('api/core/engine', { cache: 'no-store' }, 15000);
+          if (!response.ok) throw new Error('Could not read engine configuration.');
+          showEngineSettings(data);
+        } catch (error) {
+          engineSettings = null;
+          engineState.textContent = error.message;
+        } finally {
+          engineLoadInFlight = false;
+          updateEngineControls();
+        }
+      }
+      engineSelect.addEventListener('change', updateEngineControls);
+      document.getElementById('reload-core-engine').addEventListener('click', loadEngineSettings);
+      engineSave.addEventListener('click', async () => {
+        if (engineSaveInFlight || engineSave.disabled) return;
+        engineSaveInFlight = true;
+        updateEngineControls();
+        engineState.textContent = 'Saving and verifying engine configuration...';
+        try {
+          const { response, data } = await settingsRequest('api/core/engine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ core_engine: engineSelect.value }) });
+          if (!response.ok) throw new Error(data.error || 'Could not save engine.');
+          showEngineSettings(data);
+        } catch (error) {
+          engineState.textContent = error.message;
+        } finally {
+          engineSaveInFlight = false;
+          updateEngineControls();
+        }
+      });
 
       async function loadCameras() {
         const response = await fetch(panelPath('cameras.json'), { cache: 'no-store' });
@@ -8640,16 +8747,16 @@ INDEX_HTML = r"""<!doctype html>
         configSaveInFlight = true;
         [form, edgeForm].forEach((element) => { element.inert = true; });
         buttons.forEach((button) => { button.disabled = true; });
+        let saved = false;
         try {
           const payload = collectEdgeSettings({ refreshGenerated: true });
           if (!hasMeaningfulCameras(payload)) throw new Error('At least one camera needs a host/IP or RTSP URL.');
           state.textContent = 'Saving all current camera and Edge settings...';
-          const response = await fetch(panelPath('api/config'), {
+          const { response, data } = await settingsRequest('api/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
           });
-          const data = await response.json();
           const addonSync = response.headers.get("X-Edge-Options-Sync");
           if (!response.ok) throw new Error(data.error || 'Could not save configuration.');
           const verified = await fetchSavedConfig();
@@ -8663,9 +8770,8 @@ INDEX_HTML = r"""<!doctype html>
           renderConfig();
           state.textContent = `Saved and verified. ${saveSummary(verified)} ${addonSync === 'synced' ? 'Home Assistant add-on options updated.' : 'Add-on options could not be synchronized; saved camera configuration is active.'}`;
           debugEvent(`ui_${reason}_done`, { savedSummary: saveSummary(verified) });
+          saved = true;
           if (liveTimer) { window.clearInterval(liveTimer); liveTimer = null; updateLiveTimer(); }
-          // Auxiliary refresh errors must not be presented as a failed settings save.
-          await Promise.allSettled([loadPresets(), loadCameras(), ...(panelLogs ? [loadLogs()] : [])]);
         } catch (error) {
           state.textContent = error.message || 'Could not save configuration. Your form has been kept.';
           debugEvent(`ui_${reason}_error`, { message: error.message });
@@ -8674,6 +8780,8 @@ INDEX_HTML = r"""<!doctype html>
           [form, edgeForm].forEach((element) => { element.inert = false; });
           buttons.forEach((button) => { button.disabled = false; });
         }
+        // Status refreshes must not keep the settings form locked after a verified save.
+        if (saved) void Promise.allSettled([loadPresets(), loadCameras(), ...(panelLogs ? [loadLogs()] : [])]);
       }
 
       document.getElementById('save-config').addEventListener('click', async () => {
@@ -9034,6 +9142,7 @@ INDEX_HTML = r"""<!doctype html>
           path: window.location.pathname,
         });
         await loadConfig();
+        void loadEngineSettings();
         await Promise.all([loadPresets(), loadCameras(), loadRecordingStatus({ forceRender: true, reason: 'boot' })]);
       }
 
@@ -9185,6 +9294,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/core/status":
             self.send_json(engine_runtime_status())
             return
+        if path == "/api/core/engine":
+            self.send_json(core_engine_settings())
+            return
         if path == "/api/core/mediamtx.yml":
             if not MEDIAMTX_CONFIG_PATH.exists():
                 self.send_json({"error": "mediamtx_config_not_found"}, HTTPStatus.NOT_FOUND)
@@ -9241,6 +9353,17 @@ class EdgeHandler(BaseHTTPRequestHandler):
         write_debug_event("api_post", {"path": parsed.path, "query": parse_qs(parsed.query), "client": self.client_address[0]})
         if parsed.path == "/api/config":
             self.save_config()
+            return
+        if parsed.path == "/api/core/engine":
+            try:
+                payload = self.read_body_json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Expected an object")
+                self.send_json(save_core_engine(payload.get("core_engine")))
+            except ValueError:
+                self.send_json({"error": "Choose a valid streaming engine."}, HTTPStatus.BAD_REQUEST)
+            except (OSError, RuntimeError):
+                self.send_json({"error": "Could not confirm the saved engine in Home Assistant. Press Refresh engine before retrying."}, HTTPStatus.BAD_GATEWAY)
             return
         if parsed.path == "/api/refresh":
             payload = refresh_status()
