@@ -10,6 +10,13 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .client import EdgeClient
 from .const import CONF_API_KEY, DOMAIN, PLATFORMS
 from .coordinator import EdgeCoordinator
+from .frontend import async_register_card
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Load the bundled dashboard card without manual resource configuration."""
+    await async_register_card(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -39,3 +46,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unloaded:
         hass.data[DOMAIN].pop(entry.entry_id)
     return unloaded
+

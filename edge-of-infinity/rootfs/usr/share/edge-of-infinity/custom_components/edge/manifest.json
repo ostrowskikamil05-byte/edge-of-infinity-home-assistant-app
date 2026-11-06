@@ -7,9 +7,13 @@
   "integration_type": "hub",
   "iot_class": "local_polling",
   "requirements": [],
-  "version": "0.10.42",
+  "version": "0.10.43",
   "dependencies": [
     "stream",
-    "ffmpeg"
+    "ffmpeg",
+    "frontend"
+  ],
+  "after_dependencies": [
+    "go2rtc"
   ]
 }

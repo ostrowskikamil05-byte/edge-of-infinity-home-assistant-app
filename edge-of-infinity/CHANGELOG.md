@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.43
+
+- Bundle and automatically register the Edge Live custom Home Assistant card with a visual editor and authenticated native HA WebRTC signaling. Add a card-type selector and copyable custom-card YAML to the panel.
+- Add live start/stop, mute/volume, explicit microphone capture, image fit, echo cancellation, reconnect, fullscreen, browser picture-in-picture and frame export controls. Keep the player intact during entity state updates.
+- Negotiate two-way audio through the Home Assistant WebRTC provider, report unsupported return audio, and release microphone tracks on stop, removal, page hiding, failure and cancelled permission requests. HTTPS and compatible camera/provider backchannel support are required.
+- Load the frontend module once, version its resource URL, retain stable camera IDs and private RTSP source updates, and keep the standard Home Assistant camera card available.
+- Add browser WebRTC loopback/signaling-only coverage and integration registration tests; physical camera backchannels and a production Home Assistant installation are not exercised by the test fixture.
+
 ## 0.10.42
 
 - Organize navigation into Live view, Recordings, Cameras, Settings, Home Assistant and Diagnostics, removing the unused account placeholder.

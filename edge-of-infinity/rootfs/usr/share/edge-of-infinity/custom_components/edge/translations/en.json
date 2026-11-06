@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect Edge of Infinity",
-        "description": "Enter the Edge of Infinity app URL. Use the add-on local URL or the exposed API URL.",
+        "description": "Use local for the installed add-on, or enter the Edge app API URL. The integration registers the Edge Live dashboard card automatically.",
         "data": {
           "url": "Edge URL",
           "api_key": "API key"

@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "Polacz Edge of Infinity",
-        "description": "Podaj adres aplikacji Edge of Infinity. Uzyj lokalnego adresu add-onu albo wystawionego adresu API.",
+        "title": "Połącz Edge of Infinity",
+        "description": "Dla dodatku na tym samym Home Assistant użyj local. Dla zdalnego serwera podaj jego adres API. Karta Edge Live zostanie zarejestrowana automatycznie.",
         "data": {
           "url": "Adres Edge",
           "api_key": "Klucz API"
@@ -11,13 +11,13 @@
       }
     },
     "error": {
-      "cannot_connect": "Nie mozna polaczyc sie z Edge of Infinity",
-      "invalid_auth": "Nieprawidlowy klucz API",
-      "invalid_url": "Nieprawidlowy adres URL",
-      "unknown": "Nieoczekiwany blad"
+      "cannot_connect": "Nie można połączyć się z Edge of Infinity",
+      "invalid_auth": "Nieprawidłowy klucz API",
+      "invalid_url": "Nieprawidłowy adres URL",
+      "unknown": "Nieoczekiwany błąd"
     },
     "abort": {
-      "already_configured": "Edge of Infinity jest juz skonfigurowany"
+      "already_configured": "Edge of Infinity jest już skonfigurowany"
     }
   }
 }

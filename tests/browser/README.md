@@ -64,3 +64,25 @@ It writes only fixture configuration and a fixture entity-ID map. Do not point
 this suite at a production installation. Native Home Assistant stream-source,
 FFmpeg fallback, entity registration and metadata export behavior are tested in
 `tests/test_ha_live_camera.py` using API stubs; no real Home Assistant Core is run.
+
+The bundled HA custom card has a real browser WebRTC loopback suite:
+
+```sh
+NODE_PATH=/tmp/edge-browser-tests/node_modules node tests/browser/edge_live_card.cjs
+```
+
+The test loads the actual card module into a disposable page. HA's authenticated
+WebSocket message envelope is simulated; both ends use real RTCPeerConnections,
+generated video and synthetic audio. It checks decoded live frames, returned
+audio RTP packets, no microphone capture on autoplay, release on toggle/removal/
+page hiding, cancellation of delayed permission, denied and rejected return
+audio, player identity on state updates, controls, editor changes and four
+responsive viewports. It does not connect to Home Assistant, go2rtc or a camera.
+
+If managed browser policy blocks WebRTC transport (for example
+`WebRtcIPHandling: disable_non_proxied_udp`), run with
+`EDGE_WEBRTC_SIGNALING_ONLY=1`. This mode still negotiates real SDP and verifies
+microphone directions, but injects local synthetic tracks into the receive
+handler for UI rendering. It does **not** verify ICE connectivity or RTP packet
+transfer. Report which mode was run; do not describe this fallback as a passed
+media transport test.
