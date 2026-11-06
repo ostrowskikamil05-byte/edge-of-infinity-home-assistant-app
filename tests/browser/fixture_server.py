@@ -26,6 +26,9 @@ if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  p.DETECTION_SERVICE.store.prune=lambda *args:None
  p.DETECTION_SERVICE.apply(config)
  p.DETECTION_SERVICE.store.add('front','person','local',datetime(2026,7,27,0,0,8).timestamp(),{'score':.91})
+ p.DETECTION_SERVICE.store.add('front','vehicle','camera',datetime(2026,7,28,0,0,15).timestamp(),{})
+ for index in range(210):
+  p.DETECTION_SERVICE.store.add('front','motion','camera',datetime(2026,7,28,0,1).timestamp()+index*300,{})
 d=p.recording_base_dir(config['cameras'][0],0); d.mkdir(parents=True)
 import subprocess
 sample=d/'sample.mp4'

@@ -69,6 +69,7 @@ jobs:
                   time.sleep(.1)
           PY
           node tests/browser/detection_ui.cjs
+          node tests/browser/nvr_playback.cjs
 
   detection-media:
     runs-on: ubuntu-latest
