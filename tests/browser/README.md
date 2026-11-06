@@ -34,3 +34,19 @@ Stop the fixture server with Ctrl+C. Optional environment variables:
 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`, and `EDGE_NVR_SCREENSHOT_DIR`.
 Create the screenshot directory before setting it. Use the fixture server only
 with this test suite, not with a production URL (the tests add/remove a fixture MP4).
+
+The playback suite also delays the next MP4 response and verifies that the last
+video frame stays visible without a poster until the next decoded frame appears.
+
+After the playback suite, run the camera-form test against the same disposable
+fixture (it changes only the fixture camera configuration):
+
+```sh
+NODE_PATH=/tmp/edge-browser-tests/node_modules node tests/browser/camera_settings.cjs
+```
+
+This verifies vendor selection, edited IP/password, URL encoding, persistence,
+the options-sync status message and an ONVIF discovery response loaded into the
+form. ONVIF responses and Supervisor success are mocked in these browser tests;
+protocol and projection behavior have separate unit tests. No physical camera
+or production Supervisor is contacted.

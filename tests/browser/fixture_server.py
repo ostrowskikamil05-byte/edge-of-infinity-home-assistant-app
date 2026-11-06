@@ -11,6 +11,7 @@ p.MIN_RECORDING_FILE_READY_SECONDS=0
 config=p.normalize_config({'storage': {'recordings_dir': str(p.HOME_DIR/'recordings')}, 'nvr': {'segment_seconds': 7}, 'cameras': [camera('front', '192.0.2.10', 'sub')]})
 p.commit_panel_config(config)
 p.sync_runtime_engine_config=lambda *a: {}
+p.sync_supervisor_options=lambda *a: {"synced": True, "status": "synced"}
 p.schedule_recording_ensure=lambda *a: None
 p.schedule_recording_cache_refresh=lambda *a,**kw: False
 p.refresh_status=lambda: {}

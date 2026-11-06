@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.41
+
+- Keep the actual last video frame over a segment load and remove the poster during playback, preventing flashes back to a thumbnail between MP4 files.
+- Rebuild camera RTSP credentials/hosts consistently while preserving explicit paths and ports; encode reserved characters in credentials.
+- Restart only affected recorders after connection, stream or recording settings change. Scheduled recorder work reloads the latest saved config. Reload a managed Janus child when its mount configuration changes; MediaMTX reloads its written configuration.
+- Mirror saved camera settings to the add-on's own Supervisor options, preserving unrelated options and verifying the result. Add a generic cameras list while retaining the first two legacy camera option fields. This uses the default Supervisor role and only self/info and self/options endpoints.
+- Publish updated camera details immediately while refreshing connection probes in the background, and discard probe results from superseded settings.
+- Add RTSP profiles for Uniview, Reolink, Axis, Hanwha, Amcrest, Foscam, TP-Link Tapo and VIGI, plus generic ONVIF/RTSP support for other compatible cameras. Discover ONVIF Media profiles and main/sub RTSP URIs using authenticated SOAP with PasswordDigest.
+- Add regression coverage for vendor URLs, special passwords, recorder restarts, Supervisor projection/verification, ONVIF discovery, stale probe protection and browser transitions with delayed video responses.
+
 ## 0.10.40
 
 - Show one playback counter and seek bar for all video recorded in the selected day, with play/pause, skip, mute and speed controls. Load the required segment and continue through the day on the same video element instead of showing a seven-second native clip timeline.
