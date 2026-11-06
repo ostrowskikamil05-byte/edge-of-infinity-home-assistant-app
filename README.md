@@ -31,6 +31,7 @@ After publishing this repository on GitHub:
 
 This app runs Edge Core.
 
-The optional Home Assistant custom integration can still be used later to expose cameras, sensors, and WebRTC streams as native Home Assistant entities.
+The bundled Home Assistant integration exposes cameras and sensors, and automatically registers the Edge Live dashboard card. It supports 1–4 cameras, NVR/Main/Sub quality selection, audio controls and optional microphone talk. Live viewing shares the NVR recording feed by default. After an add-on update, restart Home Assistant Core to load the integration and refresh the frontend. See [setup and limitations](edge-of-infinity/DOCS.md#shared-nvr-live-streams-and-14-cameras-01044).
 
 The app is the engine. The integration is the bridge.
+

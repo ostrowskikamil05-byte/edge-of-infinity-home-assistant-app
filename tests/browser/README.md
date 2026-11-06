@@ -86,3 +86,21 @@ microphone directions, but injects local synthetic tracks into the receive
 handler for UI rendering. It does **not** verify ICE connectivity or RTP packet
 transfer. Report which mode was run; do not describe this fallback as a passed
 media transport test.
+
+The card suite also checks 1–4 cameras, actual NVR/Main/Sub entity selection,
+focus/all views, closed sessions for hidden tiles, exclusive microphone capture
+and return from the temporary direct Talk entity to NVR. The YAML builder suite
+covers 2/3/4-camera custom and native grids, quality, actual IDs and duplicates.
+
+A separate RTSP integration test requires MediaMTX 1.19.2 and FFmpeg/FFprobe:
+
+```sh
+MEDIAMTX_BINARY=/path/to/mediamtx python tests/rtsp_shared_stream.py
+```
+
+It launches two temporary local MediaMTX processes, publishes generated H264 as a
+camera, and uses the real Edge runtime config for the NVR. Three simultaneous
+readers plus a parameter probe must share one upstream camera RTSP session,
+preserve the 640×360 source dimensions, and release the upstream on NVR shutdown.
+It uses ephemeral loopback ports and temporary logs, and cleans up its processes.
+It does not contact a physical camera or Home Assistant.

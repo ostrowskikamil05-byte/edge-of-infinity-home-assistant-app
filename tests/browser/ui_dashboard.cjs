@@ -2,7 +2,7 @@ const {chromium}=require('playwright');
 const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');
 const info=JSON.parse(fs.readFileSync(process.env.EDGE_NVR_FIXTURE_INFO || '/tmp/edge-nvr-browser-fixture.json','utf8'));
 const map=path.resolve(info.recordings_dir,'..','..','ha-entities.json');
-const payload={card_version:'0.10.43',card_type:'custom:edge-live-card',entities:[{camera_id:'front',entity_id:'camera.user_renamed_front',name:'Front',local:true}]};
+const payload={card_version:'0.10.44',card_type:'custom:edge-live-card',entities:[{camera_id:'front',entity_id:'camera.user_renamed_front',name:'Front',local:true}]};
 fs.writeFileSync(map,JSON.stringify(payload));
 (async()=>{const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,args:['--no-sandbox']});
 try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],['phone',390,844],['small-phone',320,740]]){
@@ -31,7 +31,7 @@ try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],
  await nav('ha-dashboard');
  await page.waitForFunction(()=>document.getElementById('ha-camera-entity').value==='camera.user_renamed_front');
  const yaml=await page.locator('#ha-card-yaml').inputValue();
- assert(yaml.includes('type: custom:edge-live-card'));assert(yaml.includes('microphone: true'));assert((await page.locator('#ha-card-resource-status').textContent()).includes('0.10.43'));assert(yaml.includes('entity: camera.user_renamed_front'));assert(!yaml.includes('rtsp://')&&!yaml.includes('secret')&&!yaml.includes('192.0.2'));
+ assert(yaml.includes('type: custom:edge-live-card'));assert(yaml.includes('microphone: true'));assert((await page.locator('#ha-card-resource-status').textContent()).includes('0.10.44'));assert(yaml.includes('entity: camera.user_renamed_front'));assert(!yaml.includes('rtsp://')&&!yaml.includes('secret')&&!yaml.includes('192.0.2'));
  assert.equal(JSON.parse(yaml.split("\n").find(line=>line.startsWith("name: ")).slice(6)), 'Front door: "East"');
  await page.locator('#ha-copy-card').click();await page.waitForFunction(()=>document.getElementById('ha-copy-status').textContent.startsWith('Copied.'));
  assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),yaml);
@@ -49,7 +49,18 @@ try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],
  assert(!(await page.locator('[name="camera-0-host"]').isVisible()),'closed camera unexpectedly reopened');
  await page.locator('[data-remove-camera="1"]').click();
  assert.equal(await page.locator('[data-camera-form]').count(),1);
+ // Build custom and native cards for 2, 3 and 4 actual fixture entities.
+ const original=await page.evaluate(()=>fetch('api/config').then(r=>r.json()));
+ await page.evaluate(async original=>{const next=structuredClone(original);for(const id of ['side','back','garage'])next.cameras.push({...structuredClone(original.cameras[0]),id,name:id,host:'192.0.2.20'});const response=await fetch('api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(next)});if(!response.ok)throw new Error('Fixture config failed');},original);
+ const multiPayload={...payload,entities:[...payload.entities,...['side','back','garage'].map(id=>({camera_id:id,entity_id:'camera.custom_'+id,name:id,local:true}))]};fs.writeFileSync(map,JSON.stringify(multiPayload));
+ await nav('ha-dashboard');await page.locator('#ha-refresh-entities').click();await page.waitForFunction(()=>document.getElementById('ha-camera-select').options.length===4);
+ await page.locator('#ha-card-type').selectOption('edge');
+ for(const count of [2,3,4]){await page.locator('#ha-camera-count').selectOption(String(count));const yaml=await page.locator('#ha-card-yaml').inputValue();assert.equal(yaml.split('  - entity: ').length-1,count);assert(yaml.includes('quality: nvr'));assert(!(await page.locator('#ha-copy-card').isDisabled()));}
+ await page.locator('#ha-card-quality').selectOption('main');assert.equal((await page.locator('#ha-card-yaml').inputValue()).split('quality: main').length-1,4);
+ await page.locator('#ha-card-type').selectOption('native');assert((await page.locator('#ha-card-yaml').inputValue()).startsWith('type: grid'));assert.equal((await page.locator('#ha-card-yaml').inputValue()).split('type: picture-entity').length-1,4);
+ await page.locator('[data-ha-extra-slot="1"] select').selectOption('front');assert(await page.locator('#ha-copy-card').isDisabled(),'duplicate cameras allowed');
+ await page.evaluate(async original=>{const response=await fetch('api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(original)});if(!response.ok)throw new Error('Fixture restore failed');},original);fs.writeFileSync(map,JSON.stringify(payload));
  assert.equal(errors.length,0,errors.join('\n'));
- console.log(`PASS ${name}: grouped settings, unsaved state, single retention, save round-trip, exact entity YAML, clipboard, manual fallback and no overflow`);
+ console.log(`PASS ${name}: grouped settings, unsaved state, single retention, save round-trip, exact entity YAML, 1–4 camera builder/quality, clipboard, manual fallback and no overflow`);
  await context.close();
 }}finally{await browser.close();}})().catch(e=>{console.error(e);process.exit(1)});
