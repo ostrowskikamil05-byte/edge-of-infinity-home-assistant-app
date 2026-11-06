@@ -64,7 +64,26 @@ for (const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],['p
  const controls=await page.locator('.nvr-playback-controls').boundingBox();
  const viewport=await page.evaluate(()=>({width:innerWidth,height:innerHeight}));
  assert(controls.x>=0&&controls.y>=0&&controls.x+controls.width<=viewport.width+1&&controls.y+controls.height<=viewport.height+1,`fullscreen controls outside viewport: ${JSON.stringify({controls,viewport})}`);
+ assert(await page.evaluate(()=>!document.fullscreenElement||document.fullscreenElement===document.querySelector('[data-recording-wrap]')),'native fullscreen dropped the custom playback controls');
  await page.evaluate(()=>document.fullscreenElement ? document.exitFullscreen() : exitSoftFullscreen('test'));
+ await page.waitForFunction(()=>!document.fullscreenElement&&!document.querySelector('.edge-soft-fullscreen'));
+ // Browsers without element fullscreen must retain controls in the in-page mode.
+ await page.evaluate(()=>{
+  const wrap=document.querySelector('[data-recording-wrap]'),video=wrap.querySelector('video');
+  for(const method of ['requestFullscreen','webkitRequestFullscreen','msRequestFullscreen'])Object.defineProperty(wrap,method,{value:undefined,configurable:true});
+  window.videoFullscreenCalls=0;
+  for(const method of ['requestFullscreen','webkitEnterFullscreen'])Object.defineProperty(video,method,{value:()=>{window.videoFullscreenCalls++;throw new Error('Video-only fullscreen must not be used for NVR');},configurable:true});
+ });
+ await page.locator('[data-recording-fullscreen]').click();
+ await page.waitForFunction(()=>{
+  const wrap=document.querySelector('[data-recording-wrap].edge-soft-fullscreen');
+  if(!wrap)return false;
+  const rect=wrap.getBoundingClientRect();return Math.abs(rect.width-innerWidth)<2&&Math.abs(rect.height-innerHeight)<2;
+ });
+ const soft=await page.locator('.nvr-playback-controls').boundingBox();
+ assert(soft.x>=0&&soft.y>=0&&soft.x+soft.width<=viewport.width+1&&soft.y+soft.height<=viewport.height+1,'in-page fullscreen controls outside viewport');
+ assert.equal(await page.evaluate(()=>videoFullscreenCalls),0);
+ await page.evaluate(()=>exitSoftFullscreen('test'));
  assert.equal(errors.length,0,errors.join('\n'));
  if (process.env.EDGE_NVR_SCREENSHOT_DIR) await page.screenshot({path:`${process.env.EDGE_NVR_SCREENSHOT_DIR}/nvr-${name}.png`,fullPage:true});
  console.log(`PASS ${name}: duration 21s, all 3 clips, stable element, pause/refresh, seek, day switch and visible 16:9 thumbnails`);

@@ -5097,6 +5097,7 @@ INDEX_HTML = r"""<!doctype html>
         z-index: 9999 !important;
         width: 100vw !important;
         height: 100vh !important;
+        height: 100dvh !important;
         max-width: none !important;
         max-height: none !important;
         aspect-ratio: auto !important;
@@ -6018,6 +6019,7 @@ INDEX_HTML = r"""<!doctype html>
       function requestEdgeFullscreen(target, context) {
         if (!target) return;
         const media = target.querySelector('video, iframe') || target;
+        const keepPlaybackControls = target.matches('[data-recording-wrap]');
         if (softFullscreenTarget === target) {
           exitSoftFullscreen(context);
           return;
@@ -6033,14 +6035,14 @@ INDEX_HTML = r"""<!doctype html>
           }
         }
         try {
-          if (media.tagName === 'VIDEO' && typeof media.webkitEnterFullscreen === 'function') {
+          if (!keepPlaybackControls && media.tagName === 'VIDEO' && typeof media.webkitEnterFullscreen === 'function') {
             media.webkitEnterFullscreen();
             debugEvent('ui_fullscreen_open', { context, mode: 'webkit_video' });
             return;
           }
-          const mediaRequest = media.requestFullscreen
+          const mediaRequest = !keepPlaybackControls && (media.requestFullscreen
             || media.webkitRequestFullscreen
-            || media.msRequestFullscreen;
+            || media.msRequestFullscreen);
           const targetRequest = target.requestFullscreen
             || target.webkitRequestFullscreen
             || target.msRequestFullscreen;

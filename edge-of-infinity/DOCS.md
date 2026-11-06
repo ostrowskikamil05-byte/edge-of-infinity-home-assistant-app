@@ -15,7 +15,9 @@ the first event in that interval; this also works on narrow touchscreens. **Prev
 opens the individual events filtered to that camera and date. Mixed groups use
 person/vehicle color priority and list all contained types in their tooltip.
 A missing recording displays a message and keeps the current playback position.
-Metadata refreshes preserve the existing player and pause state. The event
+Metadata refreshes preserve the existing player and pause state. NVR fullscreen
+expands the complete player with its controls; browsers lacking element fullscreen
+use an in-page view instead of hiding the controls in video-only fullscreen. The event
 track refreshes at most every 15 seconds while NVR is open, with at most two
 timeline metadata requests in flight; it opens no camera media sessions. Day boundaries
 use the recorder's timezone, including daylight-saving changes.
