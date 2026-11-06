@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.46
+
+- Release camera/settings save buttons before refreshing auxiliary status; bound save and verification requests and retain edited forms after a timeout or error.
+- Add a separate streaming-engine selector at the top of Edge Settings. Persist only the chosen engine to the app’s Supervisor options, verify the value, show saved versus running engine and explain the required app/Core restart. Serialize local options updates so camera saves preserve the selected engine.
+- Mark camera credentials/endpoints and unused remote-access strings optional in the app configuration schema.
+- Add regression coverage for hung status refreshes, save/verification timeouts, failed writes, engine persistence and credential-free responses.
+
 ## 0.10.45
 
 - Add opt-in native EdgeRTC beta: a Go source registry/RTSP relay and EdgeRTC/1 encoded-frame protocol over WebSocket, decoded with browser WebCodecs. The native path uses neither WebRTC nor MSE and does not re-encode video. Existing core remains the default.

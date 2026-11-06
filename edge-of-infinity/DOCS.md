@@ -488,8 +488,14 @@ Validation includes 107 unit tests and browser tests for 1–4 camera layouts, f
 ### Native EdgeRTC beta (0.10.45)
 
 `edge_rtc` is an **opt-in experimental core**, shipped beside the existing engine.
-In the add-on's **Configuration**, set `core_engine: edge_rtc`, restart the add-on,
-then **restart Home Assistant Core** and refresh its frontend. Existing Edge Live
+From version 0.10.46, open **Edge panel → Settings → Silnik obrazu / Streaming engine**,
+select **EdgeRTC (beta)** and press **Zapisz silnik / Save engine**. The panel verifies
+the saved value and shows the engine currently running. Restart the Edge app,
+then **restart Home Assistant Core** and refresh its frontend. Alternatively, set
+`core_engine: edge_rtc` in the app’s Home Assistant **Configuration**. The Save
+button there activates when the value differs from the existing configuration;
+YAML mode also requires valid YAML. Engine selection does not restart the app
+automatically. Existing Edge Live
 cards automatically use native EdgeRTC when the integration publishes this mode.
 Select the **NVR** quality option. Switch `core_engine` back to `mediamtx_janus` and
 restart the add-on/Core to use the existing engine again. Existing camera settings,
