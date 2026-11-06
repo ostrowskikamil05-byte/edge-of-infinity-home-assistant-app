@@ -392,3 +392,34 @@ When camera IP/password/stream settings change, the panel writes edge.json and i
 The panel also synchronizes the add-on's own Home Assistant options through Supervisor. The new **cameras** list contains all configured cameras; the first two legacy hikvision_1/hikvision_2 fields are mirrored for compatibility. Other Supervisor options are preserved. The add-on uses hassio_api with the default role, not manager/admin access. The save message confirms verified synchronization or clearly states that Supervisor options could not be synchronized. Standalone/local runs without Supervisor still save edge.json normally. Reload an already-open Home Assistant configuration tab to see its latest option values.
 
 The runner imports the generic cameras list on first initialization. Once edge.json exists, it remains authoritative. In NVR, segment transitions retain the actual previous video frame until the new frame is presented; they do not revert to a live-camera snapshot or the initial recording poster.
+
+### Organized UI and native Home Assistant dashboard cards (0.10.42)
+
+Navigation separates daily viewing (**Live view**, **Recordings**) from camera setup, app settings, Home Assistant cards and diagnostics. Each camera has an expandable card with **Connection**, **Discover camera streams**, **Live & recording** and **Advanced connection** sections. The current camera stays open during edits; adding a camera opens its form. The save bar marks unsaved changes and saves both camera/app forms together.
+
+Settings show recording retention and browser compatibility first. Storage paths, remote access/ICE, performance and server settings are expandable. There is one visible retention setting; saving it synchronizes storage and NVR retention values.
+
+To put live video on the main Home Assistant dashboard:
+
+1. Update/start the add-on, leaving `install_custom_component: true` (the default).
+2. **Restart Home Assistant Core once** after this update so the changed Edge integration and its stream/FFmpeg dependencies load. If the integration is not added yet, go to **Settings → Devices & services → Add integration → Edge of Infinity** and use `local` as the connection.
+3. In the Edge panel, open **Home Assistant**. Select the camera. The integration publishes the actual registered entity ID, including IDs renamed by the user, through `/config/edge/ha-entities.json` (seen by the add-on under `/homeassistant/edge`). If detection is unavailable, enter the exact `camera.…` entity ID from Home Assistant; no ID is guessed.
+4. Click **Copy card YAML**. In Home Assistant, open your dashboard → **Edit dashboard → Add card → Manual**, paste the code and save.
+
+Example only — use the generator for your actual entity ID:
+
+```yaml
+type: picture-entity
+entity: camera.front_door
+camera_view: live
+name: Front door
+show_name: true
+show_state: false
+aspect_ratio: "16:9"
+```
+
+This is a built-in card; no HACS/custom card, browser RTSP URL, camera password or public Edge port is needed in the YAML. Home Assistant's authenticated camera/stream pipeline handles the video, including access through the normal Home Assistant URL. Home Assistant Core must be able to reach the camera's RTSP address. Use an H264 live stream for broad browser compatibility; latency and codec playback depend on Home Assistant and the camera.
+
+The native integration reads the configured live stream, updates an existing stream worker after its source changes, and adds entities for newly configured cameras on coordinator refresh. Snapshot requests use the existing cached image when available and otherwise request a frame through Home Assistant's FFmpeg integration. Entity IDs are exported atomically, without stream credentials. If multiple non-local installations use the same camera ID, choose the correct entity manually. An entity-mapping export failure does not prevent camera setup.
+
+The UI and stream-source behavior are covered by browser/unit tests with a disposable local fixture and Home Assistant API stubs. Actual playback on a running Home Assistant Core still depends on the installation's network and camera codecs.

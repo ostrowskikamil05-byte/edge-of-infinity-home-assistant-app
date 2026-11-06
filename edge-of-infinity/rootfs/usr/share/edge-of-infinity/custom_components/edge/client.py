@@ -6,6 +6,7 @@ import json as json_lib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse, unquote
 
 from aiohttp import ClientError, ClientResponseError, ClientSession
 
@@ -201,6 +202,20 @@ class EdgeClient:
         return await self._request("GET", path, expect_json=False)
 
 
+def camera_stream_source(camera: dict[str, Any], role: str = "live_stream") -> str | None:
+    """Return a private, usable RTSP source for Home Assistant's stream worker."""
+    if camera.get("enabled") is False:
+        return None
+    selected = camera.get(role) if camera.get(role) in ("main", "sub") else "sub"
+    for source in (_stream_rtsp(camera, selected), _stream_rtsp(camera, "main")):
+        if not source:
+            continue
+        parsed = urlparse(source)
+        if parsed.scheme in ("rtsp", "rtsps") and parsed.hostname and unquote(parsed.password or "") != "***":
+            return source
+    return None
+
+
 def _hikvision_channel_from_rtsp(value: str | None, fallback: str) -> str:
     """Return the channel number from a Hikvision RTSP URL."""
     if not value or "/Streaming/Channels/" not in value:
@@ -323,3 +338,4 @@ def _normalize_cameras(cameras: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for camera in cameras
         if isinstance(camera, dict)
     ]
+
