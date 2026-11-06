@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.42
+
+- Organize navigation into Live view, Recordings, Cameras, Settings, Home Assistant and Diagnostics, removing the unused account placeholder.
+- Group camera setup into connection, discovery, live/recording and advanced fields. Preserve expanded camera sections, open newly added cameras, and show unsaved changes next to sticky save actions.
+- Put recording preferences first, with one visible retention value. Move storage paths, network/ICE, performance and server options into named expandable sections.
+- Add a Home Assistant dashboard-card builder with exact registered entity IDs, YAML preview, clipboard copy and setup instructions. Export only camera/entity metadata; generated cards contain no RTSP credentials.
+- Enable native Home Assistant camera streaming through stream_source and CameraEntityFeature.STREAM, declare stream/ffmpeg dependencies and provide on-demand snapshot fallback. Refresh existing stream sources after camera settings change and add new camera entities dynamically.
+- Add native-camera lifecycle/source tests, credential-free entity mapping tests and responsive UI/clipboard/save-roundtrip browser coverage.
+
 ## 0.10.41
 
 - Keep the actual last video frame over a segment load and remove the poster during playback, preventing flashes back to a thumbnail between MP4 files.

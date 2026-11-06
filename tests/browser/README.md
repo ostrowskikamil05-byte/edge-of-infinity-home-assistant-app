@@ -50,3 +50,17 @@ the options-sync status message and an ONVIF discovery response loaded into the
 form. ONVIF responses and Supervisor success are mocked in these browser tests;
 protocol and projection behavior have separate unit tests. No physical camera
 or production Supervisor is contacted.
+
+The redesigned settings and Home Assistant card builder have an additional fixture-only suite:
+
+```sh
+NODE_PATH=/tmp/edge-browser-tests/node_modules node tests/browser/ui_dashboard.cjs
+```
+
+It checks camera/advanced group visibility, unsaved state, a single retention
+setting and save round-trips, actual mapped entity IDs, YAML quoting, clipboard
+contents, invalid/missing-entity handling and responsive layout on four viewports.
+It writes only fixture configuration and a fixture entity-ID map. Do not point
+this suite at a production installation. Native Home Assistant stream-source,
+FFmpeg fallback, entity registration and metadata export behavior are tested in
+`tests/test_ha_live_camera.py` using API stubs; no real Home Assistant Core is run.

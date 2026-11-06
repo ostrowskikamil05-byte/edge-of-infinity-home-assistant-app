@@ -26,9 +26,9 @@ from urllib.parse import parse_qs, urlparse, urlunparse, quote, unquote
 from xml.sax.saxutils import escape as xml_escape
 
 
-APP_VERSION = "0.10.41"
+APP_VERSION = "0.10.42"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-continuous-frame-multivendor-v3"
+UI_BUILD = "ui-dashboard-native-live-v4"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -4752,6 +4752,22 @@ def refresh_status() -> dict:
     return payload
 
 
+def home_assistant_dashboard_payload() -> dict:
+    """Return entity IDs and camera labels only, never connection credentials."""
+    config = load_config()
+    mapping = read_json(HOME_DIR / "ha-entities.json", {})
+    registered = mapping.get("entities", []) if isinstance(mapping, dict) else []
+    if not isinstance(registered, list):
+        registered = []
+    cameras = []
+    for camera in config.get("cameras", []):
+        matches = [item for item in registered if isinstance(item, dict) and item.get("camera_id") == camera.get("id") and re.fullmatch(r"camera\.[a-z0-9_]+", str(item.get("entity_id") or ""))]
+        local = [item for item in matches if item.get("local")]
+        candidates = sorted({item["entity_id"] for item in (local or matches)})
+        cameras.append({"id": camera.get("id"), "name": camera.get("name") or camera.get("id"), "enabled": bool(camera.get("enabled")), "entity_id": candidates[0] if len(candidates) == 1 else "", "entities": candidates})
+    return {"cameras": cameras, "integration_detected": any(item["entities"] for item in cameras)}
+
+
 def health_payload() -> dict:
     return {
         "status": "ok",
@@ -5498,6 +5514,83 @@ INDEX_HTML = r"""<!doctype html>
         .toolbar, .actions { width: 100%; }
         .toolbar button, .actions button { flex: 1 1 auto; }
       }
+
+      :root { --bg: #0b1118; --panel: #121c27; --panel-2: #172431; --line: #293a4b; --accent: #65dfc0; --muted: #a7bac9; --sidebar-width: 232px; }
+      body { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; }
+      .sidebar { background: #0e1721; overflow-y: auto; }
+      .sidebar-header { flex-wrap: wrap; gap: 8px; }
+      .brand { font-weight: 700; letter-spacing: -.035em; }
+      .nav { gap: 5px; }
+      .nav-section-label { padding: 20px 11px 6px; color: #728a9f; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
+      body.nav-collapsed .nav-section-label { font-size: 0; padding: 8px 0 0; }
+      .nav button { border: 0; background: transparent; min-height: 46px; border-radius: 8px; }
+      .nav button.active { box-shadow: inset 3px 0 var(--accent); background: rgba(101,223,192,.1); }
+      main { max-width: 1320px; padding-top: 32px; }
+      header { margin-bottom: 24px; }
+      h1 { font-size: clamp(30px, 4vw, 42px); font-weight: 650; letter-spacing: -.045em; line-height: 1.15; margin-bottom: 8px; }
+      h2 { font-size: 19px; font-weight: 650; letter-spacing: -.025em; }
+      h3 { font-size: 15px; margin: 0 0 8px; }
+      .eyebrow { font-size: 10px; font-weight: 800; letter-spacing: .18em; color: var(--accent); margin-bottom: 8px; }
+      button, input, select, textarea { font: inherit; }
+      button { min-height: 42px; border-radius: 8px; font-weight: 550; }
+      button.primary { color: #062b23; background: var(--accent); border-color: var(--accent); }
+      button.primary:hover { background: #8cebd2; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+      input, select, textarea { min-height: 44px; border-radius: 7px; }
+      .panel, .settings { background: var(--panel); border-radius: 12px; padding: 20px; }
+      .camera { border-radius: 12px; background: var(--panel); }
+      .overview-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }
+      .overview-stat { padding: 16px 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+      .overview-stat b { display: block; font-size: 27px; font-weight: 650; line-height: 1.2; font-variant-numeric: tabular-nums; }
+      .overview-stat span { color: var(--muted); font-size: 12px; }
+      .setup-guide { display: flex; flex-wrap: wrap; gap: 14px 24px; padding: 4px 0 20px; color: var(--muted); font-size: 13px; }
+      .setup-guide b, .step-number { display: inline-grid; place-items: center; min-width: 28px; height: 28px; border: 1px solid rgba(101,223,192,.3); background: rgba(101,223,192,.08); border-radius: 8px; color: var(--accent); font: 650 12px/1 system-ui; margin-right: 6px; }
+      .camera-settings-card { scroll-margin-top: 100px; border: 1px solid var(--line); border-radius: 10px; margin: 16px 0; overflow: hidden; background: #101a24; }
+      .camera-settings-card > summary { display: flex; align-items: center; gap: 12px; padding: 18px; cursor: pointer; list-style: none; }
+      .camera-settings-card > summary::after { content: '+'; color: var(--muted); font-size: 22px; margin-left: 6px; }
+      .camera-settings-card[open] > summary::after { content: '−'; }
+      .camera-avatar { display: grid; place-items: center; width: 38px; height: 38px; flex-shrink: 0; border-radius: 10px; background: #203547; color: var(--accent); font-weight: 700; }
+      .camera-summary { min-width: 0; flex: 1; }
+      .camera-summary b, .camera-summary small { display: block; overflow-wrap: anywhere; }
+      .camera-summary small { color: var(--muted); font-size: 12px; }
+      .camera-summary-status { color: var(--muted); font-size: 12px; }
+      .camera-config-body { padding: 0 20px 20px; border-top: 1px solid var(--line); }
+      .field-section { border: 0; padding: 22px 0; margin: 0; min-width: 0; }
+      .field-section + .field-section { border-top: 1px solid var(--line); }
+      .field-section legend { float: left; width: 100%; font-size: 17px; font-weight: 650; margin: 0 0 6px; padding: 0; }
+      .field-section legend + .field-help { clear: both; }
+      .field-help { color: var(--muted); font-size: 12px; margin: 4px 0 16px; }
+      .form-grid { grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 16px; }
+      .settings-group { border: 1px solid var(--line); border-radius: 9px; padding: 0 16px; margin: 14px 0; min-width: 0; }
+      .settings-group > summary { padding: 16px 0; cursor: pointer; font-weight: 650; }
+      .settings-group > summary small { display: block; margin-left: 19px; font-weight: 400; font-size: 12px; color: var(--muted); }
+      .settings-group[open] { padding-bottom: 16px; }
+      .settings-group[open] > summary { margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+      .autoconfig { background: #152431; border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 22px; }
+      .autoconfig-head { align-items: center; }
+      .autoconfig p { font-size: 12px; }
+      .camera-footer { display: flex; gap: 10px; justify-content: space-between; margin-top: 18px; }
+      .save-bar { position: sticky; bottom: 12px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: rgba(18,28,39,.96); box-shadow: 0 8px 30px rgba(0,0,0,.24); backdrop-filter: blur(14px); }
+      .save-hint { flex: 1; min-width: 100px; font-size: 12px; color: var(--muted); }
+      .save-hint.dirty { color: var(--warn); }
+      .save-message { margin: 12px 0 0; font-size: 12px; }
+      .settings-jumps { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+      .section-heading { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 20px; }
+      .section-heading h2 { margin-bottom: 4px; }
+      .section-heading p { font-size: 13px; }
+      .settings-main { padding-top: 22px; }
+      .dashboard-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(300px, .9fr); gap: 20px; align-items: start; }
+      .dashboard-builder { display: grid; gap: 16px; }
+      .dashboard-builder .section-heading { margin: 2px 0 0; }
+      #ha-card-yaml { width: 100%; resize: vertical; min-height: 215px; padding: 16px; background: #09121a; color: #b6f1df; border: 1px solid var(--line); font: 13px/1.75 ui-monospace, SFMono-Regular, Consolas, monospace; }
+      .instruction-list { padding-left: 22px; margin: 18px 0; display: grid; gap: 24px; }
+      .instruction-list p { font-size: 13px; margin-top: 5px; }
+      .tip-box { padding: 16px; margin-top: 24px; border-left: 3px solid var(--accent); background: rgba(101,223,192,.05); border-radius: 0 8px 8px 0; }
+      .tip-box p { font-size: 12px; margin-top: 5px; }
+      @media(max-width:1000px) { .dashboard-layout { grid-template-columns: minmax(0,1fr); } }
+      @media(max-width:820px) { .nav-section-label { grid-column: 1 / -1; padding-top: 10px; } main { padding-top: 24px; } .sidebar-header { margin-bottom: 0; } }
+      @media(max-width:480px) { .panel, .settings { padding: 14px; } .camera-config-body { padding-inline: 14px; } .overview-strip { gap: 6px; } .overview-stat { padding: 12px; } .overview-stat b { font-size: 22px; } .camera-summary-status { display: none; } .save-bar { bottom: 6px; } .camera-footer { flex-wrap: wrap; } .dashboard-builder .actions { flex-direction: column; } }
     </style>
   </head>
   <body>
@@ -5510,42 +5603,46 @@ INDEX_HTML = r"""<!doctype html>
           <div class="brand">Edge of Infinity</div>
           <div class="build-pill" title="Panel build">v__EDGE_PANEL_VERSION__</div>
         </div>
-        <nav class="nav">
-          <button class="active" data-page-target="home"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg></span><span class="nav-label">Home</span></button>
-          <button data-page-target="nvr"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/></svg></span><span class="nav-label">NVR</span></button>
-          <button data-page-target="camera-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h11l5 4-5 4H4z"/><circle cx="9" cy="12" r="2"/></svg></span><span class="nav-label">Camera Settings</span></button>
-          <button data-page-target="edge-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a8 8 0 0 0 .1-6"/><path d="M4.5 9a8 8 0 0 0 .1 6"/><path d="M15 4.6a8 8 0 0 0-6 0"/><path d="M9 19.4a8 8 0 0 0 6 0"/></svg></span><span class="nav-label">Edge Settings</span></button>
-          <button data-page-target="logs"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h9l3 3v15H6z"/><path d="M14 3v4h4"/><path d="M9 12h6"/><path d="M9 16h6"/><path d="M9 8h2"/></svg></span><span class="nav-label">Logs</span></button>
-          <button data-page-target="account"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c1.8-4 14.2-4 16 0"/></svg></span><span class="nav-label">Account</span></button>
+        <nav class="nav" aria-label="Main navigation">
+          <div class="nav-section-label">MONITOR</div>
+          <button class="active" data-page-target="home"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg></span><span class="nav-label">Live view</span></button>
+          <button data-page-target="nvr"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/></svg></span><span class="nav-label">Recordings</span></button>
+          <div class="nav-section-label">SETUP</div>
+          <button data-page-target="camera-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h11l5 4-5 4H4z"/><circle cx="9" cy="12" r="2"/></svg></span><span class="nav-label">Cameras</span></button>
+          <button data-page-target="edge-settings"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a8 8 0 0 0 .1-6"/><path d="M4.5 9a8 8 0 0 0 .1 6"/><path d="M15 4.6a8 8 0 0 0-6 0"/><path d="M9 19.4a8 8 0 0 0 6 0"/></svg></span><span class="nav-label">Settings</span></button>
+          <button data-page-target="ha-dashboard"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg></span><span class="nav-label">Home Assistant</span></button>
+          <div class="nav-section-label">SYSTEM</div>
+          <button data-page-target="logs"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h9l3 3v15H6z"/><path d="M14 3v4h4"/><path d="M9 12h6"/><path d="M9 16h6"/><path d="M9 8h2"/></svg></span><span class="nav-label">Diagnostics</span></button>
         </nav>
       </aside>
       <main>
         <section class="page" data-page="home">
           <header>
             <div>
-              <h1>Home</h1>
-              <p>Live camera wall, RTSP status, and quick preview controls.</p>
+              <p class="eyebrow">MONITOR</p><h1>Live view</h1>
+              <p>Your cameras at a glance. Open a feed or browse its recordings.</p>
             </div>
             <div class="toolbar">
               <button class="primary" id="refresh">Refresh status</button>
-              <button data-page-target="camera-settings">Camera settings</button>
+              <button data-page-target="camera-settings">Manage cameras</button>
+              <button data-page-target="ha-dashboard">Add to Home Assistant</button>
             </div>
           </header>
+          <div class="overview-strip" id="camera-overview" aria-label="Camera overview"></div>
           <section class="grid" id="camera-grid"></section>
         </section>
 
         <section class="page" data-page="nvr" hidden>
           <header>
             <div>
-              <h1>NVR</h1>
-              <p>Local video recordings and playback.</p>
+              <p class="eyebrow">MONITOR</p><h1>Recordings</h1>
+              <p>Choose a day, find a moment and watch the full recording.</p>
             </div>
             <div class="toolbar">
               <button class="primary" id="refresh-nvr">Refresh NVR</button>
             </div>
           </header>
           <section class="panel">
-            <h2>Recording</h2>
             <div id="nvr-grid" class="grid"></div>
           </section>
         </section>
@@ -5553,12 +5650,13 @@ INDEX_HTML = r"""<!doctype html>
         <section class="page" data-page="camera-settings" hidden>
           <header>
             <div>
-              <h1>Camera Settings</h1>
-              <p>Edit Hikvision camera connection, streams, and low-latency preferences.</p>
+              <p class="eyebrow">SETUP</p><h1>Cameras</h1>
+              <p>Connect a camera, choose its streams, then save your changes.</p>
             </div>
           </header>
         <section class="settings" id="settings">
-            <div class="preset-bar">
+            <div class="setup-guide"><span><b>1</b> Connect the camera</span><span><b>2</b> Choose live & recording streams</span><span><b>3</b> Save & check the live view</span></div>
+            <details class="settings-group preset-group"><summary>Saved camera presets <small>Reuse an existing connection</small></summary><div class="preset-bar">
               <label>Saved camera preset<select id="preset-select"></select></label>
               <label>Slot<select id="preset-slot">
                 <option value="0">Camera 1</option>
@@ -5566,36 +5664,40 @@ INDEX_HTML = r"""<!doctype html>
               </select></label>
               <button id="apply-preset" type="button">Load preset</button>
             </div>
+            </details>
             <form id="config-form"></form>
-            <div class="actions">
+            <div class="actions save-bar">
+              <span class="save-hint" data-unsaved-indicator>All changes saved</span>
               <button id="add-camera" type="button">Add camera</button>
               <button class="primary" id="save-config" type="button">Save cameras</button>
             </div>
-            <p class="notice" id="save-state">Changes are saved to <code>/homeassistant/edge/edge.json</code>. <code>panel-config.json</code> is only a diagnostics mirror.</p>
+            <p class="notice save-message" id="save-state" role="status" aria-live="polite">Camera and app settings are saved together. New connection details are applied automatically.</p>
           </section>
         </section>
 
         <section class="page" data-page="edge-settings" hidden>
           <header>
             <div>
-              <h1>Edge Settings</h1>
-              <p>Core paths, retention, future WebRTC settings, and diagnostics.</p>
+              <p class="eyebrow">SETUP</p><h1>Settings</h1>
+              <p>Recording, storage and network preferences in one place.</p>
             </div>
           </header>
           <section class="settings">
+            <div class="settings-jumps"><button type="button" data-settings-jump="recording-settings">Recording</button><button type="button" data-settings-jump="network-settings">Network</button><button type="button" data-settings-jump="storage-settings">Storage</button><button type="button" data-settings-jump="advanced-settings">Advanced</button></div>
             <form id="edge-settings-form"></form>
-            <div class="actions">
+            <div class="actions save-bar">
+              <span class="save-hint" data-unsaved-indicator>All changes saved</span>
               <button class="primary" id="save-edge-settings" type="button">Save Edge settings</button>
             </div>
-            <p class="notice" id="edge-save-state">Core settings are saved to <code>/homeassistant/edge/edge.json</code>. <code>panel-config.json</code> is only a diagnostics mirror. Some runtime changes may need an add-on restart.</p>
+            <p class="notice save-message" id="edge-save-state" role="status" aria-live="polite">Your camera and app settings are saved together.</p>
           </section>
         </section>
 
         <section class="page" data-page="logs" hidden>
           <header>
             <div>
-              <h1>Logs</h1>
-              <p>Runtime diagnostics, save verification, and ffmpeg recording tails.</p>
+              <p class="eyebrow">SYSTEM</p><h1>Diagnostics</h1>
+              <p>Connection checks and logs when you need to troubleshoot.</p>
             </div>
             <div class="toolbar">
               <button class="primary" id="refresh-logs">Refresh logs</button>
@@ -5606,24 +5708,27 @@ INDEX_HTML = r"""<!doctype html>
           </section>
         </section>
 
-        <section class="page" data-page="account" hidden>
-          <header>
-            <div>
-              <h1>Account</h1>
-              <p>Additional Edge login and trusted-device options will live here.</p>
-            </div>
-          </header>
-          <section class="panel">
-            <h2>Security</h2>
-            <div class="form-grid">
-              <label>Username<input value="admin" disabled></label>
-              <label>Password<input type="password" value="" placeholder="Coming next" disabled></label>
-              <label class="check-row"><input type="checkbox" disabled> Remember this device</label>
-              <label class="check-row"><input type="checkbox" checked disabled> Trust Home Assistant Ingress</label>
-            </div>
-            <p class="notice">This is a UI placeholder. Backend account protection will be added after the live/NVR path is stable.</p>
-          </section>
+        <section class="page" data-page="ha-dashboard" hidden>
+          <header><div><p class="eyebrow">INTEGRATION</p><h1>Home Assistant</h1><p>Put live camera video on your Home Assistant dashboard.</p></div></header>
+          <div class="dashboard-layout">
+            <section class="panel dashboard-builder">
+              <div class="section-heading"><span class="step-number">1</span><div><h2>Choose your camera</h2><p>Use a standard Home Assistant camera card. No custom card is required.</p></div></div>
+              <label>Camera<select id="ha-camera-select"></select></label>
+              <label>Home Assistant camera entity<input id="ha-camera-entity" placeholder="camera.front_door" autocomplete="off" spellcheck="false"></label>
+              <p class="notice" id="ha-entity-status" role="status"></p>
+              <div class="section-heading"><span class="step-number">2</span><div><h2>Copy your card</h2><p>Only the entity name is included. Passwords and stream addresses stay private.</p></div></div>
+              <textarea id="ha-card-yaml" rows="9" readonly spellcheck="false" aria-label="Home Assistant card YAML"></textarea>
+              <div class="actions"><button class="primary" id="ha-copy-card" type="button">Copy card YAML</button><button id="ha-refresh-entities" type="button">Refresh entities</button></div>
+              <p id="ha-copy-status" role="status" aria-live="polite" class="notice"></p>
+            </section>
+            <aside class="panel dashboard-instructions">
+              <h2>Add it to your dashboard</h2>
+              <ol class="instruction-list"><li><b>Enable the Edge integration</b><p>After updating the add-on, restart Home Assistant Core once. Go to Settings → Devices & services → Add integration → Edge of Infinity. Use <code>local</code> as the connection.</p></li><li><b>Select the camera entity</b><p>Registered entities appear here automatically. If needed, copy the exact <code>camera.…</code> ID from the integration's entity list.</p></li><li><b>Paste the card</b><p>Open your dashboard → Edit dashboard → Add card → Manual. Paste the YAML and save.</p></li></ol>
+              <div class="tip-box"><b>Live on your dashboard</b><p>Home Assistant streams the selected live feed through its own authenticated connection. Keep the camera reachable from Home Assistant and use H264 for broad browser support.</p></div>
+            </aside>
+          </div>
         </section>
+
       </main>
     </div>
     <script>
@@ -7355,6 +7460,75 @@ INDEX_HTML = r"""<!doctype html>
         `;
       }
 
+      let overviewCameras = [];
+      let haDashboard = { cameras: [] };
+      let haRequestedCamera = '';
+      function updateCameraOverview() {
+        const online = overviewCameras.filter((camera) => camera.status === 'online').length;
+        const total = (config.cameras || []).length;
+        const recording = Object.values(recordingStatus).filter((camera) => camera.recording).length;
+        document.getElementById('camera-overview').innerHTML = `<div class="overview-stat"><b>${online} / ${total}</b><span>Cameras online</span></div><div class="overview-stat"><b>${recording}</b><span>Recording now</span></div><div class="overview-stat"><b>${config.nvr?.retention_days || config.storage?.retention_days || 14} days</b><span>Recording retention</span></div>`;
+      }
+      function updateUnsavedState() {
+        document.querySelectorAll('[data-unsaved-indicator]').forEach((node) => { node.textContent = configDirty ? 'Unsaved changes' : 'All changes saved'; node.classList.toggle('dirty', configDirty); });
+      }
+      function updateDashboardCard() {
+        const selected = document.getElementById('ha-camera-select').value;
+        const camera = haDashboard.cameras.find((item) => item.id === selected);
+        const entity = document.getElementById('ha-camera-entity').value.trim();
+        const yaml = document.getElementById('ha-card-yaml');
+        const copy = document.getElementById('ha-copy-card');
+        const status = document.getElementById('ha-entity-status');
+        document.getElementById('ha-copy-status').textContent = '';
+        const valid = /^camera\.[a-z0-9_]+$/.test(entity);
+        copy.disabled = !camera || !valid;
+        if (!camera) { yaml.value = ''; status.textContent = 'Save a camera in Cameras first, then refresh this list.'; return; }
+        if (!valid) { yaml.value = ''; status.textContent = 'Enable the Edge integration and restart Home Assistant Core, or enter the exact camera entity ID from Home Assistant.'; return; }
+        yaml.value = ['type: picture-entity', `entity: ${entity}`, 'camera_view: live', `name: ${JSON.stringify(camera.name)}`, 'show_name: true', 'show_state: false', 'aspect_ratio: "16:9"'].join('\n') + '\n';
+        if (!camera.enabled) { status.textContent = 'This camera is disabled. Enable it in Cameras to view live video.'; return; }
+        status.textContent = camera.entities.includes(entity) ? 'Camera entity detected in Home Assistant. Your card is ready to copy.' : 'Using the entity ID you entered. Confirm that this camera entity exists in Home Assistant.';
+      }
+      function selectDashboardCamera() {
+        const camera = haDashboard.cameras.find((item) => item.id === document.getElementById('ha-camera-select').value);
+        document.getElementById('ha-camera-entity').value = camera?.entity_id || '';
+        updateDashboardCard();
+      }
+      async function loadDashboardEntities() {
+        const status = document.getElementById('ha-entity-status');
+        status.textContent = 'Looking for registered camera entities…';
+        try {
+          const response = await fetch(panelPath('api/home-assistant/dashboard'), { cache: 'no-store' });
+          if (!response.ok) throw new Error('Could not read Home Assistant camera entities.');
+          haDashboard = await response.json();
+          const select = document.getElementById('ha-camera-select');
+          const selected = haRequestedCamera || select.value;
+          select.innerHTML = haDashboard.cameras.map((camera) => `<option value="${escapeHtml(camera.id)}">${escapeHtml(camera.name)}${camera.enabled ? '' : ' (disabled)'}</option>`).join('');
+          if (haDashboard.cameras.some((camera) => camera.id === selected)) select.value = selected;
+          haRequestedCamera = '';
+          selectDashboardCamera();
+        } catch (error) {
+          status.textContent = error.message;
+          document.getElementById('ha-copy-card').disabled = true;
+        }
+      }
+      document.getElementById('ha-camera-select').addEventListener('change', selectDashboardCamera);
+      document.getElementById('ha-camera-entity').addEventListener('input', updateDashboardCard);
+      document.getElementById('ha-refresh-entities').addEventListener('click', loadDashboardEntities);
+      document.getElementById('ha-copy-card').addEventListener('click', async () => {
+        const area = document.getElementById('ha-card-yaml');
+        const status = document.getElementById('ha-copy-status');
+        try {
+          if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(area.value);
+          else { area.focus(); area.select(); if (!document.execCommand('copy')) throw new Error('Select and copy the YAML above.'); }
+          status.textContent = 'Copied. Paste this into a Manual card in your Home Assistant dashboard.';
+        } catch (_) { area.focus(); area.select(); status.textContent = 'Automatic copying is unavailable here. Copy the selected YAML manually.'; }
+      });
+      document.querySelectorAll('[data-settings-jump]').forEach((button) => button.addEventListener('click', () => {
+        const target = document.getElementById(button.dataset.settingsJump);
+        if (target.tagName === 'DETAILS') target.open = true;
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }));
+
       function original(value) {
         return `data-original="${escapeHtml(value || '')}"`;
       }
@@ -7413,7 +7587,7 @@ INDEX_HTML = r"""<!doctype html>
           <div class="autoconfig">
             <div class="autoconfig-head">
               <div>
-                <h2>Autoconfig</h2>
+                <h3>Discover camera streams</h3>
                 <p>${device.model ? `${escapeHtml(device.model)} ${escapeHtml(device.firmware || '')}` : 'Read camera stream profiles via ONVIF (Hikvision uses ISAPI).'}</p>
               </div>
               <button type="button" data-autoconfig="${index}" ${state.loading ? 'disabled' : ''}>${state.loading ? 'Reading...' : 'Read camera / ONVIF'}</button>
@@ -7442,6 +7616,9 @@ INDEX_HTML = r"""<!doctype html>
         `;
       }
 
+      let expandedCameraIds = new Set();
+      let cameraExpansionInitialized = false;
+      let cameraToExpand = '';
       function cameraForm(camera, index) {
         const prefix = `camera-${index}`;
         const cameraNumber = camera.camera_number || String(index + 1);
@@ -7450,77 +7627,64 @@ INDEX_HTML = r"""<!doctype html>
         const mainChannel = camera.rtsp_main_channel || hikvisionChannelFromRtsp(camera.rtsp_main, '101');
         const subChannel = camera.rtsp_sub_channel || hikvisionChannelFromRtsp(camera.rtsp_sub, '102');
         return `
-          <div class="camera-form" data-camera-form data-index="${index}">
-            <div class="row">
-              <h2>${escapeHtml(text(camera.name, `Camera ${index + 1}`))}</h2>
-              <button class="danger" type="button" data-remove-camera="${index}" ${config.cameras.length <= 1 ? 'disabled' : ''}>Remove</button>
-            </div>
-            <div class="form-grid">
-              <label>Name<input name="${prefix}-name" value="${escapeHtml(text(camera.name, `Camera ${index + 1}`))}"></label>
-              <label>Vendor<select name="${prefix}-vendor">
+          <details class="camera-settings-card" data-camera-form data-camera-id="${escapeHtml(camera.id)}" data-index="${index}" ${expandedCameraIds.has(camera.id) ? 'open' : ''}>
+            <summary><span class="camera-avatar">${index + 1}</span><span class="camera-summary"><b data-camera-summary="${index}">${escapeHtml(text(camera.name, `Camera ${index + 1}`))}</b><small>${escapeHtml(CAMERA_VENDORS[camera.vendor] || 'Camera')} · ${escapeHtml(camera.host || 'Not connected yet')}</small></span><span class="camera-summary-status">${camera.enabled ? 'Enabled' : 'Disabled'}</span></summary>
+            <div class="camera-config-body">
+              <fieldset class="field-section"><legend>Connection</legend><p class="field-help">Enter the local camera account, not your manufacturer's cloud login.</p><div class="form-grid"><label>Name<input name="${prefix}-name" value="${escapeHtml(text(camera.name, `Camera ${index + 1}`))}"></label><label>Vendor<select name="${prefix}-vendor">
                 ${Object.entries(CAMERA_VENDORS).map(([value, label]) => option(value, camera.vendor, label)).join('')}
-              </select></label>
-              <label>Host/IP<input name="${prefix}-host" value="${escapeHtml(camera.host || '')}"></label>
-              <label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label>
-              <label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label>
-              <label>Camera / NVR channel number<input name="${prefix}-camera-number" value="${escapeHtml(cameraNumber)}"></label>
-              <label>Connection<select name="${prefix}-access-protocol">
+              </select></label><label>Host/IP<input name="${prefix}-host" value="${escapeHtml(camera.host || '')}"></label><label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label><label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label></div></fieldset>
+              ${cameraAutoconfig(index)}
+              <fieldset class="field-section"><legend>Live & recording</legend><p class="field-help">Sub stream is lighter for live tiles. Main stream gives the best recording detail.</p><div class="form-grid"><label class="check-row"><input name="${prefix}-enabled" type="checkbox" ${camera.enabled ? 'checked' : ''}> Camera enabled</label><label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record continuously</label><label>Live stream<select name="${prefix}-live-stream">
+                <option value="sub" ${camera.live_stream !== 'main' ? 'selected' : ''}>sub</option>
+                <option value="main" ${camera.live_stream === 'main' ? 'selected' : ''}>main</option>
+              </select></label><label>Tile stream<select name="${prefix}-tile-stream">
+                <option value="sub" ${camera.tile_stream !== 'main' ? 'selected' : ''}>sub</option>
+                <option value="main" ${camera.tile_stream === 'main' ? 'selected' : ''}>main</option>
+              </select></label><label>Recording stream<select name="${prefix}-record-stream">
+                <option value="main" ${camera.record_stream !== 'sub' ? 'selected' : ''}>main</option>
+                <option value="sub" ${camera.record_stream === 'sub' ? 'selected' : ''}>sub</option>
+              </select></label></div></fieldset>
+              <details class="settings-group camera-advanced"><summary>Advanced connection <small>Custom RTSP, ONVIF, channels and transport</small></summary><div class="form-grid"><label>Camera / NVR channel number<input name="${prefix}-camera-number" value="${escapeHtml(cameraNumber)}"></label><label>Connection<select name="${prefix}-access-protocol">
                 ${option('rtsp', accessProtocol, 'RTSP')}
                 ${option('isapi', accessProtocol, 'ISAPI')}
                 ${option('onvif', accessProtocol, 'ONVIF')}
                 ${option('unicast', accessProtocol, 'Unicast')}
                 ${option('multicast', accessProtocol, 'Multicast')}
-              </select></label>
-              <label>RTSP transport<select name="${prefix}-rtsp-transport">
+              </select></label><label>RTSP transport<select name="${prefix}-rtsp-transport">
                 ${option('tcp', rtspTransport, 'TCP stable')}
                 ${option('udp', rtspTransport, 'UDP low latency')}
                 ${option('auto', rtspTransport, 'Auto')}
-              </select></label>
-              <label>Main channel (Hikvision)<input ${camera.vendor === 'hikvision' ? '' : 'disabled'} name="${prefix}-rtsp-main-channel" value="${escapeHtml(mainChannel)}"></label>
-              <label>Sub channel (Hikvision)<input ${camera.vendor === 'hikvision' ? '' : 'disabled'} name="${prefix}-rtsp-sub-channel" value="${escapeHtml(subChannel)}"></label>
-              <label>RTSP main<input name="${prefix}-rtsp-main" value="${escapeHtml(camera.rtsp_main || '')}"></label>
-              <label>RTSP sub<input name="${prefix}-rtsp-sub" value="${escapeHtml(camera.rtsp_sub || '')}"></label>
-              <label>ONVIF URL<input name="${prefix}-onvif" value="${escapeHtml(camera.onvif_url || '')}"></label>
-              <label>ISAPI URL<input name="${prefix}-isapi" value="${escapeHtml(camera.isapi_base_url || '')}"></label>
-              <label>Snapshot stream<select name="${prefix}-snapshot-stream">
+              </select></label><label>Main channel (Hikvision)<input ${camera.vendor === 'hikvision' ? '' : 'disabled'} name="${prefix}-rtsp-main-channel" value="${escapeHtml(mainChannel)}"></label><label>Sub channel (Hikvision)<input ${camera.vendor === 'hikvision' ? '' : 'disabled'} name="${prefix}-rtsp-sub-channel" value="${escapeHtml(subChannel)}"></label><label>RTSP main<input name="${prefix}-rtsp-main" value="${escapeHtml(camera.rtsp_main || '')}"></label><label>RTSP sub<input name="${prefix}-rtsp-sub" value="${escapeHtml(camera.rtsp_sub || '')}"></label><label>ONVIF URL<input name="${prefix}-onvif" value="${escapeHtml(camera.onvif_url || '')}"></label><label>ISAPI URL<input name="${prefix}-isapi" value="${escapeHtml(camera.isapi_base_url || '')}"></label><label>Snapshot stream<select name="${prefix}-snapshot-stream">
                 <option value="sub" ${camera.snapshot_stream !== 'main' ? 'selected' : ''}>sub</option>
                 <option value="main" ${camera.snapshot_stream === 'main' ? 'selected' : ''}>main</option>
-              </select></label>
-              <label>Live stream<select name="${prefix}-live-stream">
-                <option value="sub" ${camera.live_stream !== 'main' ? 'selected' : ''}>sub</option>
-                <option value="main" ${camera.live_stream === 'main' ? 'selected' : ''}>main</option>
-              </select></label>
-              <label>Tile stream<select name="${prefix}-tile-stream">
-                <option value="sub" ${camera.tile_stream !== 'main' ? 'selected' : ''}>sub</option>
-                <option value="main" ${camera.tile_stream === 'main' ? 'selected' : ''}>main</option>
-              </select></label>
-              <label>Recording stream<select name="${prefix}-record-stream">
-                <option value="main" ${camera.record_stream !== 'sub' ? 'selected' : ''}>main</option>
-                <option value="sub" ${camera.record_stream === 'sub' ? 'selected' : ''}>sub</option>
-              </select></label>
-              <label class="check-row"><input name="${prefix}-enabled" type="checkbox" ${camera.enabled ? 'checked' : ''}> Enabled</label>
-              <label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record</label>
-              <label class="check-row"><input name="${prefix}-low-latency" type="checkbox" ${camera.low_latency !== false ? 'checked' : ''}> Low latency</label>
+              </select></label><label class="check-row"><input name="${prefix}-low-latency" type="checkbox" ${camera.low_latency !== false ? 'checked' : ''}> Low latency</label></div><div class="actions"><button type="button" data-build-rtsp="${index}">Build RTSP URLs</button></div></details>
+              <div class="camera-footer"><button type="button" data-camera-dashboard="${index}">Add to Home Assistant</button><button class="danger" type="button" data-remove-camera="${index}" ${config.cameras.length <= 1 ? 'disabled' : ''}>Remove camera</button></div>
             </div>
-            <div class="actions">
-              <button type="button" data-build-rtsp="${index}">Build RTSP</button>
-            </div>
-            ${cameraAutoconfig(index)}
-          </div>
+          </details>
         `;
       }
 
       function renderConfig() {
-        configDirty = false;
         const cameras = config.cameras && config.cameras.length ? config.cameras : [
           { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', camera_number: '1', access_protocol: 'rtsp', rtsp_transport: 'tcp', rtsp_main_channel: '101', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true },
           { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', camera_number: '2', access_protocol: 'rtsp', rtsp_transport: 'tcp', rtsp_main_channel: '201', rtsp_sub_channel: '202', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true }
         ];
+        const previousCards = Array.from(form.querySelectorAll('[data-camera-form]'));
+        if (previousCards.length) expandedCameraIds = new Set(previousCards.filter((node) => node.open).map((node) => node.dataset.cameraId));
+        if (!cameraExpansionInitialized && cameras[0]) { expandedCameraIds.add(cameras[0].id); cameraExpansionInitialized = true; }
+        if (cameraToExpand) expandedCameraIds.add(cameraToExpand);
         config = { ...config, cameras };
         form.innerHTML = cameras.map(cameraForm).join('');
+        if (cameraToExpand) {
+          const card = Array.from(form.querySelectorAll('[data-camera-form]')).find((node) => node.dataset.cameraId === cameraToExpand);
+          card?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          cameraToExpand = '';
+        }
         renderNvrGrid({ reason: 'render_config' });
         renderPresetSlots(cameras);
         renderEdgeSettings();
+        updateUnsavedState();
+        updateCameraOverview();
       }
 
       function patchNvrCard(card, camera, index, options = {}) {
@@ -7595,78 +7759,33 @@ INDEX_HTML = r"""<!doctype html>
         const liveConfig = config.live || {};
         const nvrConfig = config.nvr || {};
         edgeForm.innerHTML = `
-          <section class="camera-form">
-            <h2>Server</h2>
-            <div class="form-grid">
-              <label>Listen address<input name="server-listen" value="${escapeHtml(text(server.listen, '0.0.0.0:8088'))}"></label>
-              <label>Public URL<input name="server-public-url" value="${escapeHtml(server.public_url || '')}" placeholder="Optional external URL"></label>
-            </div>
-            <p class="notice">Listen address is controlled by the add-on port at runtime. Changing it here prepares the config, but usually requires restart.</p>
-          </section>
-          <section class="camera-form">
-            <h2>Storage</h2>
-            <div class="form-grid">
-              <label>Recordings directory<input name="storage-recordings-dir" value="${escapeHtml(text(storage.recordings_dir, '/media/edge-of-infinity/recordings'))}"></label>
-              <label>Database path<input name="storage-database-path" value="${escapeHtml(text(storage.database_path, '/homeassistant/edge/edge.db'))}"></label>
-              <label>Retention days<input name="storage-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(storage.retention_days, 14))}"></label>
-            </div>
-          </section>
-          <section class="camera-form">
-            <h2>NVR</h2>
-            <div class="form-grid">
-              <label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label>
-              <label>NVR retention days<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label>
-              <label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label>
-              <label>Browser recording<select name="nvr-browser-playback">
-                <option value="auto_h264" ${nvrConfig.browser_playback !== 'copy' && nvrConfig.browser_playback !== 'h264' ? 'selected' : ''}>Auto H264 for HEVC</option>
-                <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Copy original</option>
-                <option value="h264" ${nvrConfig.browser_playback === 'h264' ? 'selected' : ''}>Always H264</option>
-              </select></label>
-            </div>
-            <p class="notice">NVR keeps H264 recordings light with video copy. HEVC/H265 is transcoded to H264 in auto mode so the panel can play the file.</p>
-          </section>
-          <section class="camera-form">
-            <h2>Live Preview</h2>
-            <div class="form-grid">
-              <label>Engine<select name="live-engine">
-                <option value="janus_webrtc" ${liveConfig.engine === 'janus_webrtc' ? 'selected' : ''}>Janus WebRTC core</option>
-                <option value="mediamtx" ${liveConfig.engine === 'mediamtx' ? 'selected' : ''}>MediaMTX WHEP core</option>
-                <option value="ll_hls" ${liveConfig.engine === 'll_hls' ? 'selected' : ''}>LL-HLS experimental</option>
-                <option value="srt" ${liveConfig.engine === 'srt' ? 'selected' : ''}>SRT relay</option>
-              </select></label>
-              <label>Remote access<select name="live-remote-access-mode">
+          <section class="field-section settings-main" id="recording-settings"><div class="section-heading"><span class="step-number">01</span><div><h2>Recording</h2><p>How long to keep footage and how it plays in the browser.</p></div></div><div class="form-grid"><label>Keep recordings (days)<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label><label>Recording compatibility<select name="nvr-browser-playback">
+                <option value="auto_h264" ${nvrConfig.browser_playback !== 'copy' && nvrConfig.browser_playback !== 'h264' ? 'selected' : ''}>Automatic (recommended)</option>
+                <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Keep original codec</option>
+                <option value="h264" ${nvrConfig.browser_playback === 'h264' ? 'selected' : ''}>Convert to H264</option>
+              </select></label></div><input type="hidden" name="storage-retention-days" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"><details class="settings-group"><summary>Advanced recording <small>Segment length and playback cache</small></summary><div class="form-grid"><label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label><label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label></div></details></section>
+          <details class="settings-group" id="network-settings"><summary>Network & remote access <small>Optional for viewing outside your home network</small></summary><div class="form-grid"><label>Remote access<select name="live-remote-access-mode">
                 <option value="local_only" ${text(liveConfig.remote_access_mode, 'local_only') === 'local_only' ? 'selected' : ''}>Local only / Nabu panel only</option>
                 <option value="direct_public" ${liveConfig.remote_access_mode === 'direct_public' ? 'selected' : ''}>Direct public DDNS</option>
                 <option value="vps_relay" ${liveConfig.remote_access_mode === 'vps_relay' ? 'selected' : ''}>VPS relay</option>
                 <option value="turn_relay" ${liveConfig.remote_access_mode === 'turn_relay' ? 'selected' : ''}>TURN relay</option>
-              </select></label>
-              <label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label>
-              <label>Tile FPS<input name="live-tile-fps" type="number" min="1" max="10" value="${escapeHtml(text(liveConfig.tile_fps, 5))}"></label>
-              <label>Tile max width<input name="live-tile-max-width" type="number" min="320" max="1920" value="${escapeHtml(text(liveConfig.tile_max_width, 960))}"></label>
-              <label>WebRTC public URL<input name="live-mobile-public-url" value="${escapeHtml(liveConfig.mobile_webrtc_public_url || '')}" placeholder="http://PUBLIC-IP:8889 or https://edge.example.com"></label>
-              <label>Mobile public hosts<input name="live-mobile-public-hosts" value="${escapeHtml(text(liveConfig.mobile_webrtc_public_hosts, 'homeassistant.local,192.168.33.17'))}" placeholder="homeassistant.local,public.example.com"></label>
-              <label>STUN URL<input name="live-mobile-stun-url" value="${escapeHtml(text(liveConfig.mobile_webrtc_stun_url, 'stun:stun.l.google.com:19302'))}"></label>
-              <label>TURN URL<input name="live-mobile-turn-url" value="${escapeHtml(liveConfig.mobile_webrtc_turn_url || '')}" placeholder="turns:turn.example.com:443"></label>
-              <label>TURN username<input name="live-mobile-turn-username" value="${escapeHtml(liveConfig.mobile_webrtc_turn_username || '')}"></label>
-              <label>TURN password<input name="live-mobile-turn-password" type="password" value="${escapeHtml(liveConfig.mobile_webrtc_turn_password || '')}"></label>
-              <label>Local prebuffer ms<input name="live-prebuffer-local-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_local_ms, 4000))}"></label>
-              <label>Remote prebuffer ms<input name="live-prebuffer-remote-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_remote_ms, 2000))}"></label>
-              <label class="check-row"><input name="live-prebuffer-enabled" type="checkbox" ${liveConfig.prebuffer_enabled !== false ? 'checked' : ''}> Keep selected low-latency streams warm</label>
-              <label class="check-row"><input name="live-always-on-enabled" type="checkbox" ${liveConfig.always_on_enabled !== false ? 'checked' : ''}> Keep live paths warm after boot</label>
-              <label>Always-on scope<select name="live-always-on-stream-scope">
+              </select></label><label>WebRTC public URL<input name="live-mobile-public-url" value="${escapeHtml(liveConfig.mobile_webrtc_public_url || '')}" placeholder="http://PUBLIC-IP:8889 or https://edge.example.com"></label><label>Mobile public hosts<input name="live-mobile-public-hosts" value="${escapeHtml(text(liveConfig.mobile_webrtc_public_hosts, 'homeassistant.local,192.168.33.17'))}" placeholder="homeassistant.local,public.example.com"></label></div><p class="field-help">For a Home Assistant dashboard card, Home Assistant handles remote access. These settings apply to the Edge live player.</p><details class="settings-group"><summary>Advanced WebRTC <small>STUN, TURN and ICE transport</small></summary><div class="form-grid"><label>STUN URL<input name="live-mobile-stun-url" value="${escapeHtml(text(liveConfig.mobile_webrtc_stun_url, 'stun:stun.l.google.com:19302'))}"></label><label>TURN URL<input name="live-mobile-turn-url" value="${escapeHtml(liveConfig.mobile_webrtc_turn_url || '')}" placeholder="turns:turn.example.com:443"></label><label>TURN username<input name="live-mobile-turn-username" value="${escapeHtml(liveConfig.mobile_webrtc_turn_username || '')}"></label><label>TURN password<input name="live-mobile-turn-password" type="password" value="${escapeHtml(liveConfig.mobile_webrtc_turn_password || '')}"></label><label>WebRTC ICE transport<select name="live-mobile-ice-transport">
+                <option value="auto" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'auto' ? 'selected' : ''}>Auto UDP + TCP</option>
+                <option value="udp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'udp' ? 'selected' : ''}>UDP only</option>
+                <option value="tcp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'tcp' ? 'selected' : ''}>TCP only</option>
+              </select></label></div></details></details>
+          <details class="settings-group" id="storage-settings"><summary>Storage locations <small>Keep the defaults unless you use a custom disk layout</small></summary><div class="form-grid"><label>Recordings directory<input name="storage-recordings-dir" value="${escapeHtml(text(storage.recordings_dir, '/media/edge-of-infinity/recordings'))}"></label><label>Database path<input name="storage-database-path" value="${escapeHtml(text(storage.database_path, '/homeassistant/edge/edge.db'))}"></label></div></details>
+          <details class="settings-group" id="advanced-settings"><summary>Advanced system settings <small>Playback performance, streaming engine and server</small></summary><h3>Performance</h3><div class="form-grid"><label>Tile FPS<input name="live-tile-fps" type="number" min="1" max="10" value="${escapeHtml(text(liveConfig.tile_fps, 5))}"></label><label>Tile max width<input name="live-tile-max-width" type="number" min="320" max="1920" value="${escapeHtml(text(liveConfig.tile_max_width, 960))}"></label><label class="check-row"><input name="live-prebuffer-enabled" type="checkbox" ${liveConfig.prebuffer_enabled !== false ? 'checked' : ''}> Keep selected low-latency streams warm</label><label class="check-row"><input name="live-always-on-enabled" type="checkbox" ${liveConfig.always_on_enabled !== false ? 'checked' : ''}> Keep live paths warm after boot</label><label>Always-on scope<select name="live-always-on-stream-scope">
                 <option value="tile" ${text(liveConfig.always_on_stream_scope, 'tile') === 'tile' ? 'selected' : ''}>Tile preview only</option>
                 <option value="live" ${liveConfig.always_on_stream_scope === 'live' ? 'selected' : ''}>Live stream only</option>
                 <option value="tile_live" ${liveConfig.always_on_stream_scope === 'tile_live' ? 'selected' : ''}>Tile + live</option>
                 <option value="all" ${liveConfig.always_on_stream_scope === 'all' ? 'selected' : ''}>All camera streams</option>
-              </select></label>
-              <label>WebRTC ICE transport<select name="live-mobile-ice-transport">
-                <option value="auto" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'auto' ? 'selected' : ''}>Auto UDP + TCP</option>
-                <option value="udp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'udp' ? 'selected' : ''}>UDP only</option>
-                <option value="tcp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'tcp' ? 'selected' : ''}>TCP only</option>
-              </select></label>
-            </div>
-            <p class="notice">Nabu Casa opens the Home Assistant panel only; it does not expose MediaMTX WebRTC. For LTE, set Remote access to VPS relay or TURN relay and set WebRTC public URL to that reachable endpoint. Direct public mode needs TCP 8889 plus ICE 8189 reachable from outside.</p>
-          </section>
+              </select></label><label>Local prebuffer ms<input name="live-prebuffer-local-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_local_ms, 4000))}"></label><label>Remote prebuffer ms<input name="live-prebuffer-remote-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_remote_ms, 2000))}"></label></div><h3>Engine & server</h3><div class="form-grid"><label>Engine<select name="live-engine">
+                <option value="janus_webrtc" ${liveConfig.engine === 'janus_webrtc' ? 'selected' : ''}>Janus WebRTC core</option>
+                <option value="mediamtx" ${liveConfig.engine === 'mediamtx' ? 'selected' : ''}>MediaMTX WHEP core</option>
+                <option value="ll_hls" ${liveConfig.engine === 'll_hls' ? 'selected' : ''}>LL-HLS experimental</option>
+                <option value="srt" ${liveConfig.engine === 'srt' ? 'selected' : ''}>SRT relay</option>
+              </select></label><label>Listen address<input name="server-listen" value="${escapeHtml(text(server.listen, '0.0.0.0:8088'))}"></label><label>Public URL<input name="server-public-url" value="${escapeHtml(server.public_url || '')}" placeholder="Optional external URL"></label><label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label></div><p class="field-help">The add-on's API port is configured in Home Assistant. Engine and listener changes may require restarting the add-on.</p></details>
         `;
       }
 
@@ -7916,6 +8035,14 @@ INDEX_HTML = r"""<!doctype html>
           lastFormDraft = config;
           lastFormDraftAt = Date.now();
           configDirty = true;
+          form.querySelectorAll('[data-camera-form]').forEach((node, index) => {
+            const camera = config.cameras[index];
+            if (!camera) return;
+            node.querySelector('[data-camera-summary]').textContent = camera.name || `Camera ${index + 1}`;
+            node.querySelector('.camera-summary small').textContent = `${CAMERA_VENDORS[camera.vendor] || 'Camera'} · ${camera.host || 'Not connected yet'}`;
+            node.querySelector('.camera-summary-status').textContent = camera.enabled ? 'Enabled' : 'Disabled';
+          });
+          updateUnsavedState();
         } catch (error) {
           debugEvent('ui_config_draft_sync_error', { message: error.message });
         }
@@ -7949,7 +8076,10 @@ INDEX_HTML = r"""<!doctype html>
           saveState.textContent = 'Maximum 8 cameras are supported in this panel for now.';
           return;
         }
-        config.cameras = [...config.cameras, newCamera(config.cameras.length)];
+        const added = newCamera(config.cameras.length);
+        config.cameras = [...config.cameras, added];
+        cameraToExpand = added.id;
+        configDirty = true;
         renderConfig();
         saveState.textContent = 'Camera added. Fill connection details and click Save cameras.';
       }
@@ -7961,6 +8091,7 @@ INDEX_HTML = r"""<!doctype html>
           return;
         }
         config.cameras = config.cameras.filter((_, currentIndex) => currentIndex !== index);
+        configDirty = true;
         renderConfig();
         saveState.textContent = 'Camera removed from the form. Click Save cameras to write the change.';
       }
@@ -7979,6 +8110,8 @@ INDEX_HTML = r"""<!doctype html>
           saveState.textContent = 'Host, username, and password are required to build RTSP URLs.';
           return;
         }
+        configDirty = true;
+        updateUnsavedState();
         if (vendor === 'hikvision') {
           get('rtsp-main-channel').value = mainChannel;
           get('rtsp-sub-channel').value = subChannel;
@@ -8013,7 +8146,7 @@ INDEX_HTML = r"""<!doctype html>
           storage: {
             recordings_dir: get('storage-recordings-dir').value.trim() || '/media/edge-of-infinity/recordings',
             database_path: get('storage-database-path').value.trim() || '/homeassistant/edge/edge.db',
-            retention_days: Number(get('storage-retention-days').value || 14)
+            retention_days: Number(get('nvr-retention-days').value || 14)
           },
           live: {
             engine: get('live-engine').value,
@@ -8056,6 +8189,8 @@ INDEX_HTML = r"""<!doctype html>
           name: preset.name || current[slot]?.name || `Hikvision ${slot + 1}`
         };
         config = { ...config, cameras: current };
+        cameraToExpand = current[slot].id;
+        configDirty = true;
         renderConfig();
         saveState.textContent = 'Preset loaded into the form. Click Save cameras to write it.';
       }
@@ -8083,6 +8218,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!response.ok) { const data = await response.json(); throw new Error(data.error || 'Could not load configuration.'); }
         config = await response.json();
         debugEvent('ui_config_loaded', { summary: saveSummary(config) });
+        configDirty = false;
         renderConfig();
       }
 
@@ -8098,6 +8234,8 @@ INDEX_HTML = r"""<!doctype html>
         const response = await fetch(panelPath('cameras.json'), { cache: 'no-store' });
         const data = await response.json();
         const cameras = Array.isArray(data.cameras) ? data.cameras : [];
+        overviewCameras = cameras;
+        updateCameraOverview();
         debugEvent('ui_cameras_loaded', {
           count: cameras.length,
           cameras: cameras.map((camera) => ({
@@ -8189,6 +8327,7 @@ INDEX_HTML = r"""<!doctype html>
               delete recordingStreamNonce[item.index];
             }
           });
+          updateCameraOverview();
           const nextSignature = recordingStatusSignature();
           const protectedPlayback = isNvrPlaybackProtected();
           const shouldRender = Boolean(options.forceRender)
@@ -8254,7 +8393,7 @@ INDEX_HTML = r"""<!doctype html>
           });
           const data = await response.json();
           if (!response.ok) throw new Error(data.error || 'Could not read camera configuration.');
-          if (data.camera) config.cameras[index] = { ...camera, ...data.camera };
+          if (data.camera) { config.cameras[index] = { ...camera, ...data.camera }; configDirty = true; }
           cameraAuto[index] = data.error
             ? { data, error: data.error }
             : { data, message: 'Camera configuration loaded.' };
@@ -8299,6 +8438,7 @@ INDEX_HTML = r"""<!doctype html>
           button.classList.toggle('active', button.dataset.pageTarget === pageName);
         });
         debugEvent('ui_page_change', { page: pageName });
+        if (pageName === 'ha-dashboard') loadDashboardEntities();
         if (pageName === 'home') loadCameras().catch((error) => debugEvent('ui_cameras_refresh_error', { message: error.message }));
         if (pageName === 'logs') {
           loadLogs().catch((error) => {
@@ -8407,8 +8547,8 @@ INDEX_HTML = r"""<!doctype html>
           config = verified;
           lastFormDraft = verified;
           lastFormDraftAt = Date.now();
-          renderConfig();
           configDirty = false;
+          renderConfig();
           state.textContent = `Saved and verified. ${saveSummary(verified)} ${addonSync === 'synced' ? 'Home Assistant add-on options updated.' : 'Add-on options could not be synchronized; saved camera configuration is active.'}`;
           debugEvent(`ui_${reason}_done`, { savedSummary: saveSummary(verified) });
           if (liveTimer) { window.clearInterval(liveTimer); liveTimer = null; updateLiveTimer(); }
@@ -8458,6 +8598,8 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       form.addEventListener('click', async (event) => {
+        const dashboard = event.target.closest('[data-camera-dashboard]');
+        if (dashboard) { haRequestedCamera = config.cameras[Number(dashboard.dataset.cameraDashboard)]?.id || ''; showPage('ha-dashboard'); return; }
         const removeIndex = event.target?.dataset?.removeCamera;
         if (removeIndex !== undefined) {
           removeCamera(Number(removeIndex));
@@ -8834,6 +8976,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         if path == "/health":
             self.send_json(health_payload())
+            return
+        if path == "/api/home-assistant/dashboard":
+            self.send_json(home_assistant_dashboard_payload())
             return
         if path == "/api/version":
             self.send_json({

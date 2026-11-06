@@ -7,6 +7,9 @@
   "integration_type": "hub",
   "iot_class": "local_polling",
   "requirements": [],
-  "version": "0.10.41"
+  "version": "0.10.42",
+  "dependencies": [
+    "stream",
+    "ffmpeg"
+  ]
 }
-

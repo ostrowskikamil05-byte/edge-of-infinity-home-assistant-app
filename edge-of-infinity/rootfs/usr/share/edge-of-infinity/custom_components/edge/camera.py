@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import tempfile
+from pathlib import Path
 from typing import Any
 
-from homeassistant.components.camera import Camera
+from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.components.ffmpeg import async_get_image
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .client import EdgeClientError
+from .client import EdgeClientError, camera_stream_source
 from .const import DOMAIN
 from .coordinator import EdgeCoordinator
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -24,10 +32,51 @@ async def async_setup_entry(
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator: EdgeCoordinator = data["coordinator"]
 
-    async_add_entities(
-        EdgeCamera(coordinator, camera)
-        for camera in coordinator.data.get("cameras", [])
-    )
+    known: set[str] = set()
+
+    def add_new_cameras() -> None:
+        cameras = []
+        for camera in coordinator.data.get("cameras", []):
+            camera_id = camera.get("id")
+            if not camera_id or camera_id in known:
+                continue
+            known.add(camera_id)
+            cameras.append(EdgeCamera(coordinator, camera))
+        if cameras:
+            async_add_entities(cameras)
+
+    add_new_cameras()
+    entry.async_on_unload(coordinator.async_add_listener(add_new_cameras))
+
+
+async def publish_entity_map(hass: HomeAssistant) -> None:
+    """Publish only camera/entity IDs to the shared config directory."""
+    domain_data = hass.data[DOMAIN]
+    lock = domain_data.setdefault("_entity_map_lock", asyncio.Lock())
+    async with lock:
+        entities = []
+        for data in domain_data.values():
+            if not isinstance(data, dict):
+                continue
+            client = data.get("client")
+            for camera_id, entity in data.get("entities", {}).items():
+                entities.append({"camera_id": camera_id, **entity, "local": bool(client and client.is_local)})
+        payload = {"entities": entities}
+        path = Path(hass.config.path("edge", "ha-entities.json"))
+
+        def write_map() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+                    tmp = Path(handle.name)
+                    json.dump(payload, handle)
+                tmp.replace(path)
+            finally:
+                if tmp is not None:
+                    tmp.unlink(missing_ok=True)
+
+        await hass.async_add_executor_job(write_map)
 
 
 class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
@@ -35,6 +84,7 @@ class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
 
     _attr_brand = "Edge of Infinity"
     _attr_should_poll = False
+    _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(self, coordinator: EdgeCoordinator, camera: dict[str, Any]) -> None:
         """Initialize the camera."""
@@ -44,6 +94,49 @@ class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
         self._attr_unique_id = f"edge_{self._camera_id}"
         self._attr_name = camera.get("name") or self._camera_id
         self._attr_model = camera.get("vendor")
+        self._last_stream_source = camera_stream_source(camera)
+        self.stream_options = {"rtsp_transport": "tcp"}
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        await self._publish_entity()
+
+    async def _publish_entity(self) -> None:
+        data = self.hass.data.get(DOMAIN, {}).get(self.coordinator.config_entry.entry_id)
+        if not isinstance(data, dict) or not self.entity_id:
+            return
+        data.setdefault("entities", {})[self._camera_id] = {"entity_id": self.entity_id, "name": self._attr_name}
+        try:
+            await publish_entity_map(self.hass)
+        except OSError:
+            _LOGGER.warning("Could not publish Edge camera entity IDs for the card builder")
+
+    async def async_will_remove_from_hass(self) -> None:
+        data = self.hass.data[DOMAIN].get(self.coordinator.config_entry.entry_id, {})
+        data.get("entities", {}).pop(self._camera_id, None)
+        try:
+            await publish_entity_map(self.hass)
+        except OSError:
+            _LOGGER.warning("Could not publish Edge camera entity IDs for the card builder")
+        await super().async_will_remove_from_hass()
+
+    async def stream_source(self) -> str | None:
+        """Provide the source to the authenticated Home Assistant stream pipeline."""
+        return camera_stream_source(self._camera())
+
+    def _handle_coordinator_update(self) -> None:
+        camera = self._camera()
+        source = camera_stream_source(camera)
+        if self.stream and source and source != self._last_stream_source:
+            self.stream.update_source(source)
+        self._last_stream_source = source
+        self._attr_name = camera.get("name") or self._camera_id
+        self._attr_model = camera.get("vendor")
+        data = self.hass.data[DOMAIN].get(self.coordinator.config_entry.entry_id, {})
+        mapped = data.get("entities", {}).get(self._camera_id) or {}
+        if mapped.get("entity_id") != self.entity_id or mapped.get("name") != self._attr_name:
+            self.hass.async_create_task(self._publish_entity())
+        super()._handle_coordinator_update()
 
     def _camera(self) -> dict[str, Any]:
         for camera in self.coordinator.data.get("cameras", []):
@@ -54,7 +147,8 @@ class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
     @property
     def available(self) -> bool:
         """Return if the camera is available."""
-        return self._camera().get("status") == "online"
+        camera = self._camera()
+        return bool(camera.get("enabled", True) and camera.get("status") == "online" and getattr(self.coordinator, "last_update_success", True))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -93,9 +187,19 @@ class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
     ) -> bytes | None:
         """Return camera snapshot image."""
         try:
-            return await self.coordinator.client.camera_image(self._camera())
+            image = await self.coordinator.client.camera_image(self._camera())
+            if image:
+                return image
         except EdgeClientError:
+            pass
+        source = camera_stream_source(self._camera(), "snapshot_stream")
+        if source is None:
             return None
+        try:
+            return await async_get_image(self.hass, source, width=width, height=height)
+        except (OSError, RuntimeError, TimeoutError):
+            return None
+
 
 
 def _resolution(camera: dict[str, Any]) -> str | None:
@@ -104,3 +208,4 @@ def _resolution(camera: dict[str, Any]) -> str | None:
     if width and height:
         return f"{width}x{height}"
     return None
+
