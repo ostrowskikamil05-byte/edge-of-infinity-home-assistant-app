@@ -51,9 +51,13 @@ type fakeCamera struct {
 	maximum atomic.Int32
 	mic     atomic.Uint64
 	done    chan struct{}
+	onOpen  func()
 }
 
 func (c *fakeCamera) OnConnOpen(*gortsplib.ServerHandlerOnConnOpenCtx) {
+	if c.onOpen != nil {
+		c.onOpen()
+	}
 	n := c.active.Add(1)
 	for old := c.maximum.Load(); n > old; old = c.maximum.Load() {
 		if c.maximum.CompareAndSwap(old, n) {
@@ -76,11 +80,14 @@ func (c *fakeCamera) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respon
 	})
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
-func newFake(t *testing.T) *fakeCamera {
+func newFake(t *testing.T, onOpen ...func()) *fakeCamera {
 	t.Helper()
 	sps, _ := hex.DecodeString("6742c00ada0a37e4c044000003000400000300503c489a80")
 	pps, _ := hex.DecodeString("68ce0fc8")
 	c := &fakeCamera{done: make(chan struct{})}
+	if len(onOpen) > 0 {
+		c.onOpen = onOpen[0]
+	}
 	c.direct = &description.Media{Type: description.MediaTypeVideo, Formats: []format.Format{&format.H264{PayloadTyp: 96, PacketizationMode: 1, SPS: sps, PPS: pps}}}
 	c.back = &description.Media{Type: description.MediaTypeAudio, IsBackChannel: true, Formats: []format.Format{&format.G711{PayloadTyp: 8, SampleRate: 8000, ChannelCount: 1}}}
 	c.server = &gortsplib.Server{RTSPAddress: freeAddress(), Handler: c}
@@ -190,7 +197,17 @@ func TestSharedSourceAndMicrophone(t *testing.T) {
 	t.Log("4 EdgeRTC viewers, 3 RTSP readers and microphone share ONE real RTSP camera connection")
 }
 func TestPrivateMetadataAndReload(t *testing.T) {
-	c := newFake(t)
+	var previous atomic.Pointer[source]
+	var overlap atomic.Bool
+	c := newFake(t, func() {
+		if old := previous.Load(); old != nil {
+			select {
+			case <-old.stopped:
+			default:
+				overlap.Store(true)
+			}
+		}
+	})
 	cfg := config{RTSP: freeAddress(), HTTP: freeAddress(), Token: strings.Repeat("z", 40), Sources: []sourceConfig{{ID: "front", URL: "rtsp://" + c.server.RTSPAddress + "/camera", Paths: []string{"front_main"}}}}
 	a, e := newApp(cfg)
 	if e != nil {
@@ -199,6 +216,7 @@ func TestPrivateMetadataAndReload(t *testing.T) {
 	defer a.close()
 	eventually(t, func() bool { return a.lookup("front_main").connected.Load() == 1 })
 	first := a.lookup("front_main")
+	previous.Store(first)
 	a.reload(cfg)
 	if a.lookup("front_main") != first {
 		t.Fatal("unchanged source restarted")
@@ -206,9 +224,11 @@ func TestPrivateMetadataAndReload(t *testing.T) {
 	cfg.Sources[0].URL += "?new_settings=1"
 	a.reload(cfg)
 	eventually(t, func() bool { return a.lookup("front_main").connected.Load() == 1 })
-	if c.maximum.Load() != 1 {
-		t.Fatal("reconfiguration overlapped camera connections")
+	if overlap.Load() {
+		t.Fatal("replacement connected before the previous source and its client closed")
 	}
+	// Remote close callbacks can lag behind TCP close; source ownership must not overlap.
+	eventually(t, func() bool { return c.active.Load() == 1 })
 	b, _ := json.Marshal(a.lookup("front_main").status())
 	if strings.Contains(string(b), "rtsp://") {
 		t.Fatal("source URL leaked")

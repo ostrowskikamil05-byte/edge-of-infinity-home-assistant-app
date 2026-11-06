@@ -505,7 +505,22 @@ EdgeRTC/1 sends H264 access units directly to browser WebCodecs over WS/WSS. Thi
 path instantiates neither RTCPeerConnection nor MediaSource, and does not wait
 for MP4 fragments. Browser support is checked at runtime. **HTTPS or localhost
 and a WebCodecs-compatible browser are required for native live**, not just for
-microphone capture. Desktop/tablet/phone layouts were exercised in Chromium;
+microphone capture. A local LAN address such as `http://homeassistant.local:8123`
+is not a secure browser context. For Home Assistant Cloud, open **Settings →
+Home Assistant Cloud → Remote access** and use the `https://…ui.nabu.casa` address
+to open Home Assistant and its Edge panel/card. An existing trusted HTTPS
+reverse-proxy address also works. The top-level HA page and the embedded player
+must both have a secure context. This does not require exposing camera/Edge
+media ports. `localhost` refers to the computer running the browser, so it is
+not a substitute address for a separate Home Assistant server.
+
+If HTTPS is already in use but the browser has no WebCodecs video decoder, use
+an up-to-date Chrome or Edge browser. Companion webviews may differ. Since
+0.10.47, Edge displays a specific reason and stops automatic card retries for
+these browser requirements. Peer resets while sending HTTP responses are handled
+as client disconnects rather than unhandled request tracebacks.
+
+Desktop/tablet/phone layouts were exercised in Chromium;
 physical iOS/Android companion webviews and Safari/Firefox still need validation.
 Native picture-in-picture is currently hidden.
 

@@ -124,3 +124,17 @@ cleanup, native Edge panel viewing, and MP4 recording through the production
 FFmpeg command. First-image timings use an already-running source and are not
 camera-to-screen latency. No physical camera, speaker or actual HA Core is used.
 Stop the Python fixture with Ctrl+C or SIGTERM; it cleans up its Go camera/core.
+
+
+Browser capability and connection-requirement regression tests run without a
+server or physical camera:
+
+```sh
+NODE_PATH=/tmp/edge-browser-tests/node_modules node tests/browser/edge_rtc_support.cjs
+```
+
+Playwright intercepts all requests on disposable HTTP and HTTPS test origins.
+The suite exercises the real browser secure-context restriction, missing
+WebCodecs in a secure context, supported WebCodecs, Polish guidance, microphone
+cleanup and permanent-error retry handling in the actual card. This does not
+validate a deployed TLS certificate or the Home Assistant Cloud tunnel.
