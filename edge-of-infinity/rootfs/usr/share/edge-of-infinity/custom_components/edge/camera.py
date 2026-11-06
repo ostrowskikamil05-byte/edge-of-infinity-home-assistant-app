@@ -155,7 +155,7 @@ class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
 
     def _source(self, camera: dict[str, Any]) -> str | None:
         if self._stream_role == "talk":
-            return camera_stream_source(camera)
+            return camera_nvr_source(camera) if camera.get("edge_rtc") else camera_stream_source(camera)
         return camera_nvr_source(camera, self._stream_role)
 
     def _stream_entities(self) -> dict[str, str]:
@@ -181,9 +181,10 @@ class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
         return {
             "edge_camera_id": self._camera_id,
             "edge_stream_role": self._stream_role,
-            "edge_stream_source": "camera_talk" if self._stream_role == "talk" else "edge_nvr",
+            "edge_stream_source": "edge_rtc" if camera.get("edge_rtc") else "camera_talk" if self._stream_role == "talk" else "edge_nvr",
+            "edge_profiles": list(camera.get("edge_restream", {})) if camera.get("edge_rtc") else ["nvr", "main", "sub"],
             "edge_stream_entities": self._stream_entities(),
-            "edge_record_profile": camera.get("record_stream") or "main",
+            "edge_record_profile": (camera.get("edge_rtc") or {}).get("profile") or camera.get("record_stream") or "main",
             "edge_live_card": "custom:edge-live-card",
             "edge_live_card_version": CARD_VERSION,
             "vendor": camera.get("vendor"),

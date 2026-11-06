@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.10.44"
+version: "0.10.45"
 slug: edge_of_infinity
 description: Local live and NVR core for Hikvision, Uniview, Reolink and ONVIF/RTSP cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -34,7 +34,7 @@ ports:
   9997/tcp: null
 ports_description:
   8088/tcp: Edge Core API and web interface
-  8556/tcp: MediaMTX RTSP proxy disabled by default to avoid host port conflicts
+  8556/tcp: Shared core RTSP feed, host exposure disabled by default
   8888/tcp: MediaMTX low-latency HLS
   8889/tcp: MediaMTX WebRTC WHEP/WHIP
   8189/tcp: MediaMTX WebRTC ICE TCP fallback
@@ -42,7 +42,7 @@ ports_description:
   8192/tcp: Janus HTTP API (changed from 8188 to avoid conflict)
   8193/tcp: Janus WebSocket API (changed from 8190 to avoid conflict)
   8890/udp: MediaMTX SRT relay disabled by default
-  9997/tcp: MediaMTX local API disabled by default
+  9997/tcp: Private streaming core API, host exposure disabled by default
 map:
   - type: homeassistant_config
     read_only: false
@@ -150,7 +150,7 @@ schema:
   retention_days: int(1,365)
   install_custom_component: bool
   sync_addon_options: bool
-  core_engine: list(mediamtx_janus|mediamtx)
+  core_engine: list(edge_rtc|mediamtx_janus|mediamtx)
   mediamtx_enabled: bool
   mediamtx_rtsp_port: port
   mediamtx_hls_port: port

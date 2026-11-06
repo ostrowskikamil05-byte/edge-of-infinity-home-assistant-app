@@ -28,3 +28,22 @@ jobs:
 
       - name: Run regression tests
         run: python -m unittest discover -s tests
+
+
+  edge-rtc:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: edge-of-infinity/edge-rtc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: edge-of-infinity/edge-rtc/go.sum
+      - name: Test single source, native frames, microphone and serial reload
+        run: go test -race ./...
+      - name: Build amd64
+        run: CGO_ENABLED=0 GOARCH=amd64 go build -o /tmp/edge-rtc-amd64 .
+      - name: Build arm64
+        run: CGO_ENABLED=0 GOARCH=arm64 go build -o /tmp/edge-rtc-arm64 .

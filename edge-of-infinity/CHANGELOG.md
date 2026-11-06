@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.45
+
+- Add opt-in native EdgeRTC beta: a Go source registry/RTSP relay and EdgeRTC/1 encoded-frame protocol over WebSocket, decoded with browser WebCodecs. The native path uses neither WebRTC nor MSE and does not re-encode video. Existing core remains the default.
+- Enforce one source/reconnect owner per camera recording profile, merge duplicate exact URLs, share it with recorder/probes/viewers and supported G711 RTSP microphone backchannels, and close old sources before applying replacements. Bound viewer queues, cached GOP size and microphone ownership.
+- Add an authenticated HA binary bridge with separate read/control permissions, backend-only token handling, native card rendering/audio/microphone, and a read-only Edge panel tunnel. Expose current source counts and attempts in diagnostics.
+- Build static native binaries for amd64/ARM64; add Go race tests and CI builds, runtime dependency license notices, native configuration/privacy tests and real browser H264/PCM/NVR coverage.
+- Native live currently requires HTTPS/localhost, WebCodecs and H264; microphone requires camera RTSP G711 backchannel support. Native PiP, proprietary talk APIs, QUIC/WebTransport, PTZ/event adapters and local AI are not implemented in this stage. Warm-source local first-image measurements around 30–300 ms are not glass-to-glass latency or a universal WebRTC performance comparison.
+
 ## 0.10.44
 
 - Route the existing Home Assistant camera entity through Edge NVR/MediaMTX using the recording profile. Discover the add-on internal hostname and export credential-free backend restream metadata; keep the host RTSP port unpublished by default. Missing NVR metadata never falls back to a direct camera connection.

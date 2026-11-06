@@ -11,11 +11,13 @@ from .client import EdgeClient
 from .const import CONF_API_KEY, DOMAIN, PLATFORMS
 from .coordinator import EdgeCoordinator
 from .frontend import async_register_card
+from .rtc import async_register_rtc
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Load the bundled dashboard card without manual resource configuration."""
     await async_register_card(hass)
+    async_register_rtc(hass)
     return True
 
 

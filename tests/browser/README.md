@@ -104,3 +104,23 @@ readers plus a parameter probe must share one upstream camera RTSP session,
 preserve the 640×360 source dimensions, and release the upstream on NVR shutdown.
 It uses ephemeral loopback ports and temporary logs, and cleans up its processes.
 It does not contact a physical camera or Home Assistant.
+
+Native EdgeRTC uses a separate real-media suite, with no WebRTC/MSE fallback:
+
+```sh
+(cd edge-of-infinity/edge-rtc && go test -c -o /tmp/edge-rtc-fixture .)
+EDGE_RTC_TEST_BINARY=/tmp/edge-rtc-fixture python tests/browser/edge_rtc_fixture.py
+# In another terminal:
+NODE_PATH=/tmp/edge-browser-tests/node_modules node tests/browser/edge_rtc_native.cjs
+```
+
+Requires aiohttp, FFmpeg and a WebCodecs-capable Chromium. The fixture generates
+valid baseline H264 and a simulated RTSP camera with G711 return audio. Four
+browser players receive actual frames through the real HA bridge implementation
+(with HA APIs stubbed), with RTCPeerConnection and MediaSource deliberately
+replaced by throwing constructors. Browser-generated PCM reaches the RTSP
+backchannel. The suite checks one upstream, denied microphone control, source
+cleanup, native Edge panel viewing, and MP4 recording through the production
+FFmpeg command. First-image timings use an already-running source and are not
+camera-to-screen latency. No physical camera, speaker or actual HA Core is used.
+Stop the Python fixture with Ctrl+C or SIGTERM; it cleans up its Go camera/core.

@@ -484,3 +484,56 @@ The previous single-camera `entity: camera.front_door` configuration remains val
 The add-on discovers its internal hostname through Supervisor's own `/addons/self/info` endpoint and writes credential-free `restream.json` beside `edge.json`. HA reads this file locally, or fetches `/api/home-assistant/streams` for an API-based integration. RTSP port 8556 stays unpublished on the host by default; HA Core uses the add-on's internal network. Standalone/remote deployments must provide a hostname reachable by that HA instance using `EDGE_HA_RTSP_HOST` and the configured RTSP port. Missing restream metadata reports an unavailable NVR entity, rather than silently reconnecting directly to the camera. The card YAML contains entity IDs and display options, never camera passwords or RTSP URLs.
 
 Validation includes 107 unit tests and browser tests for 1–4 camera layouts, focus/suspension, NVR/Main/Sub entity routing, temporary Talk sessions, editor and YAML builder on four screen sizes. The browser uses real SDP negotiation with synthetic local media because managed browser policy blocks WebRTC transport. A separate integration test runs **MediaMTX 1.19.2 twice**, with generated H264 video as an RTSP camera: three concurrent readers plus a parameter probe share one upstream camera reader and preserve 640×360. No physical camera, production HA installation or physical speaker was tested.
+
+### Native EdgeRTC beta (0.10.45)
+
+`edge_rtc` is an **opt-in experimental core**, shipped beside the existing engine.
+In the add-on's **Configuration**, set `core_engine: edge_rtc`, restart the add-on,
+then **restart Home Assistant Core** and refresh its frontend. Existing Edge Live
+cards automatically use native EdgeRTC when the integration publishes this mode.
+Select the **NVR** quality option. Switch `core_engine` back to `mediamtx_janus` and
+restart the add-on/Core to use the existing engine again. Existing camera settings,
+recordings and retention paths are retained.
+
+EdgeRTC/1 sends H264 access units directly to browser WebCodecs over WS/WSS. This
+path instantiates neither RTCPeerConnection nor MediaSource, and does not wait
+for MP4 fragments. Browser support is checked at runtime. **HTTPS or localhost
+and a WebCodecs-compatible browser are required for native live**, not just for
+microphone capture. Desktop/tablet/phone layouts were exercised in Chromium;
+physical iOS/Android companion webviews and Safari/Firefox still need validation.
+Native picture-in-picture is currently hidden.
+
+There is one always-on RTSP session per enabled camera source. Live, the recorder,
+probes, snapshots and a supported RTSP G711 8 kHz mono microphone share this
+session. Duplicate exact source URLs are merged. The single source is the camera's
+recording profile; independent Main/Sub quality choices are unavailable in this
+mode. Choose an H264 recording profile for native live. The engine does not
+silently re-encode H265 into H264 or open a second camera stream. Models that need
+proprietary talk APIs are not supported by the native microphone yet. A camera
+backchannel may remain reserved by Edge while that source is enabled.
+
+The HA integration proxies native binary frames under HA authentication. Reading
+an entity is required for viewing; control permission is also required to talk.
+The private core token is stored in `/config/edge/edge-rtc-token`, seen by the
+add-on in `/homeassistant/edge`, and is never put in the card YAML or browser.
+For API-based integrations outside the shared config directory, the configured
+API key must be this private core token and the advertised internal API must be
+reachable. Host API port 9997 and RTSP 8556 stay unpublished by default. No media
+ICE/TURN/public-port settings are needed when using the authenticated HA WSS
+bridge. The Edge panel's tunnel permits viewing only.
+
+Diagnostics → Runtime summary / **EdgeRTC source connections** shows active
+upstreams, connection attempts, frame traffic, native viewers and microphone
+packets. Configuration changes are watched once per second; old sessions close
+before replacements start. Network failures use one bounded backoff loop per
+source. Slow viewers are disconnected rather than blocking NVR delivery.
+
+Validation: 112 Python tests; Go race tests; amd64/ARM64 builds; actual H264
+WebCodecs playback and PCM microphone RTP on desktop, tablet and phone-sized
+Chromium viewports; actual HA bridge code with HA API stubs; control-permission
+rejection; production FFmpeg stream-copy recording and the Edge panel viewer.
+A generated 640×360/10 fps warm source produced first drawn images around
+30–300 ms locally. This is not a measured glass-to-glass latency or proof of
+being faster than WebRTC on a lossy WAN. QUIC/WebTransport, camera event adapters,
+PTZ and local AI detection are subsequent modules, not completed features here.
+See [EdgeRTC internals](edge-rtc/README.md).

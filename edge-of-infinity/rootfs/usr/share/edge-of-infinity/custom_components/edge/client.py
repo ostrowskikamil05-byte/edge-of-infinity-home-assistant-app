@@ -186,6 +186,8 @@ class EdgeClient:
         by_id = {row.get("camera_id"): row.get("streams", {}) for row in rows if isinstance(row, dict)}
         for camera in cameras:
             camera["edge_restream"] = by_id.get(camera.get("id"), {}) if payload.get("available") else {}
+            row = next((row for row in rows if isinstance(row, dict) and row.get("camera_id") == camera.get("id")), {})
+            camera["edge_rtc"] = row.get("edge_rtc") if payload.get("source") == "edge_rtc" else None
         return cameras
 
     async def _local_config_cameras(self) -> list[dict[str, Any]]:

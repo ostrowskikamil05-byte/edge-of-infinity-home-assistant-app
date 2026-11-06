@@ -26,9 +26,9 @@ from urllib.parse import parse_qs, urlparse, urlunparse, quote, unquote
 from xml.sax.saxutils import escape as xml_escape
 
 
-APP_VERSION = "0.10.44"
+APP_VERSION = "0.10.45"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "ha-nvr-multicamera-v6"
+UI_BUILD = "native-edgertc-webcodecs-v7"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -112,6 +112,8 @@ CAMERA_OVERRIDE_FIELDS = (
 STREAM_ENGINES = ("janus_webrtc", "mediamtx", "ll_hls", "srt")
 REMOTE_ACCESS_MODES = ("local_only", "direct_public", "vps_relay", "turn_relay")
 ALWAYS_ON_STREAM_SCOPES = ("tile", "live", "tile_live", "all")
+EDGE_RTC_ENABLED = os.environ.get("EDGE_CORE_ENGINE", "") == "edge_rtc"
+EDGE_RTC_CONFIG_PATH = Path(os.environ.get("EDGE_RTC_CONFIG", "/tmp/edge-runtime/edge-rtc.json"))
 MEDIAMTX_ENABLED = os.environ.get("EDGE_MEDIAMTX_ENABLED", "true").lower() == "true"
 MEDIAMTX_HOST = os.environ.get("EDGE_MEDIAMTX_HOST", "127.0.0.1")
 MEDIAMTX_RTSP_PORT = int(os.environ.get("EDGE_MEDIAMTX_RTSP_PORT", "8556"))
@@ -1876,23 +1878,30 @@ def home_assistant_restream_payload(config: dict) -> dict:
             import socket
             host = socket.gethostname().replace("_", "-")
         _HA_RESTREAM_HOST = host if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", host) else ""
-    available = bool(MEDIAMTX_ENABLED and _HA_RESTREAM_HOST)
+    available = bool((MEDIAMTX_ENABLED or EDGE_RTC_ENABLED) and _HA_RESTREAM_HOST)
     cameras = []
     for index, camera in enumerate(config.get("cameras", [])):
         streams = {}
+        recording = camera.get("record_stream") or "main"
+        if not camera.get("rtsp_" + recording):
+            recording = "main"
         if available and camera.get("enabled"):
             for profile in ("main", "sub"):
+                if EDGE_RTC_ENABLED and profile != recording:
+                    continue
                 if camera.get("rtsp_" + profile):
                     streams[profile] = f"rtsp://{_HA_RESTREAM_HOST}:{MEDIAMTX_RTSP_PORT}/{mediamtx_path(camera, index, profile)}"
-        recording = camera.get("record_stream") or "main"
         streams["nvr"] = streams.get(recording) or streams.get("main") or ""
-        cameras.append({"camera_id": camera.get("id"), "streams": streams})
-    return {"available": available, "cameras": cameras, "source": "edge_nvr", "version": APP_VERSION}
+        row = {"camera_id": camera.get("id"), "streams": streams}
+        if EDGE_RTC_ENABLED and available:
+            row["edge_rtc"] = {"api": f"http://{_HA_RESTREAM_HOST}:{MEDIAMTX_API_PORT}", "path": mediamtx_path(camera, index, recording), "profile": recording}
+        cameras.append(row)
+    return {"available": available, "cameras": cameras, "source": "edge_rtc" if EDGE_RTC_ENABLED else "edge_nvr", "version": APP_VERSION}
 
 
 def recording_source_stream(camera: dict, index: int, stream_name: str) -> tuple[str, str]:
-    if MEDIAMTX_ENABLED:
-        return mediamtx_rtsp_url(camera, index, stream_name), "mediamtx_rebroadcast"
+    if MEDIAMTX_ENABLED or EDGE_RTC_ENABLED:
+        return mediamtx_rtsp_url(camera, index, stream_name), ("edge_rtc_shared" if EDGE_RTC_ENABLED else "mediamtx_rebroadcast")
     return camera_stream(camera, stream_name), "camera_direct"
 
 
@@ -2292,6 +2301,15 @@ def sync_supervisor_options(config: dict) -> dict:
 
 
 def sync_runtime_engine_config(config: dict, reason: str) -> dict:
+    if str(Path(__file__).parent) not in sys.path:
+        sys.path.insert(0, str(Path(__file__).parent))
+    if EDGE_RTC_ENABLED:
+        from edge_rtc_config import write_config
+        with CONFIG_LOCK:
+            current = load_config()
+            write_config(current, HOME_DIR, EDGE_RTC_CONFIG_PATH, MEDIAMTX_RTSP_PORT, MEDIAMTX_API_PORT)
+            write_json(HOME_DIR / "restream.json", home_assistant_restream_payload(current))
+        return {"reason": reason, "edge_rtc": {"written": True}}
     result = {"reason": reason, "mediamtx": {}, "janus": {}}
     try:
         result["mediamtx"] = write_mediamtx_runtime_config(config)
@@ -2381,7 +2399,20 @@ def janus_status() -> dict:
     }
 
 
+def edge_rtc_status() -> dict:
+    import urllib.request
+    try:
+        token = (HOME_DIR / "edge-rtc-token").read_text().strip()
+        request = urllib.request.Request(f"http://127.0.0.1:{MEDIAMTX_API_PORT}/api/status", headers={"Authorization": "Bearer " + token})
+        with urllib.request.urlopen(request, timeout=1) as response:
+            return {"enabled": True, "api_reachable": True, **json.loads(response.read())}
+    except (OSError, ValueError):
+        return {"enabled": EDGE_RTC_ENABLED, "api_reachable": False}
+
+
 def engine_runtime_status() -> dict:
+    if EDGE_RTC_ENABLED:
+        return {"architecture": "camera RTSP -> EdgeRTC registry -> encoded frames/WebCodecs + RTSP recorder; one recording profile per camera", "edge_rtc": edge_rtc_status(), "mediamtx": {"api_reachable": False, "config_exists": False}, "janus": {"api_reachable": False, "streaming_config_exists": False}, "codec_notes": {"h264": "Native EdgeRTC/1 encoded frames, no WebRTC or MSE.", "microphone": "PCM over authenticated WS -> RTSP G711 backchannel on the existing source session."}}
     return {
         "architecture": "camera RTSP -> MediaMTX core -> Janus Streaming Plugin -> browser WebRTC. MediaMTX also exposes LL-HLS, WHEP, SRT, RTSP proxy, and fMP4 recording paths.",
         "mediamtx": mediamtx_status(),
@@ -2419,6 +2450,8 @@ def stream_capabilities(config: dict | None = None) -> dict:
     config = config or load_config()
     live = config.get("live") if isinstance(config.get("live"), dict) else {}
     runtime = engine_runtime_status()
+    if EDGE_RTC_ENABLED:
+        return {"engines": {"edge_rtc": {"status": "active" if runtime["edge_rtc"].get("api_reachable") else "starting", "transport": "edgertc/1-websocket-webcodecs"}}, "codec_policy": {"live": "H264 access units, no video re-encoding", "recording": "original RTSP video", "microphone": "PCM16LE 8kHz -> RTSP G711 backchannel"}, "runtime": runtime, "cameras": [{"id": camera.get("id"), "record_stream": camera.get("record_stream") or "main"} for camera in config.get("cameras", [])]}
     mediamtx_ready = runtime["mediamtx"]["api_reachable"] or runtime["mediamtx"]["config_exists"]
     janus_ready = runtime["janus"]["api_reachable"] or runtime["janus"]["streaming_config_exists"]
     return {
@@ -4804,17 +4837,27 @@ def home_assistant_dashboard_payload() -> dict:
 
 
 def health_payload() -> dict:
+    core = engine_runtime_status()
+    healthy = not EDGE_RTC_ENABLED or core.get("edge_rtc", {}).get("api_reachable", False)
     return {
-        "status": "ok",
+        "status": "ok" if healthy else "error",
         "product": "Edge of Infinity",
         "version": APP_VERSION,
         "server_version": SERVER_VERSION,
         "ui_build": UI_BUILD,
-        "mode": "mediamtx-janus-webrtc-core",
+        "mode": "edge-rtc-native" if EDGE_RTC_ENABLED else "mediamtx-janus-webrtc-core",
         "authoritative_config": str(CONFIG_PATH),
         "addon_config_mirror": str(ADDON_CONFIG_PATH),
-        "core": engine_runtime_status(),
+        "core": core,
     }
+
+
+EDGE_RTC_PLAYER_HTML = r"""<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;height:100%;background:#080e15;color:#d9e7ee;font:13px system-ui}canvas{width:100%;height:100%;object-fit:contain}button{position:absolute;bottom:12px;right:12px;padding:10px;border:0;border-radius:8px;background:#20384b;color:white}p{position:absolute;top:8px;left:10px}</style><canvas></canvas><p>EdgeRTC · connecting…</p><button>Sound</button><script type="module">
+import{EdgeRTCClient}from'../client.js';
+const path=location.pathname.split('/').pop(),url=new URL('../stream/'+path,location.href);let client,timer,retries=0,muted=true;
+function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,canvas:document.querySelector('canvas'),onError:m=>{document.querySelector('p').textContent=m;if(!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;document.querySelector('p').textContent='EdgeRTC · '+f.width+' × '+f.height;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
+connect();document.querySelector('button').onclick=()=>{muted=!muted;client?.setAudio(.6,muted);document.querySelector('button').textContent=muted?'Sound':'Mute';};document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(document.hidden)client?.close();else connect();});window.addEventListener('pagehide',()=>{clearTimeout(timer);client?.close();});
+</script>"""
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -5761,7 +5804,7 @@ INDEX_HTML = r"""<!doctype html>
             <aside class="panel dashboard-instructions">
               <h2>Add it to your dashboard</h2>
               <ol class="instruction-list"><li><b>Enable the Edge integration</b><p>After updating the add-on, restart Home Assistant Core once. Go to Settings → Devices & services → Add integration → Edge of Infinity. Use <code>local</code> as the connection.</p></li><li><b>Select the camera entity</b><p>The Edge integration registers our custom card automatically. Registered camera entities appear here automatically. If needed, copy the exact <code>camera.…</code> ID from the integration's entity list.</p></li><li><b>Paste the card</b><p>Open your dashboard → Edit dashboard → Add card → Manual. Paste the YAML and save.</p></li></ol>
-              <div class="tip-box"><b>Live on your dashboard</b><p>Home Assistant streams the selected live feed through its own authenticated connection. Keep the camera reachable from Home Assistant and use H264 for broad browser support. Edge Live needs a Home Assistant WebRTC provider such as go2rtc. The microphone requires HTTPS, browser permission and camera/provider support for return audio.</p></div>
+              <div class="tip-box"><b>Live on your dashboard</b><p>__EDGE_HA_LIVE_HELP__</p></div>
             </aside>
           </div>
         </section>
@@ -5781,6 +5824,7 @@ INDEX_HTML = r"""<!doctype html>
       const menuToggle = document.getElementById('menu-toggle');
       const EDGE_PANEL_VERSION = '__EDGE_PANEL_VERSION__';
       const EDGE_UI_BUILD = '__EDGE_UI_BUILD__';
+      const EDGE_NATIVE_RTC = __EDGE_NATIVE_RTC__;
       const CAMERA_VENDORS = __EDGE_CAMERA_VENDORS__;
       const CAMERA_TEMPLATES = __EDGE_CAMERA_TEMPLATES__;
       let config = { cameras: [] };
@@ -7137,6 +7181,7 @@ INDEX_HTML = r"""<!doctype html>
             runtime_config: panelLogs.runtime_config,
             config_summary: panelLogs.config_summary
           }, 'ok'),
+          ...(EDGE_NATIVE_RTC ? [logBlock('EdgeRTC source connections', panelLogs.runtime_config?.edge_rtc || {})] : []),
           logBlock('Hardware diagnostics', panelLogs.hardware || {}, hardwareSeverity),
           logBlock('Runtime parameters', panelLogs.runtime_parameters || {}, 'ok'),
           logBlock('Edge debug', panelLogs.edge_debug || 'No debug log yet.'),
@@ -7196,6 +7241,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function chooseHomePreviewStream(camera) {
         const requestedTileStream = camera.tile_stream || 'sub';
+        if (EDGE_NATIVE_RTC) return {stream:camera.record_stream||'main',requested:requestedTileStream,reason:'single_source_record_profile'};
         const liveStream = camera.live_stream || 'sub';
         const subConfigured = isStreamConfigured(camera, 'sub');
         if (isStreamConfigured(camera, requestedTileStream)) {
@@ -7225,8 +7271,8 @@ INDEX_HTML = r"""<!doctype html>
         const previewResolution = previewStream === liveStream ? liveResolution : 'tile';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
         const mediamtxPath = `${encodeURIComponent(liveId)}_${encodeURIComponent(previewStream)}`;
-        const plan = liveConnectionPlan(mediamtxPath);
-        const mediamtxUrl = plan.canEmbed ? mediaMtxPlayerUrl(plan.url) : plan.url;
+        const plan = EDGE_NATIVE_RTC ? {canEmbed:true,url:"",reason:"edge_rtc"} : liveConnectionPlan(mediamtxPath);
+        const mediamtxUrl = EDGE_NATIVE_RTC ? panelPath(`api/edge-rtc/player/${mediamtxPath}`) : plan.canEmbed ? mediaMtxPlayerUrl(plan.url) : plan.url;
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         if (live[liveKey]) {
           debugEvent('ui_live_plan', {
@@ -7243,7 +7289,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         const preview = live[liveKey]
           ? (plan.canEmbed
-            ? `<iframe class="live-frame" src="${escapeHtml(mediamtxUrl)}" data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} WebRTC live" loading="eager" allow="autoplay; fullscreen; encrypted-media" allowfullscreen onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
+            ? `<iframe class="live-frame" src="${escapeHtml(mediamtxUrl)}" data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} ${EDGE_NATIVE_RTC ? 'EdgeRTC' : 'WebRTC'} live" loading="eager" allow="autoplay; fullscreen; encrypted-media" allowfullscreen onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
             : liveBlockedPreview(plan))
           : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         const fullscreenButton = live[liveKey] && plan.canEmbed
@@ -7519,11 +7565,12 @@ INDEX_HTML = r"""<!doctype html>
         document.getElementById('ha-copy-status').textContent = '';
         const custom = document.getElementById('ha-card-type').value === 'edge';
         const count = Number(document.getElementById('ha-camera-count').value);
-        const quality = document.getElementById('ha-card-quality').value;
+        const quality = EDGE_NATIVE_RTC ? 'nvr' : document.getElementById('ha-card-quality').value;
         const items = [{camera, entity}, ...Array.from(document.querySelectorAll('[data-ha-extra-slot]')).map(slot => ({camera: haDashboard.cameras.find(item => item.id === slot.querySelector('select').value), entity: slot.querySelector('input').value.trim()}))];
         const valid = items.length === count && items.every(item => item.camera && /^camera\.[a-z0-9_]+$/.test(item.entity)) && new Set(items.map(item => item.entity)).size === count;
-        document.getElementById('ha-card-quality').disabled = !custom;
-        document.getElementById('ha-card-resource-status').textContent = haDashboard.card_ready ? `Edge Live card registered in HA (${haDashboard.card_version}). NVR is the shared recording feed. The microphone starts only when you click it and may temporarily use a direct talk connection.` : 'Restart Home Assistant Core after updating Edge to register the Edge Live card and its NVR profile entities.';
+        document.getElementById('ha-card-quality').disabled = !custom || EDGE_NATIVE_RTC;
+        if (EDGE_NATIVE_RTC) {document.getElementById('ha-card-quality').value='nvr';document.querySelector('#ha-card-type option[value="edge"]').textContent='Edge Live · native EdgeRTC';}
+        document.getElementById('ha-card-resource-status').textContent = EDGE_NATIVE_RTC ? 'EdgeRTC beta · live, NVR and a compatible RTSP microphone share one camera session. Use the NVR quality profile. HTTPS and WebCodecs are required.' : haDashboard.card_ready ? `Edge Live card registered in HA (${haDashboard.card_version}). NVR is the shared recording feed. The microphone starts only when you click it and may temporarily use a direct talk connection.` : 'Restart Home Assistant Core after updating Edge to register the Edge Live card and its NVR profile entities.';
         copy.disabled = !valid;
         if (!valid) { yaml.value = ''; status.textContent = 'Choose 1–4 different cameras and enter their exact Home Assistant entity IDs. Enable/update the Edge integration and restart Core if entities are missing.'; return; }
         if (custom) {
@@ -9003,6 +9050,8 @@ INDEX_HTML = (
     INDEX_HTML
     .replace("__EDGE_PANEL_VERSION__", APP_VERSION)
     .replace("__EDGE_UI_BUILD__", UI_BUILD)
+    .replace("__EDGE_NATIVE_RTC__", "true" if EDGE_RTC_ENABLED else "false")
+    .replace("__EDGE_HA_LIVE_HELP__", "EdgeRTC sends H264 frames through authenticated Home Assistant WebSocket connections. Native live requires HTTPS and browser WebCodecs. A compatible RTSP G711 microphone uses the existing camera session. HA streaming needs no extra public media ports." if EDGE_RTC_ENABLED else 'Home Assistant streams the selected live feed through its own authenticated connection. Keep the camera reachable from Home Assistant and use H264 for broad browser support. Edge Live needs a Home Assistant WebRTC provider such as go2rtc. The microphone requires HTTPS, browser permission and camera/provider support for return audio.')
     .replace("__EDGE_CAMERA_VENDORS__", json.dumps(CAMERA_VENDORS))
     .replace("__EDGE_CAMERA_TEMPLATES__", json.dumps({vendor: {stream: camera_stream_template(vendor, "1", stream) for stream in ("main", "sub")} for vendor in CAMERA_VENDORS}))
 )
@@ -9032,6 +9081,53 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def send_json(self, payload, status: HTTPStatus = HTTPStatus.OK, extra_headers: dict | None = None) -> None:
         self.send_bytes(json.dumps(payload).encode("utf-8"), "application/json", status, extra_headers)
 
+    def serve_edge_rtc_stream(self, stream_path: str) -> None:
+        """Read-only binary tunnel; microphone is available only through HA ACLs."""
+        import socket
+        import select
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", stream_path) or self.headers.get("Upgrade", "").lower() != "websocket":
+            self.send_json({"error": "invalid_stream"}, HTTPStatus.BAD_REQUEST)
+            return
+        backend = None
+        upgraded = False
+        try:
+            token = (HOME_DIR / "edge-rtc-token").read_text().strip()
+            backend = socket.create_connection(("127.0.0.1", MEDIAMTX_API_PORT), timeout=5)
+            key = self.headers.get("Sec-WebSocket-Key", "")
+            if not re.fullmatch(r"[A-Za-z0-9+/=]{20,32}", key):
+                raise ValueError("invalid_websocket_key")
+            header = f"GET /api/stream/{stream_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            backend.sendall(header.encode())
+            response = bytearray()
+            while not response.endswith(b"\r\n\r\n") and len(response) < 16384:
+                value = backend.recv(1)
+                if not value:
+                    raise OSError("backend_closed")
+                response.extend(value)
+            if not response.startswith(b"HTTP/1.1 101 "):
+                raise OSError("backend_unavailable")
+            self.connection.sendall(response)
+            upgraded = True
+            self.close_connection = True
+            backend.settimeout(10)
+            self.connection.settimeout(10)
+            while True:
+                readable, _, _ = select.select([backend, self.connection], [], [], 30)
+                if not readable:
+                    continue
+                for source in readable:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    destination = self.connection if source is backend else backend
+                    destination.sendall(data)
+        except (OSError, ValueError):
+            if not upgraded:
+                self.send_json({"error": "edge_rtc_unavailable"}, HTTPStatus.SERVICE_UNAVAILABLE)
+        finally:
+            if backend:
+                backend.close()
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = route_path(parsed.path)
@@ -9040,10 +9136,20 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
             return
         if path == "/health":
-            self.send_json(health_payload())
+            payload = health_payload()
+            self.send_json(payload, HTTPStatus.OK if payload["status"] == "ok" else HTTPStatus.SERVICE_UNAVAILABLE)
             return
         if path == "/api/home-assistant/dashboard":
             self.send_json(home_assistant_dashboard_payload())
+            return
+        if path == "/api/edge-rtc/client.js":
+            self.send_bytes((Path(__file__).parent / "custom_components/edge/www/edge-rtc-client.js").read_bytes(), "text/javascript")
+            return
+        if path.startswith("/api/edge-rtc/stream/") and EDGE_RTC_ENABLED:
+            self.serve_edge_rtc_stream(path.removeprefix("/api/edge-rtc/stream/"))
+            return
+        if path.startswith("/api/edge-rtc/player/") and EDGE_RTC_ENABLED:
+            self.send_bytes(EDGE_RTC_PLAYER_HTML.encode(), "text/html; charset=utf-8")
             return
         if path == "/api/version":
             self.send_json({
