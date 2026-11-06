@@ -26,9 +26,9 @@ from urllib.parse import parse_qs, urlparse, urlunparse, quote, unquote
 from xml.sax.saxutils import escape as xml_escape
 
 
-APP_VERSION = "0.10.42"
+APP_VERSION = "0.10.43"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "ui-dashboard-native-live-v4"
+UI_BUILD = "ha-edge-live-card-webrtc-v5"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -4765,7 +4765,9 @@ def home_assistant_dashboard_payload() -> dict:
         local = [item for item in matches if item.get("local")]
         candidates = sorted({item["entity_id"] for item in (local or matches)})
         cameras.append({"id": camera.get("id"), "name": camera.get("name") or camera.get("id"), "enabled": bool(camera.get("enabled")), "entity_id": candidates[0] if len(candidates) == 1 else "", "entities": candidates})
-    return {"cameras": cameras, "integration_detected": any(item["entities"] for item in cameras)}
+    card_version = mapping.get("card_version") if isinstance(mapping, dict) else ""
+    card_ready = bool(isinstance(card_version, str) and re.fullmatch(r"\d+\.\d+\.\d+", card_version) and mapping.get("card_type") == "custom:edge-live-card")
+    return {"cameras": cameras, "integration_detected": any(item["entities"] for item in cameras), "card_ready": card_ready, "card_version": card_version if card_ready else "", "card_resource": "/edge/edge-live-card.js"}
 
 
 def health_payload() -> dict:
@@ -5712,19 +5714,21 @@ INDEX_HTML = r"""<!doctype html>
           <header><div><p class="eyebrow">INTEGRATION</p><h1>Home Assistant</h1><p>Put live camera video on your Home Assistant dashboard.</p></div></header>
           <div class="dashboard-layout">
             <section class="panel dashboard-builder">
-              <div class="section-heading"><span class="step-number">1</span><div><h2>Choose your camera</h2><p>Use a standard Home Assistant camera card. No custom card is required.</p></div></div>
+              <div class="section-heading"><span class="step-number">1</span><div><h2>Choose your camera</h2><p>Use our Edge Live card for WebRTC and audio controls, or choose the standard Home Assistant card.</p></div></div>
               <label>Camera<select id="ha-camera-select"></select></label>
+              <label>Card type<select id="ha-card-type"><option value="edge">Edge Live · WebRTC, sound & microphone</option><option value="native">Standard Home Assistant camera</option></select></label>
+              <p class="notice" id="ha-card-resource-status" role="status"></p>
               <label>Home Assistant camera entity<input id="ha-camera-entity" placeholder="camera.front_door" autocomplete="off" spellcheck="false"></label>
               <p class="notice" id="ha-entity-status" role="status"></p>
-              <div class="section-heading"><span class="step-number">2</span><div><h2>Copy your card</h2><p>Only the entity name is included. Passwords and stream addresses stay private.</p></div></div>
+              <div class="section-heading"><span class="step-number">2</span><div><h2>Copy your card</h2><p>The code contains the camera entity and display options. Passwords and stream addresses stay private.</p></div></div>
               <textarea id="ha-card-yaml" rows="9" readonly spellcheck="false" aria-label="Home Assistant card YAML"></textarea>
               <div class="actions"><button class="primary" id="ha-copy-card" type="button">Copy card YAML</button><button id="ha-refresh-entities" type="button">Refresh entities</button></div>
               <p id="ha-copy-status" role="status" aria-live="polite" class="notice"></p>
             </section>
             <aside class="panel dashboard-instructions">
               <h2>Add it to your dashboard</h2>
-              <ol class="instruction-list"><li><b>Enable the Edge integration</b><p>After updating the add-on, restart Home Assistant Core once. Go to Settings → Devices & services → Add integration → Edge of Infinity. Use <code>local</code> as the connection.</p></li><li><b>Select the camera entity</b><p>Registered entities appear here automatically. If needed, copy the exact <code>camera.…</code> ID from the integration's entity list.</p></li><li><b>Paste the card</b><p>Open your dashboard → Edit dashboard → Add card → Manual. Paste the YAML and save.</p></li></ol>
-              <div class="tip-box"><b>Live on your dashboard</b><p>Home Assistant streams the selected live feed through its own authenticated connection. Keep the camera reachable from Home Assistant and use H264 for broad browser support.</p></div>
+              <ol class="instruction-list"><li><b>Enable the Edge integration</b><p>After updating the add-on, restart Home Assistant Core once. Go to Settings → Devices & services → Add integration → Edge of Infinity. Use <code>local</code> as the connection.</p></li><li><b>Select the camera entity</b><p>The Edge integration registers our custom card automatically. Registered camera entities appear here automatically. If needed, copy the exact <code>camera.…</code> ID from the integration's entity list.</p></li><li><b>Paste the card</b><p>Open your dashboard → Edit dashboard → Add card → Manual. Paste the YAML and save.</p></li></ol>
+              <div class="tip-box"><b>Live on your dashboard</b><p>Home Assistant streams the selected live feed through its own authenticated connection. Keep the camera reachable from Home Assistant and use H264 for broad browser support. Edge Live needs a Home Assistant WebRTC provider such as go2rtc. The microphone requires HTTPS, browser permission and camera/provider support for return audio.</p></div>
             </aside>
           </div>
         </section>
@@ -7481,10 +7485,12 @@ INDEX_HTML = r"""<!doctype html>
         const status = document.getElementById('ha-entity-status');
         document.getElementById('ha-copy-status').textContent = '';
         const valid = /^camera\.[a-z0-9_]+$/.test(entity);
+        document.getElementById('ha-card-resource-status').textContent = haDashboard.card_ready ? `Edge Live card registered in HA (${haDashboard.card_version}). The microphone starts only when you click it.` : 'Restart Home Assistant Core after updating Edge to register the Edge Live card. WebRTC requires a provider such as go2rtc; the standard card remains available as a fallback.';
         copy.disabled = !camera || !valid;
         if (!camera) { yaml.value = ''; status.textContent = 'Save a camera in Cameras first, then refresh this list.'; return; }
         if (!valid) { yaml.value = ''; status.textContent = 'Enable the Edge integration and restart Home Assistant Core, or enter the exact camera entity ID from Home Assistant.'; return; }
-        yaml.value = ['type: picture-entity', `entity: ${entity}`, 'camera_view: live', `name: ${JSON.stringify(camera.name)}`, 'show_name: true', 'show_state: false', 'aspect_ratio: "16:9"'].join('\n') + '\n';
+        const custom = document.getElementById('ha-card-type').value === 'edge';
+        yaml.value = (custom ? ['type: custom:edge-live-card', `entity: ${entity}`, `name: ${JSON.stringify(camera.name)}`, 'autoplay: true', 'muted: true', 'volume: 0.6', 'microphone: true', 'reconnect: true', 'fit: contain'] : ['type: picture-entity', `entity: ${entity}`, 'camera_view: live', `name: ${JSON.stringify(camera.name)}`, 'show_name: true', 'show_state: false', 'aspect_ratio: "16:9"']).join('\n') + '\n';
         if (!camera.enabled) { status.textContent = 'This camera is disabled. Enable it in Cameras to view live video.'; return; }
         status.textContent = camera.entities.includes(entity) ? 'Camera entity detected in Home Assistant. Your card is ready to copy.' : 'Using the entity ID you entered. Confirm that this camera entity exists in Home Assistant.';
       }
@@ -7511,6 +7517,7 @@ INDEX_HTML = r"""<!doctype html>
           document.getElementById('ha-copy-card').disabled = true;
         }
       }
+      document.getElementById('ha-card-type').addEventListener('change', updateDashboardCard);
       document.getElementById('ha-camera-select').addEventListener('change', selectDashboardCamera);
       document.getElementById('ha-camera-entity').addEventListener('input', updateDashboardCard);
       document.getElementById('ha-refresh-entities').addEventListener('click', loadDashboardEntities);

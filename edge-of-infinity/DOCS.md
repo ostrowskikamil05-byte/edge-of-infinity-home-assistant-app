@@ -423,3 +423,30 @@ This is a built-in card; no HACS/custom card, browser RTSP URL, camera password 
 The native integration reads the configured live stream, updates an existing stream worker after its source changes, and adds entities for newly configured cameras on coordinator refresh. Snapshot requests use the existing cached image when available and otherwise request a frame through Home Assistant's FFmpeg integration. Entity IDs are exported atomically, without stream credentials. If multiple non-local installations use the same camera ID, choose the correct entity manually. An entity-mapping export failure does not prevent camera setup.
 
 The UI and stream-source behavior are covered by browser/unit tests with a disposable local fixture and Home Assistant API stubs. Actual playback on a running Home Assistant Core still depends on the installation's network and camera codecs.
+
+### Edge Live WebRTC card and updated integration (0.10.43)
+
+Update/start the add-on with `install_custom_component: true`, then **restart Home Assistant Core**. This installs the updated `edge` integration and its bundled card; reloading an already loaded Python integration is not a substitute for this restart. Existing camera entity IDs remain unchanged. Refresh the browser/app frontend after restarting Core.
+
+The integration automatically serves and registers `/edge/edge-live-card.js?v=0.10.43`. No HACS download is needed. In the dashboard card picker select **Edge of Infinity Live**, or open **Home Assistant** in the Edge panel, select **Edge Live**, and copy the generated YAML using your actual camera entity:
+
+```yaml
+type: custom:edge-live-card
+entity: camera.front_door
+name: Front door
+autoplay: true
+muted: true
+volume: 0.6
+microphone: true
+reconnect: true
+fit: contain
+show_header: true
+```
+
+The visual card editor exposes these options. `microphone: true` shows a control; it **does not start microphone capture**. The card has start/stop, mute, volume, microphone toggle, fullscreen and settings for image fit (`contain` or `cover`), echo cancellation, automatic reconnect, reconnect now, snapshot download and picture-in-picture where the browser supports it. Playback volume/fullscreen/PiP support can differ on iOS and in the Home Assistant companion webview.
+
+Live signaling uses the existing authenticated Home Assistant camera WebSocket API. Camera credentials and RTSP addresses stay in the integration, not in the card YAML. Home Assistant must have a WebRTC provider compatible with the camera, such as its **go2rtc** integration. Edge orders setup after go2rtc if it is configured; it does not install another go2rtc server. If HA reports WebRTC unavailable, check its go2rtc setup and camera stream capabilities. The generator still offers the **Standard Home Assistant camera** card for HA's normal stream playback. Use an H264 live feed for broad browser support. Remote WebRTC media still requires working ICE connectivity; opening the HA page remotely alone does not guarantee a media route.
+
+**Talking through a camera** requires HTTPS (or localhost), browser microphone permission, and a camera/RTSP source plus WebRTC provider that support return audio/backchannel. This depends on the model and configured source, not only the camera brand. Click the microphone to request capture; click again to stop and release it. The microphone indicator turns on only after the WebRTC answer negotiates sending audio. This confirms browser/provider negotiation, not that a physical camera speaker played the sound. The card reports a rejected audio direction rather than claiming two-way audio works. There is no automatic talk mode. Capture ends on card removal, page hiding, stop, connection failure, or a cancelled permission request. Local playback is temporarily muted while talking and its prior mute state is restored afterwards.
+
+The default browser test uses real RTCPeerConnections and generated video/audio with a simulated HA signaling endpoint. It verifies received video, audio packets in the return direction, controls, state refresh stability, denied/unsupported microphone behavior and cleanup. Registration/entity behavior is checked with HA API stubs. In managed browsers that block WebRTC transport, `EDGE_WEBRTC_SIGNALING_ONLY=1` instead checks real SDP negotiation and injects local synthetic tracks for rendering; it does not verify media transport or returned RTP packets. This release was checked in that restricted mode. A running Home Assistant Core, physical camera speakers and outside-LAN ICE paths are not tested by this fixture.

@@ -17,7 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .client import EdgeClientError, camera_stream_source
-from .const import DOMAIN
+from .const import CARD_VERSION, DOMAIN
 from .coordinator import EdgeCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ async def publish_entity_map(hass: HomeAssistant) -> None:
             client = data.get("client")
             for camera_id, entity in data.get("entities", {}).items():
                 entities.append({"camera_id": camera_id, **entity, "local": bool(client and client.is_local)})
-        payload = {"entities": entities}
+        payload = {"entities": entities, "card_version": CARD_VERSION, "card_type": "custom:edge-live-card"}
         path = Path(hass.config.path("edge", "ha-entities.json"))
 
         def write_map() -> None:
@@ -156,6 +156,8 @@ class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
         camera = self._camera()
         return {
             "edge_camera_id": self._camera_id,
+            "edge_live_card": "custom:edge-live-card",
+            "edge_live_card_version": CARD_VERSION,
             "vendor": camera.get("vendor"),
             "host": camera.get("host"),
             "status": camera.get("status"),

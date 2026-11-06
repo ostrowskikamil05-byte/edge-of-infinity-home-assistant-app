@@ -50,6 +50,7 @@ def native_module():
     modules['homeassistant.helpers.entity_platform'].AddEntitiesCallback = object
     modules['homeassistant.helpers.update_coordinator'].CoordinatorEntity = CoordinatorEntity
     modules['edge_native_test.const'].DOMAIN = 'edge'
+    modules['edge_native_test.const'].CARD_VERSION = '0.10.43'
     modules['edge_native_test.coordinator'].EdgeCoordinator = object
     modules['edge_native_test.client'] = load_client_module()
     with patch.dict(sys.modules, modules):
@@ -134,3 +135,44 @@ class DashboardMetadataTests(unittest.TestCase):
         for mapping in ([], {}, {'entities': [{'camera_id': 'front', 'entity_id': 'camera.foo\npassword: secret'}]}):
             p.write_json(p.HOME_DIR / 'ha-entities.json', mapping)
             self.assertEqual(p.home_assistant_dashboard_payload()['cameras'][0]['entity_id'], '')
+
+
+class CardRegistrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_registers_real_bundle_once_with_cache_busting(self):
+        modules = {}
+        for name in ('homeassistant', 'homeassistant.components', 'homeassistant.components.frontend', 'homeassistant.components.http', 'homeassistant.core', 'edge_card_test', 'edge_card_test.const'):
+            modules[name] = types.ModuleType(name)
+        from dataclasses import dataclass
+        @dataclass
+        class StaticPathConfig:
+            url_path: str
+            path: str
+            cache_headers: bool
+        modules['homeassistant.components.http'].StaticPathConfig = StaticPathConfig
+        modules['homeassistant.core'].HomeAssistant = object
+        register_js = modules['homeassistant.components.frontend'].add_extra_js_url = Mock()
+        modules['edge_card_test.const'].DOMAIN = 'edge'
+        modules['edge_card_test.const'].CARD_VERSION = '0.10.43'
+        with patch.dict(sys.modules, modules):
+            spec = importlib.util.spec_from_file_location('edge_card_test.frontend', CAMERA_PATH.with_name('frontend.py'))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            hass = types.SimpleNamespace(data={}, http=types.SimpleNamespace(async_register_static_paths=AsyncMock()))
+            await module.async_register_card(hass)
+            await module.async_register_card(hass)
+            hass.http.async_register_static_paths.assert_awaited_once()
+            resource = hass.http.async_register_static_paths.call_args.args[0][0]
+            self.assertEqual(resource.url_path, '/edge/edge-live-card.js')
+            self.assertTrue(Path(resource.path).is_file())
+            self.assertFalse(resource.cache_headers)
+            register_js.assert_called_once_with(hass, '/edge/edge-live-card.js?v=0.10.43')
+
+    async def test_exports_card_capability_without_secrets(self):
+        p = load_panel_module()
+        p.commit_panel_config({'cameras': [{'id': 'front', 'host': '192.0.2.1', 'password': 'secret'}]})
+        p.write_json(p.HOME_DIR / 'ha-entities.json', {'card_type': 'custom:edge-live-card', 'card_version': '0.10.43', 'entities': []})
+        payload = p.home_assistant_dashboard_payload()
+        self.assertTrue(payload['card_ready'])
+        self.assertEqual(payload['card_version'], '0.10.43')
+        self.assertEqual(payload['card_resource'], '/edge/edge-live-card.js')
+        self.assertNotIn('secret', json.dumps(payload))

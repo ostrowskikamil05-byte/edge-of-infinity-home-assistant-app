@@ -6,9 +6,11 @@ from homeassistant.const import Platform
 
 DOMAIN = "edge"
 NAME = "Edge of Infinity"
+CARD_VERSION = "0.10.43"
 
 CONF_API_KEY = "api_key"
 
 PLATFORMS: list[Platform] = [Platform.CAMERA]
 
 DEFAULT_SCAN_INTERVAL_SECONDS = 10
+
