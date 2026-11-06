@@ -1,0 +1,7 @@
+NanoDet-m-plus-1.5x_416 model and postprocessing reference:
+OpenCV Zoo, https://github.com/opencv/opencv_zoo
+Revision 48b10fa505aeb51fbd127fc60a5c660040e823b7
+Model SHA-256: 4b82da9944b88577175ee23a459dce2e26e6e4be573def65b1055dc2d9720186
+Licensed under Apache-2.0; see LICENSE in this directory.
+The model is downloaded and verified when the add-on image is built.
+No camera images are sent to OpenCV or another cloud service for inference.

@@ -151,3 +151,31 @@ origins, including a Nabu Casa hostname and HA ingress prefix. It verifies
 remote notices, same-origin player URLs, live toggles, hidden legacy controls,
 saved values and four viewport widths. Player content and API responses are
 stubbed; no Nabu Casa tunnel, real HA installation or camera is contacted.
+
+
+Detection settings/history/NVR seek use a disposable fixture with seeded history:
+
+```sh
+EDGE_TEST_DETECTION_FIXTURE=1 python tests/browser/fixture_server.py
+NODE_PATH=/tmp/edge-browser-tests/node_modules node tests/browser/detection_ui.cjs
+```
+
+The new suite checks per-camera/global settings, persistence, event filters and
+opening the real generated recording at the selected event time on four widths.
+ONVIF/capture callbacks are disabled in this UI fixture.
+
+For real shared-source inference and HEVC transport tests, use the native fixture
+with the verified NanoDet model path:
+
+```sh
+EDGE_RTC_TEST_CODEC=h265 EDGE_RTC_TEST_DETECTION=1 EDGE_DETECTION_MODEL=/path/to/nanodet.onnx EDGE_RTC_TEST_BINARY=/tmp/edge-rtc-fixture python tests/browser/edge_rtc_fixture.py
+python tests/edge_rtc_hevc_wire.py
+EDGE_RTC_TEST_CODEC=h265 NODE_PATH=/tmp/edge-browser-tests/node_modules node tests/browser/edge_rtc_native.cjs
+```
+
+The wire test decodes actual HEVC EdgeRTC bytes with FFmpeg, checks changing video
+timestamps, original HEVC recording, G711 return packets, local-model processing
+and one upstream. The browser suite validates HEVC frames when its decoder is
+available; otherwise it explicitly checks the permanent HEVC-unavailable message.
+Report which HEVC browser path ran. Physical speaker/camera firmware and deployed
+HA/ONVIF devices are not covered by these fixtures.

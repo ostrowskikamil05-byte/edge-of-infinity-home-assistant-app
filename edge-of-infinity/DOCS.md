@@ -1,5 +1,100 @@
 # Edge of Infinity App Documentation
 
+## 0.11: native HEVC, camera events and local detection
+
+After updating the app, restart Home Assistant Core to load the new integration
+and refresh the frontend. Existing camera IDs, recordings and retention settings
+are preserved. Select **EdgeRTC** in **Settings → Streaming engine** for native
+H264/H265 live. Open HA through HTTPS, including your Nabu Casa address.
+
+### Enable detection
+
+1. In **Cameras**, enable **ONVIF events** and/or **Local AI** for selected cameras.
+2. In **Settings → Detection**, enable the corresponding global module and save.
+3. Open **Events** to inspect camera/module state and recent motion/person/vehicle
+   events. Filter by camera/type; **Open recording** selects the event day and
+   position. A recording must exist at that time.
+
+Both modules are initially off. ONVIF analysis runs on the camera; Edge subscribes
+to its PullPoint event service and only exposes types it advertises or reports.
+Enable/configure the camera's own analytics and grant its ONVIF account the
+required event permissions. A product's AI label does not guarantee that its
+firmware publishes person/vehicle classification through ONVIF. Generic motion,
+line-crossing/intrusion boolean topics are grouped under motion when recognized.
+Unsupported topics are ignored rather than guessed.
+
+Local AI uses a packaged **NanoDet-m-plus-1.5x_416** model from OpenCV Zoo. Its
+revision/SHA-256 and Apache-2.0 license are in `models/NOTICE` and `models/LICENSE`.
+The image build downloads/verifies the model; running inference does not send
+camera images to an external service. Detected classes are person and vehicle
+(car, bicycle, motorcycle, bus and truck). This is object detection, not identity
+recognition, plate recognition or object tracking. Boxes/scores are stored with
+events; no additional image copies are retained by this module.
+
+### HP t530 starting settings
+
+Start with **one selected camera**, **1 total analyzed FPS**, confidence **0.45**
+and a **10-second hold**. The single CPU worker handles cameras sequentially,
+reads keyframes through the existing local RTSP relay and uses 416×416 input.
+The FPS value is an upper limit shared across cameras; actual sampling also
+has to wait for camera keyframes/decoding. More selected cameras increase the
+time between samples. Prefer camera events when the Uniview's analytics expose
+the needed event types. Video encoding/decoding for analysis has a CPU cost,
+especially with a 4K HEVC source. No GPU/TPU is required or promised in this release.
+The recording and source-registry loops are independent of model inference.
+
+A test of the built amd64 image, limited to one CPU/512 MB, detected objects in a
+fixture image at about 172 MB peak RSS for that model process. This does not
+include the whole HA system/recorder or measure an actual HP t530 camera workload.
+
+### HEVC live and microphone
+
+The native core relays the original H264 or H265 recording profile without
+opening another camera RTSP session or transcoding the video. WebCodecs support
+for the **exact HEVC profile** is checked on the laptop/phone/tablet that displays
+the stream. If unsupported, Edge shows a codec-specific message and stops retrying.
+A camera H264 profile remains the broad-compatibility option. There is no automatic
+4K H265-to-H264 software transcoder on the t530. Original H265 recordings continue
+to work independently of native browser HEVC support; NVR playback can use its
+existing browser-compatibility setting.
+
+Listening supports G711 and supported AAC/Opus WebCodecs audio. Talking uses a
+negotiated RTSP G711 8 kHz mono backchannel on the existing camera session and
+requires HTTPS, browser permission and HA control permission. The card disables
+the microphone when the camera does not advertise a supported return channel.
+Uniview **IPC3618SB-ADF28KMC-I0** is the reported target model; use the Uniview
+profile and ONVIF discovery to read its actual model, firmware and RTSP profiles.
+Its physical speaker/firmware has not been tested here. Proprietary Uniview talk,
+siren/light controls and unsupported return-audio codecs are not implemented.
+
+### Home Assistant entities and automations
+
+Three detection binary sensors are grouped with each camera: motion, person and
+vehicle. Types not advertised/reported by the camera and not supplied by enabled
+local analysis remain unavailable. The integration polls event metadata every
+two seconds without re-polling the camera's video. Stale metadata makes detection
+entities unavailable. New rising events also fire `edge_event`; existing history
+is not replayed when HA starts. A typical automation trigger is:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: edge_event
+    event_data:
+      camera_id: uniview_1  # use your actual Edge camera ID
+      kind: person
+```
+
+Event payload fields include id, camera_id, kind, source (`camera` or `local`),
+timestamp and optional score. For short motion pulses, use `edge_event` rather
+than relying only on the latest polled binary-sensor state. Metadata transport
+uses a bounded recent-event window; the full retained history is in
+`/homeassistant/edge/events.sqlite` (max 20,000 events, pruned with retention).
+`detection.json` is the credential-free state mirror consumed by local HA.
+
+Read-only endpoints are `GET /api/detection` and `GET /api/events?camera=ID&limit=200`.
+These add no public media ports and do not alter HA's read/control split for talk.
+
 ## Sidebar
 
 The app enables Home Assistant Ingress and adds an Edge Infinity item to the sidebar for administrators. The sidebar panel can edit Hikvision camera settings, refresh RTSP status, and open MediaMTX/Janus live preview paths.
@@ -501,7 +596,7 @@ Select the **NVR** quality option. Switch `core_engine` back to `mediamtx_janus`
 restart the add-on/Core to use the existing engine again. Existing camera settings,
 recordings and retention paths are retained.
 
-EdgeRTC/1 sends H264 access units directly to browser WebCodecs over WS/WSS. This
+EdgeRTC/1 sends H264 (and H265 from 0.11) access units directly to browser WebCodecs over WS/WSS. This
 path instantiates neither RTCPeerConnection nor MediaSource, and does not wait
 for MP4 fragments. Browser support is checked at runtime. **HTTPS or localhost
 and a WebCodecs-compatible browser are required for native live**, not just for
@@ -531,7 +626,7 @@ There is one always-on RTSP session per enabled camera source. Live, the recorde
 probes, snapshots and a supported RTSP G711 8 kHz mono microphone share this
 session. Duplicate exact source URLs are merged. The single source is the camera's
 recording profile; independent Main/Sub quality choices are unavailable in this
-mode. Choose an H264 recording profile for native live. The engine does not
+mode. H264 has broad native-live support; from 0.11, H265 works on devices with a compatible HEVC decoder. The engine does not
 silently re-encode H265 into H264 or open a second camera stream. Models that need
 proprietary talk APIs are not supported by the native microphone yet. A camera
 backchannel may remain reserved by Edge while that source is enabled.

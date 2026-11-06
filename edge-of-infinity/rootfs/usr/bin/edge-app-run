@@ -10,7 +10,7 @@ read_option() {
   local fallback="$2"
 
   if [[ -f "${OPTIONS_PATH}" ]]; then
-    jq -r --arg key "${key}" --arg fallback "${fallback}" '.[$key] // $fallback' "${OPTIONS_PATH}" 2>/dev/null || echo "${fallback}"
+    jq -r --arg key "${key}" --arg fallback "${fallback}" 'if has($key) and .[$key] != null then .[$key] else $fallback end' "${OPTIONS_PATH}" 2>/dev/null || echo "${fallback}"
   else
     echo "${fallback}"
   fi
@@ -829,6 +829,8 @@ write_addon_options_config() {
     jq --slurpfile options "${OPTIONS_PATH}" '.cameras = $options[0].cameras' "${output}" > "${output}.cameras.tmp"
     mv "${output}.cameras.tmp" "${output}"
   fi
+  jq --slurpfile options "${OPTIONS_PATH}" '.detection = {camera_events_enabled: ($options[0].camera_events_enabled // false), local_enabled: ($options[0].local_detection_enabled // false), max_fps: ($options[0].detection_fps // 1), confidence: ($options[0].detection_confidence // 0.45), hold_seconds: ($options[0].detection_hold_seconds // 10)}' "${output}" > "${output}.detection.tmp"
+  mv "${output}.detection.tmp" "${output}"
 }
 
 bashio::log.info "Starting Edge of Infinity"

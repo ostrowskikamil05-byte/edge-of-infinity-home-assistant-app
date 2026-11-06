@@ -29,6 +29,9 @@ CONFIG_CAMERA_FIELDS = (
     "rtsp_main_channel",
     "rtsp_sub_channel",
     "onvif_url",
+    "manufacturer",
+    "model",
+    "firmware",
     "isapi_base_url",
     "enabled",
     "record",
@@ -145,6 +148,14 @@ class EdgeClient:
         if self.is_local:
             return await self._read_local_json("health.json")
         return await self._request("GET", "/health")
+
+    async def detection(self) -> dict[str, Any]:
+        """Read bounded event metadata; images/credentials are never included."""
+        try:
+            payload = await self._read_local_json("detection.json") if self.is_local else await self._request("GET", "/api/detection")
+        except EdgeClientError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     async def cameras(self) -> list[dict[str, Any]]:
         """Return cameras from core API or the current add-on shell."""

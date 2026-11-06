@@ -135,6 +135,13 @@ class EdgeCamera(CoordinatorEntity[EdgeCoordinator], Camera):
             _LOGGER.warning("Could not publish Edge camera entity IDs for the card builder")
         await super().async_will_remove_from_hass()
 
+    @property
+    def device_info(self):
+        camera = self._camera()
+        return {"identifiers": {(DOMAIN, f"{self.coordinator.config_entry.entry_id}_{self._camera_id}")},
+                "name": camera.get("name") or self._camera_id, "manufacturer": camera.get("manufacturer") or camera.get("vendor") or "Edge of Infinity",
+                "model": camera.get("model") or camera.get("vendor"), "sw_version": camera.get("firmware")}
+
     async def stream_source(self) -> str | None:
         """Provide the source to the authenticated Home Assistant stream pipeline."""
         return self._source(self._camera())

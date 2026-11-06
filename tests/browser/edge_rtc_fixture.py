@@ -23,8 +23,10 @@ ASSETS = ROOT/'edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_compone
 async def main():
     with tempfile.TemporaryDirectory() as folder:
         folder = Path(folder)
-        video = folder/'camera.h264'
-        subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=640x360:rate=10','-t','1','-c:v','libx264','-threads','1','-preset','ultrafast','-tune','zerolatency','-profile:v','baseline','-g','10','-x264-params','aud=1:repeat-headers=1','-f','h264',str(video)],check=True)
+        hevc = os.environ.get('EDGE_RTC_TEST_CODEC') == 'h265'
+        video = folder/('camera.hevc' if hevc else 'camera.h264')
+        encoding = ['-c:v','libx265','-x265-params','aud=1:repeat-headers=1:pools=1:frame-threads=1:keyint=10:bframes=0:log-level=error','-f','hevc'] if hevc else ['-c:v','libx264','-threads','1','-preset','ultrafast','-tune','zerolatency','-profile:v','baseline','-g','10','-x264-params','aud=1:repeat-headers=1','-f','h264']
+        subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=640x360:rate=10','-t','1',*encoding,str(video)],check=True)
         info_file = folder/'info.json'
         log = (folder/'fixture.log').open('wb')
         process = subprocess.Popen([os.environ['EDGE_RTC_TEST_BINARY'],'-test.run=^TestBrowserFixture$','-test.v'],env={**os.environ,'EDGE_RTC_TEST_VIDEO':str(video),'EDGE_RTC_TEST_INFO':str(info_file)},stdout=log,stderr=log)
@@ -74,9 +76,18 @@ async def main():
                     return web.Response(body=(ASSETS/name).read_bytes(),content_type='text/javascript')
                 sys.path.insert(0, str(ROOT/'tests'))
                 from test_edge_panel_config import load_panel_module
+                os.environ['EDGE_CORE_ENGINE']='edge_rtc'
                 panel=load_panel_module();panel.EDGE_RTC_ENABLED=True;panel.MEDIAMTX_ENABLED=False;panel.MEDIAMTX_API_PORT=urlparse(info['api']).port
                 panel.HOME_DIR.mkdir(parents=True,exist_ok=True);(panel.HOME_DIR/'edge-rtc-token').write_text(info['token'])
                 server=panel.ThreadingHTTPServer(('127.0.0.1',18090),panel.EdgeHandler);threading.Thread(target=server.serve_forever,daemon=True).start()
+                from edge_detection import DetectionService
+                from test_edge_panel_config import camera
+                detector = None
+                if os.environ.get('EDGE_RTC_TEST_DETECTION'):
+                    detector = DetectionService(panel.HOME_DIR, lambda *args: None, lambda *args: info['rtsp'], panel.write_json)
+                    detector.apply({'detection':{'local_enabled':True},'cameras':[{**camera('front','192.0.2.10','sub'),'local_detection_enabled':True}]})
+                async def detection_status(request):
+                    return web.json_response(detector.snapshot() if detector else {})
                 async def record(request):
                     command=panel.build_recording_command(info['rtsp'],str(folder/'record-%Y%m%d-%H%M%S.mp4'),2,'copy')
                     with (folder/'recorder.log').open('wb') as record_log:
@@ -88,11 +99,13 @@ async def main():
                         if result.returncode==0:
                             files.extend(json.loads(result.stdout).get('streams',[]))
                     return web.json_response({'files':files,'copy_video':command[command.index('-c:v')+1]=='copy'})
-                app=web.Application();app.router.add_get('/',index);app.router.add_get('/edge/{name}',asset);app.router.add_get('/api/edge/rtc/{entity}',websocket);app.router.add_get('/test/status',status);app.router.add_get('/test/record',record)
+                app=web.Application();app.router.add_get('/',index);app.router.add_get('/edge/{name}',asset);app.router.add_get('/api/edge/rtc/{entity}',websocket);app.router.add_get('/test/status',status);app.router.add_get('/test/detection',detection_status);app.router.add_get('/test/record',record)
                 runner=web.AppRunner(app);await runner.setup();site=web.TCPSite(runner,'127.0.0.1',18089);await site.start()
                 print('EdgeRTC real transport fixture ready on 18089',flush=True)
                 event=asyncio.Event();asyncio.get_running_loop().add_signal_handler(signal.SIGTERM,event.set);await event.wait();await runner.cleanup();await asyncio.to_thread(server.shutdown);server.server_close()
         finally:
+            if 'detector' in locals() and detector:
+                detector.close()
             process.terminate()
             try:
                 process.wait(timeout=5)

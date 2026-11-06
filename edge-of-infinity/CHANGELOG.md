@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.0
+
+- Add native H.265/HEVC RTP depacketization, RFC 6381 Main/Main10 codec metadata, Annex B access units with VPS/SPS/PPS on random-access frames, and browser profile support checks. Fix timestamp initialization on fragmented H264/H265 frames. H265 recording stays in the original codec; live HEVC requires a decoder on the viewing device.
+- Add opt-in ONVIF PullPoint events: service/topic discovery, WS-Addressing/reference parameters, subscription renewal/unsubscribe, bounded retries and normalized motion/person/vehicle events where the camera reports them. Accept standard XAddr capability attributes, block SOAP redirects and keep credentials on the configured camera host.
+- Add opt-in local NanoDet person/vehicle detection from the shared Edge RTSP source. Package the 3.8 MB Apache-2.0 model with a pinned revision/checksum, one CPU inference worker, keyframe sampling, a configurable total FPS budget and lower-priority analysis on Linux. Intended conservative settings for HP t530 are one selected camera and at most one analyzed frame/second total.
+- Add private SQLite event history with retention/cap, an Events page, per-camera/global detection settings, filtering and seeking to a recorded event. Superseded analysis results are discarded.
+- Add HA motion/person/vehicle binary sensors and edge_event automation events through a separate two-second metadata coordinator, with duplicate/startup suppression and stale-state handling. Preserve existing camera entity IDs and group camera/detection entities together.
+- Honor explicit false/zero add-on options instead of replacing them with defaults.
+- Preserve read-only panel media access and separate HA talk permissions. Show negotiated codec and camera microphone support; RTSP G711 return audio is still model/firmware dependent. Discover optional ONVIF manufacturer/model/firmware, including Uniview devices.
+- Validate generated H264/H265 media, original HEVC recording, shared-source analysis/microphone, real local-model inference, SQLite/ONVIF/HA behavior and responsive event-to-recording playback. No physical Uniview camera or speaker was available for acoustic/firmware testing.
+
 ## 0.10.48
 
 - Route native EdgeRTC notices, preview URLs, live-toggle diagnostics and timeout guidance through the same Home Assistant ingress/WebSocket plan. Remove the incorrect MediaMTX/public-port warning when native EdgeRTC is running on Nabu Casa or another HTTPS host.

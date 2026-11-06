@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.10.48"
+version: "0.11.0"
 slug: edge_of_infinity
 description: Local live and NVR core for Hikvision, Uniview, Reolink and ONVIF/RTSP cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -63,6 +63,11 @@ options:
   sync_addon_options: false
   cameras: []
   core_engine: mediamtx_janus
+  camera_events_enabled: false
+  local_detection_enabled: false
+  detection_fps: 1
+  detection_confidence: 0.45
+  detection_hold_seconds: 10
   mediamtx_enabled: true
   mediamtx_rtsp_port: 8556
   mediamtx_hls_port: 8888
@@ -137,6 +142,11 @@ schema:
       onvif_url: str?
       isapi_base_url: str?
       enabled: bool
+      manufacturer: str?
+      model: str?
+      firmware: str?
+      events_enabled: bool?
+      local_detection_enabled: bool?
       record: bool
       low_latency: bool
       snapshot_stream: str?
@@ -151,6 +161,11 @@ schema:
   install_custom_component: bool
   sync_addon_options: bool
   core_engine: list(edge_rtc|mediamtx_janus|mediamtx)
+  camera_events_enabled: bool?
+  local_detection_enabled: bool?
+  detection_fps: float(0.2,3)?
+  detection_confidence: float(0.1,0.95)?
+  detection_hold_seconds: int(1,120)?
   mediamtx_enabled: bool
   mediamtx_rtsp_port: port
   mediamtx_hls_port: port
