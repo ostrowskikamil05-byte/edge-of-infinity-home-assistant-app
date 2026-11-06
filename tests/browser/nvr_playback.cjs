@@ -54,7 +54,13 @@ for (const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],['p
  await page.waitForFunction(()=>{const i=document.querySelector('.recording-day-tile.active img');return i?.naturalWidth>100&&getComputedStyle(i).opacity==='1'&&!i.closest('.recording-thumb-wrap,.recording-day-thumb').classList.contains('thumb-error')});
  await page.waitForFunction(()=>{const i=document.querySelector('.recording-film-grid img');return i?.naturalWidth>100&&getComputedStyle(i).opacity==='1'&&!i.closest('.recording-thumb-wrap,.recording-day-thumb').classList.contains('thumb-error')});
  await page.locator('[data-recording-fullscreen]').click();
- await page.waitForFunction(()=>document.fullscreenElement || document.querySelector('.edge-soft-fullscreen'));
+ // The fullscreen flag can change before the browser has applied its layout.
+ await page.waitForFunction(()=>{
+  const wrap=document.fullscreenElement || document.querySelector('.edge-soft-fullscreen');
+  if(!wrap)return false;
+  const rect=wrap.getBoundingClientRect();
+  return Math.abs(rect.width-innerWidth)<2&&Math.abs(rect.height-innerHeight)<2;
+ });
  const controls=await page.locator('.nvr-playback-controls').boundingBox();
  const viewport=await page.evaluate(()=>({width:innerWidth,height:innerHeight}));
  assert(controls.x>=0&&controls.y>=0&&controls.x+controls.width<=viewport.width+1&&controls.y+controls.height<=viewport.height+1,`fullscreen controls outside viewport: ${JSON.stringify({controls,viewport})}`);
