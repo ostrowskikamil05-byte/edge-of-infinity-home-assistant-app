@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.47
+
+- Treat client resets, aborted connections and broken pipes during HTTP request handling as closed client connections, including interrupted recording-status response headers/bodies. Keep other I/O exceptions visible.
+- Distinguish an insecure HTTP browser context from missing WebCodecs support. Show actionable HTTPS/Home Assistant Cloud guidance in Polish or English; release microphone tracks and stop automatic card retries for these browser requirements. Native EdgeRTC still requires HTTPS/localhost and WebCodecs.
+- Add real-browser HTTP/HTTPS support and permanent-error tests, plus HTTP recording-status disconnect regressions. Measure RTSP replacement ordering against completion of the previous source/client, since a remote TCP-close callback can be delivered after the replacement connection is accepted.
+
 ## 0.10.46
 
 - Release camera/settings save buttons before refreshing auxiliary status; bound save and verification requests and retain edited forms after a timeout or error.

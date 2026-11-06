@@ -26,9 +26,9 @@ from urllib.parse import parse_qs, urlparse, urlunparse, quote, unquote
 from xml.sax.saxutils import escape as xml_escape
 
 
-APP_VERSION = "0.10.46"
+APP_VERSION = "0.10.47"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "settings-save-engine-v8"
+UI_BUILD = "rtc-browser-disconnect-v9"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -9168,6 +9168,13 @@ INDEX_HTML = (
 
 class EdgeHandler(BaseHTTPRequestHandler):
     server_version = SERVER_VERSION
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The browser or ingress can close a response during navigation/cancellation.
+            self.close_connection = True
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
