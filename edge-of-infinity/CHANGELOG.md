@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.38
+
+- Run recording retention at startup and every hour, even while FFmpeg records continuously or cameras are disabled/removed.
+- Remove only expired recorder-named MP4 segments under the configured recordings directory; skip symlinks and report filesystem errors.
+- Use the storage retention setting when the NVR override is absent (default: 14 days).
+
 ## 0.10.37
 
 - Infer NVR segment duration from neighboring recording timestamps, so short 4-second camera-generated chunks still map into one continuous timeline instead of being treated as broken single clips.
@@ -708,3 +714,4 @@
 - Ingress sidebar support.
 - Watchdog health check.
 - Persistent config and media mounts.
+
