@@ -91,7 +91,7 @@ class FullDayTests(unittest.TestCase):
         p = self.panel
         for second in range(15):
             write_fake_mp4(self.directory / f'20260727-1200{second:02}.mp4')
-        with patch.object(p, 'recording_duration_seconds', side_effect=lambda path, stat, fallback: fallback), patch.object(p, 'schedule_recording_cache_refresh') as build:
+        with patch.object(p, 'recording_duration_seconds', side_effect=lambda path, stat, fallback, **kwargs: fallback), patch.object(p, 'schedule_recording_cache_refresh') as build:
             status = p.recording_status_payload(self.config)['cameras'][0]
         self.assertEqual(len(status['files']), 15)
         self.assertEqual(status['timeline']['file_count'], 15)

@@ -359,3 +359,11 @@ Both **Save cameras** and **Save Edge settings** save the current values from bo
 In **NVR**, select a calendar day, then use the **Day timeline** slider or a sampled preview to start at a specific time. Previous/next-day buttons navigate dates. The main timeline spans midnight to midnight in the add-on's local timezone (normally 24 hours; 23 or 25 hours on daylight-saving transitions). Missing periods jump to an available recording; they are not fabricated video. A day in progress contains only footage recorded so far.
 
 Recordings remain small MP4 segments on disk to limit data loss if power fails. The player joins them into one continuous day stream, so there is no need to open individual seven-minute files. Existing older clips are included; irregular clip durations are measured using FFprobe. The playback-cache segment setting limits optional cache generation, not how much of the selected day can be watched. Old or partial caches are bypassed until they match the selected day's source files. Retention still defaults to 14 days.
+
+### NVR day player (0.10.40)
+
+The video controls show **elapsed recorded video / total recorded video in the selected day**. For example, three seven-second clips produce a 21-second player, rather than restarting a seven-second counter after every clip. The player loads the necessary MP4 segment and advances automatically. Play/pause, ±10 seconds, mute, playback speed and fullscreen are available on desktop and touch layouts. The separate midnight-to-midnight timeline still selects a wall-clock time; missing footage is skipped, not counted as recorded video.
+
+Status polling updates counters without replacing the video or resetting pause, speed or position. The available duration grows when new recordings arrive. Switching dates replaces only that camera's player. Historical days stop at the end of their available recordings; the latest day can wait for new footage.
+
+Preview tiles keep a 16:9 shape and load in a small client-side queue. Desktop, portrait/landscape tablet, phone and 320px layouts are covered by the browser regression suite. This is responsive browser support; codec playback still depends on the device. Keep **Browser recording = Auto H264 for HEVC** for broadly compatible new recordings.

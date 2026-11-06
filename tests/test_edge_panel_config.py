@@ -70,11 +70,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.39")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.39")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.39")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.39")
-        self.assertIn("v0.10.39", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.40")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.40")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.40")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.40")
+        self.assertIn("v0.10.40", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -435,8 +435,8 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("nvr-continuous-short-segments-v1", html)
-        self.assertIn("fileCount > 1", html)
+        self.assertIn("nvr-day-player-responsive-v2", html)
+        self.assertIn("function recordingPlayerControls", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
         self.assertIn("function markNvrInteraction", html)
@@ -481,7 +481,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("timeline_start=", html)
         self.assertIn("mode=playback", html)
         self.assertIn("webkit-playsinline", html)
-        self.assertIn("controls preload=", html)
+        self.assertIn("data-recording-playback-seek", html)
         self.assertIn("recording-thumb", html)
         self.assertIn("THUMB_PLACEHOLDER", html)
         self.assertIn("data-recording-thumb-src", html)
