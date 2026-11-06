@@ -136,6 +136,7 @@ option_has_value() {
 }
 
 has_addon_camera_options() {
+  jq -e '.cameras | type == "array" and length > 0' "${OPTIONS_PATH}" >/dev/null 2>&1 ||
   option_has_value "hikvision_1_host" ||
     option_has_value "hikvision_1_rtsp_main" ||
     option_has_value "hikvision_2_host" ||
@@ -823,6 +824,10 @@ write_addon_options_config() {
         "rtsp"
       ]
     }' > "${output}"
+  if jq -e '.cameras | type == "array" and length > 0' "${OPTIONS_PATH}" >/dev/null 2>&1; then
+    jq --slurpfile options "${OPTIONS_PATH}" '.cameras = $options[0].cameras' "${output}" > "${output}.cameras.tmp"
+    mv "${output}.cameras.tmp" "${output}"
+  fi
 }
 
 bashio::log.info "Starting Edge of Infinity"
@@ -1064,6 +1069,7 @@ export EDGE_MEDIAMTX_WEBRTC_TCP_ONLY="${MEDIAMTX_WEBRTC_TCP_ONLY}"
 export EDGE_MEDIAMTX_SRT_PORT="${MEDIAMTX_SRT_PORT}"
 export EDGE_MEDIAMTX_API_PORT="${MEDIAMTX_API_PORT}"
 export EDGE_MEDIAMTX_RECORD="${MEDIAMTX_RECORD}"
+export EDGE_JANUS_PID="${JANUS_PID:-0}"
 export EDGE_JANUS_ENABLED="${JANUS_ENABLED}"
 export EDGE_JANUS_CONFIG_DIR="${JANUS_CONFIG_DIR}"
 export EDGE_JANUS_HOST="127.0.0.1"

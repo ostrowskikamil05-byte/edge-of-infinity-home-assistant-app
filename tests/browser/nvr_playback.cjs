@@ -7,7 +7,8 @@ const browser=await chromium.launch({headless:true,executablePath:process.env.PL
 try{
 for (const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],['phone',390,844],['small-phone',320,740],['tablet-landscape',1180,820]]) {
  const context=await browser.newContext({viewport:{width,height},isMobile:name!=='desktop',hasTouch:name!=='desktop'});
- const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ const page=await context.newPage();const errors=[];
+ await page.route('**/recordings/**000007.mp4*', async route => { await page.waitForTimeout(400); await route.continue(); });page.on('pageerror',e=>errors.push(e.message));
  await page.goto(process.env.EDGE_NVR_TEST_URL || 'http://127.0.0.1:18088');
  await page.locator('[name="camera-0-name"]').waitFor({state:'attached'});
  if(await page.locator('nav').isHidden()) await page.locator('#menu-toggle').click();
@@ -23,7 +24,10 @@ for (const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],['p
  await page.evaluate(()=>{window.savedVideo=document.querySelector('video[data-recording-player]');window.savedSrc=window.savedVideo.src;});
  await page.locator('[data-recording-speed]').selectOption('4');
  await page.locator('[data-recording-toggle]').click();
- await page.waitForFunction(()=>document.querySelector('video')?.dataset.recordingFileUrl.endsWith('000007.mp4'),null,{timeout:15000});
+ await page.waitForFunction(()=>{const v=document.querySelector('video');const f=document.querySelector('[data-recording-transition]');return v?.dataset.recordingFileUrl.endsWith('000007.mp4')&&f&&!f.hidden},null,{timeout:15000});
+ assert(await page.locator('video').evaluate(v=>!v.hasAttribute('poster')),'poster returned during playback transition');
+ assert(await page.locator('[data-recording-transition]').evaluate(c=>c.width>0&&c.getContext('2d').getImageData(0,0,c.width,c.height).data.some((v,i)=>i%4!==3&&v>0)),'last video frame was not retained');
+ await page.waitForFunction(()=>document.querySelector('[data-recording-transition]')?.hidden);
  await page.waitForFunction(()=>document.querySelector('video')?.dataset.recordingFileUrl.endsWith('000014.mp4'),null,{timeout:15000});
  assert(await page.evaluate(()=>savedVideo===document.querySelector('video[data-recording-player]')),'video replaced between clips');
  await page.locator('[data-recording-toggle]').click();
@@ -57,6 +61,7 @@ for (const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],['p
  assert.equal(errors.length,0,errors.join('\n'));
  if (process.env.EDGE_NVR_SCREENSHOT_DIR) await page.screenshot({path:`${process.env.EDGE_NVR_SCREENSHOT_DIR}/nvr-${name}.png`,fullPage:true});
  console.log(`PASS ${name}: duration 21s, all 3 clips, stable element, pause/refresh, seek, day switch and visible 16:9 thumbnails`);
+ await page.unrouteAll({behavior:'ignoreErrors'});
  await context.close();
 }
 }finally{await browser.close();}

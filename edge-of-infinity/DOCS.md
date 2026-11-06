@@ -367,3 +367,28 @@ The video controls show **elapsed recorded video / total recorded video in the s
 Status polling updates counters without replacing the video or resetting pause, speed or position. The available duration grows when new recordings arrive. Switching dates replaces only that camera's player. Historical days stop at the end of their available recordings; the latest day can wait for new footage.
 
 Preview tiles keep a 16:9 shape and load in a small client-side queue. Desktop, portrait/landscape tablet, phone and 320px layouts are covered by the browser regression suite. This is responsive browser support; codec playback still depends on the device. Keep **Browser recording = Auto H264 for HEVC** for broadly compatible new recordings.
+
+### Camera profiles and immediate configuration sync (0.10.41)
+
+Choose a vendor in Camera Settings, enter the host/IP, local camera username and password, and use **Build RTSP** or **Read camera / ONVIF**. Verify the main/sub URLs in the form and save. Existing camera IDs stay unchanged, so changing a vendor does not detach recorded history.
+
+| Vendor/profile | Connection support |
+| --- | --- |
+| Hikvision | Hikvision RTSP paths and existing ISAPI configuration |
+| Dahua / Amcrest | cam/realmonitor RTSP profiles |
+| Uniview | media/video1 and media/video2 profiles; ONVIF discovery |
+| Reolink | h264Preview channel main/sub profiles; ONVIF discovery (default device-service port 8000) |
+| Axis | axis-media RTSP profiles; ONVIF discovery |
+| Hanwha / Samsung | profile1/profile2 RTSP profiles; ONVIF discovery |
+| Foscam | videoMain/videoSub profiles; ONVIF discovery |
+| TP-Link Tapo / VIGI | stream1/stream2 profiles; ONVIF discovery |
+| Bosch / Vivotek / Sony / Other ONVIF | Discover the camera's own ONVIF Media profiles or enter explicit RTSP URLs |
+| Custom RTSP | Use explicit main/sub stream URLs |
+
+These profiles support local live video, snapshots from RTSP, recording and playback through the existing engine. Paths and available services vary by model and firmware. Cameras that only expose a proprietary/cloud stream are not made RTSP-compatible by selecting a brand. Enable RTSP/ONVIF on the device, create a local camera/ONVIF account where required (especially Tapo/Reolink), and synchronize its clock. The ONVIF URL is editable; explicit RTSP URLs preserve custom paths and ports. Advanced encoder writes remain Hikvision ISAPI functionality; ONVIF discovery reads profiles and stream addresses, not all vendor administration settings.
+
+When camera IP/password/stream settings change, the panel writes edge.json and its mirrors, updates MediaMTX runtime configuration and restarts only changed recorders. When Janus mount configuration changes, the managed Janus process is reloaded. Camera status initially shows the new details as checking while background probes finish. Old probe results cannot overwrite newer settings.
+
+The panel also synchronizes the add-on's own Home Assistant options through Supervisor. The new **cameras** list contains all configured cameras; the first two legacy hikvision_1/hikvision_2 fields are mirrored for compatibility. Other Supervisor options are preserved. The add-on uses hassio_api with the default role, not manager/admin access. The save message confirms verified synchronization or clearly states that Supervisor options could not be synchronized. Standalone/local runs without Supervisor still save edge.json normally. Reload an already-open Home Assistant configuration tab to see its latest option values.
+
+The runner imports the generic cameras list on first initialization. Once edge.json exists, it remains authoritative. In NVR, segment transitions retain the actual previous video frame until the new frame is presented; they do not revert to a live-camera snapshot or the initial recording poster.

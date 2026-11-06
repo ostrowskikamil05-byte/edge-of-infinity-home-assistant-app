@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import json
+import base64
+import signal
+import functools
 import os
 import platform
 import re
@@ -14,17 +17,18 @@ import hashlib
 import threading
 import tempfile
 import time
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 import xml.etree.ElementTree as ET
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse, quote, unquote
+from xml.sax.saxutils import escape as xml_escape
 
 
-APP_VERSION = "0.10.40"
+APP_VERSION = "0.10.41"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-day-player-responsive-v2"
+UI_BUILD = "nvr-continuous-frame-multivendor-v3"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -72,6 +76,9 @@ DEBUG_LOCK = threading.Lock()
 RECORDING_ENSURE_LOCK = threading.Lock()
 CONFIG_LOCK = threading.RLock()
 CONFIG_SAVE_LOCK = threading.Lock()
+RECORDING_CONTROL_LOCK = threading.RLock()
+JANUS_RELOAD_LOCK = threading.Lock()
+JANUS_MANAGED_PID = int(os.environ.get("EDGE_JANUS_PID", "0"))
 RECORDING_DURATION_CACHE: dict[str, tuple[int, int, int]] = {}
 RECORDING_DURATION_LOCK = threading.Lock()
 RECORDING_CACHE_LOCK = threading.Lock()
@@ -353,13 +360,13 @@ def build_rtsp(explicit: str, host: str, username: str, password: str, channel: 
     if explicit:
         return explicit
     if host and username and password:
-        return f"rtsp://{username}:{password}@{host}:554/Streaming/Channels/{channel}"
+        return f"rtsp://{quote(username, safe='')}:{quote(password, safe='')}@{host}:554/Streaming/Channels/{channel}"
     return ""
 
 
 def build_hikvision_rtsp(host: str, username: str, password: str, channel: str) -> str:
     if host and username and password:
-        return f"rtsp://{username}:{password}@{host}:554/Streaming/Channels/{channel}"
+        return f"rtsp://{quote(username, safe='')}:{quote(password, safe='')}@{host}:554/Streaming/Channels/{channel}"
     return ""
 
 
@@ -405,8 +412,8 @@ def rtsp_url_parts(value: str) -> dict:
     parsed = urlparse(value or "")
     return {
         "host": parsed.hostname or "",
-        "username": parsed.username or "",
-        "password": parsed.password or "",
+        "username": unquote(parsed.username or ""),
+        "password": unquote(parsed.password or ""),
         "channel": hikvision_channel_from_rtsp(value, ""),
         "is_hikvision_streaming_path": "/Streaming/Channels/" in (parsed.path or value or ""),
     }
@@ -714,10 +721,53 @@ def build_dahua_rtsp(explicit: str, host: str, username: str, password: str, sub
     return ""
 
 
+CAMERA_VENDORS = {
+    "hikvision": "Hikvision", "dahua": "Dahua", "uniview": "Uniview", "reolink": "Reolink",
+    "axis": "Axis", "hanwha": "Hanwha / Samsung", "amcrest": "Amcrest", "foscam": "Foscam",
+    "tapo": "TP-Link Tapo", "vigi": "TP-Link VIGI", "bosch": "Bosch (ONVIF)",
+    "vivotek": "Vivotek (ONVIF)", "sony": "Sony (ONVIF)", "onvif": "Other ONVIF", "rtsp": "Custom RTSP",
+}
+
+
+def camera_stream_template(vendor: str, number: str, stream: str) -> str:
+    channel = max(1, safe_int(number, 1))
+    sub = stream == "sub"
+    return {
+        "uniview": f"/media/video{2 if sub else 1}",
+        "reolink": f"/h264Preview_{channel:02d}_{'sub' if sub else 'main'}",
+        "dahua": f"/cam/realmonitor?channel={channel}&subtype={1 if sub else 0}",
+        "amcrest": f"/cam/realmonitor?channel={channel}&subtype={1 if sub else 0}",
+        "axis": "/axis-media/media.amp" + ("?resolution=640x360" if sub else ""),
+        "hanwha": f"/profile{2 if sub else 1}/media.smp",
+        "foscam": "/videoSub" if sub else "/videoMain",
+        "tapo": f"/stream{2 if sub else 1}", "vigi": f"/stream{2 if sub else 1}",
+    }.get(vendor, "")
+
+
+def rebind_camera_rtsp(value: str, host: str, username: str, password: str) -> str:
+    if not value or not host:
+        return value
+    parsed = urlparse(value)
+    if parsed.scheme not in ("rtsp", "rtsps"):
+        return value
+    target = urlparse(f"rtsp://{host}")
+    hostname = target.hostname or host
+    authority = f"[{hostname}]" if ":" in hostname else hostname
+    port = target.port or parsed.port or 554
+    credentials = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username else ""
+    return urlunparse(parsed._replace(netloc=f"{credentials}{authority}:{port}"))
+
+
+def camera_profile_rtsp(vendor: str, number: str, stream: str, host: str, username: str, password: str, explicit: str = "") -> str:
+    path = camera_stream_template(vendor, number, stream)
+    source = explicit or (f"rtsp://camera{path}" if path else "")
+    return rebind_camera_rtsp(source, host, username, password) if source else ""
+
+
 def normalize_camera(raw: dict, index: int) -> dict:
     raw = raw if isinstance(raw, dict) else {}
-    vendor = raw.get("vendor") if raw.get("vendor") in ("hikvision", "dahua", "onvif", "rtsp") else "hikvision"
-    vendor_labels = {"hikvision": "Hikvision", "dahua": "Dahua", "onvif": "ONVIF", "rtsp": "RTSP"}
+    vendor = raw.get("vendor") if raw.get("vendor") in CAMERA_VENDORS else ("onvif" if raw.get("vendor") else "hikvision")
+    vendor_labels = CAMERA_VENDORS
     vendor_label = vendor_labels.get(vendor, "Camera")
     camera_id = raw.get("id") or f"{vendor}_{index}"
     name = raw.get("name") or f"{vendor_label} {index}"
@@ -753,9 +803,9 @@ def normalize_camera(raw: dict, index: int) -> dict:
         rtsp_sub = build_rtsp(rtsp_sub, host, username, password, rtsp_sub_channel)
         rtsp_main_channel = hikvision_channel_from_rtsp(rtsp_main, rtsp_main_channel)
         rtsp_sub_channel = hikvision_channel_from_rtsp(rtsp_sub, rtsp_sub_channel)
-    elif vendor == "dahua":
-        rtsp_main = build_dahua_rtsp(rtsp_main, host, username, password, 0)
-        rtsp_sub = build_dahua_rtsp(rtsp_sub, host, username, password, 1)
+    else:
+        rtsp_main = camera_profile_rtsp(vendor, camera_number, "main", host, username, password, rtsp_main)
+        rtsp_sub = camera_profile_rtsp(vendor, camera_number, "sub", host, username, password, rtsp_sub)
         rtsp_main_channel = ""
         rtsp_sub_channel = ""
     snapshot_stream = normalize_stream_name(raw.get("snapshot_stream"), "sub")
@@ -763,7 +813,8 @@ def normalize_camera(raw: dict, index: int) -> dict:
     record_stream = normalize_stream_name(raw.get("record_stream"), "main")
     tile_stream = normalize_stream_name(raw.get("tile_stream"), "sub")
 
-    onvif_url = raw.get("onvif_url") or (f"http://{host}:80/onvif/device_service" if host else "")
+    onvif_port = 8000 if vendor == "reolink" else 80
+    onvif_url = raw.get("onvif_url") or (f"http://{host}:{onvif_port}/onvif/device_service" if host else "")
     isapi_base_url = raw.get("isapi_base_url") or (f"http://{host}" if host and vendor == "hikvision" else "")
     if vendor == "hikvision":
         onvif_url = refresh_hikvision_onvif_url(onvif_url, host)
@@ -934,6 +985,15 @@ def merge_existing_camera_values(raw_payload: dict) -> dict:
             value = raw_camera.get(field)
             if value in ("main", "sub"):
                 merged_camera[field] = value
+        connection_changed = any(raw_camera.get(field) is not None and raw_camera.get(field) != existing_camera.get(field) for field in ("host", "username", "password"))
+        if connection_changed and merged_camera.get("vendor") != "hikvision":
+            for field in ("rtsp_main", "rtsp_sub"):
+                merged_camera[field] = rebind_camera_rtsp(merged_camera.get(field) or "", merged_camera.get("host") or "", merged_camera.get("username") or "", merged_camera.get("password") or "")
+            old_endpoint = merged_camera.get("onvif_url") or ""
+            if old_endpoint and existing_camera.get("host") != merged_camera.get("host"):
+                endpoint = urlparse(old_endpoint)
+                target = urlparse("http://" + (merged_camera.get("host") or ""))
+                merged_camera["onvif_url"] = urlunparse(endpoint._replace(netloc=f"{target.hostname}:{target.port or endpoint.port or 80}"))
         merged_cameras.append(merged_camera)
 
     return {**existing, **raw_payload, "cameras": merged_cameras}
@@ -2116,6 +2176,89 @@ def write_janus_streaming_runtime_config(config: dict) -> dict:
     }
 
 
+def reload_managed_janus() -> dict:
+    global JANUS_MANAGED_PID
+    with JANUS_RELOAD_LOCK:
+        if JANUS_MANAGED_PID <= 0 or not JANUS_ENABLED:
+            return {"applied": False, "reason": "not_managed_here"}
+        try:
+            command = Path(f"/proc/{JANUS_MANAGED_PID}/cmdline").read_bytes().split(b"\0")[0]
+            if Path(os.fsdecode(command)).name != "janus":
+                return {"applied": False, "reason": "janus_pid_mismatch"}
+            os.kill(JANUS_MANAGED_PID, signal.SIGTERM)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                try:
+                    done, _ = os.waitpid(JANUS_MANAGED_PID, os.WNOHANG)
+                except ChildProcessError:
+                    done = JANUS_MANAGED_PID
+                if done:
+                    break
+                time.sleep(0.05)
+            else:
+                os.kill(JANUS_MANAGED_PID, signal.SIGKILL)
+                os.waitpid(JANUS_MANAGED_PID, 0)
+            HOME_DIR.mkdir(parents=True, exist_ok=True)
+            with (HOME_DIR / "janus.log").open("ab") as log:
+                process = subprocess.Popen(["janus", f"--configs-folder={JANUS_CONFIG_DIR}", "--disable-colors"], stdout=log, stderr=subprocess.STDOUT)
+            JANUS_MANAGED_PID = process.pid
+            return {"applied": True, "pid": process.pid}
+        except OSError:
+            return {"applied": False, "reason": "janus_reload_failed"}
+
+
+def supervisor_self_request(path: str, payload: dict | None = None) -> dict:
+    import urllib.request
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        raise RuntimeError("supervisor_unavailable")
+    # This connector only ever addresses this add-on's own options.
+    if path not in ("/addons/self/info", "/addons/self/options"):
+        raise ValueError("Unsupported Supervisor path")
+    request = urllib.request.Request("http://supervisor" + path, data=json.dumps(payload).encode() if payload is not None else None,
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="POST" if payload is not None else "GET")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        result = json.loads(response.read())
+    if result.get("result") != "ok":
+        raise RuntimeError("supervisor_options_rejected")
+    return result.get("data") or {}
+
+
+def addon_options_from_config(config: dict, existing: dict) -> dict:
+    options = dict(existing)
+    cameras = [{key: camera.get(key) for key in ("id", "name", "vendor", "host", "username", "password", "rtsp_main", "rtsp_sub", "camera_number", "access_protocol", "rtsp_transport", "onvif_url", "isapi_base_url", "enabled", "record", "low_latency", "snapshot_stream", "live_stream", "tile_stream", "record_stream")} for camera in config.get("cameras", [])]
+    options["cameras"] = cameras
+    for index in range(2):
+        camera = cameras[index] if index < len(cameras) else {}
+        prefix = f"hikvision_{index + 1}_"
+        for field in ("enabled", "name", "host", "username", "password", "camera_number", "access_protocol", "rtsp_transport", "rtsp_main", "rtsp_sub", "onvif_url", "isapi_base_url", "record", "low_latency", "snapshot_stream", "live_stream", "record_stream"):
+            default = {"enabled": False, "record": True, "low_latency": True, "camera_number": "1", "access_protocol": "rtsp", "rtsp_transport": "tcp", "snapshot_stream": "sub", "live_stream": "sub", "record_stream": "main"}.get(field, "")
+            options[prefix + field] = camera.get(field, default)
+    storage = config.get("storage") or {}
+    for field in ("recordings_dir", "database_path", "retention_days"):
+        if field in storage:
+            options[field] = storage[field]
+    return options
+
+
+def sync_supervisor_options(config: dict) -> dict:
+    if not os.environ.get("SUPERVISOR_TOKEN"):
+        return {"synced": False, "status": "unavailable"}
+    try:
+        current = supervisor_self_request("/addons/self/info").get("options") or {}
+        desired = addon_options_from_config(config, current)
+        if desired != current:
+            supervisor_self_request("/addons/self/options", {"options": desired})
+        observed = supervisor_self_request("/addons/self/info").get("options") or {}
+        success = all(observed.get(key) == value for key, value in desired.items())
+        result = {"synced": success, "status": "synced" if success else "verification_failed"}
+    except (OSError, ValueError, RuntimeError):
+        # Never include request bodies, credentials or Supervisor response bodies in diagnostics.
+        result = {"synced": False, "status": "failed"}
+    write_json(HOME_DIR / "addon-options-sync.json", result)
+    return result
+
+
 def sync_runtime_engine_config(config: dict, reason: str) -> dict:
     result = {"reason": reason, "mediamtx": {}, "janus": {}}
     try:
@@ -2124,6 +2267,8 @@ def sync_runtime_engine_config(config: dict, reason: str) -> dict:
         result["mediamtx"] = {"written": False, "error": str(error), "type": type(error).__name__}
     try:
         result["janus"] = write_janus_streaming_runtime_config(config)
+        if result["janus"].get("written"):
+            result["janus"]["reload"] = reload_managed_janus()
     except OSError as error:
         result["janus"] = {"written": False, "error": str(error), "type": type(error).__name__}
     write_json(HOME_DIR / "edge.last-runtime-sync.json", result)
@@ -3768,6 +3913,32 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
     return {"cameras": cameras}
 
 
+def serialized_recording(function):
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        with RECORDING_CONTROL_LOCK:
+            return function(*args, **kwargs)
+    return wrapped
+
+
+@serialized_recording
+def restart_changed_recordings(previous: dict, current: dict) -> list[str]:
+    current_by_id = {recording_key(camera, index): camera for index, camera in enumerate(current.get("cameras", []))}
+    stopped = []
+    fields = ("host", "username", "password", "rtsp_main", "rtsp_sub", "record_stream", "enabled", "record")
+    nvr_fields = ("segment_seconds", "browser_playback")
+    global_change = previous.get("storage", {}).get("recordings_dir") != current.get("storage", {}).get("recordings_dir") or any(previous.get("nvr", {}).get(field) != current.get("nvr", {}).get(field) for field in nvr_fields)
+    for index, camera in enumerate(previous.get("cameras", [])):
+        key = recording_key(camera, index)
+        target = current_by_id.get(key)
+        if global_change or target is None or any(camera.get(field) != target.get(field) for field in fields):
+            if key in RECORDING_PROCESSES:
+                stop_recording(camera, index)
+                stopped.append(key)
+    return stopped
+
+
+@serialized_recording
 def ensure_configured_recordings(config: dict, reason: str) -> list[dict]:
     cleanup_recording_processes()
     results = []
@@ -3813,11 +3984,14 @@ def schedule_recording_ensure(config: dict, reason: str) -> None:
             if now - LAST_RECORDING_ENSURE_AT < RECORDING_ENSURE_MIN_SECONDS:
                 return
             LAST_RECORDING_ENSURE_AT = now
-    snapshot = json.loads(json.dumps(config))
-    thread = threading.Thread(target=ensure_configured_recordings, args=(snapshot, reason), daemon=True)
+    def run_latest():
+        with RECORDING_CONTROL_LOCK:
+            ensure_configured_recordings(load_config(), reason)
+    thread = threading.Thread(target=run_latest, daemon=True)
     thread.start()
 
 
+@serialized_recording
 def start_recording(camera: dict, index: int) -> dict:
     cleanup_recording_processes()
     key = recording_key(camera, index)
@@ -3921,6 +4095,7 @@ def start_recording(camera: dict, index: int) -> dict:
     }
 
 
+@serialized_recording
 def stop_recording(camera: dict, index: int) -> dict:
     cleanup_recording_processes()
     key = recording_key(camera, index)
@@ -4172,7 +4347,73 @@ def autoconfig_endpoints(camera: dict) -> dict[str, str]:
     }
 
 
+def onvif_request(camera: dict, endpoint: str, action: str, body: str) -> ET.Element:
+    import urllib.request
+    endpoint_url = urlparse(endpoint)
+    configured = urlparse(camera.get("onvif_url") or "")
+    allowed_hosts = {configured.hostname, urlparse("http://" + (camera.get("host") or "")).hostname}
+    if endpoint_url.scheme not in ("http", "https") or endpoint_url.hostname not in allowed_hosts:
+        raise ValueError("ONVIF service must be hosted by the configured camera.")
+    nonce = os.urandom(16)
+    created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    password = camera.get("password") or ""
+    digest = base64.b64encode(hashlib.sha1(nonce + created.encode() + password.encode()).digest()).decode()
+    username = camera.get("username") or ""
+    security = f'<wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"><wsse:UsernameToken><wsse:Username>{xml_escape(username)}</wsse:Username><wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">{digest}</wsse:Password><wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">{base64.b64encode(nonce).decode()}</wsse:Nonce><wsu:Created>{created}</wsu:Created></wsse:UsernameToken></wsse:Security>'
+    envelope = f'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><s:Header>{security}</s:Header><s:Body>{body}</s:Body></s:Envelope>'
+    request = urllib.request.Request(endpoint, data=envelope.encode(), headers={"Content-Type": f'application/soap+xml; charset=utf-8; action="{action}"'}, method="POST")
+    passwords = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+    passwords.add_password(None, endpoint, username, password)
+    opener = urllib.request.build_opener(urllib.request.HTTPDigestAuthHandler(passwords))
+    try:
+        with opener.open(request, timeout=8) as response:
+            payload = response.read(2_000_001)
+        if len(payload) > 2_000_000:
+            raise RuntimeError("ONVIF response is too large.")
+        root = ET.fromstring(payload)
+    except (OSError, ET.ParseError) as error:
+        raise RuntimeError("ONVIF request failed; check the service URL, ONVIF account and camera clock.") from error
+    if any(element.tag.rsplit("}", 1)[-1] == "Fault" for element in root.iter()):
+        raise RuntimeError("ONVIF camera rejected the request; check ONVIF permissions and clock synchronization.")
+    return root
+
+
+def onvif_value(root: ET.Element, name: str) -> str:
+    return next((element.text or "" for element in root.iter() if element.tag.rsplit("}", 1)[-1] == name), "")
+
+
+def fetch_onvif_camera_config(camera: dict) -> dict:
+    endpoint = camera.get("onvif_url") or ""
+    if not endpoint:
+        raise ValueError("Enter the camera ONVIF device-service URL first.")
+    capabilities = onvif_request(camera, endpoint, "http://www.onvif.org/ver10/device/wsdl/GetCapabilities", '<tds:GetCapabilities><tds:Category>Media</tds:Category></tds:GetCapabilities>')
+    media = next((node for node in capabilities.iter() if node.tag.rsplit("}", 1)[-1] == "Media"), None)
+    media_url = onvif_value(media, "XAddr") if media is not None else ""
+    if not media_url:
+        raise RuntimeError("Camera did not expose an ONVIF Media service; use manual RTSP URLs.")
+    profiles_xml = onvif_request(camera, media_url, "http://www.onvif.org/ver10/media/wsdl/GetProfiles", '<trt:GetProfiles/>')
+    profiles = []
+    for node in profiles_xml.iter():
+        if node.tag.rsplit("}", 1)[-1] != "Profiles" or not node.get("token"):
+            continue
+        profiles.append({"token": node.get("token"), "area": safe_int(onvif_value(node, "Width"), 0) * safe_int(onvif_value(node, "Height"), 0)})
+    if not profiles:
+        raise RuntimeError("Camera returned no ONVIF profiles; enable ONVIF or enter manual RTSP URLs.")
+    profiles.sort(key=lambda item: item["area"], reverse=True)
+    discovered = dict(camera)
+    for stream, profile in (("main", profiles[0]), ("sub", profiles[-1])):
+        body = f'<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>{xml_escape(profile["token"])}</trt:ProfileToken></trt:GetStreamUri>'
+        uri_xml = onvif_request(camera, media_url, "http://www.onvif.org/ver10/media/wsdl/GetStreamUri", body)
+        uri = onvif_value(uri_xml, "Uri")
+        if urlparse(uri).scheme not in ("rtsp", "rtsps"):
+            raise RuntimeError("Camera did not return a playable RTSP URL.")
+        discovered[f"rtsp_{stream}"] = rebind_camera_rtsp(uri, camera.get("host") or urlparse(endpoint).hostname or "", camera.get("username") or "", camera.get("password") or "")
+    return {"ok": True, "camera": discovered, "device": {"manufacturer": CAMERA_VENDORS.get(camera.get("vendor"), "ONVIF")}, "streams": {}, "channels": [], "sections": {"onvif": {"ok": True}}, "effective_streams": effective_streams(discovered), "recommendations": [{"severity": "notice", "stream": "all", "message": "ONVIF main/sub streams loaded into the form. Save cameras to apply them."}]}
+
+
 def fetch_camera_autoconfig(camera: dict) -> dict:
+    if camera.get("vendor") != "hikvision":
+        return fetch_onvif_camera_config(camera)
     endpoints = autoconfig_endpoints(camera)
     raw_sections: dict[str, dict] = {}
     for name, path in endpoints.items():
@@ -4349,6 +4590,31 @@ def update_stream_config(camera: dict, stream_name: str, settings: dict) -> dict
     return parse_stream_config(refreshed_xml)
 
 
+def publish_pending_camera_status(config: dict) -> None:
+    rows = []
+    for index, camera in enumerate(config.get("cameras", [])):
+        rows.append({
+            "id": camera.get("id"), "index": index, "key": recording_key(camera, index),
+            "name": camera.get("name"), "vendor": camera.get("vendor"), "host": camera.get("host"),
+            "enabled": bool(camera.get("enabled")), "record": bool(camera.get("record")),
+            "live_stream": camera.get("live_stream"), "tile_stream": camera.get("tile_stream"),
+            "record_stream": camera.get("record_stream"), "snapshot_stream": camera.get("snapshot_stream"),
+            "status": "checking" if camera.get("enabled") else "disabled", "detail": "Saved configuration applied; refreshing connection status.",
+            "stream_urls": stream_urls(camera, index), "effective_streams": effective_streams(camera),
+            "record_rtsp": redact_rtsp(camera_stream(camera, camera.get("record_stream") or "main")),
+        })
+    payload = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "cameras": rows}
+    write_json(DATA_DIR / "cameras.json", payload)
+    write_json(HOME_DIR / "cameras.json", payload)
+
+
+def refresh_status_after_save() -> None:
+    try:
+        refresh_status()
+    except Exception as error:  # noqa: BLE001
+        write_debug_event("camera_refresh_after_save_failed", {"type": type(error).__name__})
+
+
 def refresh_status() -> dict:
     config = load_config()
     previous_payload = read_json(DATA_DIR / "cameras.json", {"cameras": []})
@@ -4477,9 +4743,12 @@ def refresh_status() -> dict:
         }
         cameras.append(camera_status)
 
-    payload = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "cameras": cameras}
-    write_json(DATA_DIR / "cameras.json", payload)
-    write_json(HOME_DIR / "cameras.json", payload)
+    with CONFIG_LOCK:
+        if config != load_config():
+            return read_json(DATA_DIR / "cameras.json", {"cameras": []})
+        payload = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "cameras": cameras}
+        write_json(DATA_DIR / "cameras.json", payload)
+        write_json(HOME_DIR / "cameras.json", payload)
     return payload
 
 
@@ -4897,6 +5166,8 @@ INDEX_HTML = r"""<!doctype html>
         object-fit: contain;
         background: #05080a;
       }
+      .recording-transition-frame { position: absolute; inset: 0 0 auto; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #05080a; pointer-events: none; }
+      .recording-transition-frame[hidden] { display: none; }
       .recording-player-wrap {
         position: relative;
         border-radius: 8px;
@@ -5368,6 +5639,8 @@ INDEX_HTML = r"""<!doctype html>
       const menuToggle = document.getElementById('menu-toggle');
       const EDGE_PANEL_VERSION = '__EDGE_PANEL_VERSION__';
       const EDGE_UI_BUILD = '__EDGE_UI_BUILD__';
+      const CAMERA_VENDORS = __EDGE_CAMERA_VENDORS__;
+      const CAMERA_TEMPLATES = __EDGE_CAMERA_TEMPLATES__;
       let config = { cameras: [] };
       let live = {};
       let presets = [];
@@ -6040,6 +6313,28 @@ INDEX_HTML = r"""<!doctype html>
         });
       }
 
+      function holdRecordingFrame(video) {
+        const frame = video.closest('.recording-player-wrap')?.querySelector('[data-recording-transition]');
+        if (!frame || video.readyState < 2 || !video.videoWidth) return;
+        try {
+          frame.width = video.videoWidth; frame.height = video.videoHeight;
+          frame.style.height = `${video.clientHeight}px`;
+          frame.getContext('2d').drawImage(video, 0, 0);
+          frame.hidden = false;
+        } catch (_) { frame.hidden = true; }
+      }
+      function releaseRecordingFrame(video) {
+        video.removeAttribute('poster');
+        const frame = video.closest('.recording-player-wrap')?.querySelector('[data-recording-transition]');
+        if (!frame) return;
+        const release = () => {
+          const expectedSeek = Number(video.dataset.recordingSeek || 0);
+          if (!video.seeking && video.currentTime + 0.1 >= expectedSeek) frame.hidden = true;
+        };
+        if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(release);
+        else requestAnimationFrame(() => requestAnimationFrame(release));
+      }
+
       function switchRecordingVideoToFile(index, target, autoplay = false, reason = 'server_file_seek') {
         if (!target?.target?.file?.url) return false;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
@@ -6061,7 +6356,7 @@ INDEX_HTML = r"""<!doctype html>
         video.defaultPlaybackRate = video.playbackRate;
         updateRecordingTimelineUi(index, target.requested, target.timeline.total);
         updateRecordingTileSelection(index, fileUrl);
-        if (cleanCurrent === cleanNext && video.readyState >= 1) {
+        if (video.dataset.recordingLoadedFile === fileUrl && video.readyState >= 1) {
           try {
             video.currentTime = target.seek;
           } catch (error) {
@@ -6071,6 +6366,9 @@ INDEX_HTML = r"""<!doctype html>
           debugEvent('ui_recording_server_file_fast_seek', { index, reason, recording: target.target.file.name, timeline_second: target.requested, playback_second: target.playbackSeek, segment_second: target.seek });
           return true;
         }
+        holdRecordingFrame(video);
+        video.removeAttribute("poster");
+        video.dataset.recordingLoadedFile = fileUrl;
         video.src = nextSrc;
         video.dataset.recordingSrc = nextSrc;
         video.load();
@@ -6997,7 +7295,8 @@ INDEX_HTML = r"""<!doctype html>
           : '';
         const player = playable
           ? `<div class="recording-player-wrap" data-recording-wrap="${index}">
-              <video class="recording-player" tabindex="0" aria-label="Recordings for selected day" src="${escapeHtml(playerSrc)}" ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ''} preload="${preloadMode}" playsinline webkit-playsinline data-recording-player="${index}" data-recording-file-url="${escapeHtml(selectedFile?.url || '')}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-start="${escapeHtml(playerPlaybackStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
+              <video class="recording-player" tabindex="0" aria-label="Recordings for selected day" src="${escapeHtml(playerSrc)}" ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ''} preload="${preloadMode}" playsinline webkit-playsinline data-recording-player="${index}" data-recording-file-url="${escapeHtml(selectedFile?.url || '')}" data-recording-loaded-file="${escapeHtml(selectedFile?.url || '')}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-start="${escapeHtml(playerPlaybackStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
+              <canvas class="recording-transition-frame" data-recording-transition hidden aria-hidden="true"></canvas>
               ${recordingPlayerControls(index, timeline, targetForPoster?.playbackSeek || 0)}
               <button class="fullscreen-button" type="button" data-recording-fullscreen="${index}" aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>
             </div>`
@@ -7115,9 +7414,9 @@ INDEX_HTML = r"""<!doctype html>
             <div class="autoconfig-head">
               <div>
                 <h2>Autoconfig</h2>
-                <p>${device.model ? `${escapeHtml(device.model)} ${escapeHtml(device.firmware || '')}` : 'Read camera settings through Hikvision ISAPI.'}</p>
+                <p>${device.model ? `${escapeHtml(device.model)} ${escapeHtml(device.firmware || '')}` : 'Read camera stream profiles via ONVIF (Hikvision uses ISAPI).'}</p>
               </div>
-              <button type="button" data-autoconfig="${index}" ${state.loading ? 'disabled' : ''}>${state.loading ? 'Reading...' : 'Autoconfig'}</button>
+              <button type="button" data-autoconfig="${index}" ${state.loading ? 'disabled' : ''}>${state.loading ? 'Reading...' : 'Read camera / ONVIF'}</button>
             </div>
             ${state.error ? `<p class="section-status state-offline">${escapeHtml(state.error)}</p>` : ''}
             ${state.message ? `<p class="section-status state-online">${escapeHtml(state.message)}</p>` : ''}
@@ -7159,15 +7458,12 @@ INDEX_HTML = r"""<!doctype html>
             <div class="form-grid">
               <label>Name<input name="${prefix}-name" value="${escapeHtml(text(camera.name, `Camera ${index + 1}`))}"></label>
               <label>Vendor<select name="${prefix}-vendor">
-                <option value="hikvision" ${camera.vendor === 'hikvision' ? 'selected' : ''}>Hikvision</option>
-                <option value="dahua" ${camera.vendor === 'dahua' ? 'selected' : ''}>Dahua</option>
-                <option value="onvif" ${camera.vendor === 'onvif' ? 'selected' : ''}>ONVIF</option>
-                <option value="rtsp" ${camera.vendor === 'rtsp' ? 'selected' : ''}>RTSP</option>
+                ${Object.entries(CAMERA_VENDORS).map(([value, label]) => option(value, camera.vendor, label)).join('')}
               </select></label>
               <label>Host/IP<input name="${prefix}-host" value="${escapeHtml(camera.host || '')}"></label>
               <label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label>
               <label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label>
-              <label>Camera number<input name="${prefix}-camera-number" value="${escapeHtml(cameraNumber)}"></label>
+              <label>Camera / NVR channel number<input name="${prefix}-camera-number" value="${escapeHtml(cameraNumber)}"></label>
               <label>Connection<select name="${prefix}-access-protocol">
                 ${option('rtsp', accessProtocol, 'RTSP')}
                 ${option('isapi', accessProtocol, 'ISAPI')}
@@ -7180,8 +7476,8 @@ INDEX_HTML = r"""<!doctype html>
                 ${option('udp', rtspTransport, 'UDP low latency')}
                 ${option('auto', rtspTransport, 'Auto')}
               </select></label>
-              <label>Main channel<input name="${prefix}-rtsp-main-channel" value="${escapeHtml(mainChannel)}"></label>
-              <label>Sub channel<input name="${prefix}-rtsp-sub-channel" value="${escapeHtml(subChannel)}"></label>
+              <label>Main channel (Hikvision)<input ${camera.vendor === 'hikvision' ? '' : 'disabled'} name="${prefix}-rtsp-main-channel" value="${escapeHtml(mainChannel)}"></label>
+              <label>Sub channel (Hikvision)<input ${camera.vendor === 'hikvision' ? '' : 'disabled'} name="${prefix}-rtsp-sub-channel" value="${escapeHtml(subChannel)}"></label>
               <label>RTSP main<input name="${prefix}-rtsp-main" value="${escapeHtml(camera.rtsp_main || '')}"></label>
               <label>RTSP sub<input name="${prefix}-rtsp-sub" value="${escapeHtml(camera.rtsp_sub || '')}"></label>
               <label>ONVIF URL<input name="${prefix}-onvif" value="${escapeHtml(camera.onvif_url || '')}"></label>
@@ -7209,6 +7505,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="actions">
               <button type="button" data-build-rtsp="${index}">Build RTSP</button>
             </div>
+            ${cameraAutoconfig(index)}
           </div>
         `;
       }
@@ -7474,9 +7771,30 @@ INDEX_HTML = r"""<!doctype html>
         return element;
       }
 
+      function refreshVendorRtsp(value, vendor, host, username, password, number, stream) {
+        let path = CAMERA_TEMPLATES[vendor]?.[stream] || '';
+        if (vendor === 'reolink') path = `/h264Preview_${String(Number(number) || 1).padStart(2, '0')}_${stream}`;
+        if (['dahua', 'amcrest'].includes(vendor)) path = `/cam/realmonitor?channel=${Number(number) || 1}&subtype=${stream === 'sub' ? 1 : 0}`;
+        if (!value && !path) return '';
+        try {
+          const parsed = new URL(value || `rtsp://camera${path}`);
+          const target = new URL(`rtsp://${host}`);
+          parsed.hostname = target.hostname;
+          parsed.port = target.port || parsed.port || '554';
+          parsed.username = username; parsed.password = password;
+          return parsed.href;
+        } catch (_) { return value || ''; }
+      }
+
       function refreshGeneratedCameraFields(section, index) {
         const vendor = cameraField(section, index, 'vendor').value;
-        if (vendor !== 'hikvision') return;
+        if (vendor !== 'hikvision') {
+          for (const stream of ['main', 'sub']) {
+            const input = cameraField(section, index, `rtsp-${stream}`);
+            input.value = refreshVendorRtsp(input.value.trim(), vendor, cameraField(section, index, 'host').value.trim(), cameraField(section, index, 'username').value.trim(), cameraField(section, index, 'password').value, cameraField(section, index, 'camera-number').value, stream);
+          }
+          return;
+        }
         const host = cameraField(section, index, 'host').value.trim();
         const username = cameraField(section, index, 'username').value.trim();
         const password = cameraField(section, index, 'password').value;
@@ -7561,8 +7879,8 @@ INDEX_HTML = r"""<!doctype html>
           const host = get('host').value.trim();
           const username = get('username').value.trim();
           const password = get('password').value;
-          const rtspMain = vendor === 'hikvision' ? refreshHikvisionRtsp(rtspMainRaw, host, username, password, rtspMainChannel) : rtspMainRaw;
-          const rtspSub = vendor === 'hikvision' ? refreshHikvisionRtsp(rtspSubRaw, host, username, password, rtspSubChannel) : rtspSubRaw;
+          const rtspMain = vendor === 'hikvision' ? refreshHikvisionRtsp(rtspMainRaw, host, username, password, rtspMainChannel) : refreshVendorRtsp(rtspMainRaw, vendor, host, username, password, cameraNumber, 'main');
+          const rtspSub = vendor === 'hikvision' ? refreshHikvisionRtsp(rtspSubRaw, host, username, password, rtspSubChannel) : refreshVendorRtsp(rtspSubRaw, vendor, host, username, password, cameraNumber, 'sub');
           return {
             ...existingCameras[index],
             id: existingCameras[index]?.id || `${get('vendor').value}_${index + 1}`,
@@ -7664,21 +7982,23 @@ INDEX_HTML = r"""<!doctype html>
         if (vendor === 'hikvision') {
           get('rtsp-main-channel').value = mainChannel;
           get('rtsp-sub-channel').value = subChannel;
-          get('rtsp-main').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/${mainChannel}`;
-          get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/Streaming/Channels/${subChannel}`;
+          get('rtsp-main').value = buildHikvisionRtsp(host, username, password, mainChannel);
+          get('rtsp-sub').value = buildHikvisionRtsp(host, username, password, subChannel);
           get('onvif').value = get('onvif').value || `http://${host}:80/onvif/device_service`;
           get('isapi').value = get('isapi').value || `http://${host}`;
           saveState.textContent = 'Hikvision RTSP URLs prepared. Click Save cameras to write them.';
           return;
         }
         if (vendor === 'dahua') {
-          get('rtsp-main').value = `rtsp://${username}:${password}@${host}:554/cam/realmonitor?channel=1&subtype=0`;
-          get('rtsp-sub').value = `rtsp://${username}:${password}@${host}:554/cam/realmonitor?channel=1&subtype=1`;
+          get('rtsp-main').value = refreshVendorRtsp('', vendor, host, username, password, cameraNumber, 'main');
+          get('rtsp-sub').value = refreshVendorRtsp('', vendor, host, username, password, cameraNumber, 'sub');
           get('onvif').value = get('onvif').value || `http://${host}:80/onvif/device_service`;
           saveState.textContent = 'Dahua RTSP URLs prepared. Click Save cameras to write them.';
           return;
         }
-        saveState.textContent = 'Generic ONVIF/RTSP cameras need manual RTSP URLs for now.';
+        for (const stream of ['main', 'sub']) get(`rtsp-${stream}`).value = refreshVendorRtsp('', vendor, host, username, password, cameraNumber, stream);
+        get('onvif').value = get('onvif').value || `http://${host}:${vendor === 'reolink' ? 8000 : 80}/onvif/device_service`;
+        saveState.textContent = CAMERA_TEMPLATES[vendor]?.main ? 'RTSP profile prepared. Save cameras to apply. Use ONVIF discovery for models with different paths.' : 'Use Read camera / ONVIF discovery or enter explicit RTSP URLs, then save.';
       }
 
       function collectEdgeSettings(options = {}) {
@@ -7921,7 +8241,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       async function loadCameraAutoconfig(index) {
-        config = collectConfig();
+        config = collectEdgeSettings();
         const camera = config.cameras[index];
         if (!camera) return;
         cameraAuto[index] = { loading: true };
@@ -7934,6 +8254,7 @@ INDEX_HTML = r"""<!doctype html>
           });
           const data = await response.json();
           if (!response.ok) throw new Error(data.error || 'Could not read camera configuration.');
+          if (data.camera) config.cameras[index] = { ...camera, ...data.camera };
           cameraAuto[index] = data.error
             ? { data, error: data.error }
             : { data, message: 'Camera configuration loaded.' };
@@ -7978,6 +8299,7 @@ INDEX_HTML = r"""<!doctype html>
           button.classList.toggle('active', button.dataset.pageTarget === pageName);
         });
         debugEvent('ui_page_change', { page: pageName });
+        if (pageName === 'home') loadCameras().catch((error) => debugEvent('ui_cameras_refresh_error', { message: error.message }));
         if (pageName === 'logs') {
           loadLogs().catch((error) => {
             logsView.innerHTML = `<p class="notice">${escapeHtml(error.message)}</p>`;
@@ -8076,6 +8398,7 @@ INDEX_HTML = r"""<!doctype html>
             body: JSON.stringify(payload)
           });
           const data = await response.json();
+          const addonSync = response.headers.get("X-Edge-Options-Sync");
           if (!response.ok) throw new Error(data.error || 'Could not save configuration.');
           const verified = await fetchSavedConfig();
           if (JSON.stringify(canonicalConfig(data)) !== JSON.stringify(canonicalConfig(verified))) {
@@ -8086,7 +8409,7 @@ INDEX_HTML = r"""<!doctype html>
           lastFormDraftAt = Date.now();
           renderConfig();
           configDirty = false;
-          state.textContent = `Saved and verified. ${saveSummary(verified)}`;
+          state.textContent = `Saved and verified. ${saveSummary(verified)} ${addonSync === 'synced' ? 'Home Assistant add-on options updated.' : 'Add-on options could not be synchronized; saved camera configuration is active.'}`;
           debugEvent(`ui_${reason}_done`, { savedSummary: saveSummary(verified) });
           if (liveTimer) { window.clearInterval(liveTimer); liveTimer = null; updateLiveTimer(); }
           // Auxiliary refresh errors must not be presented as a failed settings save.
@@ -8124,7 +8447,13 @@ INDEX_HTML = r"""<!doctype html>
       form.addEventListener('input', () => {
         syncConfigDraftFromForm();
       });
-      form.addEventListener('change', () => {
+      form.addEventListener('change', (event) => {
+        const match = event.target.name?.match(/^camera-(\d+)-vendor$/);
+        if (match) {
+          const index = Number(match[1]);
+          for (const field of ['rtsp-main', 'rtsp-sub', 'onvif', 'isapi']) form.elements[`camera-${index}-${field}`].value = '';
+          buildRtspForCamera(index);
+        }
         syncConfigDraftFromForm();
       });
 
@@ -8351,6 +8680,10 @@ INDEX_HTML = r"""<!doctype html>
         }
       }, true);
 
+      for (const name of ['loadeddata', 'playing', 'seeked']) nvrGrid.addEventListener(name, (event) => {
+        if (event.target.matches?.('video[data-recording-player]')) releaseRecordingFrame(event.target);
+      }, true);
+
       nvrGrid.addEventListener('play', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if (video) { markNvrInteraction('recording_video_play', recordingVideoDiagnostics(video)); updateRecordingPlayerControls(video, 'Playing recordings for selected day'); }
@@ -8463,6 +8796,8 @@ INDEX_HTML = (
     INDEX_HTML
     .replace("__EDGE_PANEL_VERSION__", APP_VERSION)
     .replace("__EDGE_UI_BUILD__", UI_BUILD)
+    .replace("__EDGE_CAMERA_VENDORS__", json.dumps(CAMERA_VENDORS))
+    .replace("__EDGE_CAMERA_TEMPLATES__", json.dumps({vendor: {stream: camera_stream_template(vendor, "1", stream) for stream in ("main", "sub")} for vendor in CAMERA_VENDORS}))
 )
 
 
@@ -8472,7 +8807,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"[edge-panel] {self.address_string()} {format % args}")
 
-    def send_bytes(self, payload: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def send_bytes(self, payload: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK, extra_headers: dict | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
@@ -8481,12 +8816,14 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, str(value))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(payload)
 
-    def send_json(self, payload, status: HTTPStatus = HTTPStatus.OK) -> None:
-        self.send_bytes(json.dumps(payload).encode("utf-8"), "application/json", status)
+    def send_json(self, payload, status: HTTPStatus = HTTPStatus.OK, extra_headers: dict | None = None) -> None:
+        self.send_bytes(json.dumps(payload).encode("utf-8"), "application/json", status, extra_headers)
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -8676,6 +9013,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 })
                 self.send_json({"error": "empty_request_body", "body": body_info}, HTTPStatus.BAD_REQUEST)
                 return
+            previous_config = load_config()
             raw_payload, merged_payload, normalized_payload, final_payload, saved_payload = persist_config_payload(request_payload)
             committed_payload = saved_payload
             save_debug_payload(raw_payload, merged_payload, normalized_payload, saved_payload)
@@ -8693,12 +9031,15 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "addon_config_mirror_path": str(ADDON_CONFIG_PATH),
                 "panel_mirror_path": str(PANEL_CONFIG_PATH),
             })
+            restart_changed_recordings(previous_config, saved_payload)
             stop_orphan_recordings(saved_payload)
             sync_runtime_engine_config(saved_payload, "config_save")
             schedule_recording_ensure(saved_payload, "config_save")
             remember_camera_presets(saved_payload.get("cameras", []))
-            refresh_status()
-            self.send_json(saved_payload)
+            publish_pending_camera_status(saved_payload)
+            options_sync = sync_supervisor_options(saved_payload)
+            threading.Thread(target=refresh_status_after_save, daemon=True).start()
+            self.send_json(saved_payload, extra_headers={"X-Edge-Options-Sync": options_sync["status"]})
         except (json.JSONDecodeError, OSError, ValueError) as error:
             write_debug_event("config_save_error", {"error": str(error)})
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
