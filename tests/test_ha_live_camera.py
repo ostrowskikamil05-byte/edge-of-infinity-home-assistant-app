@@ -50,7 +50,7 @@ def native_module():
     modules['homeassistant.helpers.entity_platform'].AddEntitiesCallback = object
     modules['homeassistant.helpers.update_coordinator'].CoordinatorEntity = CoordinatorEntity
     modules['edge_native_test.const'].DOMAIN = 'edge'
-    modules['edge_native_test.const'].CARD_VERSION = '0.10.43'
+    modules['edge_native_test.const'].CARD_VERSION = '0.10.44'
     modules['edge_native_test.coordinator'].EdgeCoordinator = object
     modules['edge_native_test.client'] = load_client_module()
     with patch.dict(sys.modules, modules):
@@ -71,23 +71,23 @@ class NativeCameraTests(unittest.IsolatedAsyncioTestCase):
                     task = asyncio.create_task(coro)
                     tasks.append(task)
                     return task
-                source = {'id': 'front', 'name': 'Front door', 'enabled': True, 'status': 'online', 'vendor': 'reolink', 'live_stream': 'sub', 'snapshot_stream': 'sub', 'rtsp_sub': 'rtsp://user:secret@192.0.2.1/sub'}
+                source = {'id': 'front', 'name': 'Front door', 'enabled': True, 'status': 'online', 'vendor': 'reolink', 'live_stream': 'sub', 'snapshot_stream': 'sub', 'rtsp_sub': 'rtsp://user:secret@192.0.2.1/sub', 'edge_restream': {'nvr': 'rtsp://edge-addon:8556/front_main', 'main': 'rtsp://edge-addon:8556/front_main', 'sub': 'rtsp://edge-addon:8556/front_sub'}}
                 hass = types.SimpleNamespace(data={'edge': {'entry': {'client': types.SimpleNamespace(is_local=True)}}}, config=types.SimpleNamespace(path=lambda *parts: str(Path(folder).joinpath(*parts))), async_add_executor_job=execute, async_create_task=schedule)
                 coordinator = types.SimpleNamespace(hass=hass, config_entry=types.SimpleNamespace(entry_id='entry'), data={'cameras': [source]}, client=types.SimpleNamespace(camera_image=AsyncMock(return_value=None)))
                 entity = module.EdgeCamera(coordinator, source)
                 await entity.async_added_to_hass()
-                self.assertEqual(await entity.stream_source(), source['rtsp_sub'])
+                self.assertEqual(await entity.stream_source(), source['edge_restream']['nvr'])
                 self.assertTrue(entity._attr_supported_features & 2)
                 self.assertEqual(await entity.async_camera_image(320, 180), b'jpeg-frame')
-                get_image.assert_awaited_once_with(hass, source['rtsp_sub'], width=320, height=180)
+                get_image.assert_awaited_once_with(hass, source['edge_restream']['nvr'], width=320, height=180)
                 mapping = json.loads(Path(folder, 'edge/ha-entities.json').read_text())
                 self.assertEqual(mapping['entities'][0]['entity_id'], 'camera.actual_front_door')
                 self.assertNotIn('secret', json.dumps(mapping))
                 self.assertNotIn('rtsp://', json.dumps(mapping))
                 entity.stream = Mock()
-                coordinator.data['cameras'][0] = {**source, 'name': 'New name', 'rtsp_sub': 'rtsp://user:new-secret@192.0.2.2/sub'}
+                coordinator.data['cameras'][0] = {**source, 'name': 'New name', 'rtsp_sub': 'rtsp://user:new-secret@192.0.2.2/sub', 'edge_restream': {'nvr': 'rtsp://edge-addon:8557/front_main'}}
                 entity._handle_coordinator_update()
-                entity.stream.update_source.assert_called_once_with('rtsp://user:new-secret@192.0.2.2/sub')
+                entity.stream.update_source.assert_called_once_with('rtsp://edge-addon:8557/front_main')
                 await asyncio.gather(*tasks)
                 await entity.async_will_remove_from_hass()
                 self.assertEqual(json.loads(Path(folder, 'edge/ha-entities.json').read_text())['entities'], [])
@@ -152,7 +152,7 @@ class CardRegistrationTests(unittest.IsolatedAsyncioTestCase):
         modules['homeassistant.core'].HomeAssistant = object
         register_js = modules['homeassistant.components.frontend'].add_extra_js_url = Mock()
         modules['edge_card_test.const'].DOMAIN = 'edge'
-        modules['edge_card_test.const'].CARD_VERSION = '0.10.43'
+        modules['edge_card_test.const'].CARD_VERSION = '0.10.44'
         with patch.dict(sys.modules, modules):
             spec = importlib.util.spec_from_file_location('edge_card_test.frontend', CAMERA_PATH.with_name('frontend.py'))
             module = importlib.util.module_from_spec(spec)
@@ -165,14 +165,14 @@ class CardRegistrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(resource.url_path, '/edge/edge-live-card.js')
             self.assertTrue(Path(resource.path).is_file())
             self.assertFalse(resource.cache_headers)
-            register_js.assert_called_once_with(hass, '/edge/edge-live-card.js?v=0.10.43')
+            register_js.assert_called_once_with(hass, '/edge/edge-live-card.js?v=0.10.44')
 
     async def test_exports_card_capability_without_secrets(self):
         p = load_panel_module()
         p.commit_panel_config({'cameras': [{'id': 'front', 'host': '192.0.2.1', 'password': 'secret'}]})
-        p.write_json(p.HOME_DIR / 'ha-entities.json', {'card_type': 'custom:edge-live-card', 'card_version': '0.10.43', 'entities': []})
+        p.write_json(p.HOME_DIR / 'ha-entities.json', {'card_type': 'custom:edge-live-card', 'card_version': '0.10.44', 'entities': []})
         payload = p.home_assistant_dashboard_payload()
         self.assertTrue(payload['card_ready'])
-        self.assertEqual(payload['card_version'], '0.10.43')
+        self.assertEqual(payload['card_version'], '0.10.44')
         self.assertEqual(payload['card_resource'], '/edge/edge-live-card.js')
         self.assertNotIn('secret', json.dumps(payload))

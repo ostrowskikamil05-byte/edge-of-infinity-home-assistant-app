@@ -26,9 +26,9 @@ from urllib.parse import parse_qs, urlparse, urlunparse, quote, unquote
 from xml.sax.saxutils import escape as xml_escape
 
 
-APP_VERSION = "0.10.43"
+APP_VERSION = "0.10.44"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "ha-edge-live-card-webrtc-v5"
+UI_BUILD = "ha-nvr-multicamera-v6"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -1798,7 +1798,7 @@ def capture_isapi_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
 
 
 def capture_ffmpeg_snapshot(camera: dict, target_id: str) -> tuple[str, str]:
-    stream = camera_stream(camera, camera.get("snapshot_stream") or "sub")
+    stream = recording_source_stream(camera, 0, camera.get("snapshot_stream") or "sub")[0]
     if not stream:
         return "", ""
 
@@ -1857,6 +1857,37 @@ def mediamtx_path(camera: dict, index: int, stream_name: str) -> str:
 
 def mediamtx_rtsp_url(camera: dict, index: int, stream_name: str) -> str:
     return f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}/{mediamtx_path(camera, index, stream_name)}"
+
+
+_HA_RESTREAM_HOST = None
+
+
+def home_assistant_restream_payload(config: dict) -> dict:
+    """Advertise shared NVR RTSP paths reachable from HA, never camera credentials."""
+    global _HA_RESTREAM_HOST
+    if _HA_RESTREAM_HOST is None:
+        host = os.environ.get("EDGE_HA_RTSP_HOST", "").strip()
+        if not host and os.environ.get("SUPERVISOR_TOKEN"):
+            try:
+                host = str(supervisor_self_request("/addons/self/info").get("hostname") or "")
+            except (OSError, ValueError, RuntimeError):
+                pass
+        if not host:
+            import socket
+            host = socket.gethostname().replace("_", "-")
+        _HA_RESTREAM_HOST = host if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", host) else ""
+    available = bool(MEDIAMTX_ENABLED and _HA_RESTREAM_HOST)
+    cameras = []
+    for index, camera in enumerate(config.get("cameras", [])):
+        streams = {}
+        if available and camera.get("enabled"):
+            for profile in ("main", "sub"):
+                if camera.get("rtsp_" + profile):
+                    streams[profile] = f"rtsp://{_HA_RESTREAM_HOST}:{MEDIAMTX_RTSP_PORT}/{mediamtx_path(camera, index, profile)}"
+        recording = camera.get("record_stream") or "main"
+        streams["nvr"] = streams.get(recording) or streams.get("main") or ""
+        cameras.append({"camera_id": camera.get("id"), "streams": streams})
+    return {"available": available, "cameras": cameras, "source": "edge_nvr", "version": APP_VERSION}
 
 
 def recording_source_stream(camera: dict, index: int, stream_name: str) -> tuple[str, str]:
@@ -2030,6 +2061,7 @@ def write_mediamtx_runtime_config(config: dict) -> dict:
         'rtspEncryption: "no"',
         f"rtspAddress: :{MEDIAMTX_RTSP_PORT}",
         "",
+        "moq: no",
         "rtmp: no",
         "",
         "hls: yes",
@@ -2271,6 +2303,7 @@ def sync_runtime_engine_config(config: dict, reason: str) -> dict:
             result["janus"]["reload"] = reload_managed_janus()
     except OSError as error:
         result["janus"] = {"written": False, "error": str(error), "type": type(error).__name__}
+    write_json(HOME_DIR / "restream.json", home_assistant_restream_payload(config))
     write_json(HOME_DIR / "edge.last-runtime-sync.json", result)
     write_debug_event("runtime_engine_config_sync", {
         "reason": reason,
@@ -4658,7 +4691,7 @@ def refresh_status() -> dict:
                 status = "missing_rtsp"
                 detail = "Camera is enabled, but rtsp_main is empty."
             else:
-                main_probe = probe_rtsp_stream(rtsp_main)
+                main_probe = probe_rtsp_stream(recording_source_stream(camera, index, "main")[0])
                 video_stream = main_probe.get("video") or {}
                 audio_stream = main_probe.get("audio") or {}
                 if video_stream:
@@ -4684,7 +4717,7 @@ def refresh_status() -> dict:
                     live_fps = fps
                     live_bitrate = bitrate
                 else:
-                    live_probe = probe_rtsp_stream(live_rtsp)
+                    live_probe = probe_rtsp_stream(recording_source_stream(camera, index, live_stream_name)[0])
                     live_video_stream = live_probe.get("video") or {}
                     if live_video_stream:
                         live_probe_status = "online"
@@ -5714,12 +5747,12 @@ INDEX_HTML = r"""<!doctype html>
           <header><div><p class="eyebrow">INTEGRATION</p><h1>Home Assistant</h1><p>Put live camera video on your Home Assistant dashboard.</p></div></header>
           <div class="dashboard-layout">
             <section class="panel dashboard-builder">
-              <div class="section-heading"><span class="step-number">1</span><div><h2>Choose your camera</h2><p>Use our Edge Live card for WebRTC and audio controls, or choose the standard Home Assistant card.</p></div></div>
-              <label>Camera<select id="ha-camera-select"></select></label>
+              <div class="section-heading"><span class="step-number">1</span><div><h2>Choose your camera</h2><p>Choose 1–4 cameras. Edge Live uses shared NVR streams with quality and audio controls.</p></div></div>
+              <label>Number of cameras<select id="ha-camera-count"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label><label>Camera 1<select id="ha-camera-select"></select></label>
               <label>Card type<select id="ha-card-type"><option value="edge">Edge Live · WebRTC, sound & microphone</option><option value="native">Standard Home Assistant camera</option></select></label>
               <p class="notice" id="ha-card-resource-status" role="status"></p>
               <label>Home Assistant camera entity<input id="ha-camera-entity" placeholder="camera.front_door" autocomplete="off" spellcheck="false"></label>
-              <p class="notice" id="ha-entity-status" role="status"></p>
+              <div id="ha-extra-cameras"></div><label>Stream quality<select id="ha-card-quality"><option value="nvr">NVR · same profile as recording</option><option value="main">Main stream</option><option value="sub">Substream · less data</option></select></label><p class="notice">NVR shares the recording feed without reducing its resolution. Different main/sub profiles may open separate upstream camera streams.</p><p class="notice" id="ha-entity-status" role="status"></p>
               <div class="section-heading"><span class="step-number">2</span><div><h2>Copy your card</h2><p>The code contains the camera entity and display options. Passwords and stream addresses stay private.</p></div></div>
               <textarea id="ha-card-yaml" rows="9" readonly spellcheck="false" aria-label="Home Assistant card YAML"></textarea>
               <div class="actions"><button class="primary" id="ha-copy-card" type="button">Copy card YAML</button><button id="ha-refresh-entities" type="button">Refresh entities</button></div>
@@ -7484,16 +7517,39 @@ INDEX_HTML = r"""<!doctype html>
         const copy = document.getElementById('ha-copy-card');
         const status = document.getElementById('ha-entity-status');
         document.getElementById('ha-copy-status').textContent = '';
-        const valid = /^camera\.[a-z0-9_]+$/.test(entity);
-        document.getElementById('ha-card-resource-status').textContent = haDashboard.card_ready ? `Edge Live card registered in HA (${haDashboard.card_version}). The microphone starts only when you click it.` : 'Restart Home Assistant Core after updating Edge to register the Edge Live card. WebRTC requires a provider such as go2rtc; the standard card remains available as a fallback.';
-        copy.disabled = !camera || !valid;
-        if (!camera) { yaml.value = ''; status.textContent = 'Save a camera in Cameras first, then refresh this list.'; return; }
-        if (!valid) { yaml.value = ''; status.textContent = 'Enable the Edge integration and restart Home Assistant Core, or enter the exact camera entity ID from Home Assistant.'; return; }
         const custom = document.getElementById('ha-card-type').value === 'edge';
-        yaml.value = (custom ? ['type: custom:edge-live-card', `entity: ${entity}`, `name: ${JSON.stringify(camera.name)}`, 'autoplay: true', 'muted: true', 'volume: 0.6', 'microphone: true', 'reconnect: true', 'fit: contain'] : ['type: picture-entity', `entity: ${entity}`, 'camera_view: live', `name: ${JSON.stringify(camera.name)}`, 'show_name: true', 'show_state: false', 'aspect_ratio: "16:9"']).join('\n') + '\n';
-        if (!camera.enabled) { status.textContent = 'This camera is disabled. Enable it in Cameras to view live video.'; return; }
-        status.textContent = camera.entities.includes(entity) ? 'Camera entity detected in Home Assistant. Your card is ready to copy.' : 'Using the entity ID you entered. Confirm that this camera entity exists in Home Assistant.';
+        const count = Number(document.getElementById('ha-camera-count').value);
+        const quality = document.getElementById('ha-card-quality').value;
+        const items = [{camera, entity}, ...Array.from(document.querySelectorAll('[data-ha-extra-slot]')).map(slot => ({camera: haDashboard.cameras.find(item => item.id === slot.querySelector('select').value), entity: slot.querySelector('input').value.trim()}))];
+        const valid = items.length === count && items.every(item => item.camera && /^camera\.[a-z0-9_]+$/.test(item.entity)) && new Set(items.map(item => item.entity)).size === count;
+        document.getElementById('ha-card-quality').disabled = !custom;
+        document.getElementById('ha-card-resource-status').textContent = haDashboard.card_ready ? `Edge Live card registered in HA (${haDashboard.card_version}). NVR is the shared recording feed. The microphone starts only when you click it and may temporarily use a direct talk connection.` : 'Restart Home Assistant Core after updating Edge to register the Edge Live card and its NVR profile entities.';
+        copy.disabled = !valid;
+        if (!valid) { yaml.value = ''; status.textContent = 'Choose 1–4 different cameras and enter their exact Home Assistant entity IDs. Enable/update the Edge integration and restart Core if entities are missing.'; return; }
+        if (custom) {
+          const lines = ['type: custom:edge-live-card'];
+          if (count === 1) lines.push(`entity: ${entity}`, `name: ${JSON.stringify(camera.name)}`, `quality: ${quality}`);
+          else { lines.push('columns: auto', 'cameras:'); items.forEach(item => lines.push(`  - entity: ${item.entity}`, `    name: ${JSON.stringify(item.camera.name)}`, `    quality: ${quality}`)); }
+          lines.push('autoplay: true', 'muted: true', 'volume: 0.6', 'microphone: true', 'reconnect: true', 'fit: contain'); yaml.value = lines.join('\n') + '\n';
+        } else if (count === 1) yaml.value = ['type: picture-entity', `entity: ${entity}`, 'camera_view: live', `name: ${JSON.stringify(camera.name)}`, 'show_name: true', 'show_state: false', 'aspect_ratio: "16:9"'].join('\n') + '\n';
+        else { const lines = ['type: grid', 'columns: 2', 'square: false', 'cards:']; items.forEach(item => lines.push('  - type: picture-entity', `    entity: ${item.entity}`, '    camera_view: live', `    name: ${JSON.stringify(item.camera.name)}`, '    show_state: false')); yaml.value = lines.join('\n') + '\n'; }
+        status.textContent = items.some(item => !item.camera.enabled) ? 'A selected camera is disabled. Enable it in Cameras to view live video.' : 'Card ready. Copy the YAML into your Home Assistant dashboard.';
       }
+      function renderDashboardSlots() {
+        const count = Number(document.getElementById('ha-camera-count').value);
+        const root = document.getElementById('ha-extra-cameras');
+        const previous = Array.from(root.querySelectorAll('[data-ha-extra-slot]')).map(slot => ({id: slot.querySelector('select').value, entity: slot.querySelector('input').value}));
+        root.replaceChildren(); const used = new Set([document.getElementById('ha-camera-select').value]);
+        for (let i = 1; i < count; i++) {
+          const selected = previous[i-1]?.id || haDashboard.cameras.find(camera => !used.has(camera.id))?.id || ''; used.add(selected);
+          const camera = haDashboard.cameras.find(item => item.id === selected);
+          const slot = document.createElement('div'); slot.dataset.haExtraSlot = String(i);
+          slot.innerHTML = `<label>Camera ${i+1}<select><option value="">Select camera</option>${haDashboard.cameras.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('')}</select></label><label>Home Assistant camera entity<input autocomplete="off" spellcheck="false" placeholder="camera.front_door"></label>`;
+          slot.querySelector('select').value = selected;slot.querySelector('input').value = previous[i-1]?.entity || camera?.entity_id || '';
+          slot.querySelector('select').onchange = () => {slot.querySelector('input').value = haDashboard.cameras.find(item => item.id === slot.querySelector('select').value)?.entity_id || '';updateDashboardCard();};slot.querySelector('input').oninput = updateDashboardCard;root.append(slot);
+        }
+      }
+
       function selectDashboardCamera() {
         const camera = haDashboard.cameras.find((item) => item.id === document.getElementById('ha-camera-select').value);
         document.getElementById('ha-camera-entity').value = camera?.entity_id || '';
@@ -7511,12 +7567,14 @@ INDEX_HTML = r"""<!doctype html>
           select.innerHTML = haDashboard.cameras.map((camera) => `<option value="${escapeHtml(camera.id)}">${escapeHtml(camera.name)}${camera.enabled ? '' : ' (disabled)'}</option>`).join('');
           if (haDashboard.cameras.some((camera) => camera.id === selected)) select.value = selected;
           haRequestedCamera = '';
-          selectDashboardCamera();
+          selectDashboardCamera();renderDashboardSlots();updateDashboardCard();
         } catch (error) {
           status.textContent = error.message;
           document.getElementById('ha-copy-card').disabled = true;
         }
       }
+      document.getElementById('ha-camera-count').addEventListener('change', () => {renderDashboardSlots();updateDashboardCard();});
+      document.getElementById('ha-card-quality').addEventListener('change', updateDashboardCard);
       document.getElementById('ha-card-type').addEventListener('change', updateDashboardCard);
       document.getElementById('ha-camera-select').addEventListener('change', selectDashboardCamera);
       document.getElementById('ha-camera-entity').addEventListener('input', updateDashboardCard);
@@ -8994,6 +9052,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "ui_build": UI_BUILD,
                 "authoritative_config": str(CONFIG_PATH),
             })
+            return
+        if path == "/api/home-assistant/streams":
+            self.send_json(home_assistant_restream_payload(load_config()))
             return
         if path == "/api/config":
             try:

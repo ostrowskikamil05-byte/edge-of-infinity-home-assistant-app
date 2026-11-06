@@ -153,7 +153,7 @@ class EdgeClient:
             cameras = payload.get("cameras") if isinstance(payload, dict) else payload
             config_cameras = await self._local_config_cameras()
             merged = _merge_camera_config(cameras if isinstance(cameras, list) else [], config_cameras)
-            return _normalize_cameras(merged)
+            return await self._with_restreams(_normalize_cameras(merged))
 
         try:
             payload = await self._request("GET", "/cameras")
@@ -172,7 +172,21 @@ class EdgeClient:
         except EdgeClientError:
             config_payload = {}
         config_cameras = config_payload.get("cameras") if isinstance(config_payload, dict) else []
-        return _normalize_cameras(_merge_camera_config(cameras, config_cameras if isinstance(config_cameras, list) else []))
+        return await self._with_restreams(_normalize_cameras(_merge_camera_config(cameras, config_cameras if isinstance(config_cameras, list) else [])))
+
+    async def _with_restreams(self, cameras: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Load backend-only NVR routes; missing metadata never opens a camera directly."""
+        try:
+            payload = await self._read_local_json("restream.json") if self.is_local else await self._request("GET", "/api/home-assistant/streams")
+        except (EdgeClientError, OSError, ValueError):
+            payload = {}
+        payload = payload if isinstance(payload, dict) else {}
+        rows = payload.get("cameras", [])
+        rows = rows if isinstance(rows, list) else []
+        by_id = {row.get("camera_id"): row.get("streams", {}) for row in rows if isinstance(row, dict)}
+        for camera in cameras:
+            camera["edge_restream"] = by_id.get(camera.get("id"), {}) if payload.get("available") else {}
+        return cameras
 
     async def _local_config_cameras(self) -> list[dict[str, Any]]:
         for filename in ("edge.json", "panel-config.json"):
@@ -200,6 +214,23 @@ class EdgeClient:
 
         path = snapshot_url if snapshot_url.startswith("/") else f"/{snapshot_url}"
         return await self._request("GET", path, expect_json=False)
+
+
+def camera_nvr_source(camera: dict[str, Any], profile: str = "nvr") -> str | None:
+    """Select a shared NVR route, without silently falling back to the camera."""
+    if camera.get("enabled") is False or profile not in ("nvr", "main", "sub"):
+        return None
+    streams = camera.get("edge_restream")
+    source = streams.get(profile) if isinstance(streams, dict) else None
+    if not isinstance(source, str):
+        return None
+    try:
+        parsed = urlparse(source)
+    except ValueError:
+        return None
+    if parsed.scheme in ("rtsp", "rtsps") and parsed.hostname and not parsed.username and not parsed.password:
+        return source
+    return None
 
 
 def camera_stream_source(camera: dict[str, Any], role: str = "live_stream") -> str | None:

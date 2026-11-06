@@ -450,3 +450,37 @@ Live signaling uses the existing authenticated Home Assistant camera WebSocket A
 **Talking through a camera** requires HTTPS (or localhost), browser microphone permission, and a camera/RTSP source plus WebRTC provider that support return audio/backchannel. This depends on the model and configured source, not only the camera brand. Click the microphone to request capture; click again to stop and release it. The microphone indicator turns on only after the WebRTC answer negotiates sending audio. This confirms browser/provider negotiation, not that a physical camera speaker played the sound. The card reports a rejected audio direction rather than claiming two-way audio works. There is no automatic talk mode. Capture ends on card removal, page hiding, stop, connection failure, or a cancelled permission request. Local playback is temporarily muted while talking and its prior mute state is restored afterwards.
 
 The default browser test uses real RTCPeerConnections and generated video/audio with a simulated HA signaling endpoint. It verifies received video, audio packets in the return direction, controls, state refresh stability, denied/unsupported microphone behavior and cleanup. Registration/entity behavior is checked with HA API stubs. In managed browsers that block WebRTC transport, `EDGE_WEBRTC_SIGNALING_ONLY=1` instead checks real SDP negotiation and injects local synthetic tracks for rendering; it does not verify media transport or returned RTP packets. This release was checked in that restricted mode. A running Home Assistant Core, physical camera speakers and outside-LAN ICE paths are not tested by this fixture.
+
+### Shared NVR live streams and 1–4 cameras (0.10.44)
+
+Update/start Edge and **restart Home Assistant Core**, then refresh the HA frontend. The existing camera entity IDs remain; their default source now uses the same **Edge NVR recording profile**. The integration additionally registers Main, Sub and Talk camera entities, and publishes their actual entity IDs (including user renames) to the card. These extra entities do not open camera connections merely by being registered. The custom card editor and Edge's **Home Assistant** page can select 1, 2, 3 or 4 different cameras.
+
+The default route is `camera → Edge MediaMTX/NVR → Home Assistant WebRTC provider → dashboard`. Native stream workers, still-frame fallback and periodic RTSP status probes also read from MediaMTX. The NVR relay forwards the existing encoded video; it does not downscale it or generate higher resolution than the camera provides. The player shows the actual decoded dimensions. WebRTC still needs a browser-compatible codec; configure an H264 profile if the camera's H265 feed cannot play on your browser.
+
+Each tile offers **NVR** (same profile as recording), **Main** and **Sub** (usually less bandwidth). Only registered profiles are selectable. Multiple viewers of the **same profile** share one upstream MediaMTX camera session. Main and sub are separate camera streams, so using both can require two upstream sessions. Existing Edge preview/prebuffer settings can also keep another profile open. For a single active camera profile overall, use that same profile for recording, Live, Tile and snapshot settings, and avoid the prebuffer `all` scope. This update does not silently change your camera's codec, bitrate or existing per-camera preview preferences.
+
+Example — replace the entity IDs with actual IDs from your installation, or use the generator:
+
+```yaml
+type: custom:edge-live-card
+columns: auto
+cameras:
+  - entity: camera.front_door
+    quality: nvr
+  - entity: camera.garden
+    quality: nvr
+  - entity: camera.garage
+    quality: nvr
+  - entity: camera.driveway
+    quality: nvr
+muted: true
+microphone: true
+```
+
+The previous single-camera `entity: camera.front_door` configuration remains valid; add `quality: nvr`, `main` or `sub` as desired. The visual editor supports 1–4 camera slots with independent quality selection, and `columns: auto`, `1` or `2`. Auto uses two columns on wide cards and one on narrow cards. The **View** selector focuses one selected camera or returns to all. Invisible tiles close their media sessions; visible tiles keep their video elements during ordinary HA state updates. Each tile retains its own sound, volume and fullscreen controls. Only one microphone is captured at a time across the grid.
+
+**Talk audio is an explicit exception to shared NVR viewing.** MediaMTX's RTSP pull path skips camera backchannels. Pressing the microphone therefore temporarily uses the dedicated Talk entity and a direct camera/provider session. The card returns to NVR when talking stops, return audio is rejected, or the connection drops. HTTPS, browser permission and compatible camera/provider two-way audio support remain required. Merely opening the card never requests the microphone.
+
+The add-on discovers its internal hostname through Supervisor's own `/addons/self/info` endpoint and writes credential-free `restream.json` beside `edge.json`. HA reads this file locally, or fetches `/api/home-assistant/streams` for an API-based integration. RTSP port 8556 stays unpublished on the host by default; HA Core uses the add-on's internal network. Standalone/remote deployments must provide a hostname reachable by that HA instance using `EDGE_HA_RTSP_HOST` and the configured RTSP port. Missing restream metadata reports an unavailable NVR entity, rather than silently reconnecting directly to the camera. The card YAML contains entity IDs and display options, never camera passwords or RTSP URLs.
+
+Validation includes 107 unit tests and browser tests for 1–4 camera layouts, focus/suspension, NVR/Main/Sub entity routing, temporary Talk sessions, editor and YAML builder on four screen sizes. The browser uses real SDP negotiation with synthetic local media because managed browser policy blocks WebRTC transport. A separate integration test runs **MediaMTX 1.19.2 twice**, with generated H264 video as an RTSP camera: three concurrent readers plus a parameter probe share one upstream camera reader and preserve 640×360. No physical camera, production HA installation or physical speaker was tested.

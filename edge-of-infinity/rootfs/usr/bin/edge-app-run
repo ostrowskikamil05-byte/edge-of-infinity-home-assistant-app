@@ -435,6 +435,7 @@ rtspTransports: [tcp]
 rtspEncryption: "no"
 rtspAddress: :${MEDIAMTX_RTSP_PORT}
 
+moq: no
 rtmp: no
 
 hls: yes

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.44
+
+- Route the existing Home Assistant camera entity through Edge NVR/MediaMTX using the recording profile. Discover the add-on internal hostname and export credential-free backend restream metadata; keep the host RTSP port unpublished by default. Missing NVR metadata never falls back to a direct camera connection.
+- Add Main/Sub profile entities and a temporary direct Talk entity, preserving existing base unique IDs and publishing actual registered entity IDs for quality switching. Default NVR viewing shares the recorder feed without downscaling.
+- Support 1–4 cameras in Edge Live, per-camera NVR/Main/Sub selection, decoded resolution display, responsive columns, focus-one/all views, suspended hidden players and one active microphone across the grid. Keep single-camera YAML compatible.
+- Extend the visual editor and panel YAML builder to select 1–4 cameras and quality; retain the standard HA card/grid alternative.
+- Return from direct talk to NVR after microphone stop/rejection/disconnection. Guard stale playback promises during stream changes. MediaMTX does not carry camera backchannels; direct talk and separate main/sub profiles can add upstream sessions.
+- Move RTSP status probes and FFmpeg still-frame capture onto the shared proxy. Explicitly disable unused MoQ listeners in both runtime templates.
+- Validate with 107 unit tests, responsive card/builder browser suites and a real MediaMTX test showing 3 readers plus a probe share one upstream RTSP session with unchanged dimensions. Browser WebRTC transport and physical camera speakers remain untested in this environment.
+
 ## 0.10.43
 
 - Bundle and automatically register the Edge Live custom Home Assistant card with a visual editor and authenticated native HA WebRTC signaling. Add a card-type selector and copyable custom-card YAML to the panel.
