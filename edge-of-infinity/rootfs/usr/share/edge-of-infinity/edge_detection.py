@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
 import math
@@ -99,6 +99,19 @@ def classify(description):
     return None
 
 
+def day_bounds(day):
+    """Recorder-local calendar boundaries, including 23/25-hour DST days."""
+    if not isinstance(day, str) or len(day) != 10:
+        raise ValueError('invalid_event_day')
+    start = datetime.strptime(day, '%Y-%m-%d')
+    if start.strftime('%Y-%m-%d') != day:
+        raise ValueError('invalid_event_day')
+    try:
+        return start.timestamp(), (start + timedelta(days=1)).timestamp()
+    except (OverflowError, OSError) as error:
+        raise ValueError('invalid_event_day') from error
+
+
 class EventStore:
     def __init__(self, path):
         self.path = Path(path)
@@ -108,6 +121,7 @@ class EventStore:
             db.execute('PRAGMA journal_mode=WAL')
             db.execute('CREATE TABLE IF NOT EXISTS edge_events (id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, timestamp REAL NOT NULL, data TEXT NOT NULL)')
             db.execute('CREATE INDEX IF NOT EXISTS edge_events_time ON edge_events(timestamp)')
+            db.execute('CREATE INDEX IF NOT EXISTS edge_events_camera_time ON edge_events(camera_id,timestamp)')
         self.path.chmod(0o600)
 
     @contextmanager
@@ -126,19 +140,64 @@ class EventStore:
             return cursor.lastrowid
 
     def recent(self, camera_id=None, limit=200):
+        return self.page(camera_id=camera_id, limit=limit)['events']
+
+    def page(self, camera_id=None, limit=200, day=None, kind=None, before=None):
+        """Bounded keyset pagination stays stable when new events arrive."""
         limit = max(1, min(1000, int(limit)))
+        clauses, parameters = [], []
+        if camera_id is not None:
+            clauses.append('camera_id=?')
+            parameters.append(str(camera_id))
+        if day:
+            start, end = day_bounds(day)
+            clauses.append('timestamp>=? AND timestamp<?')
+            parameters.extend((start, end))
+        if kind:
+            if kind not in KINDS:
+                raise ValueError('invalid_event_kind')
+            clauses.append('kind=?')
+            parameters.append(kind)
+        if before is not None:
+            before = int(before)
+            if not 0 < before <= 9223372036854775807:
+                raise ValueError('invalid_event_cursor')
+            clauses.append('id<?')
+            parameters.append(before)
+        where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
         with self.lock, self.connect() as db:
-            if camera_id is None:
-                rows = db.execute('SELECT id,camera_id,kind,source,timestamp,data FROM edge_events ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
-            else:
-                rows = db.execute('SELECT id,camera_id,kind,source,timestamp,data FROM edge_events WHERE camera_id=? ORDER BY id DESC LIMIT ?', (str(camera_id), limit)).fetchall()
+            rows = db.execute('SELECT id,camera_id,kind,source,timestamp,data FROM edge_events' + where + ' ORDER BY id DESC LIMIT ?', (*parameters, limit + 1)).fetchall()
+        has_more = len(rows) > limit
         result = []
-        for ident, camera, kind, source, stamp, data in rows:
+        for ident, camera, kind, source, stamp, data in rows[:limit]:
             dt = datetime.fromtimestamp(stamp)
             midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-            result.append({'id': ident, 'camera_id': camera, 'kind': kind, 'source': source, 'timestamp': stamp,
-                           'day': dt.strftime('%Y-%m-%d'), 'day_seconds': stamp - midnight, **json.loads(data)})
-        return result
+            result.append({**json.loads(data), 'id': ident, 'camera_id': camera, 'kind': kind, 'source': source, 'timestamp': stamp,
+                           'day': dt.strftime('%Y-%m-%d'), 'day_seconds': stamp - midnight, 'time_label': dt.strftime('%H:%M:%S')})
+        return {'events': result, 'has_more': has_more, 'next_before': result[-1]['id'] if has_more else None}
+
+    def timeline(self, camera_id, day):
+        """Summarize every retained event in five-minute bins, without media I/O."""
+        if not camera_id or not day:
+            raise ValueError('camera_and_day_required')
+        start, end = day_bounds(day)
+        with self.lock, self.connect() as db:
+            rows = db.execute('SELECT CAST((timestamp-?)/300 AS INTEGER),kind,COUNT(*),MIN(timestamp) FROM edge_events WHERE camera_id=? AND timestamp>=? AND timestamp<? GROUP BY 1,2 ORDER BY 1,2',
+                              (start, str(camera_id), start, end)).fetchall()
+        markers = {}
+        for slot, kind, count, stamp in rows:
+            if kind not in KINDS:
+                continue
+            marker = markers.setdefault(slot, {'slot': slot, 'count': 0, 'kinds': [], 'timestamp': stamp})
+            marker['count'] += count
+            marker['kinds'].append(kind)
+            marker['timestamp'] = min(marker['timestamp'], stamp)
+        for marker in markers.values():
+            marker['day_seconds'] = marker['timestamp'] - start
+            marker['time_label'] = datetime.fromtimestamp(marker['timestamp']).strftime('%H:%M:%S')
+        return {'camera_id': str(camera_id), 'day': day, 'day_start_ts': start, 'day_total_seconds': end - start,
+                'midpoint_label': datetime.fromtimestamp((start + end) / 2).strftime('%H:%M'),
+                'count': sum(marker['count'] for marker in markers.values()), 'markers': list(markers.values())}
 
     def prune(self, days):
         with self.lock, self.connect() as db:

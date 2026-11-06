@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.1
+
+- Browse the complete retained event history with server-side camera/type/day filters and stable cursor pagination. Keep the selected history page during detection-status polling; cancel superseded filter requests and bound request timeouts.
+- Show motion/person/vehicle markers on each NVR day, with previous/next navigation and a link to that day’s full event history. Five-minute groups summarize all retained events, including events outside the recent-state window. Event refreshes update metadata without replacing the video; missing footage is reported before seeking.
+- Add a Companion notification YAML builder for person/vehicle events, camera selection, validated notify.mobile_app service, clipboard/manual copying and a configurable cooldown. Users save and enable the generated automation in HA.
+- Handle recorder-local calendar boundaries across 23/25-hour DST days and validate event query dates/cursors. Add history/API/DST tests and responsive browser coverage for deep history, filters, stale responses, notification YAML, markers and actual recording seeks. Run the existing NVR playback regression suite in CI.
+
 ## 0.11.0
 
 - Add native H.265/HEVC RTP depacketization, RFC 6381 Main/Main10 codec metadata, Annex B access units with VPS/SPS/PPS on random-access frames, and browser profile support checks. Fix timestamp initialization on fragmented H264/H265 frames. H265 recording stays in the original codec; live HEVC requires a decoder on the viewing device.

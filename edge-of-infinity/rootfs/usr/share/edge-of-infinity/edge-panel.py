@@ -32,9 +32,9 @@ from edge_detection import DetectionService, settings as detection_settings
 DETECTION_SERVICE = None
 
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.11.1"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "hevc-detection-v11"
+UI_BUILD = "event-history-v111"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -5346,6 +5346,17 @@ INDEX_HTML = r"""<!doctype html>
       }
       .recording-player-wrap:fullscreen .nvr-playback-controls, .recording-player-wrap.edge-soft-fullscreen .nvr-playback-controls { width: 100%; }
       .recording-day-seek { width: 100%; accent-color: #22c55e; cursor: pointer; }
+      .event-history-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+      .event-history-row button { min-height: 44px; }
+      #event-pagination { justify-content: space-between; }
+      #event-list .field-section { margin-top: 10px; overflow-wrap: anywhere; }
+      #event-notification-yaml { width: 100%; min-height: 250px; font: 12px/1.5 ui-monospace, monospace; white-space: pre; padding: 12px; color: var(--text); background: #0c1419; border: 1px solid var(--line); border-radius: 8px; }
+      .recording-events { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+      .recording-event-track { position: relative; height: 44px; margin: 8px 0; border-bottom: 1px solid var(--line); background: linear-gradient(90deg, transparent 24.8%, var(--line) 25%, transparent 25.2%, transparent 49.8%, var(--line) 50%, transparent 50.2%, transparent 74.8%, var(--line) 75%, transparent 75.2%); }
+      .recording-event-marker { display: block; position: absolute; bottom: 0; height: 32px; min-width: 0; padding: 0; border: 0; border-radius: 2px; background: #22c55e; }
+      .recording-event-marker[data-kind="person"] { background: #60a5fa; }
+      .recording-event-marker[data-kind="vehicle"] { background: #fbbf24; }
+      .recording-events select { width: 100%; min-width: 0; min-height: 44px; }
       .recording-timeline {
         display: grid;
         gap: 6px;
@@ -5795,7 +5806,14 @@ INDEX_HTML = r"""<!doctype html>
 
         <section class="page" data-page="events" hidden>
           <header><div><p class="eyebrow">DETECTION</p><h1>Zdarzenia / Events</h1><p>Ruch, osoby i pojazdy z kamery oraz lokalnej analizy.</p></div><div class="toolbar"><button id="refresh-events" type="button">Odśwież / Refresh</button><button data-page-target="edge-settings">Ustawienia detekcji</button></div></header>
-          <section class="panel"><p id="detection-runtime" role="status"></p><div id="detection-cameras" class="grid"></div><div class="form-grid"><label>Kamera<select id="event-camera-filter"><option value="">Wszystkie / All</option></select></label><label>Typ<select id="event-kind-filter"><option value="">Wszystkie / All</option><option value="motion">Ruch / Motion</option><option value="person">Osoba / Person</option><option value="vehicle">Pojazd / Vehicle</option></select></label></div><div id="event-list" aria-live="polite"></div></section>
+          <section class="panel">
+            <p id="detection-runtime" role="status"></p><div id="detection-cameras" class="grid"></div>
+            <div class="form-grid"><label>Kamera<select id="event-camera-filter"><option value="">Wszystkie / All</option></select></label><label>Typ<select id="event-kind-filter"><option value="">Wszystkie / All</option><option value="motion">Ruch / Motion</option><option value="person">Osoba / Person</option><option value="vehicle">Pojazd / Vehicle</option></select></label><label>Dzień rejestratora<input type="date" id="event-day-filter"></label></div>
+            <div class="event-history-row"><button type="button" id="event-clear-day">Wszystkie dni / All days</button><span class="field-help">Historia pozostaje na wybranej stronie. Przycisk Odśwież pobiera najnowsze zdarzenia.</span></div>
+            <p id="event-history-status" role="status"></p><div id="event-list"></div>
+            <div class="event-history-row" id="event-pagination"><button type="button" id="events-newer" disabled>Nowsze / Newer</button><span id="event-page-label"></span><button type="button" id="events-older" disabled>Starsze / Older</button></div>
+            <details class="field-section" id="event-notifications"><summary>Powiadomienia na telefon / Home Assistant</summary><p class="field-help">Wybierz kamerę i usługę powiadomień aplikacji Companion. Skopiuj YAML do nowej automatyzacji HA i zapisz ją tam. Edge przygotowuje kod; automatyzację uruchamiasz w HA.</p><div class="form-grid"><label>Kamera<select id="event-notify-camera"></select></label><label>Usługa powiadomień<input id="event-notify-service" placeholder="notify.mobile_app_twoj_telefon" autocomplete="off"></label><label>Przerwa między powiadomieniami (s)<input id="event-notify-cooldown" type="number" min="0" max="3600" value="60"></label></div><textarea id="event-notification-yaml" readonly spellcheck="false" aria-label="YAML automatyzacji powiadomień"></textarea><div class="event-history-row"><button type="button" id="event-copy-notification" disabled>Kopiuj YAML</button><span id="event-notification-status" role="status"></span></div></details>
+          </section>
         </section>
 
         <section class="page" data-page="camera-settings" hidden>
@@ -7628,6 +7646,7 @@ INDEX_HTML = r"""<!doctype html>
               ${daySelector}
               ${player}
               ${timelineControl}
+              ${currentDay ? `<section class="recording-events" data-recording-events="${index}"><div class="event-history-row"><b>Zdarzenia dnia / Day events</b><button type="button" data-recording-events-refresh="${index}">Odśwież</button></div><div data-recording-event-content><p class="field-help">Ładowanie zdarzeń…</p></div><p class="nvr-playback-message" data-recording-event-message role="status"></p></section>` : ''}
               ${diagnostics}
               <div class="actions">
                 <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}" ${!isRecording && !canRecord ? 'disabled' : ''}>${isRecording ? 'Stop' : 'Record'}</button>
@@ -7954,6 +7973,7 @@ INDEX_HTML = r"""<!doctype html>
         // Initialize only new players; existing nodes keep their source, position and pause state.
         applyRecordingSeek();
         scheduleRecordingThumbnailHydration();
+        refreshRecordingEvents();
       }
 
       function renderPresetSlots(cameras) {
@@ -8717,56 +8737,242 @@ INDEX_HTML = r"""<!doctype html>
         renderConfig();
       }
 
-      let detectionData = {cameras: [], recent_events: []};
-      let detectionTimer = null;
+      const eventKindNames = {motion: 'Ruch', person: 'Osoba', vehicle: 'Pojazd'};
+      let detectionData = {cameras: []}, detectionTimer = null, detectionLoading = false;
+      const eventHistory = {events: [], before: null, stack: [], next: null, serial: 0, controller: null, key: ''};
+      const recordingEventCache = new Map();
+      const recordingEventQueue = [];
+      let recordingEventRequests = 0;
+
+      async function eventJson(path, signal) {
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        if (signal?.aborted) abort();
+        else signal?.addEventListener('abort', abort, {once:true});
+        const timer = setTimeout(abort, 10000);
+        try {
+          const response = await fetch(panelPath(path), {cache:'no-store', signal:controller.signal});
+          if (!response.ok) throw new Error('Nie udało się odczytać zdarzeń. Spróbuj ponownie.');
+          return await response.json();
+        } finally {
+          clearTimeout(timer);signal?.removeEventListener('abort', abort);
+        }
+      }
+      function populateEventCameras() {
+        for (const id of ['event-camera-filter', 'event-notify-camera']) {
+          const select = document.getElementById(id), selected = select.value;
+          const options = (id === 'event-camera-filter' ? '<option value="">Wszystkie / All</option>' : '') + (config.cameras || []).map(camera => `<option value="${escapeHtml(camera.id)}">${escapeHtml(camera.name || camera.id)}</option>`).join('');
+          if (select.innerHTML !== options) {
+            select.innerHTML = options;
+            if (Array.from(select.options).some(option => option.value === selected)) select.value = selected;
+          }
+        }
+        updateNotificationYaml();
+      }
       async function loadDetection() {
-        const response = await fetch(panelPath('api/detection'), {cache:'no-store'});
-        if (!response.ok) throw new Error('Could not read detection status.');
-        detectionData = await response.json();
-        const cameras = detectionData.cameras || [];
-        const select = document.getElementById('event-camera-filter');
-        const selected = select.value;
-        select.innerHTML = '<option value="">Wszystkie / All</option>' + cameras.map(camera => `<option value="${escapeHtml(camera.id)}">${escapeHtml(camera.name)}</option>`).join('');
-        select.value = selected;
-        document.getElementById('detection-runtime').textContent = `${detectionData.model || 'Detection'} · ${detectionData.backend || 'CPU'} · limit ${detectionData.max_fps || 1} FPS total · analysis ${detectionData.analysis_ms || 0} ms. Model: ${detectionData.model_installed ? 'ready' : 'not installed / starting'}`;
-        document.getElementById('detection-cameras').innerHTML = cameras.map(camera => `<article class="camera"><div class="body"><b>${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
-        renderDetectionEvents();
+        if (detectionLoading) return;
+        detectionLoading = true;
+        try {
+          detectionData = await eventJson('api/detection');
+          document.getElementById('detection-runtime').textContent = `${detectionData.model || 'Detection'} · ${detectionData.backend || 'CPU'} · limit ${detectionData.max_fps || 1} FPS total · analysis ${detectionData.analysis_ms || 0} ms. Model: ${detectionData.model_installed ? 'ready' : 'not installed / starting'}`;
+          document.getElementById('detection-cameras').innerHTML = (detectionData.cameras || []).map(camera => `<article class="camera"><div class="body"><b>${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(eventKindNames[kind] || kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
+        } finally {detectionLoading = false;}
+      }
+      function eventFilters() {
+        const query = new URLSearchParams({limit:'100'});
+        for (const [field, id] of [['camera','event-camera-filter'], ['kind','event-kind-filter'], ['day','event-day-filter']]) {
+          const value = document.getElementById(id).value;
+          if (value) query.set(field, value);
+        }
+        return query;
+      }
+      function updateEventPagination(loading = false) {
+        document.getElementById('events-older').disabled = loading || !eventHistory.next;
+        document.getElementById('events-newer').disabled = loading || !eventHistory.stack.length;
+        document.getElementById('event-page-label').textContent = `Strona ${eventHistory.stack.length + 1} · ${eventHistory.events.length} zdarzeń`;
+      }
+      async function loadEventHistory({before=null, stack=[]} = {}) {
+        eventHistory.controller?.abort();
+        const controller = new AbortController(), serial = ++eventHistory.serial;
+        eventHistory.controller = controller;
+        const query = eventFilters(), key = query.toString();
+        if (key !== eventHistory.key) {
+          eventHistory.events = [];eventHistory.stack = [];eventHistory.next = null;
+          document.getElementById('event-list').replaceChildren();
+        }
+        if (before) query.set('before', String(before));
+        updateEventPagination(true);
+        document.getElementById('event-list').setAttribute('aria-busy', 'true');
+        document.getElementById('event-history-status').textContent = 'Ładowanie historii…';
+        try {
+          const data = await eventJson(`api/events?${query}`, controller.signal);
+          if (serial !== eventHistory.serial) return;
+          Object.assign(eventHistory, {events:data.events || [], before, stack, next:data.next_before || null, key});
+          renderDetectionEvents();
+          document.getElementById('event-history-status').textContent = 'Historia gotowa. Daty i godziny według strefy rejestratora.';
+        } catch (error) {
+          if (serial === eventHistory.serial) document.getElementById('event-history-status').textContent = controller.signal.aborted ? 'Odczyt przerwany.' : error.name === 'AbortError' ? 'Odczyt trwał zbyt długo. Użyj Odśwież.' : error.message;
+        } finally {
+          if (serial === eventHistory.serial) {updateEventPagination();document.getElementById('event-list').setAttribute('aria-busy', 'false');}
+        }
       }
       function renderDetectionEvents() {
-        const cameraId = document.getElementById('event-camera-filter').value;
-        const kind = document.getElementById('event-kind-filter').value;
-        const cameras = detectionData.cameras || [];
-        const rows = (detectionData.recent_events || []).filter(item => (!cameraId || item.camera_id === cameraId) && (!kind || item.kind === kind));
-        document.getElementById('event-list').innerHTML = rows.length ? rows.map(item => {
+        const cameras = config.cameras || [];
+        document.getElementById('event-list').innerHTML = eventHistory.events.length ? eventHistory.events.map(item => {
           const camera = cameras.find(camera => camera.id === item.camera_id);
-          return `<article class="field-section"><div class="row"><b>${escapeHtml(camera?.name || item.camera_id)} · ${escapeHtml(item.kind)}</b><span>${escapeHtml(new Date(item.timestamp * 1000).toLocaleString())}</span></div><p>${item.source === 'local' ? 'Local AI' : 'Camera / ONVIF'}${item.score ? ` · ${Math.round(item.score * 100)}%` : ''}</p><button type="button" data-event-recording="${item.id}" ${camera ? '' : 'disabled'}>Otwórz nagranie / Open recording</button></article>`;
-        }).join('') : '<p class="notice">Brak zdarzeń. Włącz moduł w Settings → Detection i wybierz kamery. Typy zdarzeń ONVIF zależą od kamery i jej konfiguracji analityki.</p>';
+          return `<article class="field-section"><div class="event-history-row"><b>${escapeHtml(camera?.name || item.camera_id)} · ${escapeHtml(eventKindNames[item.kind] || item.kind)} <small>(${escapeHtml(item.kind)})</small></b><span>${escapeHtml(item.day)} ${escapeHtml(item.time_label || new Date(item.timestamp * 1000).toLocaleTimeString())}</span></div><p>${item.source === 'local' ? 'Local AI' : 'Camera / ONVIF'}${item.score ? ` · ${Math.round(item.score * 100)}%` : ''}</p><button type="button" data-event-recording="${Number(item.id)}" ${camera ? '' : 'disabled'}>Otwórz nagranie / Open recording</button></article>`;
+        }).join('') : '<p class="notice">Brak zdarzeń dla wybranych filtrów. Sprawdź dzień, kamerę oraz ustawienia detekcji.</p>';
       }
-      document.getElementById('refresh-events').addEventListener('click', () => loadDetection().catch(error => {document.getElementById('detection-runtime').textContent = error.message;}));
-      for (const id of ['event-camera-filter', 'event-kind-filter']) document.getElementById(id).addEventListener('change', renderDetectionEvents);
+      function enterEventsPage() {
+        populateEventCameras();
+        const refresh = () => loadDetection().catch(error => {document.getElementById('detection-runtime').textContent = error.message;});
+        refresh();
+        if (!eventHistory.key || eventHistory.key !== eventFilters().toString()) loadEventHistory();
+        detectionTimer = setInterval(refresh, 5000);
+      }
+      document.getElementById('refresh-events').addEventListener('click', () => {
+        loadDetection().catch(error => {document.getElementById('detection-runtime').textContent = error.message;});
+        loadEventHistory();
+      });
+      for (const id of ['event-camera-filter', 'event-kind-filter', 'event-day-filter']) document.getElementById(id).addEventListener('change', () => loadEventHistory());
+      document.getElementById('event-clear-day').addEventListener('click', () => {document.getElementById('event-day-filter').value = '';loadEventHistory();});
+      document.getElementById('events-older').addEventListener('click', () => {
+        if (eventHistory.next) loadEventHistory({before:eventHistory.next, stack:[...eventHistory.stack,eventHistory.before]});
+      });
+      document.getElementById('events-newer').addEventListener('click', () => {
+        if (eventHistory.stack.length) loadEventHistory({before:eventHistory.stack.at(-1), stack:eventHistory.stack.slice(0,-1)});
+      });
+      let openingEventRecording = false;
       document.getElementById('event-list').addEventListener('click', async event => {
         const button = event.target.closest('[data-event-recording]');
-        if (!button) return;
-        const item = (detectionData.recent_events || []).find(row => String(row.id) === button.dataset.eventRecording);
-        const camera = (detectionData.cameras || []).find(row => row.id === item?.camera_id);
-        if (!item || !camera) return;
-        const index = camera.index;
+        if (!button || openingEventRecording) return;
+        const item = eventHistory.events.find(row => String(row.id) === button.dataset.eventRecording);
+        const index = (config.cameras || []).findIndex(camera => camera.id === item?.camera_id);
+        if (!item || index < 0) return;
+        openingEventRecording = true;button.disabled = true;
         selectedRecordingDay[index] = item.day;
         delete selectedRecording[index];delete selectedRecordingSeek[index];delete selectedRecordingTimeline[index];delete recordingStreamStartOffset[index];
         showPage('nvr');
         try {
           const waitDeadline = Date.now() + 12000;
           while (nvrLoading && Date.now() < waitDeadline) await new Promise(resolve => setTimeout(resolve, 50));
-          if (nvrLoading) throw new Error('Recording status is busy; try the event again.');
+          if (nvrLoading) throw new Error('Odczyt nagrań trwa. Spróbuj ponownie.');
           await loadRecordingStatus({forceRender:true,reason:'detection_event'});
-          const target = recordingTargetForOffset(index, item.day_seconds);
-          if (!target || recordingStatus[index]?.selected_day !== item.day || Math.abs(target.requested - item.day_seconds) > 2) throw new Error('No recording at the event time. Check whether recording was enabled.');
-          selectRecordingAtOffset(index, item.day_seconds);
-          recordingAutoplayAfterRender[index] = true;
+          if (!seekRecordingEvent(index, item)) throw new Error('Brak nagrania w chwili zdarzenia. Sprawdź, czy nagrywanie było włączone.');
         } catch (error) {
-          document.getElementById('event-list').textContent = error.message;
-          showPage('events');
+          showPage('events');document.getElementById('event-history-status').textContent = error.message;
+        } finally {openingEventRecording = false;button.disabled = false;}
+      });
+
+      function seekRecordingEvent(index, item) {
+        const target = recordingTargetForOffset(index, item.day_seconds);
+        if (!target || recordingStatus[index]?.selected_day !== item.day || Math.abs(target.requested - item.day_seconds) > 2) return false;
+        selectRecordingAtOffset(index, item.day_seconds);
+        return true;
+      }
+      function renderRecordingEvents(section, data) {
+        const content = section.querySelector('[data-recording-event-content]');
+        const signature = JSON.stringify(data);
+        if (content.dataset.signature === signature || (section.contains(document.activeElement) && document.activeElement.matches('select'))) return;
+        const index = section.dataset.recordingEvents;
+        const total = Math.max(1, Number(data.day_total_seconds || 86400));
+        content.innerHTML = `<p>${Number(data.count || 0)} zdarzeń · <span style="color:#22c55e">Ruch</span> · <span style="color:#60a5fa">Osoba</span> · <span style="color:#fbbf24">Pojazd</span></p><div class="recording-event-track" role="img" aria-label="Zdarzenia wybranego dnia">${(data.markers || []).map(marker => {
+          const kind = marker.kinds.includes('person') ? 'person' : marker.kinds.includes('vehicle') ? 'vehicle' : 'motion';
+          const label = `${marker.time_label} · ${marker.kinds.map(kind => eventKindNames[kind] || kind).join(', ')} · ${marker.count} zdarzeń`;
+          return `<span class="recording-event-marker" data-kind="${kind}" data-recording-event-slot="${Number(marker.slot)}" style="left:${Number(marker.slot) * 300 / total * 100}%;width:${Math.min(300,total - Number(marker.slot) * 300) / total * 100}%" title="${escapeHtml(label)}"></span>`;
+        }).join('')}</div><div class="timeline-row"><span>00:00</span><span>${escapeHtml(data.midpoint_label || '12:00')}</span><span>24:00</span></div><label>Godzina zdarzeń<select data-recording-event-select="${index}"><option value="">Wybierz znacznik…</option>${(data.markers || []).map(marker => `<option value="${Number(marker.slot)}">${escapeHtml(marker.time_label)} · ${escapeHtml(marker.kinds.map(kind => eventKindNames[kind] || kind).join(", "))} · ${Number(marker.count)}</option>`).join('')}</select></label><div class="event-history-row"><button type="button" data-recording-event-step="previous" data-record-index="${index}" ${data.markers?.length ? '' : 'disabled'}>Poprzednie zdarzenia</button><button type="button" data-recording-event-step="next" data-record-index="${index}" ${data.markers?.length ? '' : 'disabled'}>Następne zdarzenia</button><button type="button" data-recording-event-history="${index}">Pełna historia dnia</button></div><p class="field-help">Znaczniki grupują 5 minut. Wybierz godzinę z listy lub przyciskami, aby otworzyć pierwsze zdarzenie. Historia pokazuje każde osobno.</p>`;
+        content.dataset.signature = signature;
+      }
+      function pumpRecordingEvents() {
+        while (recordingEventRequests < 2 && recordingEventQueue.length) {
+          const job = recordingEventQueue.shift();
+          if (activePage !== 'nvr') {job.entry.pending = false;continue;}
+          recordingEventRequests++;
+          eventJson(`api/events/timeline?${new URLSearchParams({camera:job.camera,day:job.day})}`).then(data => {
+            job.entry.data = data;job.entry.at = Date.now();
+            nvrGrid.querySelectorAll('[data-recording-events]').forEach(section => {if (section.dataset.eventKey === job.key) renderRecordingEvents(section,data);});
+          }).catch(error => {
+            job.entry.at = Date.now();
+            nvrGrid.querySelectorAll('[data-recording-events]').forEach(section => {if (section.dataset.eventKey === job.key) section.querySelector('[data-recording-event-message]').textContent = error.name === 'AbortError' ? 'Odczyt zdarzeń trwał zbyt długo. Użyj Odśwież.' : error.message;});
+          }).finally(() => {job.entry.pending = false;recordingEventRequests--;pumpRecordingEvents();});
         }
+      }
+      function refreshRecordingEvents(forceIndex = null) {
+        if (activePage !== 'nvr') return;
+        nvrGrid.querySelectorAll('[data-recording-events]').forEach(section => {
+          const index = section.dataset.recordingEvents, card = section.closest('[data-nvr-day]');
+          const camera = config.cameras?.[Number(index)]?.id, day = card?.dataset.nvrDay;
+          if (!camera || !day) return;
+          const key = JSON.stringify([camera,day]);section.dataset.eventKey = key;
+          let entry = recordingEventCache.get(key);
+          if (!entry) {entry = {at:0,pending:false};recordingEventCache.set(key,entry);}
+          if (entry.data) renderRecordingEvents(section,entry.data);
+          if (entry.pending || (String(forceIndex) !== index && Date.now() - entry.at < 15000)) return;
+          entry.pending = true;section.querySelector('[data-recording-event-message]').textContent = '';
+          recordingEventQueue.push({key,camera,day,entry});
+        });
+        if (recordingEventCache.size > 30) for (const [key,entry] of recordingEventCache) {
+          if (!entry.pending && !Array.from(nvrGrid.querySelectorAll('[data-recording-events]')).some(section => section.dataset.eventKey === key)) recordingEventCache.delete(key);
+          if (recordingEventCache.size <= 30) break;
+        }
+        pumpRecordingEvents();
+      }
+      function handleRecordingEventClick(event) {
+        const section = event.target.closest('[data-recording-events]');
+        if (!section) return false;
+        const index = section.dataset.recordingEvents, data = recordingEventCache.get(section.dataset.eventKey)?.data;
+        if (event.target.closest('[data-recording-events-refresh]')) {refreshRecordingEvents(index);return true;}
+        if (event.target.closest('[data-recording-event-history]')) {
+          populateEventCameras();document.getElementById('event-camera-filter').value = config.cameras[index].id;
+          document.getElementById('event-day-filter').value = section.closest('[data-nvr-day]').dataset.nvrDay;
+          document.getElementById('event-kind-filter').value = '';showPage('events');return true;
+        }
+        const target = event.target.closest('[data-recording-event-step]');
+        if (!target || !data) return false;
+        const current = Number(selectedRecordingTimeline[index] || 0);
+        const marker = target.dataset.recordingEventStep === 'next' ? data.markers.find(item => item.day_seconds > current + .5) : [...data.markers].reverse().find(item => item.day_seconds < current - .5);
+        showRecordingMarker(section,marker);
+        return true;
+      }
+
+      function showRecordingMarker(section, marker) {
+        const index = section.dataset.recordingEvents, data = recordingEventCache.get(section.dataset.eventKey)?.data;
+        if (!data) return;
+        const message = section.querySelector('[data-recording-event-message]');
+        if (!marker) message.textContent = 'Brak kolejnych zdarzeń w tym kierunku.';
+        else if (!seekRecordingEvent(index,{...marker,day:data.day})) message.textContent = `Brak nagrania o ${marker.time_label}. Historia zdarzeń jest niezależna od zapisu wideo.`;
+        else message.textContent = `${marker.time_label} · ${marker.count} zdarzeń w tym przedziale.`;
+      }
+
+      function updateNotificationYaml() {
+        const camera = (config.cameras || []).find(camera => camera.id === document.getElementById('event-notify-camera').value);
+        const service = document.getElementById('event-notify-service').value.trim();
+        const cooldown = Number(document.getElementById('event-notify-cooldown').value);
+        const valid = camera && /^notify\.mobile_app_[a-z0-9_]+$/.test(service) && Number.isInteger(cooldown) && cooldown >= 0 && cooldown <= 3600;
+        document.getElementById('event-copy-notification').disabled = !valid;
+        document.getElementById('event-notification-status').textContent = valid ? 'Gotowe do wklejenia w HA → Automatyzacje → Edytuj w YAML.' : 'Wybierz kamerę i wpisz usługę notify.mobile_app_… z Home Assistanta.';
+        const lines = valid ? [
+          `alias: ${JSON.stringify('Edge: osoba lub pojazd — ' + (camera.name || camera.id))}`,
+          'description: "Powiadomienia ze zdarzeń Edge of Infinity"',
+          'triggers:', '  - trigger: event', '    event_type: edge_event', '    event_data:', `      camera_id: ${JSON.stringify(camera.id)}`,
+          'conditions:', '  - condition: template', `    value_template: "{{ trigger.event.data.kind in ['person', 'vehicle'] }}"`,
+          'actions:', `  - action: ${service}`, '    data:', '      title: "Edge of Infinity"', '      message: >-',
+          "        {{ 'Osoba' if trigger.event.data.kind == 'person' else 'Pojazd' }}",
+          '        · {{ trigger.event.data.camera_id }}',
+          "        · {{ as_local(as_datetime(trigger.event.data.timestamp)).strftime('%d.%m.%Y %H:%M:%S') }}",
+          '  - delay:', `      seconds: ${cooldown}`, 'mode: single', 'max_exceeded: silent', ''
+        ] : [];
+        document.getElementById('event-notification-yaml').value = lines.join('\n');
+      }
+      for (const id of ['event-notify-camera','event-notify-service','event-notify-cooldown']) document.getElementById(id).addEventListener('input', updateNotificationYaml);
+      document.getElementById('event-copy-notification').addEventListener('click', async () => {
+        const area = document.getElementById('event-notification-yaml');area.focus();area.select();
+        let copied = false;
+        try {
+          if (navigator.clipboard?.writeText) {await navigator.clipboard.writeText(area.value);copied = true;}
+          else copied = document.execCommand('copy');
+        } catch (_) {}
+        document.getElementById('event-notification-status').textContent = copied ? 'YAML skopiowany. Wklej i zapisz automatyzację w HA.' : 'Kod zaznaczony. Skopiuj go ręcznie i wklej w automatyzacji HA.';
       });
 
       function showPage(pageName) {
@@ -8779,10 +8985,8 @@ INDEX_HTML = r"""<!doctype html>
         });
         debugEvent('ui_page_change', { page: pageName });
         if (detectionTimer) {clearInterval(detectionTimer);detectionTimer=null;}
-        if (pageName === 'events') {
-          const refresh = () => loadDetection().catch(error => {document.getElementById('detection-runtime').textContent=error.message;});
-          refresh();detectionTimer=setInterval(refresh,5000);
-        }
+        if (pageName === 'events') enterEventsPage();
+        if (pageName === 'nvr') refreshRecordingEvents();
         if (pageName === 'ha-dashboard') loadDashboardEntities();
         if (pageName === 'home') loadCameras().catch((error) => debugEvent('ui_cameras_refresh_error', { message: error.message }));
         if (pageName === 'logs') {
@@ -8807,7 +9011,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         if (activePage !== 'nvr') return;
         nvrTimer = window.setInterval(() => {
-          loadRecordingStatus({ reason: 'timer' }).catch((error) => {
+          loadRecordingStatus({ reason: 'timer' }).then(() => refreshRecordingEvents()).catch((error) => {
             debugEvent('ui_recording_status_error', { message: error.message });
           });
         }, NVR_STATUS_REFRESH_MS);
@@ -9020,6 +9224,13 @@ INDEX_HTML = r"""<!doctype html>
         if (label) label.textContent = recordingTimelineLabel(index, Number(slider.value), Number(slider.max) + 1);
       });
       nvrGrid.addEventListener('change', (event) => {
+        const eventSelect = event.target.closest('[data-recording-event-select]');
+        if (eventSelect) {
+          const section = eventSelect.closest('[data-recording-events]');
+          const data = recordingEventCache.get(section.dataset.eventKey)?.data;
+          if (eventSelect.value) showRecordingMarker(section,data?.markers.find(marker => String(marker.slot) === eventSelect.value));
+          return;
+        }
         const playback = event.target.closest('[data-recording-playback-seek]');
         if (playback) { seekRecordingPlayback(playback.dataset.recordingPlaybackSeek, Number(playback.value)); return; }
         const speed = event.target.closest('[data-recording-speed]');
@@ -9033,6 +9244,7 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       nvrGrid.addEventListener('click', async (event) => {
+        if (handleRecordingEventClick(event)) return;
         const toggle = event.target.closest('[data-recording-toggle]');
         if (toggle) {
           const video = nvrGrid.querySelector(`video[data-recording-player="${toggle.dataset.recordingToggle}"]`);
@@ -9416,8 +9628,20 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/events":
             try:
                 query = parse_qs(parsed.query)
-                events = DETECTION_SERVICE.store.recent((query.get("camera") or [None])[0], int((query.get("limit") or [200])[0])) if DETECTION_SERVICE else []
-                self.send_json({"events": events})
+                result = DETECTION_SERVICE.store.page(camera_id=(query.get("camera") or [None])[0], limit=int((query.get("limit") or [200])[0]),
+                    day=(query.get("day") or [None])[0], kind=(query.get("kind") or [None])[0], before=(query.get("before") or [None])[0]) if DETECTION_SERVICE else {"events": [], "has_more": False, "next_before": None}
+                self.send_json(result)
+            except ValueError:
+                self.send_json({"error": "invalid_event_query"}, HTTPStatus.BAD_REQUEST)
+            return
+        if path == "/api/events/timeline":
+            try:
+                query = parse_qs(parsed.query)
+                camera, day = (query.get("camera") or [""])[0], (query.get("day") or [""])[0]
+                if not DETECTION_SERVICE:
+                    self.send_json({"error": "detection_starting"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self.send_json(DETECTION_SERVICE.store.timeline(camera, day))
             except ValueError:
                 self.send_json({"error": "invalid_event_query"}, HTTPStatus.BAD_REQUEST)
             return

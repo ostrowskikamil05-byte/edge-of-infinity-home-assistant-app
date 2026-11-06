@@ -179,3 +179,11 @@ and one upstream. The browser suite validates HEVC frames when its decoder is
 available; otherwise it explicitly checks the permanent HEVC-unavailable message.
 Report which HEVC browser path ran. Physical speaker/camera firmware and deployed
 HA/ONVIF devices are not covered by these fixtures.
+
+The detection UI fixture seeds 212 events, including an old person event outside
+the recent 200-event mirror. `detection_ui.cjs` verifies complete history paging,
+date/type filters, preservation during metadata polling, cancelled/stale filter
+and timeline responses, Companion notification YAML/clipboard, event markers,
+missing-footage handling and actual MP4 playback seeks at four screen widths.
+`nvr_playback.cjs` also runs against this fixture in CI to protect clip transitions,
+paused playback, growing days, thumbnails and fullscreen controls.

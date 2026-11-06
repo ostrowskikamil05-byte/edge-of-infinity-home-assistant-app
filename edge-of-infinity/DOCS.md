@@ -1,5 +1,45 @@
 # Edge of Infinity App Documentation
 
+## 0.11.1: event history, recording markers and phone notifications
+
+**Events** now browses the complete retained SQLite history, up to its existing
+20,000-event/retention limit. Select a camera, event type and recorder-local date;
+leave the date blank for all days. **Older/Newer** pages contain up to 100 events.
+Detection-status polling preserves your selected page. **Refresh** returns to the
+newest matching events. Camera/type/day filtering happens in the database, so an
+older person event remains searchable even after hundreds of newer motion events.
+
+Each **Recordings** day has a separate event track: green motion, blue person,
+yellow vehicle. A marker groups five minutes. Select its time from the dropdown to open
+the first event in that interval; this also works on narrow touchscreens. **Previous/Next events** steps through groups; **Full day history**
+opens the individual events filtered to that camera and date. Mixed groups use
+person/vehicle color priority and list all contained types in their tooltip.
+A missing recording displays a message and keeps the current playback position.
+Metadata refreshes preserve the existing player and pause state. The event
+track refreshes at most every 15 seconds while NVR is open, with at most two
+timeline metadata requests in flight; it opens no camera media sessions. Day boundaries
+use the recorder's timezone, including daylight-saving changes.
+
+In **Events → Phone notifications / Home Assistant**, select a camera, enter the
+Companion app service (for example `notify.mobile_app_your_phone`) and choose a
+cooldown. Copy the generated YAML into a new HA automation's YAML editor, save
+and enable it in Home Assistant. Find the service name under **Developer tools →
+Actions** after registering the phone in the HA Companion app. The automation
+reacts to person/vehicle `edge_event` messages from camera ONVIF or local AI.
+It sends one notification and waits for the configured cooldown; other matching
+events for that camera during the wait are ignored. Edge only generates the
+code and does not create an automation or send a test notification itself.
+
+The compatible history endpoint accepts
+`GET /api/events?camera=ID&kind=person&day=2026-07-27&limit=100&before=EVENT_ID`.
+It returns `events`, `has_more` and `next_before`; pass the latter as `before`
+for the next older page. Omit filters for all events. The response is capped at
+1,000 rows. Invalid kinds/dates/cursors return HTTP 400. Timeline metadata is
+`GET /api/events/timeline?camera=ID&day=2026-07-27`, with all event counts grouped
+into five-minute intervals and timestamps of their first events. Neither API
+adds media decoding or public ports. Existing retention, recordings, detection
+settings and HA entity IDs are preserved.
+
 ## 0.11: native HEVC, camera events and local detection
 
 After updating the app, restart Home Assistant Core to load the new integration
