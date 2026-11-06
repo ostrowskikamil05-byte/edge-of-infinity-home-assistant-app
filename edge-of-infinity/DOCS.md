@@ -342,3 +342,10 @@ install_custom_component: true
 ```
 
 After the add-on updates this folder, restart Home Assistant Core so the integration reloads.
+
+
+### Automatic recording retention (0.10.38)
+
+Recordings are checked at panel startup and every hour, without opening the UI or restarting recording. The default recordings directory is `/media/edge-of-infinity/recordings`. MP4 segments older than 14 days (by last modification time) are removed, including subdirectories of disabled or removed cameras. Files exactly 14 days old remain until a later check.
+
+`nvr.retention_days` takes precedence over `storage.retention_days`; the default is 14 days. Changes are read at the next hourly check. Only FFmpeg/MediaMTX recording filenames are eligible; unrelated media and symlinks are skipped. Retention results and errors appear as `recording_retention_done` / `recording_retention_error` in the debug log.

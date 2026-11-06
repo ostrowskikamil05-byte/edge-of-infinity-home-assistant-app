@@ -70,11 +70,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.10.37")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.37")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.37")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.37")
-        self.assertIn("v0.10.37", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.10.38")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.10.38")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.10.38")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.10.38")
+        self.assertIn("v0.10.38", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -1618,3 +1618,4 @@ class EdgePanelConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

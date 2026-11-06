@@ -2,7 +2,7 @@ FROM bluenviron/mediamtx:1.19.2 AS mediamtx
 
 FROM ghcr.io/home-assistant/base:latest
 
-ARG BUILD_VERSION=0.10.37
+ARG BUILD_VERSION=0.10.38
 ARG BUILD_ARCH=amd64
 
 LABEL \
@@ -17,3 +17,4 @@ RUN apk add --no-cache curl ffmpeg jq python3 py3-pip janus-gateway && \
     chmod a+x /usr/bin/edge-app-run /usr/local/bin/mediamtx
 
 CMD [ "/usr/bin/edge-app-run" ]
+

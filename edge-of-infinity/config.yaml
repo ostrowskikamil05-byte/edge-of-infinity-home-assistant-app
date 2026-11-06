@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.10.37"
+version: "0.10.38"
 slug: edge_of_infinity
 description: Private low-latency live NVR core for Hikvision and ONVIF cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -188,3 +188,4 @@ schema:
 backup: hot
 backup_exclude:
   - /media/edge-of-infinity/recordings
+

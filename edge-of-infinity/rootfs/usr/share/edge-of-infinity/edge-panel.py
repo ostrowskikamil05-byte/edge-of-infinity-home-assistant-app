@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-APP_VERSION = "0.10.37"
+APP_VERSION = "0.10.38"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
 UI_BUILD = "nvr-continuous-short-segments-v1"
 MAX_REQUEST_BODY_BYTES = 2_000_000
@@ -57,6 +57,8 @@ RECORDING_CACHE_MIN_TIMEOUT_SECONDS = 1800
 RECORDING_CACHE_MAX_TIMEOUT_SECONDS = 21600
 ACTIVE_DAY_CACHE_DEFER_REASON = "active_day_deferred_until_midnight"
 RECORDING_ENSURE_MIN_SECONDS = 30
+RECORDING_RETENTION_INTERVAL_SECONDS = 3600
+RECORDING_RETENTION_LOOP_STARTED = False
 RECORDING_THUMBNAIL_WARMUP_INTERVAL_SECONDS = 300
 RECORDING_THUMBNAIL_WARMUP_PER_CAMERA = 4
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
@@ -3480,19 +3482,66 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
     return command
 
 
+def recording_retention_days(config: dict) -> int:
+    storage = config.get("storage") if isinstance(config.get("storage"), dict) else {}
+    nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
+    return clamp_int(nvr.get("retention_days"), clamp_int(storage.get("retention_days"), 14, 1, 365), 1, 365)
+
+
 def cleanup_old_recordings(directory: Path, retention_days: int) -> int:
-    if not directory.exists():
+    """Remove expired recording segments without following directory symlinks."""
+    if directory.is_symlink() or not directory.is_dir():
         return 0
     cutoff = time.time() - max(1, retention_days) * 86400
     removed = 0
-    for path in directory.glob("*.mp4"):
-        try:
-            if path.stat().st_mtime < cutoff:
-                path.unlink()
-                removed += 1
-        except OSError:
-            continue
+
+    def scan_error(error: OSError) -> None:
+        write_debug_event("recording_retention_error", {"path": str(error.filename), "error": str(error)})
+
+    for root, dirs, files in os.walk(directory, followlinks=False, onerror=scan_error):
+        dirs[:] = [name for name in dirs if not (Path(root) / name).is_symlink()]
+        for name in files:
+            # Only names produced by the FFmpeg or MediaMTX recorder qualify.
+            if not re.fullmatch(r"(?:\d{8}-\d{6}|\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:-\d+)?)[.]mp4", name):
+                continue
+            path = Path(root) / name
+            try:
+                if not path.is_symlink() and path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                scan_error(error)
     return removed
+
+
+def cleanup_configured_recordings(config: dict) -> int:
+    storage = config.get("storage") if isinstance(config.get("storage"), dict) else {}
+    directory = Path(storage.get("recordings_dir") or "/media/edge-of-infinity/recordings")
+    retention_days = recording_retention_days(config)
+    removed = cleanup_old_recordings(directory, retention_days)
+    write_debug_event("recording_retention_done", {
+        "directory": str(directory), "retention_days": retention_days, "removed": removed,
+    })
+    return removed
+
+
+def recording_retention_loop() -> None:
+    while True:
+        try:
+            cleanup_configured_recordings(load_config())
+        except Exception as error:  # noqa: BLE001
+            write_debug_event("recording_retention_error", {"error": str(error), "type": type(error).__name__})
+        time.sleep(RECORDING_RETENTION_INTERVAL_SECONDS)
+
+
+def start_recording_retention_loop() -> None:
+    global RECORDING_RETENTION_LOOP_STARTED
+    if RECORDING_RETENTION_LOOP_STARTED:
+        return
+    RECORDING_RETENTION_LOOP_STARTED = True
+    threading.Thread(target=recording_retention_loop, daemon=True).start()
 
 
 def recording_status_payload(config: dict | None = None, day_selection: dict[str, str] | None = None) -> dict:
@@ -3672,7 +3721,7 @@ def start_recording(camera: dict, index: int) -> dict:
     config = load_config()
     nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
     segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
-    retention_days = clamp_int(nvr.get("retention_days"), 14, 1, 365)
+    retention_days = recording_retention_days(config)
     removed_old = cleanup_old_recordings(directory, retention_days)
     log_path = directory / "ffmpeg.log"
     output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
@@ -8661,6 +8710,7 @@ def main() -> None:
         status_payload = refresh_status()
         write_debug_event("boot_refresh_status_done", {"camera_summary": config_summary(status_payload)})
         schedule_recording_ensure(config, "boot")
+        start_recording_retention_loop()
         start_recording_cache_refresh_loop()
         start_recording_thumbnail_warmup_loop()
     except Exception as error:
@@ -8674,3 +8724,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
