@@ -24,7 +24,7 @@ const path=require('node:path');
     window.fixture={sessions,captures:[],calls:[],mode:'accept',denied:false,pending:false,draw,audio,videoStream};
     Object.defineProperty(navigator.mediaDevices,'getUserMedia',{configurable:true,value:async constraints=>{
      fixture.calls.push(constraints);if(fixture.denied)throw new DOMException('Denied','NotAllowedError');
-     const stream=sink.stream.clone();fixture.captures.push(stream);
+     await audio.resume();const stream=sink.stream.clone();fixture.captures.push(stream);
      if(fixture.pending)await new Promise(resolve=>fixture.resolvePermission=resolve);
      return stream;
     }});
