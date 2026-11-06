@@ -138,3 +138,16 @@ The suite exercises the real browser secure-context restriction, missing
 WebCodecs in a secure context, supported WebCodecs, Polish guidance, microphone
 cleanup and permanent-error retry handling in the actual card. This does not
 validate a deployed TLS certificate or the Home Assistant Cloud tunnel.
+
+
+Remote Edge panel routing has a fixture-only suite:
+
+```sh
+NODE_PATH=/tmp/edge-browser-tests/node_modules node tests/browser/remote_live.cjs
+```
+
+This loads the actual native/legacy panel pages on intercepted HTTPS test
+origins, including a Nabu Casa hostname and HA ingress prefix. It verifies
+remote notices, same-origin player URLs, live toggles, hidden legacy controls,
+saved values and four viewport widths. Player content and API responses are
+stubbed; no Nabu Casa tunnel, real HA installation or camera is contacted.

@@ -29,6 +29,26 @@ jobs:
       - name: Run regression tests
         run: python -m unittest discover -s tests
 
+  remote-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install browser test runtime
+        run: |
+          npm install --prefix "${RUNNER_TEMP}/edge-browser-tests" --no-save playwright@1.62.1
+          "${RUNNER_TEMP}/edge-browser-tests/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Test native and legacy remote routing and browser requirements
+        run: |
+          export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
+          node tests/browser/remote_live.cjs
+          node tests/browser/edge_rtc_support.cjs
+
 
   edge-rtc:
     runs-on: ubuntu-latest

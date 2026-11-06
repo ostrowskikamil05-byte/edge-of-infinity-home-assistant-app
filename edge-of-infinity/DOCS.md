@@ -511,7 +511,10 @@ Home Assistant Cloud → Remote access** and use the `https://…ui.nabu.casa` a
 to open Home Assistant and its Edge panel/card. An existing trusted HTTPS
 reverse-proxy address also works. The top-level HA page and the embedded player
 must both have a secure context. This does not require exposing camera/Edge
-media ports. `localhost` refers to the computer running the browser, so it is
+media ports. Since 0.10.48, native EdgeRTC uses this same connection plan for
+remote-access notices and live previews; the unrelated MediaMTX public URL/ICE/
+TURN controls are hidden and their existing values are retained for switching
+back to the legacy core. `localhost` refers to the computer running the browser, so it is
 not a substitute address for a separate Home Assistant server.
 
 If HTTPS is already in use but the browser has no WebCodecs video decoder, use
