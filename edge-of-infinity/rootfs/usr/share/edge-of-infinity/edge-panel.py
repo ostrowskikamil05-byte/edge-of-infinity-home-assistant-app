@@ -26,9 +26,9 @@ from urllib.parse import parse_qs, urlparse, urlunparse, quote, unquote
 from xml.sax.saxutils import escape as xml_escape
 
 
-APP_VERSION = "0.10.47"
+APP_VERSION = "0.10.48"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "rtc-browser-disconnect-v9"
+UI_BUILD = "native-remote-routing-v10"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -5196,6 +5196,7 @@ INDEX_HTML = r"""<!doctype html>
       .settings, .panel { padding: 14px; }
       .panel + .panel { margin-top: 14px; }
       .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 10px; }
+      .form-grid label[hidden] { display: none; }
       label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
       input, select {
         width: 100%;
@@ -6027,6 +6028,22 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function liveConnectionPlan(path) {
+        if (EDGE_NATIVE_RTC) {
+          const url = panelPath(`api/edge-rtc/player/${path}`);
+          return {
+            url,
+            canEmbed: true,
+            reason: 'edge_rtc',
+            message: 'EdgeRTC uses the Home Assistant HTTPS/WebSocket connection.',
+            diagnostics: {
+              engine: 'edge_rtc',
+              page_protocol: window.location.protocol,
+              page_host: window.location.hostname,
+              media_url: new URL(url, window.location.href).href,
+              transport: window.location.protocol === 'https:' ? 'wss' : 'ws',
+            },
+          };
+        }
         const publicUrl = String(config?.live?.mobile_webrtc_public_url || '').trim().replace(/\/+$/, '');
         const mediaUrl = directMediaMtxPath(path);
         const parsedMediaUrl = parseUrl(mediaUrl);
@@ -7310,8 +7327,8 @@ INDEX_HTML = r"""<!doctype html>
         const previewResolution = previewStream === liveStream ? liveResolution : 'tile';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
         const mediamtxPath = `${encodeURIComponent(liveId)}_${encodeURIComponent(previewStream)}`;
-        const plan = EDGE_NATIVE_RTC ? {canEmbed:true,url:"",reason:"edge_rtc"} : liveConnectionPlan(mediamtxPath);
-        const mediamtxUrl = EDGE_NATIVE_RTC ? panelPath(`api/edge-rtc/player/${mediamtxPath}`) : plan.canEmbed ? mediaMtxPlayerUrl(plan.url) : plan.url;
+        const plan = liveConnectionPlan(mediamtxPath);
+        const mediamtxUrl = plan.canEmbed ? (EDGE_NATIVE_RTC ? plan.url : mediaMtxPlayerUrl(plan.url)) : plan.url;
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         if (live[liveKey]) {
           debugEvent('ui_live_plan', {
@@ -7391,7 +7408,7 @@ INDEX_HTML = r"""<!doctype html>
               url,
               path: frame.dataset.livePath || '',
               timeout_ms: 12000,
-              hint: 'If this happens only on LTE or another Wi-Fi, check WebRTC public URL, ICE candidates, TCP 8889, and ICE TCP/UDP 8189.',
+              hint: EDGE_NATIVE_RTC ? 'Check the EdgeRTC core/source status, H264, browser WebCodecs and the Home Assistant HTTPS/WebSocket connection.' : 'If this happens only on LTE or another Wi-Fi, check WebRTC public URL, ICE candidates, TCP 8889, and ICE TCP/UDP 8189.',
             });
           }, 12000);
           liveFrameTimers.set(liveKey, timer);
@@ -7915,7 +7932,7 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Keep original codec</option>
                 <option value="h264" ${nvrConfig.browser_playback === 'h264' ? 'selected' : ''}>Convert to H264</option>
               </select></label></div><input type="hidden" name="storage-retention-days" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"><details class="settings-group"><summary>Advanced recording <small>Segment length and playback cache</small></summary><div class="form-grid"><label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label><label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label></div></details></section>
-          <details class="settings-group" id="network-settings"><summary>Network & remote access <small>Optional for viewing outside your home network</small></summary><div class="form-grid"><label>Remote access<select name="live-remote-access-mode">
+          <details class="settings-group" id="network-settings"><summary>Network & remote access <small>${EDGE_NATIVE_RTC ? 'EdgeRTC through Home Assistant HTTPS/WSS' : 'Optional for viewing outside your home network'}</small></summary>${EDGE_NATIVE_RTC ? '<p class="notice" data-native-network-info>EdgeRTC korzysta z adresu HTTPS Home Assistanta, także przez Nabu Casa. Nie wymaga publicznego adresu MediaMTX, portów ICE ani TURN/VPS. / EdgeRTC uses the Home Assistant HTTPS/WebSocket connection; no public MediaMTX URL or extra media ports are needed.</p>' : ''}<div data-legacy-network ${EDGE_NATIVE_RTC ? 'hidden' : ''}><div class="form-grid"><label>Remote access<select name="live-remote-access-mode">
                 <option value="local_only" ${text(liveConfig.remote_access_mode, 'local_only') === 'local_only' ? 'selected' : ''}>Local only / Nabu panel only</option>
                 <option value="direct_public" ${liveConfig.remote_access_mode === 'direct_public' ? 'selected' : ''}>Direct public DDNS</option>
                 <option value="vps_relay" ${liveConfig.remote_access_mode === 'vps_relay' ? 'selected' : ''}>VPS relay</option>
@@ -7924,14 +7941,14 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="auto" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'auto' ? 'selected' : ''}>Auto UDP + TCP</option>
                 <option value="udp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'udp' ? 'selected' : ''}>UDP only</option>
                 <option value="tcp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'tcp' ? 'selected' : ''}>TCP only</option>
-              </select></label></div></details></details>
+              </select></label></div></details></div></details>
           <details class="settings-group" id="storage-settings"><summary>Storage locations <small>Keep the defaults unless you use a custom disk layout</small></summary><div class="form-grid"><label>Recordings directory<input name="storage-recordings-dir" value="${escapeHtml(text(storage.recordings_dir, '/media/edge-of-infinity/recordings'))}"></label><label>Database path<input name="storage-database-path" value="${escapeHtml(text(storage.database_path, '/homeassistant/edge/edge.db'))}"></label></div></details>
           <details class="settings-group" id="advanced-settings"><summary>Advanced system settings <small>Playback performance, streaming engine and server</small></summary><h3>Performance</h3><div class="form-grid"><label>Tile FPS<input name="live-tile-fps" type="number" min="1" max="10" value="${escapeHtml(text(liveConfig.tile_fps, 5))}"></label><label>Tile max width<input name="live-tile-max-width" type="number" min="320" max="1920" value="${escapeHtml(text(liveConfig.tile_max_width, 960))}"></label><label class="check-row"><input name="live-prebuffer-enabled" type="checkbox" ${liveConfig.prebuffer_enabled !== false ? 'checked' : ''}> Keep selected low-latency streams warm</label><label class="check-row"><input name="live-always-on-enabled" type="checkbox" ${liveConfig.always_on_enabled !== false ? 'checked' : ''}> Keep live paths warm after boot</label><label>Always-on scope<select name="live-always-on-stream-scope">
                 <option value="tile" ${text(liveConfig.always_on_stream_scope, 'tile') === 'tile' ? 'selected' : ''}>Tile preview only</option>
                 <option value="live" ${liveConfig.always_on_stream_scope === 'live' ? 'selected' : ''}>Live stream only</option>
                 <option value="tile_live" ${liveConfig.always_on_stream_scope === 'tile_live' ? 'selected' : ''}>Tile + live</option>
                 <option value="all" ${liveConfig.always_on_stream_scope === 'all' ? 'selected' : ''}>All camera streams</option>
-              </select></label><label>Local prebuffer ms<input name="live-prebuffer-local-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_local_ms, 4000))}"></label><label>Remote prebuffer ms<input name="live-prebuffer-remote-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_remote_ms, 2000))}"></label></div><h3>Engine & server</h3><div class="form-grid"><label>Engine<select name="live-engine">
+              </select></label><label>Local prebuffer ms<input name="live-prebuffer-local-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_local_ms, 4000))}"></label><label>Remote prebuffer ms<input name="live-prebuffer-remote-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_remote_ms, 2000))}"></label></div><h3>${EDGE_NATIVE_RTC ? 'Server' : 'Engine & server'}</h3><div class="form-grid"><label ${EDGE_NATIVE_RTC ? 'hidden' : ''}>Engine<select name="live-engine">
                 <option value="janus_webrtc" ${liveConfig.engine === 'janus_webrtc' ? 'selected' : ''}>Janus WebRTC core</option>
                 <option value="mediamtx" ${liveConfig.engine === 'mediamtx' ? 'selected' : ''}>MediaMTX WHEP core</option>
                 <option value="ll_hls" ${liveConfig.engine === 'll_hls' ? 'selected' : ''}>LL-HLS experimental</option>

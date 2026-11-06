@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.48
+
+- Route native EdgeRTC notices, preview URLs, live-toggle diagnostics and timeout guidance through the same Home Assistant ingress/WebSocket plan. Remove the incorrect MediaMTX/public-port warning when native EdgeRTC is running on Nabu Casa or another HTTPS host.
+- Hide unused MediaMTX public URL/ICE/TURN and legacy playback-engine controls in native mode, while preserving their saved values for switching back. Show native HTTPS/WSS guidance in Network settings.
+- Add browser regressions for native and legacy remote access, Nabu Casa ingress prefixes, other HTTPS hosts, saved hidden settings and four screen widths.
+
 ## 0.10.47
 
 - Treat client resets, aborted connections and broken pipes during HTTP request handling as closed client connections, including interrupted recording-status response headers/bodies. Keep other I/O exceptions visible.
