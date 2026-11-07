@@ -93,3 +93,11 @@ class RecordingCompatibilityTests(unittest.TestCase):
         prepared=self.cache.prepare(delayed)
         self.assertLess(abs(start(prepared)),.03)
         self.assertEqual(self.timing(prepared)['fps'],self.timing(delayed)['fps'])
+
+    def test_previous_recorder_warnings_do_not_masquerade_as_current_failures(self):
+        log=self.root/'ffmpeg.log'
+        content='old run: Non-monotonic DTS; error\n=== Edge recording start ===\n{"event":"recording_start_command"}\n'
+        log.write_text(content)
+        current=self.p.current_recording_log_tail(log)
+        self.assertNotIn('Non-monotonic',current);self.assertIn('recording_start_command',current)
+        self.assertEqual(log.read_text(),content,'Keep full historical logs on disk')

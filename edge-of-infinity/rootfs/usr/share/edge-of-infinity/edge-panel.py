@@ -1538,7 +1538,7 @@ def collect_panel_logs() -> dict:
         for log_path in sorted(recordings_dir.glob("**/ffmpeg.log"), key=lambda item: item.stat().st_mtime, reverse=True)[:8]:
             recording_logs.append({
                 "path": str(log_path),
-                "tail": redact_rtsp(read_text_tail(log_path, 8000)),
+                "tail": current_recording_log_tail(log_path, 8000),
             })
     except OSError as error:
         recording_logs.append({"path": str(recordings_dir), "tail": f"recording_log_scan_error: {error}"})
@@ -4004,7 +4004,13 @@ def recording_log_path(camera: dict, index: int) -> Path:
 
 
 def recording_log_tail(camera: dict, index: int, limit: int = 6000) -> str:
-    return redact_rtsp(read_text_tail(recording_log_path(camera, index), limit))
+    return current_recording_log_tail(recording_log_path(camera, index),limit)
+
+
+def current_recording_log_tail(path: Path, limit: int = 6000) -> str:
+    tail=redact_rtsp(read_text_tail(path,limit))
+    start=tail.rfind('=== Edge recording start ===')
+    return tail[start:] if start>=0 else tail
 
 
 def recording_health(camera: dict, index: int) -> dict:
