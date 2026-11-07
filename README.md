@@ -79,3 +79,20 @@ analysis and a specific error code, also included in exported Local AI logs.
 Recording tiles now prefer small cached JPEGs, and unchanged full-day file lists
 are not repeatedly sent during polling. If the panel offers a refresh notice
 after an update, reload that browser tab to load the current player code.
+
+## Phone playback and decoder protection (0.11.8)
+
+Update the app and refresh the panel tab. iPhone (including the Home Assistant
+app) and Android request a normalized MP4 container for recordings and saved
+alert clips. This copies encoded video without changing resolution, FPS or
+pixels. A temporary 64 MiB / 12-segment cache avoids repeated work; it does not
+copy whole days. HEVC playback requires phone/browser HEVC support.
+
+In advanced local detection settings, leave the decoder on **Auto** initially.
+Edge tries VAAPI when the host exposes a working GPU. If software decoding falls
+behind under high CPU load, Auto can switch analysis to keyframes; Events shows
+that mode and warns that short events between keyframes may be missed. Choose
+**CPU — all frames** to force full decoding, or **CPU — keyframes** to reduce
+load explicitly. Recording quality and FPS are independent of AI sampling. No
+mode creates an extra physical camera stream. GPU behavior on HP t530 and native
+phone playback must still be checked on the actual devices.

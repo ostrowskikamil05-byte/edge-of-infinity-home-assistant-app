@@ -8,7 +8,7 @@ const assert=require('node:assert/strict');
    const page=await context.newPage();page.setDefaultTimeout(25000);const errors=[];page.on('pageerror',error=>errors.push(error.message));
    // JPEG extraction is deliberately unavailable: preview success must come
    // from the saved video, with no live/camera endpoint or server decoder.
-   await page.route('**/recording-thumbs/**',route=>route.fulfill({status:503,body:'server extraction unavailable'}));
+   await page.route('**/recording-thumbs/**',route=>route.fulfill({status:415,body:'server extraction unsupported'}));
    await page.goto(process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18088');
    await page.locator('[name="camera-0-name"]').waitFor({state:'attached'});
    const nav=async name=>{if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator(`nav [data-page-target="${name}"]`).click();};

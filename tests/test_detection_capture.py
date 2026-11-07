@@ -34,6 +34,53 @@ class DetectionCaptureTests(unittest.TestCase):
         self.assertIn('fps=1.0000,scale=416:416:force_original_aspect_ratio=decrease',command)
         self.assertEqual(command[command.index('-threads')+1],'1')
 
+    def test_gpu_probe_is_local_cached_and_failure_leaves_software_available(self):
+        old=self.m._GPU_CACHE
+        try:
+            self.m._GPU_CACHE=(-1e9,'')
+            with patch.object(self.m.Path,'glob',return_value=[Path('/dev/dri/renderD128')]),patch.object(self.m.os,'access',return_value=True),patch.object(self.m.subprocess,'run',return_value=type('Result',(),{'returncode':0})()) as probe:
+                self.assertEqual(self.m.vaapi_device(),'/dev/dri/renderD128');self.assertEqual(self.m.vaapi_device(),'/dev/dri/renderD128')
+                self.assertEqual(probe.call_count,1);self.assertFalse(any('rtsp://' in str(value) for value in probe.call_args.args[0]))
+            gpu=self.m.analysis_command('rtsp://127.0.0.1:8556/main',1,'vaapi','/dev/dri/renderD128')
+            self.assertIn('vaapi',gpu);self.assertIn('scale_vaapi=',gpu[gpu.index('-vf')+1]);self.assertIn('hwdownload',gpu[gpu.index('-vf')+1])
+            light=self.m.analysis_command('rtsp://127.0.0.1:8556/main',1,'cpu_keyframes')
+            self.assertEqual(light[light.index('-skip_frame')+1],'nokey');self.assertNotIn('fps=',light[light.index('-vf')+1]);self.assertIn('passthrough',light)
+        finally:self.m._GPU_CACHE=old
+
+    def test_failed_gpu_decoder_falls_back_to_cpu_without_exposing_a_camera_url(self):
+        program="import sys,time\nwhile True:\n sys.stdout.buffer.write(b'P6\\n1 1\\n255\\n'+bytes([0,255,0]));sys.stdout.buffer.flush();time.sleep(.1)\n"
+        def command(url,fps,backend='cpu',device=''):
+            self.assertEqual(url,'rtsp://127.0.0.1:8556/main')
+            return [sys.executable,'-c','raise SystemExit(1)' if backend=='vaapi' else program]
+        with patch.object(self.m,'vaapi_device',return_value='/dev/dri/renderD128'),patch.object(self.m,'analysis_command',side_effect=command):
+            reader=self.m.SharedFrameReader('rtsp://127.0.0.1:8556/main',1)
+            try:
+                reader.read(timeout=5)
+                self.assertEqual(reader.backend,'cpu');self.assertEqual(reader.fallback_reason,'vaapi_unavailable_for_stream')
+            finally:reader.close()
+
+    def test_overloaded_slow_cpu_restarts_only_local_decoder_and_discards_late_frame(self):
+        full="import sys,time\nsys.stdout.buffer.write(b'P6\\n1 1\\n255\\n'+bytes([255,0,0]));sys.stdout.buffer.flush();time.sleep(3.15);sys.stdout.buffer.write(b'P6\\n1 1\\n255\\n'+bytes([0,0,255]));sys.stdout.buffer.flush();time.sleep(5)"
+        light="import sys,time\nwhile True:\n sys.stdout.buffer.write(b'P6\\n1 1\\n255\\n'+bytes([0,255,0]));sys.stdout.buffer.flush();time.sleep(.1)\n"
+        def command(url,fps,backend='cpu',device=''):
+            return [sys.executable,'-c',light if backend=='cpu_keyframes' else full]
+        with patch.object(self.m,'vaapi_device',return_value=''),patch.object(self.m,'cpu_overloaded',return_value=True),patch.object(self.m,'analysis_command',side_effect=command):
+            reader=self.m.SharedFrameReader('rtsp://127.0.0.1:8556/main',1)
+            try:
+                reader.read(timeout=3);original=reader.process
+                (pixels,width,height),stamp=reader.read(timeout=7)
+                frame=self.d.AnalysisFrame(pixels,width,height);offset=(frame.top*416+frame.left)*3
+                self.assertEqual(pixels[offset:offset+3],bytes([0,255,0]),'Late blue CPU frame must not become an intrusion event at the wrong time')
+                self.assertEqual(reader.backend,'cpu_keyframes');self.assertEqual(reader.fallback_reason,'cpu_overload')
+                self.assertIsNot(reader.process,original);self.assertIsNotNone(original.poll())
+            finally:reader.close()
+
+    def test_decoder_setting_survives_supervisor_projection(self):
+        from test_edge_panel_config import load_panel_module
+        panel=load_panel_module();config=panel.normalize_config({'detection':{'decoder':'keyframes'}})
+        self.assertEqual(panel.addon_options_from_config(config,{})['detection_decoder'],'keyframes')
+        self.assertEqual(self.d.settings({'decoder':'untrusted'})['decoder'],'auto')
+
     def test_superseded_camera_cannot_start_a_late_decoder_after_disabling_detection(self):
         with tempfile.TemporaryDirectory() as directory:
             service=self.d.DetectionService(directory,lambda *a:None,lambda *a:'rtsp://127.0.0.1:8556/main',lambda *a:None)

@@ -15,15 +15,17 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
+	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
 	"github.com/gorilla/websocket"
 )
 
-const version = "0.11.7"
+const version = "0.11.8"
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -79,11 +81,20 @@ type app struct {
 	listener net.Listener
 	stop     chan struct{}
 	closed   bool
+	readers  sync.Map
+}
+
+const relayWriteQueueSize = 4096 // bounded burst capacity for large 4K I-frames
+
+type relayReader struct {
+	source *source
+	role   string
+	failed atomic.Bool
 }
 
 func newApp(c config) (*app, error) {
 	a := &app{cfg: c, sources: map[string]*source{}, paths: map[string]*source{}, stop: make(chan struct{})}
-	a.rtsp = &gortsplib.Server{RTSPAddress: c.RTSP, Handler: a, WriteQueueSize: 256}
+	a.rtsp = &gortsplib.Server{RTSPAddress: c.RTSP, Handler: a, WriteQueueSize: relayWriteQueueSize, WriteTimeout: 5 * time.Second}
 	if e := a.rtsp.Start(); e != nil {
 		return nil, e
 	}
@@ -320,8 +331,48 @@ func (a *app) rtspStream(path string) (*base.Response, *gortsplib.ServerStream, 
 	}
 	return &base.Response{StatusCode: base.StatusOK}, stream, nil
 }
-func (a *app) OnPlay(*gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
+func (a *app) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
+	role := "reader"
+	if values := ctx.Request.Header["User-Agent"]; len(values) > 0 {
+		if strings.HasPrefix(values[0], "EdgeAI/") {
+			role = "analysis"
+		}
+		if strings.HasPrefix(values[0], "EdgeRecorder/") {
+			role = "recording"
+		}
+	}
+	a.readers.Store(ctx.Session, &relayReader{source: a.lookup(ctx.Path), role: role})
 	return &base.Response{StatusCode: base.StatusOK}, nil
+}
+
+func (a *app) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
+	a.readers.Delete(ctx.Session)
+}
+
+func (a *app) OnStreamWriteError(ctx *gortsplib.ServerHandlerOnStreamWriteErrorCtx) {
+	value, ok := a.readers.Load(ctx.Session)
+	if !ok {
+		ctx.Session.Close()
+		return
+	}
+	reader := value.(*relayReader)
+	if !reader.failed.CompareAndSwap(false, true) {
+		return
+	}
+	var overflow liberrors.ErrServerWriteQueueFull
+	if reader.source != nil {
+		reader.source.relayFailures.Add(1)
+		if errors.As(ctx.Error, &overflow) {
+			reader.source.relayOverflows.Add(1)
+		}
+		reader.source.relayLastRole.Store(reader.role)
+		now := time.Now().Unix()
+		last := reader.source.relayLastLog.Load()
+		if now-last >= 30 && reader.source.relayLastLog.CompareAndSwap(last, now) {
+			log.Printf("EdgeRTC: isolated a slow local %s reader; camera upstream retained (see source counters)", reader.role)
+		}
+	}
+	ctx.Session.Close()
 }
 func main() {
 	path := flag.String("config", "/tmp/edge-runtime/edge-rtc.json", "private config")

@@ -30,6 +30,7 @@ if str(Path(__file__).parent) not in sys.path:
 from edge_detection import DetectionService, settings as detection_settings, zone_settings, ZONE_FIELDS
 from edge_storage import MIB, SEGMENT, managed_files, prune_cache, trim_log
 from edge_recording_media import AlertMediaService, video_timing
+from edge_recording_compat import CompatibleRecordings
 
 DETECTION_SERVICE = None
 ALERT_SERVICE = None
@@ -89,12 +90,13 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.11.7"
+APP_VERSION = "0.11.8"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-speed-ai-v117"
+UI_BUILD = "mobile-relay-v118"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
+RECORDING_COMPAT = CompatibleRecordings(DATA_DIR / 'recording-compat')
 CONFIG_PATH = Path(os.environ.get("EDGE_HOME_CONFIG", "/homeassistant/edge/edge.json"))
 ADDON_CONFIG_PATH = Path(os.environ.get("EDGE_ADDON_CONFIG", "/config/edge.json"))
 CONFIG_BACKUP_PATH = HOME_DIR / "edge.backup.json"
@@ -1516,9 +1518,11 @@ def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording
 
     if detection is not None:
         selected=[camera for camera in detection.get('cameras',[]) if camera.get('local_status')!='disabled']
-        severity='error' if any(camera.get('local_status')=='error' for camera in selected) else 'warning' if any(camera.get('local_status')!='running' for camera in selected) else 'ok'
+        severity='error' if any(camera.get('local_status')=='error' for camera in selected) else 'warning' if any(camera.get('local_status')!='running' or (camera.get('decoder') or {}).get('backend')=='cpu_keyframes' for camera in selected) else 'ok'
         diagnostics.append(diagnostic_item(severity,'Local AI',f"{len(selected)} selected camera(s); model {'loaded' if detection.get('model_loaded') else 'not loaded'}.",detection))
     for title, tail in tails.items():
+        if title=='Recording cache' and recording_cache_budget(config)<=0:
+            diagnostics.append(diagnostic_item('ok',title,'Playback copy cache is disabled. Retained messages below are historical.',{'tail':tail[-2000:]}));continue
         diagnostics.append(diagnostic_from_tail(title, tail))
     for item in recording_logs[:4]:
         diagnostics.append(diagnostic_from_tail(f"Recording FFmpeg {Path(item.get('path') or '').name}", item.get("tail") or ""))
@@ -2387,7 +2391,7 @@ def addon_options_from_config(config: dict, existing: dict) -> dict:
         projected.update(dict(zip(ZONE_FIELDS, [zone['enabled'], *zone['bounds']])))
     options["cameras"] = cameras
     detect = detection_settings(config.get("detection"))
-    for option, field in (("camera_events_enabled", "camera_events_enabled"), ("local_detection_enabled", "local_enabled"), ("detection_fps", "max_fps"), ("detection_confidence", "confidence"), ("detection_hold_seconds", "hold_seconds"), ("detection_animal_confidence", "animal_confidence"), ("detection_person_enabled", "person_enabled"), ("detection_animal_enabled", "animal_enabled"), ("detection_vehicle_enabled", "vehicle_enabled"), ("detection_alert_media_mb", "alert_media_mb"), ("detection_pre_seconds", "pre_seconds"), ("detection_post_seconds", "post_seconds"), ("detection_notifications_enabled", "notifications_enabled"), ("detection_notify_service", "notify_service"), ("detection_notify_cooldown", "notify_cooldown"), ("detection_notify_path", "notify_path")):
+    for option, field in (("camera_events_enabled", "camera_events_enabled"), ("local_detection_enabled", "local_enabled"), ("detection_fps", "max_fps"), ("detection_decoder", "decoder"), ("detection_confidence", "confidence"), ("detection_hold_seconds", "hold_seconds"), ("detection_animal_confidence", "animal_confidence"), ("detection_person_enabled", "person_enabled"), ("detection_animal_enabled", "animal_enabled"), ("detection_vehicle_enabled", "vehicle_enabled"), ("detection_alert_media_mb", "alert_media_mb"), ("detection_pre_seconds", "pre_seconds"), ("detection_post_seconds", "post_seconds"), ("detection_notifications_enabled", "notifications_enabled"), ("detection_notify_service", "notify_service"), ("detection_notify_cooldown", "notify_cooldown"), ("detection_notify_path", "notify_path")):
         options[option] = detect[field]
     for index in range(2):
         camera = cameras[index] if index < len(cameras) else {}
@@ -3253,6 +3257,8 @@ def storage_usage_payload(config: dict) -> dict:
             except OSError:pass
         return total
     result = {'recordings_bytes':total,
+              'phone_cache_bytes':RECORDING_COMPAT.prune(),
+              'phone_cache_limit_bytes':RECORDING_COMPAT.budget,
               'alert_clip_bytes':alert_bytes(root/'.alerts','.mp4'),
               'alert_clip_limit_bytes':alert_limit,
               'alert_image_bytes':alert_bytes(HOME_DIR/'alerts','.jpg'),
@@ -3828,7 +3834,7 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_secon
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{time.time_ns()}.tmp")
     command = build_recording_thumbnail_command(source, tmp, seek_seconds=0 if seek_seconds is None else seek_seconds)
-    acquired = RECORDING_THUMBNAIL_SEMAPHORE.acquire(timeout=20 if seek_seconds is None else 0.2)
+    acquired = RECORDING_THUMBNAIL_SEMAPHORE.acquire(timeout=0.2)
     if not acquired:
         append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_busy", {
             "key": key,
@@ -4051,7 +4057,7 @@ def recording_mode_from_codec(video_codec: str, nvr: dict) -> str:
     return 'transcode_to_h264' if nvr.get('browser_playback') == 'h264' else 'copy'
 
 
-def build_recording_command(stream: str, output_pattern: str, segment_seconds: int, mode: str) -> list[str]:
+def build_recording_command(stream: str, output_pattern: str, segment_seconds: int, mode: str, video_codec: str = '') -> list[str]:
     command = [
         "ffmpeg",
         "-hide_banner",
@@ -4074,8 +4080,8 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
         "32768",
         "-analyzeduration",
         "0",
-        "-use_wallclock_as_timestamps",
-        "1",
+        "-user_agent",
+        "EdgeRecorder/1",
         "-i",
         stream,
         "-map",
@@ -4117,6 +4123,8 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
             "-ac",
             "1",
         ]
+    if mode=='copy' and video_codec.lower() in ('hevc','h265'):
+        command+=['-tag:v','hvc1']
     command += [
         "-f",
         "segment",
@@ -4179,6 +4187,7 @@ def cleanup_configured_recordings(config: dict) -> int:
     retention_days = recording_retention_days(config)
     removed = cleanup_old_recordings(directory, retention_days)
     cache_cleanup = cleanup_disposable_storage(config)
+    RECORDING_COMPAT.prune()
     write_debug_event("recording_retention_done", {
         "directory": str(directory), "retention_days": retention_days, "removed": removed,
         "cache_cleanup": cache_cleanup,
@@ -4446,7 +4455,7 @@ def start_recording(camera: dict, index: int) -> dict:
     log_path = directory / "ffmpeg.log"
     output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
     mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr)
-    command = build_recording_command(stream, output_pattern, segment_seconds, mode)
+    command = build_recording_command(stream, output_pattern, segment_seconds, mode,video_codec)
     log_header = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "event": "recording_start_command",
@@ -6896,9 +6905,17 @@ INDEX_HTML = r"""<!doctype html>
 
       function mediaUrlWithTimeFragment(url, seekSeconds) {
         const seek = Math.max(0, Number(seekSeconds || 0));
-        if (!url || !seek) return url;
-        const clean = String(url).split('#', 1)[0];
-        return `${clean}#t=${seek.toFixed(3)}`;
+        if (!url) return url;
+        let clean = String(url).split('#', 1)[0];
+        // WKWebView and Android need a seekable, normalized MP4 container.
+        // A bounded stream-copy cache uses saved clips, never camera streams.
+        if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1)) {
+          const parsed=new URL(clean,location.href);
+          if (/\/recordings\/|\/api\/alerts\/\d+\/clip\.mp4$/.test(parsed.pathname)) {
+            parsed.searchParams.set('compat','1');parsed.searchParams.set('container','hvc1-v1');clean=parsed.href;
+          }
+        }
+        return seek?`${clean}#t=${seek.toFixed(3)}`:clean;
       }
 
       function recordingDefaultTarget(files, status = {}) {
@@ -6976,10 +6993,12 @@ INDEX_HTML = r"""<!doctype html>
           if (!source) continue;
           recordingThumbnailActive += 1;
           let finished = false;
+          let ownedUrl='';
           const finish = (ok) => {
             if (finished) return;
             finished = true;
             image.onload = null; image.onerror = null;
+            if(ownedUrl)URL.revokeObjectURL(ownedUrl);
             delete image.dataset.recordingThumbQueued;
             if (ok) { thumbnailContainer(image)?.classList.remove('thumb-error'); thumbnailContainer(image)?.classList.add('thumb-loaded'); image.removeAttribute('data-recording-thumb-src'); }
             else markRecordingThumbnailFailed(image);
@@ -6989,11 +7008,25 @@ INDEX_HTML = r"""<!doctype html>
           let expectedUrl = new URL(source, window.location.href).href;
           image.onload = () => { if (image.currentSrc === expectedUrl && image.naturalWidth > 1) finish(true); };
           let fallback=false;
-          image.onerror = () => { if (image.currentSrc !== expectedUrl)return;if(fallback){finish(false);return;}fallback=true;recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>finish(false)); };
+          image.onerror = () => { if (image.currentSrc !== expectedUrl)return;if(fallback){finish(false);return;}fallback=true;image.dataset.recordingThumbBackend='browser';recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>finish(false)); };
           image.loading = 'eager';
           // A small cached JPEG avoids downloading/decoding full 4K clips for
           // every film tile, especially through Nabu Casa.
-          image.src=source;
+          fetch(source,{signal:AbortSignal.timeout(15000)}).then(async response=>{
+            if([429,425,503].includes(response.status)){
+              const attempt=Number(image.dataset.thumbAttempts||0)+1;image.dataset.thumbAttempts=String(attempt);
+              if(attempt>6){finish(false);return;}
+              finished=true;image.onload=null;image.onerror=null;recordingThumbnailActive--;
+              const wait=Math.max(Math.min(8000,500*2**(attempt-1)),Math.min(60000,Math.max(0,Number(response.headers.get('Retry-After'))||0)*1000));
+              setTimeout(()=>{delete image.dataset.recordingThumbQueued;if(image.isConnected)loadRecordingThumbnail(image);},wait);
+              pumpRecordingThumbnails();return;
+            }
+            if(!response.ok)throw new Error('thumbnail_unavailable');
+            const blob=await response.blob();if(!blob.type.startsWith('image/'))throw new Error('thumbnail_unavailable');
+            ownedUrl=URL.createObjectURL(blob);expectedUrl=ownedUrl;image.dataset.recordingThumbBackend='jpeg';image.src=ownedUrl;
+          }).catch(()=>{
+            if(finished)return;fallback=true;image.dataset.recordingThumbBackend='browser';recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>finish(false));
+          });
         }
       }
       function loadRecordingThumbnail(image) {
@@ -7070,9 +7103,10 @@ INDEX_HTML = r"""<!doctype html>
         };
         // Paused seeks can be fully occluded by the held frame; some browsers
         // then defer video-frame callbacks until playback resumes.
-        if (video.paused) requestAnimationFrame(()=>requestAnimationFrame(release));
-        else if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(release);
-        else requestAnimationFrame(() => requestAnimationFrame(release));
+        // WebKit may defer frame callbacks while this canvas covers the video.
+        // loadeddata/seeked already guarantee a decoded picture; never make
+        // showing it depend on a callback from an occluded video surface.
+        requestAnimationFrame(() => requestAnimationFrame(release));
       }
 
       function pauseRecording(video) {
@@ -7081,7 +7115,8 @@ INDEX_HTML = r"""<!doctype html>
       function playRecording(video) {
         video.dataset.recordingWantsPlay='true';video.dataset.recordingPlayPending='true';
         const epoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.dataset.recordingPlayEpoch=epoch;
-        if(video.readyState<2||video.seeking||recordingScrubs.has(video.dataset.recordingPlayer)){updateRecordingPlayerControls(video,'');return;}
+        const scrub=recordingScrubs.get(video.dataset.recordingPlayer);
+        if(scrub?.active){updateRecordingPlayerControls(video,'');return;}
         const request=video.play();
         if(!video.paused)video.dataset.recordingPlayPending='false';
         request.catch(error=>{
@@ -7094,8 +7129,6 @@ INDEX_HTML = r"""<!doctype html>
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         if (!video) return false;
         const fileUrl = target.target.file.url;
-        const cleanCurrent = String(video.currentSrc || video.getAttribute('src') || '').split('#', 1)[0];
-        const cleanNext = new URL(panelPath(fileUrl), window.location.href).href;
         const nextPath = panelPath(fileUrl);
         const nextSrc = mediaUrlWithTimeFragment(nextPath, target.seek);
         const fileSeek=video.dataset.recordingLoadedFile===fileUrl&&Number.isFinite(video.duration)
@@ -7620,7 +7653,8 @@ INDEX_HTML = r"""<!doctype html>
           seekRecordingPlayback(state.index,state.desired,true);
         }
         const expected=Number.isFinite(video.duration)?Math.min(state.desired,Number(video.dataset.recordingPlaybackStart||0)+Math.max(0,video.duration-.05)):state.desired;
-        if(state.finishing&&!video.seeking&&video.readyState>=2&&Math.abs(recordingPlaybackPosition(video)-expected)<.2){
+        const advance=state.playStarted?Math.max(0,(performance.now()-state.playStarted)/1000)*video.playbackRate:0;
+        if(state.finishing&&!video.seeking&&video.readyState>=2&&Math.abs(recordingPlaybackPosition(video)-expected)<.2+advance){
           const resume=state.resume;discardRecordingScrub(state.index);hideRecordingScrubPreview();
           updateRecordingPlayerControls(video,'');showRecordingControls(video.closest('[data-recording-wrap]'));
           if(resume)playRecording(video);else pauseRecording(video);
@@ -8684,7 +8718,7 @@ INDEX_HTML = r"""<!doctype html>
             </div><p class="field-help">Punkt na pasku filmu → zdjęcie osoby lub zwierzęcia → właściwy moment nagrania. Fragment alertu obejmuje najbliższe zamknięte części nagrania przed i po wykryciu. Nagrywanie wybranej kamery musi być włączone.</p>
             <div class="form-grid"><label>Limit klipów alertów (MB)<input type="number" min="32" max="4096" name="detection-alert-mb" value="${detection.alert_media_mb||256}"></label><label>Sekundy przed wykryciem<input type="number" min="0" max="10" name="detection-pre" value="${detection.pre_seconds??5}"></label><label>Sekundy po wykryciu<input type="number" min="5" max="60" name="detection-post" value="${detection.post_seconds||15}"></label></div><p class="field-help">Zdjęcia alertów mają limit 32 MB. Klipy mają osobny limit powyżej i retencję taką jak nagrania; najstarsze alerty wygasają po zapełnieniu limitu. Oryginalny zapis pozostaje niezależny. Klip pojawi się po zamknięciu części nagrania, zdjęcie lokalnego wykrycia od razu.</p>
             <details class="settings-group"><summary>Powiadomienia na telefon</summary><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-notifications" ${detection.notifications_enabled?'checked':''}> Powiadamiaj o osobie lub zwierzęciu</label><label>Telefon w Home Assistant<input name="detection-notify-service" list="edge-notify-services" placeholder="notify.mobile_app_twoj_telefon" value="${escapeHtml(detection.notify_service||'')}"><datalist id="edge-notify-services"></datalist></label><label>Przerwa między alertami (s)<input type="number" name="detection-notify-cooldown" min="5" max="3600" value="${detection.notify_cooldown||30}"></label></div><p class="field-help" data-phone-services>Wybierz usługę telefonu z aplikacją Home Assistant Companion. Zapisz ustawienia; zaktualizowana integracja Edge wysyła nowe alerty ze zdjęciem, bez dodatkowej automatyzacji YAML.</p></details>
-            <details class="settings-group"><summary>Zaawansowana detekcja</summary><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-camera-events" ${detection.camera_events_enabled?'checked':''}> Zdarzenia ONVIF z kamery</label><label>Łączny limit analizy klatek/s<input type="number" name="detection-fps" min="0.2" max="3" step="0.2" value="${detection.max_fps||1}"></label><label>Pewność<input type="number" name="detection-confidence" min="0.1" max="0.95" step="0.05" value="${detection.confidence||.45}"></label><label>Pewność zwierzęcia<input type="number" name="detection-animal-confidence" min="0.1" max="0.95" step="0.05" value="${detection.animal_confidence||.35}"></label><label>Podtrzymanie wykrycia (s)<input type="number" name="detection-hold" min="1" max="120" value="${detection.hold_seconds||10}"></label></div></details><p class="field-help">HP t530: jedna kamera i 1 analizowana klatka/s łącznie. Rozpoznawanie nie identyfikuje tożsamości osoby; możliwości zależą od wielkości obiektu i oświetlenia.</p></section>
+            <details class="settings-group"><summary>Zaawansowana detekcja</summary><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-camera-events" ${detection.camera_events_enabled?'checked':''}> Zdarzenia ONVIF z kamery</label><label>Dekodowanie AI<select name="detection-decoder"><option value="auto" ${detection.decoder==='auto'||!detection.decoder?'selected':''}>Auto · GPU / ochrona CPU</option><option value="cpu" ${detection.decoder==='cpu'?'selected':''}>CPU · wszystkie klatki</option><option value="keyframes" ${detection.decoder==='keyframes'?'selected':''}>CPU · klatki kluczowe</option></select></label><label>Łączny limit analizy klatek/s<input type="number" name="detection-fps" min="0.2" max="3" step="0.2" value="${detection.max_fps||1}"></label><label>Pewność<input type="number" name="detection-confidence" min="0.1" max="0.95" step="0.05" value="${detection.confidence||.45}"></label><label>Pewność zwierzęcia<input type="number" name="detection-animal-confidence" min="0.1" max="0.95" step="0.05" value="${detection.animal_confidence||.35}"></label><label>Podtrzymanie wykrycia (s)<input type="number" name="detection-hold" min="1" max="120" value="${detection.hold_seconds||10}"></label></div></details><p class="field-help">HP t530: jedna kamera i 1 analizowana klatka/s łącznie. Rozpoznawanie nie identyfikuje tożsamości osoby; możliwości zależą od wielkości obiektu i oświetlenia.</p></section>
           <section class="field-section settings-main" id="recording-settings"><div class="section-heading"><span class="step-number">01</span><div><h2>Recording</h2><p>How long to keep footage and how it plays in the browser.</p></div></div><div class="form-grid"><label>Keep recordings (days)<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label><label>Recording compatibility<select name="nvr-browser-playback">
 
                 <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Oryginalna jakość i kodek (zalecane)</option>
@@ -9127,7 +9161,7 @@ INDEX_HTML = r"""<!doctype html>
             person_enabled:get('detection-person').checked,animal_enabled:get('detection-animal').checked,vehicle_enabled:get('detection-vehicle').checked,
             alert_media_mb:Number(get('detection-alert-mb').value||256),pre_seconds:Number(get('detection-pre').value||0),post_seconds:Number(get('detection-post').value||15),
             notifications_enabled:get('detection-notifications').checked,notify_service:get('detection-notify-service').value.trim(),notify_cooldown:Number(get('detection-notify-cooldown').value||30),notify_path:notificationPanelPath(),
-            max_fps: Number(get('detection-fps').value || 1),
+            max_fps: Number(get('detection-fps').value || 1), decoder:get('detection-decoder').value,
             confidence: Number(get('detection-confidence').value || 0.45),
             animal_confidence:Number(get('detection-animal-confidence').value||.35),
             hold_seconds: Number(get('detection-hold').value || 10)
@@ -9318,7 +9352,7 @@ INDEX_HTML = r"""<!doctype html>
           const usage=recordingStorage;
           const daily=Object.values(recordingStatus).reduce((sum,item)=>sum+Number(item.bytes_per_day_estimate||0),0);
           const retention=Number(config.nvr?.retention_days||14);
-          output.textContent=`Nagrania: ${formatBytes(usage.recordings_bytes)} · Kopie odtwarzania: ${formatBytes(usage.playback_cache_bytes)} / ${formatBytes(usage.playback_cache_limit_bytes)} · Miniatury: ${formatBytes(usage.thumbnail_cache_bytes)} / ${formatBytes(usage.thumbnail_cache_limit_bytes)} · Klipy alertów: ${formatBytes(usage.alert_clip_bytes)} / ${formatBytes(usage.alert_clip_limit_bytes)} · Zdjęcia alertów: ${formatBytes(usage.alert_image_bytes)} / ${formatBytes(usage.alert_image_limit_bytes)}. Wolne na dysku nagrań: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}; wolne w konfiguracji HA: ${usage.cache_volume?.free_bytes==null?'—':formatBytes(usage.cache_volume.free_bytes)}.${daily?' Szacunek ciągłego nagrywania: '+formatBytes(daily)+'/dobę, '+formatBytes(daily*retention)+' na '+retention+' dni. Zależy od bitrate i sceny.':''}`;
+          output.textContent=`Nagrania: ${formatBytes(usage.recordings_bytes)} · Kopie odtwarzania: ${formatBytes(usage.playback_cache_bytes)} / ${formatBytes(usage.playback_cache_limit_bytes)} · Kopie dla telefonów: ${formatBytes(usage.phone_cache_bytes)} / ${formatBytes(usage.phone_cache_limit_bytes)} · Miniatury: ${formatBytes(usage.thumbnail_cache_bytes)} / ${formatBytes(usage.thumbnail_cache_limit_bytes)} · Klipy alertów: ${formatBytes(usage.alert_clip_bytes)} / ${formatBytes(usage.alert_clip_limit_bytes)} · Zdjęcia alertów: ${formatBytes(usage.alert_image_bytes)} / ${formatBytes(usage.alert_image_limit_bytes)}. Wolne na dysku nagrań: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}; wolne w konfiguracji HA: ${usage.cache_volume?.free_bytes==null?'—':formatBytes(usage.cache_volume.free_bytes)}.${daily?' Szacunek ciągłego nagrywania: '+formatBytes(daily)+'/dobę, '+formatBytes(daily*retention)+' na '+retention+' dni. Zależy od bitrate i sceny.':''}`;
         });
       }
       function recordingDayLoadMessage(message) {
@@ -9546,7 +9580,7 @@ INDEX_HTML = r"""<!doctype html>
         try {
           detectionData = await eventJson('api/detection');
           document.getElementById('detection-runtime').textContent = `${detectionData.model || 'Detection'} · ${detectionData.backend || 'CPU'} · limit ${detectionData.max_fps || 1} FPS total · analysis ${detectionData.analysis_ms || 0} ms. Model: ${detectionData.model_installed ? 'ready' : 'not installed / starting'}`;
-          document.getElementById('detection-cameras').innerHTML = (detectionData.cameras || []).map(camera => `<article class="camera"><div class="body"><b>${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)}</p>${camera.local_error?`<p role="status">AI: ${escapeHtml(camera.local_error.code)} (${escapeHtml(camera.local_error.phase)}). Szczegóły znajdziesz w logach Local AI.</p>`:''}${camera.last_analysis?`<p>Ostatnia analiza: ${escapeHtml(new Date(camera.last_analysis.timestamp*1000).toLocaleTimeString())} · ${Number(camera.last_analysis.objects)} obiektów · ${Number(camera.last_analysis.analysis_ms)} ms.</p>`:''}<p>Strefa Edge (tylko lokalne AI): ${camera.local_zone?.enabled ? (camera.local_zone.valid ? 'włączona' : 'nieprawidłowa — popraw ustawienia') : 'cały kadr'}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(eventKindNames[kind] || kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
+          document.getElementById('detection-cameras').innerHTML = (detectionData.cameras || []).map(camera => `<article class="camera"><div class="body"><b>${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)} · Dekoder: ${escapeHtml(camera.decoder?.backend||'—')}</p>${camera.decoder?.backend==='cpu_keyframes'?'<p class="notice warning">AI analizuje klatki kluczowe. Krótkie zdarzenia pomiędzy nimi mogą zostać pominięte. Pełna jakość i FPS nagrań pozostają zachowane.</p>':''}${camera.local_error?`<p role="status">AI: ${escapeHtml(camera.local_error.code)} (${escapeHtml(camera.local_error.phase)}). Szczegóły znajdziesz w logach Local AI.</p>`:''}${camera.last_analysis?`<p>Ostatnia analiza: ${escapeHtml(new Date(camera.last_analysis.timestamp*1000).toLocaleTimeString())} · ${Number(camera.last_analysis.objects)} obiektów · ${Number(camera.last_analysis.analysis_ms)} ms.</p>`:''}<p>Strefa Edge (tylko lokalne AI): ${camera.local_zone?.enabled ? (camera.local_zone.valid ? 'włączona' : 'nieprawidłowa — popraw ustawienia') : 'cały kadr'}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(eventKindNames[kind] || kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
         } finally {detectionLoading = false;}
       }
       function eventFilters() {
@@ -9699,7 +9733,7 @@ INDEX_HTML = r"""<!doctype html>
       function showSavedAlertClip(event) {
           nvrGrid.querySelectorAll('video').forEach(video=>video.pause());
           const dialog=document.createElement('dialog');dialog.setAttribute('aria-label','Zapisany fragment alertu');dialog.style.cssText='max-width:95vw;width:850px;background:#101c29;color:white;border:0;border-radius:8px';
-          dialog.innerHTML=`<p>${escapeHtml(eventKindNames[event.kind]||event.kind)} · zapisany fragment alertu</p><video controls playsinline style="width:100%;max-height:75vh" src="${escapeHtml(panelPath(event.clip_url))}#t=${Number(event.clip_offset_seconds||0)}"></video><button type="button">Zamknij</button>`;
+          dialog.innerHTML=`<p>${escapeHtml(eventKindNames[event.kind]||event.kind)} · zapisany fragment alertu</p><video controls playsinline style="width:100%;max-height:75vh" src="${escapeHtml(mediaUrlWithTimeFragment(panelPath(event.clip_url),event.clip_offset_seconds))}"></video><button type="button">Zamknij</button>`;
           const close=()=>{const video=dialog.querySelector('video');video.pause();video.removeAttribute('src');video.load();dialog.remove();};dialog.querySelector('button').onclick=close;dialog.addEventListener('cancel',close);document.body.append(dialog);dialog.showModal();
       }
       document.addEventListener('click',async event=>{const button=event.target.closest('[data-alert-clip]');if(!button)return;try{const item=await eventJson(`api/alerts/${button.dataset.alertClip}`);if(item.clip_url)showSavedAlertClip(item);}catch(_){button.textContent='Fragment chwilowo niedostępny';}});
@@ -10135,7 +10169,7 @@ INDEX_HTML = r"""<!doctype html>
           if (video) {
             clearRecordingContinuation(toggle.dataset.recordingToggle);
             const scrub=recordingScrubs.get(video.dataset.recordingPlayer);
-            if(scrub){scrub.resume=!scrub.resume;video.dataset.recordingWantsPlay=String(scrub.resume);if(scrub.finishing)flushRecordingScrub(scrub);updateRecordingPlayerControls(video,'');return;}
+            if(scrub){scrub.resume=!scrub.resume;video.dataset.recordingWantsPlay=String(scrub.resume);if(scrub.resume&&scrub.finishing)playRecording(video);else if(!scrub.resume)pauseRecording(video);if(scrub.finishing)flushRecordingScrub(scrub);updateRecordingPlayerControls(video,'');return;}
             if (!video.paused||video.dataset.recordingPlayPending==='true') pauseRecording(video);
             else {
               const total = Number(recordingStatus[toggle.dataset.recordingToggle]?.timeline?.playback_total_seconds || 0);
@@ -10281,7 +10315,7 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('play', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if(video&&recordingScrubs.has(video.dataset.recordingPlayer)){const scrub=recordingScrubs.get(video.dataset.recordingPlayer);if(scrub.finishing)scrub.resume=true;video.pause();return;}
+        if(video&&recordingScrubs.has(video.dataset.recordingPlayer)){const scrub=recordingScrubs.get(video.dataset.recordingPlayer);if(scrub.active){video.pause();return;}scrub.resume=true;scrub.playStarted=performance.now();}
         if(video&&video.paused)return;
         if(video){video.dataset.recordingWantsPlay='true';video.dataset.recordingPlayPending='false';}
         if(video)showRecordingControls(video.closest('[data-recording-wrap]'));
@@ -10990,7 +11024,17 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.send_bytes(target.read_bytes(),'image/jpeg');return
         target=ALERT_SERVICE.path(ident) if ALERT_SERVICE else AlertMediaService.directory(load_config())/f'event-{ident}.mp4'
         if not target.is_file() or target.is_symlink():self.send_json({'error':'alert_clip_pending_or_expired'},HTTPStatus.NOT_FOUND);return
+        target=self.compatible_recording(target)
+        if target is None:return
         self.serve_mp4_file(target,self.path,f'alert-{ident}.mp4','alert_clip_request',{'id':ident},send_body=send_body,cache_control='private, max-age=60')
+
+    def compatible_recording(self, target):
+        if parse_qs(urlparse(self.path).query).get('compat')!=['1']:return target
+        try:return RECORDING_COMPAT.prepare(target)
+        except (OSError,RuntimeError,subprocess.TimeoutExpired) as error:
+            write_debug_event('recording_compat_error',{'filename':target.name,'error':str(error)})
+            self.send_json({'error':'recording_compat_unavailable'},HTTPStatus.SERVICE_UNAVAILABLE,{'Retry-After':'1'})
+            return None
 
     def serve_recording_thumbnail(self, request_path: str, query: str = '') -> None:
         parts = request_path.removeprefix("/recording-thumbs/").split("/", 1)
@@ -11015,6 +11059,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "error": str(error),
                 "type": type(error).__name__,
             }
+            if str(error)=='thumbnail_generation_busy':
+                self.send_json({'error':'thumbnail_generation_busy'},HTTPStatus.TOO_MANY_REQUESTS,{'Retry-After':'1'});return
             append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_request_error", payload)
             write_debug_event("recording_thumbnail_error", payload)
             self.send_json({"error": str(error)}, HTTPStatus.TOO_MANY_REQUESTS if str(error) == 'thumbnail_generation_busy' else HTTPStatus.BAD_GATEWAY)
@@ -11158,7 +11204,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if target is None or not target.exists():
             self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
             return
-
+        target=self.compatible_recording(target)
+        if target is None:return
         self.serve_mp4_file(
             target,
             request_path,

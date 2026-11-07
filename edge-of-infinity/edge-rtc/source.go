@@ -28,31 +28,35 @@ type viewer struct {
 func (v *viewer) close() { v.once.Do(func() { close(v.done) }) }
 
 type source struct {
-	cfg        sourceConfig
-	server     *gortsplib.Server
-	ctx        context.Context
-	cancel     context.CancelFunc
-	stopped    chan struct{}
-	mu         sync.RWMutex
-	client     *gortsplib.Client
-	stream     *gortsplib.ServerStream
-	viewers    map[*viewer]bool
-	mic        *viewer
-	back       *description.Media
-	backFormat *format.G711
-	micSeq     uint16
-	micTS      uint32
-	started    time.Time
-	video      map[string]any
-	audio      map[string]any
-	gop        [][]byte
-	gopBytes   int
-	connected  atomic.Int32
-	attempts   atomic.Uint64
-	packets    atomic.Uint64
-	bytes      atomic.Uint64
-	drops      atomic.Uint64
-	micPackets atomic.Uint64
+	cfg            sourceConfig
+	server         *gortsplib.Server
+	ctx            context.Context
+	cancel         context.CancelFunc
+	stopped        chan struct{}
+	mu             sync.RWMutex
+	client         *gortsplib.Client
+	stream         *gortsplib.ServerStream
+	viewers        map[*viewer]bool
+	mic            *viewer
+	back           *description.Media
+	backFormat     *format.G711
+	micSeq         uint16
+	micTS          uint32
+	started        time.Time
+	video          map[string]any
+	audio          map[string]any
+	gop            [][]byte
+	gopBytes       int
+	connected      atomic.Int32
+	attempts       atomic.Uint64
+	packets        atomic.Uint64
+	bytes          atomic.Uint64
+	drops          atomic.Uint64
+	micPackets     atomic.Uint64
+	relayFailures  atomic.Uint64
+	relayOverflows atomic.Uint64
+	relayLastLog   atomic.Int64
+	relayLastRole  atomic.Value
 }
 
 func newSource(c sourceConfig, server *gortsplib.Server) *source {
@@ -63,7 +67,8 @@ func (s *source) stop() { s.cancel(); <-s.stopped }
 func (s *source) status() map[string]any {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return map[string]any{"camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
+	lastRole, _ := s.relayLastRole.Load().(string)
+	return map[string]any{"rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
 }
 func (s *source) run() {
 	defer close(s.stopped)

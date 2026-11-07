@@ -48,6 +48,7 @@ async def main():
                 recording = await response.json()
             assert recording['copy_video'] and any(row['codec_name'] == 'hevc' and row['width'] == 640 and row['height'] == 360 for row in recording['files']), recording
             assert recording['pixel_identical'], 'recording changed decoded source pixels'
+            assert all(row['codec_tag_string']=='hvc1' for row in recording['files']),recording
             async with session.get(base + '/test/alert') as response:
                 alert = await response.json()
             assert alert['state']=='ready' and alert['pixel_identical'] and abs(alert['fps']-alert['recorded_fps'])<.05, alert
