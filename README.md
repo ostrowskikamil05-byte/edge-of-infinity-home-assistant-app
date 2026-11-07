@@ -67,3 +67,15 @@ notifications, select your Companion `notify.mobile_app_…` service, enable and
 save. Notifications use authenticated saved pictures and a link to the recorded
 event. No extra automation is required; older manually created notification
 automations can send duplicates if left enabled.
+
+Version 0.11.7 keeps a persistent sampler on the existing Edge relay so local AI
+can analyze frames between keyframes. It uses one low-priority decoder per
+selected camera (maximum four) and one inference thread. Keep one camera and
+one analyzed frame/second total on HP t530 initially. The recorder and live
+stream retain the original resolution, codec and FPS. Long camera GOPs can
+still delay the first decoded frame; the Events page now shows the last actual
+analysis and a specific error code, also included in exported Local AI logs.
+
+Recording tiles now prefer small cached JPEGs, and unchanged full-day file lists
+are not repeatedly sent during polling. If the panel offers a refresh notice
+after an update, reload that browser tab to load the current player code.

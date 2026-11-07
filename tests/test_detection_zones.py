@@ -84,7 +84,7 @@ class DetectionZoneTests(unittest.TestCase):
             self.assertEqual(url,'rtsp://127.0.0.1:8556/front_main')
             return m.AnalysisFrame(bytes(416*416*3))
         with tempfile.TemporaryDirectory() as directory, patch.object(m,'NanoDet',Detector), patch.object(m,'capture_frame',capture):
-            service=m.DetectionService(directory,lambda *a:self.fail('Unexpected camera HTTP'),lambda *a:'rtsp://127.0.0.1:8556/front_main',lambda *a:None)
+            service=m.DetectionService(directory,lambda *a:self.fail('Unexpected camera HTTP'),lambda *a:'rtsp://127.0.0.1:8556/front_main',lambda *a:None,frame_source=capture)
             try:
                 cam={**camera('front','192.0.2.10','sub'),**configured_zone(),'local_detection_enabled':True}
                 config={'detection':{'local_enabled':True,'max_fps':3},'cameras':[cam]}

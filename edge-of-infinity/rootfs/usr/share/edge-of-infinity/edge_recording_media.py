@@ -61,7 +61,7 @@ def video_timing(path):
                                 for child,e,f in boxes(c,d):
                                     if child==b'stts':table=(e,f)
                     if not video or not timescale:continue
-                    count=ticks=0
+                    count=ticks=0;intervals={}
                     if table:
                         handle.seek(table[0]);head=handle.read(8)
                         entries=int.from_bytes(head[4:8],'big') if len(head)==8 else 0
@@ -69,7 +69,14 @@ def video_timing(path):
                             for _ in range(entries):
                                 raw=handle.read(8);n=int.from_bytes(raw[:4],'big');delta=int.from_bytes(raw[4:],'big')
                                 count+=n;ticks+=n*delta
-                    fps=timescale*count/ticks if ticks else 0
+                                if delta>0:intervals[delta]=intervals.get(delta,0)+n
+                    # Audio padding / a final sample can extend the average
+                    # duration. The weighted median is the video frame clock.
+                    accumulated=0;median=0;half=sum(intervals.values())/2
+                    for delta,n in sorted(intervals.items()):
+                        accumulated+=n
+                        if accumulated>=half:median=delta;break
+                    fps=timescale/median if median else (timescale*count/ticks if ticks else 0)
                     result={'fps':round(fps,6) if .1<=fps<=240 else 0.0,'duration':duration/timescale if duration else 0.0,
                             'frame_seconds':1/fps if .1<=fps<=240 else 0.0}
     with _TIMING_LOCK:
