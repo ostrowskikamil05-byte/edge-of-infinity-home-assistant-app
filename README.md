@@ -42,3 +42,28 @@ The optional `core_engine: edge_rtc` mode uses our EdgeRTC/1 frame protocol over
 WebSocket and browser WebCodecs, with no WebRTC or MSE on that path. One recording
 profile is shared with native live, NVR and supported RTSP G711 microphone audio.
 See [setup and current limits](edge-of-infinity/DOCS.md#native-edgertc-beta-01045).
+
+## Recording alerts (0.11.6)
+
+In Edge settings, enable local detection, select the camera and choose person
+and/or animal detection. Keep recording enabled. Intrusions add dots to the
+video's existing seek bar: open a dot to see event thumbnails, then select a
+thumbnail to watch that moment. Alerts also retain the picture and an original
+quality clip. The clip becomes available after the post-event buffer and the
+recording segment close; it includes whole boundary segments without re-encoding.
+
+Detection reads the shared Edge relay; clips and preview thumbnails read saved
+recordings. These features do not open additional physical camera streams.
+Original resolution, codec and FPS are preserved. On HP t530, start with one
+camera and the default total analysis rate of one frame per second.
+
+Clips have a separate 256 MiB default budget; alert pictures have a 32 MiB / 2000
+image budget. Both follow recording retention and evict their oldest files.
+Original recordings and the existing 32 MiB preview cache retain their own rules.
+
+For phone notifications, update the add-on and restart Home Assistant Core to
+load the updated bundled integration. In Edge settings, expand phone
+notifications, select your Companion `notify.mobile_app_…` service, enable and
+save. Notifications use authenticated saved pictures and a link to the recorded
+event. No extra automation is required; older manually created notification
+automations can send duplicates if left enabled.

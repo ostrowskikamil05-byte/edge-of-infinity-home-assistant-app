@@ -133,6 +133,7 @@ class DetectionTests(unittest.TestCase):
         pixels = cv2.resize(cv2.imread(image), (416, 416)).tobytes()
         result = detector.infer(pixels, .4)
         self.assertTrue(any(row['kind'] == 'vehicle' for row in result))
+        self.assertTrue(any(row['kind'] == 'animal' for row in detector.infer(pixels, .35)), 'The packaged COCO sample must exercise animal inference')
 
     def test_detection_settings_and_camera_flags_survive_roundtrip(self):
         panel = load_panel_module()

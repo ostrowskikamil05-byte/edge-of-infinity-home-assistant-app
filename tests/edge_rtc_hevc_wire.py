@@ -48,6 +48,9 @@ async def main():
                 recording = await response.json()
             assert recording['copy_video'] and any(row['codec_name'] == 'hevc' and row['width'] == 640 and row['height'] == 360 for row in recording['files']), recording
             assert recording['pixel_identical'], 'recording changed decoded source pixels'
+            async with session.get(base + '/test/alert') as response:
+                alert = await response.json()
+            assert alert['state']=='ready' and alert['pixel_identical'] and abs(alert['fps']-alert['recorded_fps'])<.05, alert
             deadline = time.monotonic() + 15
             while True:
                 async with session.get(base + '/test/detection') as response:
@@ -68,7 +71,7 @@ async def main():
                 source = (await response.json())['sources'][0]
             assert source['upstream_connections'] == 1 and source['connection_attempts'] == 1, source
             assert source['microphone_packets'] >= 8, source
-            print('PASS: H265 EdgeRTC frames decode to 640x360; original HEVC recording, local CPU inference, correctly cropped preview and G711 microphone share one camera connection')
+            print('PASS: H265 EdgeRTC, original HEVC recording and intrusion clip, local inference, preview and G711 microphone share exactly one camera connection; alert pixels and FPS unchanged')
 
 
 asyncio.run(main())

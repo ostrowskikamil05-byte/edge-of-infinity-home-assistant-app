@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from urllib.parse import urlparse
 import types
 
@@ -109,7 +110,29 @@ async def main():
                             recorded_hashes=hashes(file)
                             pixel_identical=pixel_identical and bool(recorded_hashes) and set(recorded_hashes).issubset(original_hashes)
                     return web.json_response({'files':files,'copy_video':command[command.index('-c:v')+1]=='copy','pixel_identical':pixel_identical})
-                app=web.Application();app.router.add_get('/',index);app.router.add_get('/edge/{name}',asset);app.router.add_get('/api/edge/rtc/{entity}',websocket);app.router.add_get('/test/status',status);app.router.add_get('/test/detection',detection_status);app.router.add_get('/test/record',record)
+                async def alert(request):
+                    # Export already-recorded HEVC while live, inference and talk
+                    # remain attached. The exporter receives no camera address.
+                    def build():
+                        from edge_detection import EventStore
+                        from edge_recording_media import AlertMediaService, video_timing
+                        store=EventStore(folder/'alert-events.sqlite')
+                        rows=[];stamp=time.time()-20
+                        for path in sorted(folder.glob('record-*.mp4')):
+                            duration=video_timing(path)['duration']
+                            if duration>0:
+                                rows.append({'path':path,'start_ts':stamp,'duration':duration});stamp+=duration
+                        ident=store.add('front','animal','local',rows[0]['start_ts']+.5,{})
+                        service=AlertMediaService(store,lambda:{'storage':{'recordings_dir':str(folder/'alerts')},'detection':{}},lambda *args:rows,lambda *args:None,lambda *args:None,start=False)
+                        service.build(store.get(ident));clip=service.path(ident)
+                        def pixels(path):
+                            output=subprocess.run(['ffmpeg','-v','error','-threads','1','-i',str(path),'-map','0:v:0','-threads','1','-f','framemd5','-'],capture_output=True,text=True,check=True).stdout
+                            return [line.rsplit(',',1)[-1].strip() for line in output.splitlines() if line and not line.startswith('#')]
+                        original=[value for row in rows for value in pixels(row['path'])]
+                        recorded_fps=sum(video_timing(row['path'])['fps']*row['duration'] for row in rows)/sum(row['duration'] for row in rows)
+                        return {'state':store.get(ident)['clip_state'],'pixel_identical':original==pixels(clip),'fps':video_timing(clip)['fps'],'recorded_fps':recorded_fps}
+                    return web.json_response(await asyncio.to_thread(build))
+                app=web.Application();app.router.add_get('/',index);app.router.add_get('/edge/{name}',asset);app.router.add_get('/api/edge/rtc/{entity}',websocket);app.router.add_get('/test/status',status);app.router.add_get('/test/detection',detection_status);app.router.add_get('/test/record',record);app.router.add_get('/test/alert',alert)
                 runner=web.AppRunner(app);await runner.setup();site=web.TCPSite(runner,'127.0.0.1',18089);await site.start()
                 print('EdgeRTC real transport fixture ready on 18089',flush=True)
                 event=asyncio.Event();asyncio.get_running_loop().add_signal_handler(signal.SIGTERM,event.set);await event.wait();await runner.cleanup();await asyncio.to_thread(server.shutdown);server.server_close()

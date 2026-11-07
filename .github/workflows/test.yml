@@ -74,6 +74,7 @@ jobs:
           node tests/browser/nvr_playback.cjs
           node tests/browser/nvr_navigation.cjs
           node tests/browser/nvr_scrubbing.cjs
+          node tests/browser/nvr_alerts.cjs
           node tests/browser/recording_storage.cjs
           node tests/browser/ui_dashboard.cjs
           node tests/browser/camera_settings.cjs
@@ -111,6 +112,7 @@ jobs:
           export EDGE_TEST_MODEL="${RUNNER_TEMP}/nanodet.onnx" EDGE_TEST_IMAGE="${RUNNER_TEMP}/test-vehicle.png" EDGE_DETECTION_MODEL="${RUNNER_TEMP}/nanodet.onnx" EDGE_RTC_TEST_BINARY="${RUNNER_TEMP}/edge-rtc-fixture"
           python -m unittest discover -s tests -p test_detection.py
           python -m unittest discover -s tests -p test_detection_zones.py
+          python -m unittest discover -s tests -p test_alert_media.py
           go -C edge-of-infinity/edge-rtc test -c -o "${EDGE_RTC_TEST_BINARY}" .
           python tests/run_detection_media.py
 

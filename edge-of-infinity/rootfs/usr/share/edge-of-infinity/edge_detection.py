@@ -21,7 +21,8 @@ import time
 from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
 
-KINDS = ('motion', 'person', 'vehicle')
+KINDS = ('motion', 'person', 'vehicle', 'animal')
+ANIMAL_CLASSES = {14:'bird',15:'cat',16:'dog',17:'horse',18:'sheep',19:'cow',20:'elephant',21:'bear',22:'zebra',23:'giraffe'}
 MODEL_PATH = Path(os.environ.get('EDGE_DETECTION_MODEL', str(Path(__file__).parent / 'models/nanodet.onnx')))
 MODEL_SHA256 = '4b82da9944b88577175ee23a459dce2e26e6e4be573def65b1055dc2d9720186'
 EVENT_ACTION = 'http://www.onvif.org/ver10/events/wsdl/'
@@ -82,11 +83,17 @@ class AnalysisFrame:
                 result.append({**obj, 'box': [round(value, 6) for value in box]})
         return result
 
-    def jpeg(self):
+    def jpeg(self, objects=None):
         import cv2
         import numpy as np
         image = np.frombuffer(self.pixels, np.uint8).reshape(416, 416, 3)
         scene = image[self.top:self.top + self.height, self.left:self.left + self.width]
+        if objects:
+            best=max(objects,key=lambda item:item.get('score',0));x1,y1,x2,y2=best['box']
+            margin=.2*max(x2-x1,y2-y1)
+            left,top=max(0,int((x1-margin)*self.width)),max(0,int((y1-margin)*self.height))
+            right,bottom=min(self.width,int((x2+margin)*self.width)),min(self.height,int((y2+margin)*self.height))
+            if right>left and bottom>top:scene=scene[top:bottom,left:right]
         ok, encoded = cv2.imencode('.jpg', scene, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:
             raise RuntimeError('preview_encoding_failed')
@@ -103,8 +110,19 @@ def settings(raw=None):
             return default
     return {'camera_events_enabled': raw.get('camera_events_enabled') is True,
             'local_enabled': raw.get('local_enabled') is True,
+            'person_enabled': raw.get('person_enabled', True) is not False,
+            'animal_enabled': raw.get('animal_enabled', True) is not False,
+            'vehicle_enabled': raw.get('vehicle_enabled', True) is not False,
+            'alert_media_mb': int(number('alert_media_mb', 256, 32, 4096)),
+            'pre_seconds': int(number('pre_seconds', 5, 0, 10)),
+            'post_seconds': int(number('post_seconds', 15, 5, 60)),
+            'notifications_enabled': raw.get('notifications_enabled') is True,
+            'notify_service': str(raw.get('notify_service') or '')[:160] if re.fullmatch(r'notify\.mobile_app_[a-z0-9_]+', str(raw.get('notify_service') or '')) else '',
+            'notify_cooldown': int(number('notify_cooldown', 30, 5, 3600)),
+            'notify_path': str(raw.get('notify_path') or '')[:500] if str(raw.get('notify_path') or '').startswith('/') and not str(raw.get('notify_path') or '').startswith('//') else '',
             'max_fps': number('max_fps', 1, .2, 3),
             'confidence': number('confidence', .45, .1, .95),
+            'animal_confidence': number('animal_confidence', .35, .1, .95),
             'hold_seconds': number('hold_seconds', 10, 1, 120)}
 
 
@@ -158,6 +176,8 @@ def classify(description):
     description = description.lower()
     if any(x in description for x in ('person', 'human', 'people')):
         return 'person'
+    if any(x in description for x in ('animal', 'petdetect', 'dogdetect', 'catdetect')):
+        return 'animal'
     if any(x in description for x in ('vehicle', 'automobile', 'caralarm')):
         return 'vehicle'
     if any(x in description for x in ('motion', 'linecross', 'intrusion', 'fielddetect', 'vmd')):
@@ -207,6 +227,29 @@ class EventStore:
 
     def recent(self, camera_id=None, limit=200):
         return self.page(camera_id=camera_id, limit=limit)['events']
+
+    def get(self, ident):
+        with self.lock, self.connect() as db:
+            row = db.execute('SELECT camera_id,kind,source,timestamp,data FROM edge_events WHERE id=?',(int(ident),)).fetchone()
+        if row is None:
+            return None
+        camera,kind,source,stamp,data = row
+        start,_ = day_bounds(datetime.fromtimestamp(stamp).strftime('%Y-%m-%d'))
+        return {**json.loads(data),'id':int(ident),'camera_id':camera,'kind':kind,'source':source,'timestamp':stamp,
+                'day':datetime.fromtimestamp(stamp).strftime('%Y-%m-%d'),'day_seconds':stamp-start,'time_label':datetime.fromtimestamp(stamp).strftime('%H:%M:%S')}
+
+    def update_media(self, ident, **values):
+        with self.lock, self.connect() as db:
+            row = db.execute('SELECT data FROM edge_events WHERE id=?',(int(ident),)).fetchone()
+            if row is not None:
+                data = json.loads(row[0]); data.update(values)
+                db.execute('UPDATE edge_events SET data=? WHERE id=?',(json.dumps(data,allow_nan=False),int(ident)))
+
+    def alert_points(self, camera_id, day):
+        start,end = day_bounds(day)
+        with self.lock, self.connect() as db:
+            rows=db.execute("SELECT id,kind,timestamp FROM edge_events WHERE camera_id=? AND timestamp>=? AND timestamp<? AND kind IN ('person','animal') ORDER BY timestamp,id",(str(camera_id),start,end)).fetchall()
+        return [{'id':ident,'kind':kind,'timestamp':stamp,'day_seconds':stamp-start} for ident,kind,stamp in rows]
 
     def page(self, camera_id=None, limit=200, day=None, kind=None, before=None):
         """Bounded keyset pagination stays stable when new events arrive."""
@@ -263,7 +306,8 @@ class EventStore:
             marker['time_label'] = datetime.fromtimestamp(marker['timestamp']).strftime('%H:%M:%S')
         return {'camera_id': str(camera_id), 'day': day, 'day_start_ts': start, 'day_total_seconds': end - start,
                 'midpoint_label': datetime.fromtimestamp((start + end) / 2).strftime('%H:%M'),
-                'count': sum(marker['count'] for marker in markers.values()), 'markers': list(markers.values())}
+                'count': sum(marker['count'] for marker in markers.values()), 'markers': list(markers.values()),
+                'alerts': self.alert_points(camera_id,day)}
 
     def prune(self, days):
         with self.lock, self.connect() as db:
@@ -292,7 +336,7 @@ class NanoDet:
         self.net.setInput(cv.dnn.blobFromImage(image))
         outputs = self.net.forward(self.net.getUnconnectedOutLayersNames())
         detections = []
-        classes = {0: 'person', 1: 'vehicle', 2: 'vehicle', 3: 'vehicle', 5: 'vehicle', 7: 'vehicle'}
+        classes = {0: 'person', 1: 'vehicle', 2: 'vehicle', 3: 'vehicle', 5: 'vehicle', 7: 'vehicle', **{index:'animal' for index in ANIMAL_CLASSES}}
         candidates = {index: [] for index in classes}
         for stride, scores, regressions in zip((8, 16, 32, 64), outputs[::2], outputs[1::2]):
             scores, regressions = scores[0], regressions[0]
@@ -330,12 +374,13 @@ def capture_frame(proxy_url):
 
 
 class DetectionService:
-    def __init__(self, home, soap, proxy_url, publish):
+    def __init__(self, home, soap, proxy_url, publish, on_event=None):
         self.home, self.soap, self.proxy_url, self.publish = Path(home), soap, proxy_url, publish
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.config = {'cameras': [], 'detection': settings()}
         self.store = EventStore(self.home / 'events.sqlite')
+        self.on_event = on_event
         self.workers, self.states, self.status, self.reported = {}, {}, {}, {}
         self.capture_lock, self.preview_lock = threading.Lock(), threading.Lock()
         self.frames = {}
@@ -351,10 +396,11 @@ class DetectionService:
         current['detection'] = settings(config.get('detection'))
         desired = {str(c['id']): c for c in current.get('cameras', []) if c.get('enabled') and c.get('events_enabled') and current['detection']['camera_events_enabled']}
         with self.lock:
+            options_changed=any(self.config.get('detection',{}).get(key)!=current['detection'][key] for key in ('confidence','animal_confidence','person_enabled','animal_enabled','vehicle_enabled'))
             previous = {str(c['id']): c for c in self.config.get('cameras', [])}
             for camera in current.get('cameras', []):
                 ident = str(camera['id'])
-                if previous.get(ident) != camera:
+                if previous.get(ident) != camera or options_changed:
                     self._clear(ident, 'local')
                     self.frames.pop(ident, None)
                 if camera_event_signature(previous.get(ident) or {}) != camera_event_signature(camera):
@@ -363,6 +409,8 @@ class DetectionService:
                 if ident not in {str(camera['id']) for camera in current.get('cameras', [])}:
                     self.frames.pop(ident, None)
             self.config = current
+            for key in list(self.states):
+                if key[2]!='motion' and not current['detection'][key[2]+'_enabled']:self.states.pop(key,None)
             for ident, (camera, stop) in list(self.workers.items()):
                 if ident not in desired or camera_event_signature(desired[ident]) != camera_event_signature(camera):
                     stop.set()
@@ -383,16 +431,22 @@ class DetectionService:
             if key[:2] == (str(ident), source):
                 self.states.pop(key, None)
 
-    def record(self, camera_id, kind, source, active, timestamp=None, **data):
+    def record(self, camera_id, kind, source, active, timestamp=None, frame=None, **data):
         if kind not in KINDS or source not in ('camera', 'local'):
             return
         stamp = timestamp if timestamp is not None else time.time()
         key = (str(camera_id), source, kind)
         with self.lock:
+            if kind!='motion' and not self.config['detection'][kind+'_enabled']:return
             self.reported.setdefault((str(camera_id), source), set()).add(kind)
             previous = self.states.get(key) or {}
             if active and not previous.get('active'):
-                self.store.add(str(camera_id), kind, source, stamp, data)
+                ident=self.store.add(str(camera_id), kind, source, stamp, data)
+                if kind in ('person','animal') and self.on_event:
+                    try:
+                        self.on_event({'id':ident,'camera_id':str(camera_id),'kind':kind,'source':source,'timestamp':stamp},frame)
+                    except Exception:
+                        self.store.update_media(ident,clip_state='error',media_error='alert_queue_unavailable')
             self.states[key] = {'active': bool(active), 'last_seen': stamp, **data}
 
     def _set_status(self, ident, source, value):
@@ -540,17 +594,19 @@ class DetectionService:
                     if self.config != config:
                         continue
                     self._remember_frame(camera, frame, captured_at)
-                objects = zone_objects(frame.scene_objects(self.model.infer(frame.pixels, options['confidence'])), camera)
+                threshold=min(options['confidence'],options['animal_confidence']) if options['animal_enabled'] else options['confidence']
+                objects = zone_objects(frame.scene_objects(self.model.infer(frame.pixels, threshold)), camera)
+                objects=[obj for obj in objects if obj['score'] >= options['animal_confidence' if obj['kind']=='animal' else 'confidence']]
                 with self.lock:
                     # Discard results from settings that have been superseded during analysis.
                     if self.config != config:
                         continue
                     self._set_status(ident, 'local', 'running')
-                    for kind in ('person', 'vehicle'):
-                        matched = [obj for obj in objects if obj['kind'] == kind]
+                    for kind in ('person', 'vehicle', 'animal'):
+                        matched = [obj for obj in objects if obj['kind'] == kind] if options[kind+'_enabled'] else []
                         old = self.states.get((ident, 'local', kind)) or {}
                         if matched:
-                            self.record(ident, kind, 'local', True, timestamp=captured_at, score=max(obj['score'] for obj in matched), objects=matched,
+                            self.record(ident, kind, 'local', True, timestamp=captured_at, frame=frame, score=max(obj['score'] for obj in matched), objects=matched,
                                         **({'zone_id': 'local_zone'} if zone_settings(camera)['enabled'] else {}))
                         elif not old.get('active') or time.time() - old.get('last_seen', 0) > options['hold_seconds']:
                             self.record(ident, kind, 'local', False)
@@ -572,15 +628,17 @@ class DetectionService:
                     values = [self.states.get((ident, source, kind), {}) for source in ('camera', 'local')]
                     states[kind] = any(value.get('active') and (source != 'local' or now - value.get('last_seen', 0) < max(30, self.config['detection']['hold_seconds'] * 3)) for source, value in zip(('camera', 'local'), values))
                 supported = set(self.reported.get((ident, 'camera'), set())) if camera_on else set()
+                supported={kind for kind in supported if kind=='motion' or self.config['detection'][kind+'_enabled']}
                 if local_on:
-                    supported.update(('person', 'vehicle'))
+                    supported.update(kind for kind in ('person','vehicle','animal') if self.config['detection'][kind+'_enabled'])
                 rows.append({'id': ident, 'index': index, 'name': camera.get('name', ident), 'states': states, 'supported_kinds': sorted(supported),
                              'camera_status': self.status.get((ident, 'camera'), 'connecting') if camera_on else 'disabled',
                              'local_status': self.status.get((ident, 'local'), 'loading') if local_on else 'disabled',
                              'local_zone': zone_settings(camera)})
             return {'updated_at': now, 'cameras': rows, 'recent_events': self.store.recent(limit=200),
                     'model': 'NanoDet-m-plus-1.5x_416', 'model_installed': MODEL_PATH.is_file(), 'backend': 'CPU (1 thread)',
-                    'max_fps': self.config['detection']['max_fps'], 'analysis_ms': self.analysis_ms}
+                    'max_fps': self.config['detection']['max_fps'], 'analysis_ms': self.analysis_ms,
+                    'notifications': {key:self.config['detection'][key] for key in ('notifications_enabled','notify_service','notify_cooldown','notify_path')}}
 
     def _publish_loop(self):
         last_prune = 0

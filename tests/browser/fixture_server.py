@@ -37,6 +37,14 @@ if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  p.DETECTION_SERVICE.store.add('front','vehicle','camera',datetime(2026,7,28,0,0,15).timestamp(),{})
  for index in range(210):
   p.DETECTION_SERVICE.store.add('front','motion','camera',datetime(2026,7,28,0,1).timestamp()+index*300,{})
+ # Keep historical paging IDs/counts stable while adding one intrusion to today.
+ with p.DETECTION_SERVICE.store.connect() as db:
+  db.execute("UPDATE edge_events SET kind='animal',timestamp=? WHERE id=3",(datetime(2026,7,28,0,0,6).timestamp(),))
+ for ident in (1,3):
+  event=p.DETECTION_SERVICE.store.get(ident)
+  image=p.alert_image_path(ident);image.parent.mkdir(parents=True,exist_ok=True);image.write_bytes(preview_jpeg)
+  p.write_json(image.with_suffix('.json'),{key:event[key] for key in ('id','camera_id','kind','timestamp')})
+  p.DETECTION_SERVICE.store.update_media(ident,has_image=True,clip_state='pending')
 d=p.recording_base_dir(config['cameras'][0],0); d.mkdir(parents=True)
 import subprocess
 sample=d/'sample.mp4'
@@ -44,5 +52,10 @@ subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=160x90:ra
 for name in ['20260727-000000.mp4','20260727-000007.mp4','20260727-000014.mp4','20260728-000000.mp4','20260728-000007.mp4','20260728-000014.mp4']:
  shutil.copyfile(sample,d/name)
 sample.unlink()
+if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
+ p.ALERT_SERVICE=p.AlertMediaService(p.DETECTION_SERVICE.store,p.load_config,p.alert_source_entries,p.save_alert_image,p.save_alert_fallback_image,start=False)
+ # Fixture dates are intentionally historical; retention is covered separately.
+ p.ALERT_SERVICE.prune=lambda reserve=0:{'bytes':0,'limit_bytes':256*1024*1024}
+ for ident in (1,3):p.ALERT_SERVICE.build(p.DETECTION_SERVICE.store.get(ident))
 Path(os.environ.get('EDGE_NVR_FIXTURE_INFO', '/tmp/edge-nvr-browser-fixture.json')).write_text(json.dumps({'recordings_dir': str(d), 'recording_cache_dir':str(p.RECORDING_CACHE_DIR), 'thumbnail_dir':str(p.RECORDING_THUMB_DIR)}))
 p.ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('EDGE_NVR_TEST_PORT', '18088'))),p.EdgeHandler).serve_forever()
