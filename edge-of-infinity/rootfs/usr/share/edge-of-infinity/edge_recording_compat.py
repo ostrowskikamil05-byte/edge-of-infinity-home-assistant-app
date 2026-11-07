@@ -26,6 +26,8 @@ class CompatibleRecordings:
         finally:self.lock.release()
 
     def _prune(self, reserve=0, slots=0):
+        abandoned=self.directory/'remux.tmp'
+        if abandoned.is_file() and not abandoned.is_symlink():abandoned.unlink(missing_ok=True)
         rows=[]
         for path in self.directory.iterdir():
             if MANAGED.fullmatch(path.name) and path.is_file() and not path.is_symlink():
