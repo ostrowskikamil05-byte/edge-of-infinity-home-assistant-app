@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.8
+
+- Fix phone recording playback on iPhone/Home Assistant WKWebView and Android: issue Play immediately within the user gesture, including an unfinished seek, instead of waiting for a decoded frame that the phone may only load after Play. Release held seek pictures independently of callbacks from an occluded video surface. Keep one seek bar, original frames and pause/resume intent.
+- Preserve camera RTP timestamps when recording instead of replacing them with network arrival times. Write new HEVC recordings as hvc1 for mobile compatibility. Mobile playback of existing recordings and saved alert clips uses a faststart MP4 stream-copy remux: no video re-encoding, resolution/FPS reduction or new camera connections. Copies are limited to 64 MiB, 12 segments and 48 hours in app temporary data, with one low-priority worker and disk reserve; originals are untouched. HEVC still requires a device/browser HEVC decoder.
+- Increase the bounded local RTSP write queue from 256 to 4096 packets to absorb large 4K I-frame bursts. Isolate and close only a failed local consumer, rate-limit its messages and expose overflow/failure counters and consumer role. Recording/live upstreams are not restarted by a slow AI reader.
+- Enable standard Home Assistant video-device access and include Mesa VAAPI drivers. Auto AI decoding tries the local render device, falls back to CPU if the stream is unsupported and switches an overloaded, delayed CPU reader to keyframes. Expose Auto/CPU/keyframe settings and an explicit warning that short events between keyframes can be missed. Full recording quality and FPS remain unchanged; hardware acceleration depends on the device, driver and codec.
+- Retry busy thumbnail generation with backoff instead of starting full-resolution browser video downloads. Keep one extraction worker, the existing preview budget and historical cache diagnostics without reporting obsolete disk errors as active failures.
+- Add actual HEVC/H264 remux pixel/FPS tests, RTSP burst and slow-reader isolation race tests, busy-thumbnail tests and iPhone/Android loading-policy simulations. Browser phone simulations do not replace testing on physical devices; no GPU is available in CI.
+
 ## 0.11.7
 
 - Index each recording list once and use binary search while scrubbing. Reuse the index across metadata refreshes when the files are unchanged. Let polling send only a revision token and omit the unchanged file list from responses, reducing repeated full-day transfers through Home Assistant ingress/Nabu Casa.

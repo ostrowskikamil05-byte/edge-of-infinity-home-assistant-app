@@ -122,6 +122,7 @@ def settings(raw=None):
             'notify_cooldown': int(number('notify_cooldown', 30, 5, 3600)),
             'notify_path': str(raw.get('notify_path') or '')[:500] if str(raw.get('notify_path') or '').startswith('/') and not str(raw.get('notify_path') or '').startswith('//') else '',
             'max_fps': number('max_fps', 1, .2, 3),
+            'decoder':raw.get('decoder') if raw.get('decoder') in ('auto','cpu','keyframes') else 'auto',
             'confidence': number('confidence', .45, .1, .95),
             'animal_confidence': number('animal_confidence', .35, .1, .95),
             'hold_seconds': number('hold_seconds', 10, 1, 120)}
@@ -435,7 +436,8 @@ class DetectionService:
     def _analysis_frame(self,camera,index,fps):
         url=self._proxy(camera,index)
         if self.frame_source:return self.frame_source(url),time.time()
-        ident=str(camera['id']);signature=(url,fps)
+        mode=self.config['detection']['decoder']
+        ident=str(camera['id']);signature=(url,fps,mode)
         with self.reader_lock:
             with self.lock:
                 if self.stop.is_set() or not self.config['detection']['local_enabled'] or not camera.get('enabled') or not camera.get('local_detection_enabled') or camera not in self.config.get('cameras',[]):
@@ -445,7 +447,7 @@ class DetectionService:
                 previous[1].close();self.readers.pop(ident,None);previous=None
             if previous is None:
                 if len(self.readers)>=4:raise RuntimeError('analysis_camera_limit')
-                previous=(signature,SharedFrameReader(url,fps));self.readers[ident]=previous
+                previous=(signature,SharedFrameReader(url,fps,mode));self.readers[ident]=previous
             reader=previous[1]
         pixels,stamp=reader.read()
         return AnalysisFrame(*pixels),stamp
@@ -664,10 +666,12 @@ class DetectionService:
                 supported={kind for kind in supported if kind=='motion' or self.config['detection'][kind+'_enabled']}
                 if local_on:
                     supported.update(kind for kind in ('person','vehicle','animal') if self.config['detection'][kind+'_enabled'])
+                reader=self.readers.get(ident)
                 rows.append({'id': ident, 'index': index, 'name': camera.get('name', ident), 'states': states, 'supported_kinds': sorted(supported),
                              'camera_status': self.status.get((ident, 'camera'), 'connecting') if camera_on else 'disabled',
                              'local_status': self.status.get((ident, 'local'), 'loading') if local_on else 'disabled',
                              'local_error':self.errors.get(ident) if local_on else None,'last_analysis':self.last_analysis.get(ident),
+                             'decoder':reader[1].status() if reader else None,
                              'local_zone': zone_settings(camera)})
             return {'updated_at': now, 'cameras': rows, 'recent_events': self.store.recent(limit=200),
                     'model': 'NanoDet-m-plus-1.5x_416', 'model_installed': MODEL_PATH.is_file(), 'backend': 'CPU (1 thread)',

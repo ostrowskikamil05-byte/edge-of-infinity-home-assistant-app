@@ -76,6 +76,8 @@ jobs:
           node tests/browser/nvr_scrubbing.cjs
           node tests/browser/nvr_alerts.cjs
           node tests/browser/nvr_speed.cjs
+          node tests/browser/nvr_backpressure.cjs
+          node tests/browser/nvr_mobile.cjs
           node tests/browser/recording_storage.cjs
           node tests/browser/ui_dashboard.cjs
           node tests/browser/camera_settings.cjs
@@ -115,6 +117,7 @@ jobs:
           python -m unittest discover -s tests -p test_detection_zones.py
           python -m unittest discover -s tests -p test_detection_capture.py
           python -m unittest discover -s tests -p test_alert_media.py
+          python -m unittest discover -s tests -p test_recording_compat.py
           go -C edge-of-infinity/edge-rtc test -c -o "${EDGE_RTC_TEST_BINARY}" .
           python tests/run_detection_media.py
 

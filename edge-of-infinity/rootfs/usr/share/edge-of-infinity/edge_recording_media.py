@@ -45,7 +45,7 @@ def video_timing(path):
                 if child!=b'trak':continue
                 for child,media_start,media_end in boxes(track_start,track_end):
                     if child!=b'mdia':continue
-                    timescale=duration=0;video=False;table=None
+                    timescale=duration=0;video=False;table=None;sample_entry=''
                     for child,a,b in boxes(media_start,media_end):
                         if child==b'hdlr':
                             handle.seek(a);video=handle.read(12)[8:12]==b'vide'
@@ -60,6 +60,10 @@ def video_timing(path):
                                 if child!=b'stbl':continue
                                 for child,e,f in boxes(c,d):
                                     if child==b'stts':table=(e,f)
+                                    elif child==b'stsd':
+                                        handle.seek(e);data=handle.read(min(16,f-e))
+                                        if len(data)==16 and int.from_bytes(data[4:8],'big'):
+                                            sample_entry=data[12:16].decode('ascii',errors='replace')
                     if not video or not timescale:continue
                     count=ticks=0;intervals={}
                     if table:
@@ -78,7 +82,8 @@ def video_timing(path):
                         if accumulated>=half:median=delta;break
                     fps=timescale/median if median else (timescale*count/ticks if ticks else 0)
                     result={'fps':round(fps,6) if .1<=fps<=240 else 0.0,'duration':duration/timescale if duration else 0.0,
-                            'frame_seconds':1/fps if .1<=fps<=240 else 0.0}
+                            'frame_seconds':1/fps if .1<=fps<=240 else 0.0,
+                            'sample_entry':sample_entry,'codec_name':{'hev1':'hevc','hvc1':'hevc','avc1':'h264','avc3':'h264'}.get(sample_entry,'')}
     with _TIMING_LOCK:
         if len(_TIMING)>=512:_TIMING.pop(next(iter(_TIMING)))
         _TIMING[str(path)]=(signature,result)

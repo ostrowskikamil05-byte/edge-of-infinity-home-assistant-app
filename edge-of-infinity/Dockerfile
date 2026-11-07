@@ -11,7 +11,7 @@ FROM bluenviron/mediamtx:1.19.2 AS mediamtx
 
 FROM ghcr.io/home-assistant/base:latest
 
-ARG BUILD_VERSION=0.11.7
+ARG BUILD_VERSION=0.11.8
 ARG BUILD_ARCH=amd64
 
 LABEL \
@@ -22,7 +22,7 @@ LABEL \
 COPY --from=mediamtx /mediamtx /usr/local/bin/mediamtx
 COPY --from=edge_rtc /edge-rtc /usr/local/bin/edge-rtc
 COPY edge-rtc/THIRD_PARTY_NOTICES.md /usr/share/edge-of-infinity/THIRD_PARTY_NOTICES.md
-RUN apk add --no-cache curl ffmpeg jq python3 py3-pip py3-opencv py3-numpy janus-gateway && \
+RUN apk add --no-cache curl ffmpeg jq python3 py3-pip py3-opencv py3-numpy janus-gateway mesa-va-gallium libva && \
     mkdir -p /usr/share/edge-of-infinity/models && \
     curl --fail --location --retry 3 --output /usr/share/edge-of-infinity/models/nanodet.onnx \
       https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/object_detection_nanodet/object_detection_nanodet_2022nov.onnx && \

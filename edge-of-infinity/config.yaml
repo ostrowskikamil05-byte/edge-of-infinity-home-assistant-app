@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.11.7"
+version: "0.11.8"
 slug: edge_of_infinity
 description: Local live and NVR core for Hikvision, Uniview, Reolink and ONVIF/RTSP cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -10,6 +10,7 @@ startup: application
 boot: auto
 stage: experimental
 init: false
+video: true
 hassio_api: true
 hassio_role: default
 ingress: true
@@ -66,6 +67,7 @@ options:
   camera_events_enabled: false
   local_detection_enabled: false
   detection_fps: 1
+  detection_decoder: auto
   detection_confidence: 0.45
   detection_animal_confidence: 0.35
   detection_hold_seconds: 10
@@ -180,6 +182,7 @@ schema:
   camera_events_enabled: bool?
   local_detection_enabled: bool?
   detection_fps: float(0.2,3)?
+  detection_decoder: list(auto|cpu|keyframes)?
   detection_confidence: float(0.1,0.95)?
   detection_animal_confidence: float(0.1,0.95)?
   detection_hold_seconds: int(1,120)?
