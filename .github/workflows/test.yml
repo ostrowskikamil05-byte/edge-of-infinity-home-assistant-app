@@ -42,7 +42,7 @@ jobs:
       - name: Install browser test runtime
         run: |
           npm install --prefix "${RUNNER_TEMP}/edge-browser-tests" --no-save playwright@1.62.1
-          "${RUNNER_TEMP}/edge-browser-tests/node_modules/.bin/playwright" install --with-deps chromium
+          "${RUNNER_TEMP}/edge-browser-tests/node_modules/.bin/playwright" install --with-deps chromium webkit
       - name: Test native and legacy remote routing and browser requirements
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
@@ -81,6 +81,26 @@ jobs:
           node tests/browser/recording_storage.cjs
           node tests/browser/ui_dashboard.cjs
           node tests/browser/camera_settings.cjs
+      - name: Test native phone recording decoders and camera switching
+        run: |
+          export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
+          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_NVR_TEST_PORT=18091 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/phone-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/phone-ui.log" 2>&1 &
+          edge_phone_fixture_pid=$!
+          trap 'kill "${edge_phone_fixture_pid}" || true' EXIT
+          python - <<'PY'
+          import time, urllib.request
+          deadline = time.monotonic() + 30
+          while True:
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:18091/api/version', timeout=1).close()
+                  break
+              except OSError:
+                  if time.monotonic() > deadline:
+                      raise
+                  time.sleep(.1)
+          PY
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_phone_native.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_phone_native.cjs
 
   detection-media:
     runs-on: ubuntu-latest

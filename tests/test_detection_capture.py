@@ -17,6 +17,17 @@ class DetectionCaptureTests(unittest.TestCase):
         self.d=module()
         import edge_analysis_capture
         self.m=edge_analysis_capture
+        self.failed_before=set(self.m._GPU_FAILED)
+        self.addCleanup(lambda:setattr(self.m,'_GPU_FAILED',self.failed_before))
+
+    def test_failed_kernel_decoder_is_not_probed_again_until_restart(self):
+        old=self.m._GPU_CACHE
+        try:
+            self.m._GPU_CACHE=(-1e9,'');self.m._GPU_FAILED=set()
+            self.m.reject_vaapi_device('/dev/dri/renderD128')
+            with patch.object(self.m.Path,'glob',return_value=[Path('/dev/dri/renderD128')]),patch.object(self.m.os,'access',return_value=True),patch.object(self.m.subprocess,'run',side_effect=AssertionError('Do not repeat a broken kernel decoder')):
+                self.assertEqual(self.m.vaapi_device(),'')
+        finally:self.m._GPU_CACHE=old
 
     def test_ppm_geometry_channels_and_padding_need_no_log_regex(self):
         pixels,width,height=self.m.read_ppm(io.BytesIO(b'P6\n2 1\n255\n'+bytes([255,0,0,0,0,255])))
