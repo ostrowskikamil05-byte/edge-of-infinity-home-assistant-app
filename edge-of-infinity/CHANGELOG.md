@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.4
+
+- Stop generating full-day playback copies by default: the day player keeps one timeline and seeks original segments. Remove recognized legacy playback-cache files automatically at startup/maintenance when the copy budget is zero. An optional global copy budget is capped at 2 GB, with space reservation and refusal of oversized day builds; active cached players are protected from ordinary eviction.
+- Bound the combined normal/scrub thumbnail cache to 32 MiB by default, 2048 images and 48 hours since access. Evict oldest images across cameras and remove thumbnails whose source recording disappeared. Preserve thumbnail dimensions/encoding quality. Caches regenerate from originals as needed.
+- Preserve H264/H265 camera video by default, including legacy automatic configurations that previously converted HEVC to ultrafast H264. Keep explicit H264 compatibility conversion available with a quality/space warning. Never automatically lower camera bitrate, resolution or frame rate. Probe the shared recording feed instead of opening another camera source.
+- Give archival recording to the Edge recorder only: disable duplicate MediaMTX recording in both startup and generated runtime configurations. Existing recordings, including legacy MediaMTX folders, remain subject to the configured recording retention.
+- Show original-video/cache/thumbnail usage, both filesystem free-space readings and estimated continuous-recording storage for the selected retention. Add a cache-only cleanup button and editable cache budgets, preserving settings across saves/restarts.
+- Suppress recorder progress spam and bound recognized application/recorder logs with in-place tail retention so open recorder descriptors remain valid. Never remove original footage as part of cache cleanup; the existing recording-retention policy remains separate.
+- Add storage quota, cache bundle/TTL/LRU, symlink/foreign-file protection, codec preservation, inventory and configuration tests plus responsive cleanup/playback coverage. AI and live frame pacing remain unchanged.
+
 ## 0.11.3
 
 - Fix recording-day navigation behind a stalled refresh: a new selection cancels the older request, stale replies cannot switch the day back, requests have a timeout and errors/loading are visible. Keep explicitly requested empty days instead of silently opening the latest day.

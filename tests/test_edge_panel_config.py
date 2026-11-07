@@ -70,11 +70,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.11.3")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.11.3")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.11.3")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.11.3")
-        self.assertIn("v0.11.3", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.11.4")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.11.4")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.11.4")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.11.4")
+        self.assertIn("v0.11.4", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -435,7 +435,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("nvr-native-quality-v113", html)
+        self.assertIn("recording-storage-v114", html)
         self.assertIn("function recordingPlayerControls", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
@@ -1255,7 +1255,7 @@ class EdgePanelConfigTests(unittest.TestCase):
             {
                 "server": {},
                 "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
-                "nvr": {"segment_seconds": 10},
+                "nvr": {"segment_seconds": 10, "playback_cache_mb": 64},
                 "cameras": [
                     {
                         "id": "hikvision_1",

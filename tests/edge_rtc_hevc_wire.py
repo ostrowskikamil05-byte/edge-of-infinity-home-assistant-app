@@ -47,6 +47,7 @@ async def main():
             async with session.get(base + '/test/record') as response:
                 recording = await response.json()
             assert recording['copy_video'] and any(row['codec_name'] == 'hevc' and row['width'] == 640 and row['height'] == 360 for row in recording['files']), recording
+            assert recording['pixel_identical'], 'recording changed decoded source pixels'
             deadline = time.monotonic() + 15
             while True:
                 async with session.get(base + '/test/detection') as response:

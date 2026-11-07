@@ -91,16 +91,24 @@ async def main():
                 async def detection_status(request):
                     return web.json_response(detector.snapshot() if detector else {})
                 async def record(request):
-                    command=panel.build_recording_command(info['rtsp'],str(folder/'record-%Y%m%d-%H%M%S.mp4'),2,'copy')
+                    mode=panel.recording_mode_from_codec('hevc' if hevc else 'h264',{})
+                    command=panel.build_recording_command(info['rtsp'],str(folder/'record-%Y%m%d-%H%M%S.mp4'),2,mode)
                     with (folder/'recorder.log').open('wb') as record_log:
                         recorder=await asyncio.create_subprocess_exec(*command,stdout=record_log,stderr=record_log)
                         await asyncio.sleep(3.5);recorder.terminate();await recorder.wait()
+                    def hashes(path):
+                        result=subprocess.run(['ffmpeg','-v','error','-threads','1','-i',str(path),'-map','0:v:0','-threads','1','-f','framemd5','-'],capture_output=True,text=True,check=True)
+                        return [line.rsplit(',',1)[-1].strip() for line in result.stdout.splitlines() if line and not line.startswith('#')]
+                    original_hashes=set(hashes(video))
                     files=[]
+                    pixel_identical=True
                     for file in folder.glob('record-*.mp4'):
                         result=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries','stream=codec_name,width,height','-of','json',str(file)],capture_output=True,text=True)
                         if result.returncode==0:
                             files.extend(json.loads(result.stdout).get('streams',[]))
-                    return web.json_response({'files':files,'copy_video':command[command.index('-c:v')+1]=='copy'})
+                            recorded_hashes=hashes(file)
+                            pixel_identical=pixel_identical and bool(recorded_hashes) and set(recorded_hashes).issubset(original_hashes)
+                    return web.json_response({'files':files,'copy_video':command[command.index('-c:v')+1]=='copy','pixel_identical':pixel_identical})
                 app=web.Application();app.router.add_get('/',index);app.router.add_get('/edge/{name}',asset);app.router.add_get('/api/edge/rtc/{entity}',websocket);app.router.add_get('/test/status',status);app.router.add_get('/test/detection',detection_status);app.router.add_get('/test/record',record)
                 runner=web.AppRunner(app);await runner.setup();site=web.TCPSite(runner,'127.0.0.1',18089);await site.start()
                 print('EdgeRTC real transport fixture ready on 18089',flush=True)

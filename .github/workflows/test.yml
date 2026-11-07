@@ -73,6 +73,7 @@ jobs:
           node tests/browser/detection_ui.cjs
           node tests/browser/nvr_playback.cjs
           node tests/browser/nvr_navigation.cjs
+          node tests/browser/recording_storage.cjs
           node tests/browser/ui_dashboard.cjs
           node tests/browser/camera_settings.cjs
 
