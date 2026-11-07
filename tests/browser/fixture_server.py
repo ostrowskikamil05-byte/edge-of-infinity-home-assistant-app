@@ -44,5 +44,5 @@ subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=160x90:ra
 for name in ['20260727-000000.mp4','20260727-000007.mp4','20260727-000014.mp4','20260728-000000.mp4','20260728-000007.mp4','20260728-000014.mp4']:
  shutil.copyfile(sample,d/name)
 sample.unlink()
-Path(os.environ.get('EDGE_NVR_FIXTURE_INFO', '/tmp/edge-nvr-browser-fixture.json')).write_text(json.dumps({'recordings_dir': str(d)}))
+Path(os.environ.get('EDGE_NVR_FIXTURE_INFO', '/tmp/edge-nvr-browser-fixture.json')).write_text(json.dumps({'recordings_dir': str(d), 'recording_cache_dir':str(p.RECORDING_CACHE_DIR), 'thumbnail_dir':str(p.RECORDING_THUMB_DIR)}))
 p.ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('EDGE_NVR_TEST_PORT', '18088'))),p.EdgeHandler).serve_forever()

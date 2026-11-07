@@ -43,7 +43,7 @@ MEDIAMTX_ALWAYS_ON_LIVE="$(read_option 'mediamtx_always_on_live' 'true')"
 MEDIAMTX_ALWAYS_ON_STREAM_SCOPE="$(read_option 'mediamtx_always_on_stream_scope' 'tile')"
 MEDIAMTX_SRT_PORT="$(read_option 'mediamtx_srt_port' '8890')"
 MEDIAMTX_API_PORT="$(read_option 'mediamtx_api_port' '9997')"
-MEDIAMTX_RECORD="$(read_option 'mediamtx_record' 'true')"
+MEDIAMTX_RECORD="$(read_option 'mediamtx_record' 'false')"
 JANUS_ENABLED="$(read_option 'janus_enabled' 'true')"
 JANUS_HTTP_PORT="$(read_option 'janus_http_port' '8192')"
 JANUS_WS_PORT="$(read_option 'janus_ws_port' '8193')"
@@ -357,8 +357,8 @@ write_mediamtx_path() {
     printf '    rtspTransport: tcp\n'
     if [[ "${should_record}" == "true" && "${MEDIAMTX_RECORD}" == "true" ]]; then
       printf '    sourceOnDemand: no\n'
-      printf '    record: yes\n'
-      printf '    recordPath: "%s/%%path/%%Y-%%m-%%d_%%H-%%M-%%S-%%f"\n' "${RECORDINGS_DIR}"
+      # Edge recorder owns archival files; MediaMTX only shares the source.
+      printf '    record: no\n'
     elif [[ "${keep_warm}" == "true" ]]; then
       printf '    sourceOnDemand: no\n'
       printf '    record: no\n'

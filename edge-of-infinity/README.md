@@ -52,3 +52,14 @@ This package now runs the Edge panel as the controller and MediaMTX + Janus as t
 The add-on creates `/homeassistant/edge/edge.json` with starter Hikvision camera slots. Camera Settings in the panel is the preferred editor and preserves saved connection fields when a form submits blank technical values.
 
 Enabled cameras are probed through the configured stream. Browser live preview should use MediaMTX WebRTC on port `8889`; the old MJPEG/JPEG preview paths are no longer the panel's live route.
+
+
+### Recording storage
+
+Recordings preserve the camera video codec, resolution and FPS by default. Legacy automatic playback settings migrate to original-video recording; an explicitly selected H264 compatibility conversion remains available and can increase file size or change image quality. Existing recordings are not recompressed. H265 playback depends on the viewing browser/device.
+
+The day player reads the original segments as one timeline. Full-day playback copies are disabled by default (`nvr.playback_cache_mb: 0`), so viewing another day does not duplicate that day's video on disk. Optional copies have a global byte budget, free-space checks and a two-day idle lifetime. The combined thumbnail cache defaults to 32 MiB, at most 2048 images and 48 hours without access; images regenerate from retained footage. Its dimensions and encoding quality are unchanged.
+
+In Recording settings, usage separates original footage, playback copies and thumbnails. **Posprzątaj cache i miniatury** removes recognized generated files and trims logs; it does not delete original recordings or change the recording-retention setting. Automatic maintenance also runs on startup and hourly. The deprecated MediaMTX recording switch no longer creates a second archive; legacy archive files are retained until the configured retention removes them.
+
+A camera bitrate of 4 Mbit/s produces approximately 43.2 GB per day, or 604.8 GB over 14 days, before small container/audio overheads. Already-compressed camera footage has no guaranteed further size reduction without losing detail. Storage estimates in the panel use recent recorded segment sizes/durations and vary with bitrate, scene and recording continuity.

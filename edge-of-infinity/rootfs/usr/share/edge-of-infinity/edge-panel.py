@@ -28,13 +28,14 @@ from xml.sax.saxutils import escape as xml_escape
 if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
 from edge_detection import DetectionService, settings as detection_settings, zone_settings, ZONE_FIELDS
+from edge_storage import MIB, SEGMENT, managed_files, prune_cache, trim_log
 
 DETECTION_SERVICE = None
 
 
-APP_VERSION = "0.11.3"
+APP_VERSION = "0.11.4"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "nvr-native-quality-v113"
+UI_BUILD = "recording-storage-v114"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -91,6 +92,10 @@ RECORDING_DURATION_LOCK = threading.Lock()
 RECORDING_CACHE_LOCK = threading.Lock()
 RECORDING_CACHE_BUILD_SEMAPHORE = threading.BoundedSemaphore(value=1)
 RECORDING_THUMBNAIL_SEMAPHORE = threading.BoundedSemaphore(value=1)
+STORAGE_CLEANUP_LOCK = threading.Lock()
+STORAGE_USAGE_LOCK = threading.Lock()
+STORAGE_USAGE_CACHE = {}
+RECORDING_CACHE_ACCESS = {}
 HIKVISION_MAIN_CHANNEL = "101"
 HIKVISION_SUB_CHANNEL = "102"
 STREAM_FALLBACK_CHANNELS = {"main": HIKVISION_MAIN_CHANNEL, "sub": HIKVISION_SUB_CHANNEL}
@@ -300,6 +305,7 @@ def write_debug_event(event: str, payload: dict | None = None) -> None:
     try:
         DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with DEBUG_LOCK:
+            trim_log(DEBUG_LOG_PATH)
             with DEBUG_LOG_PATH.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
     except OSError as error:
@@ -316,8 +322,10 @@ def append_jsonl_log(path: Path, event: str, payload: dict | None = None) -> Non
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        with DEBUG_LOCK:
+            trim_log(path)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
     except OSError as error:
         print(f"[edge-panel] jsonl log write failed: {error}")
 
@@ -933,8 +941,10 @@ def normalize_config(payload: dict) -> dict:
             "segment_seconds": clamp_int(nvr.get("segment_seconds"), 10, 2, 300),
             "retention_days": clamp_int(nvr.get("retention_days"), safe_int(storage.get("retention_days"), 14), 1, 365),
             "playback_cache_segments": clamp_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS, 12, RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS),
+            "playback_cache_mb": clamp_int(nvr.get("playback_cache_mb"), 0, 0, 2048),
+            "thumbnail_cache_mb": clamp_int(nvr.get("thumbnail_cache_mb"), 32, 1, 256),
             "copy_all_streams": bool(nvr.get("copy_all_streams", True)),
-            "browser_playback": nvr.get("browser_playback") if nvr.get("browser_playback") in ("auto_h264", "copy", "h264") else "auto_h264",
+            "browser_playback": "h264" if nvr.get("browser_playback") == "h264" else "copy",
         },
         "cameras": normalized,
         "detection": detection_settings(payload.get("detection")),
@@ -2038,8 +2048,7 @@ def add_mediamtx_path(lines: list[str], path_name: str, source_url: str, should_
     if should_record and MEDIAMTX_RECORD:
         lines += [
             "    sourceOnDemand: no",
-            "    record: yes",
-            f"    recordPath: {yaml_string(f'{recordings_dir}/%path/%Y-%m-%d_%H-%M-%S-%f')}",
+            "    record: no",  # Edge recorder owns archival video; avoid a second copy.
         ]
     elif keep_warm:
         lines += [
@@ -2201,7 +2210,8 @@ def write_mediamtx_runtime_config(config: dict) -> dict:
         "path_count": path_count,
         "public_hosts": public_hosts,
         "ice_transport": normalize_webrtc_ice_transport(live.get("mobile_webrtc_ice_transport"), live.get("mobile_webrtc_tcp_only")),
-        "recording_enabled": MEDIAMTX_RECORD,
+        "recording_enabled": False,
+        "recording_owner": "edge_recorder",
         "segment_seconds": segment_seconds,
         "prebuffer_enabled": prebuffer_enabled,
         "always_on_enabled": always_on_enabled,
@@ -3073,6 +3083,99 @@ def build_recording_stream_command(concat_path: Path, seek_seconds: int = 0) -> 
     return command
 
 
+def recording_cache_budget(config: dict) -> int:
+    return clamp_int((config.get('nvr') or {}).get('playback_cache_mb'), 0, 0, 2048) * MIB
+
+
+def thumbnail_cache_budget(config: dict) -> int:
+    return clamp_int((config.get('nvr') or {}).get('thumbnail_cache_mb'), 32, 1, 256) * MIB
+
+
+def active_recording_caches() -> set:
+    now = time.monotonic()
+    with RECORDING_CACHE_LOCK:
+        expired = [path for path, accessed in RECORDING_CACHE_ACCESS.items() if now - accessed > 600]
+        for path in expired:
+            RECORDING_CACHE_ACCESS.pop(path, None)
+        active = set(RECORDING_CACHE_ACCESS)
+    return {path for video in active for path in (video, video.with_suffix('.json'), video.with_suffix('.ffconcat'))}
+
+
+def cleanup_disposable_storage(config: dict, wait_for_thumbnail: bool = False) -> dict:
+    if not STORAGE_CLEANUP_LOCK.acquire(blocking=False):
+        return {'skipped': 'maintenance_busy'}
+    try:
+        root = Path((config.get('storage') or {}).get('recordings_dir') or '/media/edge-of-infinity/recordings')
+        source_roots = {recording_key(camera,index): root / safe_id(camera.get('id') or f'camera_{index+1}')
+                        for index,camera in enumerate(config.get('cameras', []))}
+        report = {}
+        if RECORDING_CACHE_BUILD_SEMAPHORE.acquire(blocking=False):
+            try:
+                budget = recording_cache_budget(config)
+                report['playback'] = prune_cache(RECORDING_CACHE_DIR, 'playback', budget, max_files=64,
+                                                 protected=active_recording_caches() if budget else set())
+            finally:
+                RECORDING_CACHE_BUILD_SEMAPHORE.release()
+        else:
+            report['playback'] = {'skipped':'playback_worker_busy'}
+        if RECORDING_THUMBNAIL_SEMAPHORE.acquire(timeout=15 if wait_for_thumbnail else 0):
+            try:
+                report['thumbnails'] = prune_cache(RECORDING_THUMB_DIR, 'thumbnail', thumbnail_cache_budget(config), source_roots=source_roots)
+            finally:
+                RECORDING_THUMBNAIL_SEMAPHORE.release()
+        else:
+            report['thumbnails'] = {'skipped':'thumbnail_worker_busy'}
+        paths = [DEBUG_LOG_PATH, RECORDING_CACHE_LOG_PATH, RECORDING_THUMB_LOG_PATH, RECORDING_STREAM_LOG_PATH]
+        if root.is_dir() and not root.is_symlink():
+            paths += [path / 'ffmpeg.log' for path in root.iterdir() if path.is_dir() and not path.is_symlink()]
+        with DEBUG_LOCK:
+            report['log_freed_bytes'] = sum(trim_log(path) for path in paths)
+        with STORAGE_USAGE_LOCK:
+            STORAGE_USAGE_CACHE.clear()
+        return report
+    finally:
+        STORAGE_CLEANUP_LOCK.release()
+
+
+def storage_usage_payload(config: dict) -> dict:
+    root = Path((config.get('storage') or {}).get('recordings_dir') or '/media/edge-of-infinity/recordings')
+    signature = (str(root), recording_cache_budget(config), thumbnail_cache_budget(config))
+    with STORAGE_USAGE_LOCK:
+        cached = STORAGE_USAGE_CACHE.get(signature)
+    if cached and time.monotonic() - cached[0] < 60:
+        return cached[1]
+    total = 0
+    if root.is_dir() and not root.is_symlink():
+        for parent, directories, names in os.walk(root, followlinks=False):
+            directories[:] = [name for name in directories if not (Path(parent)/name).is_symlink()]
+            for name in names:
+                if re.fullmatch(SEGMENT,name):
+                    path = Path(parent)/name
+                    try:
+                        if not path.is_symlink() and path.is_file():
+                            total += path.stat().st_size
+                    except OSError:
+                        pass
+    def volume(path):
+        while not path.exists() and path != path.parent:
+            path = path.parent
+        try:
+            usage = shutil.disk_usage(path)
+            return {'free_bytes':usage.free,'total_bytes':usage.total}
+        except OSError:
+            return {'free_bytes':None,'total_bytes':None}
+    result = {'recordings_bytes':total,
+              'playback_cache_bytes':sum(stat.st_size for _,stat in managed_files(RECORDING_CACHE_DIR,'playback')),
+              'thumbnail_cache_bytes':sum(stat.st_size for _,stat in managed_files(RECORDING_THUMB_DIR,'thumbnail')),
+              'playback_cache_limit_bytes':recording_cache_budget(config),
+              'thumbnail_cache_limit_bytes':thumbnail_cache_budget(config),
+              'recordings_volume':volume(root),'cache_volume':volume(HOME_DIR),
+              'measured_at':int(time.time())}
+    with STORAGE_USAGE_LOCK:
+        STORAGE_USAGE_CACHE[signature] = (time.monotonic(),result)
+    return result
+
+
 def recording_cache_dir(key: str, cache_name: str = "") -> Path:
     base = RECORDING_CACHE_DIR / safe_id(key)
     return base / safe_id(cache_name) if cache_name else base
@@ -3214,6 +3317,7 @@ def recording_cache_status(
     auto_refresh: bool = True,
     cache_name: str = "",
 ) -> dict:
+    budget = recording_cache_budget(load_config())
     signature = recording_cache_source_signature(entries, segment_seconds)
     meta_path = recording_cache_meta_path(key, cache_name)
     video_path = recording_cache_video_path(key, cache_name)
@@ -3240,7 +3344,7 @@ def recording_cache_status(
     cache_too_short_for_sources = bool(raw_ready and not current and len(signature["items"]) > 1 and metadata_file_count <= 1)
     stale_active_day_cache = bool(raw_ready and active_day_cache and not current)
     # A stale cache can be only the tail of a day, so its offsets are unsafe.
-    ready = current
+    ready = current and budget > 0 and file_size <= budget
     worker_id = recording_cache_worker_id(key, cache_name)
     with RECORDING_CACHE_LOCK:
         building = worker_id in RECORDING_CACHE_WORKERS
@@ -3254,7 +3358,7 @@ def recording_cache_status(
     )
     if auto_refresh and active_day_cache and not current:
         defer_reason = ACTIVE_DAY_CACHE_DEFER_REASON
-    if auto_refresh and signature["items"] and not current and not defer_reason:
+    if auto_refresh and budget > 0 and signature["items"] and not current and not defer_reason:
         schedule_recording_cache_refresh(key, entries, segment_seconds, signature, reason="recording_status", cache_name=cache_name)
 
     cache_id = metadata.get("cache_id") or metadata.get("source_hash") or str(int(time.time()))
@@ -3263,7 +3367,9 @@ def recording_cache_status(
         sum(safe_int(entry.get("duration_seconds"), segment_seconds) for entry in entries),
     )
     return {
-        "enabled": True,
+        "enabled": budget > 0,
+        "byte_limit": budget,
+        "disabled_reason": "disk_saving_file_sequence" if budget <= 0 else "",
         "ready": ready,
         "raw_ready": raw_ready,
         "current": current,
@@ -3297,6 +3403,9 @@ def schedule_recording_cache_refresh(
     reason: str = "manual",
     cache_name: str = "",
 ) -> bool:
+    budget = recording_cache_budget(load_config())
+    if budget <= 0:
+        return False
     if shutil.which("ffmpeg") is None or not entries:
         return False
     worker_entries = []
@@ -3319,6 +3428,8 @@ def schedule_recording_cache_refresh(
             }
         )
     if not worker_entries:
+        return False
+    if sum(entry['path'].stat().st_size for entry in worker_entries) * 1.1 + MIB > budget:
         return False
     source_signature = signature or recording_cache_source_signature(worker_entries, segment_seconds)
     worker_id = recording_cache_worker_id(key, cache_name)
@@ -3364,6 +3475,18 @@ def build_recording_cache_worker(
         acquired = RECORDING_CACHE_BUILD_SEMAPHORE.acquire(timeout=7200)
         if not acquired:
             raise RuntimeError("recording_cache_global_worker_timeout")
+        budget = recording_cache_budget(load_config())
+        estimate = int(sum(entry['path'].stat().st_size for entry in entries) * 1.1) + MIB
+        if budget <= 0 or estimate > budget:
+            return
+        # Reserve the pending remux alongside all retained day copies.
+        retained = prune_cache(RECORDING_CACHE_DIR, 'playback', budget - estimate,
+                               protected=active_recording_caches(), max_files=64)
+        if retained['bytes'] + estimate > budget:
+            return
+        RECORDING_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        if shutil.disk_usage(RECORDING_CACHE_DIR).free < estimate + 16 * MIB:
+            return
         cache_dir.mkdir(parents=True, exist_ok=True)
         concat_payload = "\n".join(ffconcat_file_line(entry["path"]) for entry in entries) + "\n"
         concat_path.write_text(concat_payload, encoding="utf-8")
@@ -3389,6 +3512,8 @@ def build_recording_cache_worker(
             raise RuntimeError(f"recording_cache_ffmpeg_failed exit={result.returncode}: {stderr[-1200:]}")
         if not tmp_path.exists() or tmp_path.stat().st_size <= 0:
             raise RuntimeError("recording_cache_output_empty")
+        if tmp_path.stat().st_size > estimate or recording_cache_budget(load_config()) <= 0:
+            raise RuntimeError('recording_cache_budget_exceeded')
         tmp_path.replace(video_path)
         metadata = {
             "key": key,
@@ -3462,6 +3587,8 @@ def build_recording_cache_worker(
 
 
 def refresh_recording_caches(config: dict, reason: str) -> None:
+    if recording_cache_budget(config) <= 0:
+        return
     nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
     segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
     cache_limit = clamp_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS, 12, RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS)
@@ -3469,7 +3596,7 @@ def refresh_recording_caches(config: dict, reason: str) -> None:
         if not camera_should_record(camera):
             continue
         key = recording_key(camera, index)
-        all_entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds)
+        all_entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds, measure_durations=False)
         days = recording_day_groups(all_entries, segment_seconds, key)
         active_day = days[0]["day"] if days else ""
         entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds, day_key=active_day) if active_day else all_entries
@@ -3658,10 +3785,7 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_secon
             })
             raise RuntimeError(error_text)
         tmp.replace(target)
-        if seek_seconds is not None:
-            cached = sorted(target.parent.glob('*.jpg'), key=lambda path: path.stat().st_mtime, reverse=True)
-            for stale in cached[128:]:
-                stale.unlink(missing_ok=True)
+        prune_cache(RECORDING_THUMB_DIR, 'thumbnail', thumbnail_cache_budget(load_config()))
         payload = {
             "key": key,
             "source": source.name,
@@ -3727,7 +3851,7 @@ def warm_recording_thumbnails(config: dict, reason: str) -> dict:
     errors = []
     for index, camera in enumerate(config.get("cameras", [])):
         key = recording_key(camera, index)
-        entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds)
+        entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds, measure_durations=False)
         newest_days = [item.get("day") for item in recording_day_groups(entries, segment_seconds, key)[:2]]
         for day in newest_days:
             day_entries = [entry for entry in entries if entry.get("day") == day]
@@ -3823,26 +3947,12 @@ def recording_codec_mode(stream: str, nvr: dict) -> tuple[str, str, str, dict]:
     audio = probe.get("audio") or {}
     video_codec = str(video.get("codec_name") or "").lower()
     audio_codec = str(audio.get("codec_name") or "").lower()
-    playback_policy = nvr.get("browser_playback") if nvr.get("browser_playback") in ("auto_h264", "copy", "h264") else "auto_h264"
-    if playback_policy == "copy":
-        return "copy", video_codec, audio_codec, probe
-    if playback_policy == "h264":
-        return "transcode_to_h264", video_codec, audio_codec, probe
-    if video_codec and video_codec not in ("h264", "avc1"):
-        return "transcode_to_h264", video_codec, audio_codec, probe
-    return "copy_h264", video_codec, audio_codec, probe
+    mode = 'transcode_to_h264' if nvr.get('browser_playback') == 'h264' else 'copy'
+    return mode, video_codec, audio_codec, probe
 
 
 def recording_mode_from_codec(video_codec: str, nvr: dict) -> str:
-    codec = str(video_codec or "").lower()
-    playback_policy = nvr.get("browser_playback") if nvr.get("browser_playback") in ("auto_h264", "copy", "h264") else "auto_h264"
-    if playback_policy == "copy":
-        return "copy"
-    if playback_policy == "h264":
-        return "transcode_to_h264"
-    if codec and codec not in ("h264", "avc1"):
-        return "transcode_to_h264"
-    return "copy_h264"
+    return 'transcode_to_h264' if nvr.get('browser_playback') == 'h264' else 'copy'
 
 
 def build_recording_command(stream: str, output_pattern: str, segment_seconds: int, mode: str) -> list[str]:
@@ -3850,7 +3960,8 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
-        "info",
+        "warning",
+        "-nostats",
         "-nostdin",
         "-y",
         "-fflags",
@@ -3971,8 +4082,10 @@ def cleanup_configured_recordings(config: dict) -> int:
     directory = Path(storage.get("recordings_dir") or "/media/edge-of-infinity/recordings")
     retention_days = recording_retention_days(config)
     removed = cleanup_old_recordings(directory, retention_days)
+    cache_cleanup = cleanup_disposable_storage(config)
     write_debug_event("recording_retention_done", {
         "directory": str(directory), "retention_days": retention_days, "removed": removed,
+        "cache_cleanup": cache_cleanup,
     })
     return removed
 
@@ -4041,6 +4154,15 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
             recording_status = "disabled"
         video_codec = camera.get("record_video_codec") or camera.get("live_video_codec") or camera.get("video_codec") or camera.get("codec") or ""
         nvr_mode = recording_mode_from_codec(video_codec, nvr)
+        recent = sorted(candidates, key=lambda item: item[2])[-360:]
+        sample_duration = 0
+        for position, (path, stat, start) in enumerate(recent):
+            following = recent[position+1][2] if position+1 < len(recent) else None
+            fallback = recording_inferred_duration_seconds(start, following, segment_seconds)
+            with RECORDING_DURATION_LOCK:
+                duration = RECORDING_DURATION_CACHE.get(str(path))
+            sample_duration += (duration[2] or fallback) if duration and duration[:2] == (stat.st_mtime_ns,stat.st_size) else fallback
+        daily_estimate = int(sum(stat.st_size for _,stat,_ in recent) * 86400 / sample_duration) if sample_duration else 0
         health = recording_health(camera, index)
         cameras.append(
             {
@@ -4062,6 +4184,8 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
                 "directory_exists": directory.exists(),
                 "segments": segment_count,
                 "segments_total": total_segment_count,
+                "recording_bytes": sum(stat.st_size for _,stat,_ in candidates),
+                "bytes_per_day_estimate": daily_estimate,
                 "segments_pending": max(0, total_segment_count - segment_count),
                 "files": segment_files,
                 "days": days,
@@ -4091,7 +4215,7 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
                 "ffprobe_present": health["ffprobe_present"],
             }
         )
-    return {"cameras": cameras}
+    return {"cameras": cameras, "storage": storage_usage_payload(config)}
 
 
 def serialized_recording(function):
@@ -4205,7 +4329,7 @@ def start_recording(camera: dict, index: int) -> dict:
     removed_old = cleanup_old_recordings(directory, retention_days)
     log_path = directory / "ffmpeg.log"
     output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
-    mode, video_codec, audio_codec, probe = recording_codec_mode(direct_stream, nvr)
+    mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr)
     command = build_recording_command(stream, output_pattern, segment_seconds, mode)
     log_header = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -4809,6 +4933,8 @@ def publish_pending_camera_status(config: dict) -> None:
 
 def refresh_status_after_save() -> None:
     try:
+        report = cleanup_disposable_storage(load_config())
+        write_debug_event('recording_storage_maintenance', report)
         refresh_status()
     except Exception as error:  # noqa: BLE001
         write_debug_event("camera_refresh_after_save_failed", {"type": type(error).__name__})
@@ -5879,7 +6005,7 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </header>
           <section class="panel">
-            <div id="nvr-grid" class="grid"></div>
+            <section class="notice" data-recording-disk-usage role="status">Odczyt zajętego miejsca…</section><div id="nvr-grid" class="grid"></div>
           </section>
         </section>
 
@@ -6012,6 +6138,7 @@ INDEX_HTML = r"""<!doctype html>
       let nvrTimer = null;
       let cameraAuto = {};
       let recordingStatus = {};
+      let recordingStorage = null;
       let selectedRecording = {};
       let selectedRecordingSeek = {};
       let selectedRecordingTimeline = {};
@@ -8151,6 +8278,7 @@ INDEX_HTML = r"""<!doctype html>
         renderNvrGrid({ reason: 'render_config' });
         renderPresetSlots(cameras);
         renderEdgeSettings();
+        renderRecordingStorage();
         updateUnsavedState();
         updateCameraOverview();
       }
@@ -8231,10 +8359,10 @@ INDEX_HTML = r"""<!doctype html>
         edgeForm.innerHTML = `
           <section class="field-section" id="detection-settings"><h2>Detekcja / Detection</h2><p class="field-help">Zdarzenia ONVIF wykonuje kamera. Lokalne AI korzysta ze wspólnego strumienia Edge. Włącz wybrane kamery w ich ustawieniach. / Enable detection separately on each camera.</p><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-camera-events" ${detection.camera_events_enabled ? 'checked' : ''}> Zdarzenia z kamer / Camera events</label><label class="check-row"><input type="checkbox" name="detection-local" ${detection.local_enabled ? 'checked' : ''}> Lokalne AI: osoba i pojazd / Local AI</label><label>Łączny limit klatek/s / Total FPS<input type="number" name="detection-fps" min="0.2" max="3" step="0.2" value="${escapeHtml(detection.max_fps || 1)}"></label><label>Pewność / Confidence<input type="number" name="detection-confidence" min="0.1" max="0.95" step="0.05" value="${escapeHtml(detection.confidence || 0.45)}"></label><label>Podtrzymanie alarmu AI (s)<input type="number" name="detection-hold" min="1" max="120" value="${escapeHtml(detection.hold_seconds || 10)}"></label></div><p class="field-help">HP t530: zacznij od jednej kamery i 1 klatki/s łącznie. Analiza działa kolejno, na jednym wątku CPU. / One CPU worker, no cloud inference.</p></section>
           <section class="field-section settings-main" id="recording-settings"><div class="section-heading"><span class="step-number">01</span><div><h2>Recording</h2><p>How long to keep footage and how it plays in the browser.</p></div></div><div class="form-grid"><label>Keep recordings (days)<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label><label>Recording compatibility<select name="nvr-browser-playback">
-                <option value="auto_h264" ${nvrConfig.browser_playback !== 'copy' && nvrConfig.browser_playback !== 'h264' ? 'selected' : ''}>Automatic (recommended)</option>
-                <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Keep original codec</option>
-                <option value="h264" ${nvrConfig.browser_playback === 'h264' ? 'selected' : ''}>Convert to H264</option>
-              </select></label></div><input type="hidden" name="storage-retention-days" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"><details class="settings-group"><summary>Advanced recording <small>Segment length and playback cache</small></summary><div class="form-grid"><label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label><label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label></div></details></section>
+
+                <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Oryginalna jakość i kodek (zalecane)</option>
+                <option value="h264" ${nvrConfig.browser_playback === 'h264' ? 'selected' : ''}>H264 · zgodność kosztem jakości i miejsca</option>
+              </select></label></div><p class="field-help">Oryginalny H.265 pozostaje H.265, z rozdzielczością i FPS kamery. Nagranie jest już skompresowane przez kamerę. Zmniejszanie bitrate lub ponowne kodowanie może pogorszyć szczegóły. Obsługa odtwarzania H.265 zależy od przeglądarki.</p><div class="notice" data-recording-disk-usage role="status">Odczyt zajętego miejsca…</div><button type="button" data-cleanup-recording-cache>Posprzątaj cache i miniatury</button><output data-storage-cleanup-result role="status"></output><input type="hidden" name="storage-retention-days" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"><details class="settings-group"><summary>Advanced recording <small>Limity miejsca i długość fragmentów</small></summary><div class="form-grid"><label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label><label>Limit miniatur (MB)<input name="nvr-thumbnail-cache-mb" type="number" min="1" max="256" value="${nvrConfig.thumbnail_cache_mb ?? 32}"></label><label>Limit kopii do odtwarzania (MB, 0 = wyłączone)<input name="nvr-playback-cache-mb" type="number" min="0" max="2048" value="${nvrConfig.playback_cache_mb ?? 0}"></label><label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label></div><p class="field-help">Domyślnie cały dzień odtwarza się z oryginalnych fragmentów, bez pełnej kopii filmu. Miniatury mają wspólny limit miejsca, maksymalnie 2048 obrazów i wygasają po 48 godzinach bez użycia. Usunięte miniatury można wygenerować ponownie z nagrania.</p></details></section>
           <details class="settings-group" id="network-settings"><summary>Network & remote access <small>${EDGE_NATIVE_RTC ? 'EdgeRTC through Home Assistant HTTPS/WSS' : 'Optional for viewing outside your home network'}</small></summary>${EDGE_NATIVE_RTC ? '<p class="notice" data-native-network-info>EdgeRTC korzysta z adresu HTTPS Home Assistanta, także przez Nabu Casa. Nie wymaga publicznego adresu MediaMTX, portów ICE ani TURN/VPS. / EdgeRTC uses the Home Assistant HTTPS/WebSocket connection; no public MediaMTX URL or extra media ports are needed.</p>' : ''}<div data-legacy-network ${EDGE_NATIVE_RTC ? 'hidden' : ''}><div class="form-grid"><label>Remote access<select name="live-remote-access-mode">
                 <option value="local_only" ${text(liveConfig.remote_access_mode, 'local_only') === 'local_only' ? 'selected' : ''}>Local only / Nabu panel only</option>
                 <option value="direct_public" ${liveConfig.remote_access_mode === 'direct_public' ? 'selected' : ''}>Direct public DDNS</option>
@@ -8677,6 +8805,8 @@ INDEX_HTML = r"""<!doctype html>
             segment_seconds: Number(get('nvr-segment-seconds').value || 10),
             retention_days: Number(get('nvr-retention-days').value || get('storage-retention-days').value || 14),
             playback_cache_segments: Number(get('nvr-playback-cache-segments').value || 10000),
+            playback_cache_mb: Number(get('nvr-playback-cache-mb').value || 0),
+            thumbnail_cache_mb: Number(get('nvr-thumbnail-cache-mb').value || 32),
             browser_playback: get('nvr-browser-playback').value
           }
         };
@@ -8838,8 +8968,28 @@ INDEX_HTML = r"""<!doctype html>
         monitorLiveFrames();
       }
 
+      edgeForm.addEventListener('click',async event=>{
+        const button=event.target.closest('[data-cleanup-recording-cache]');if(!button)return;
+        const output=edgeForm.querySelector('[data-storage-cleanup-result]');button.disabled=true;output.textContent='Sprzątanie plików pomocniczych…';
+        try{
+          const response=await fetch(panelPath('api/storage/cleanup'),{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          const data=await response.json();if(!response.ok)throw new Error(data.error||'Błąd sprzątania');
+          recordingStorage=data.storage;renderRecordingStorage();
+          const cleanup=data.cleanup||{},freed=Number(cleanup.playback?.freed_bytes||0)+Number(cleanup.thumbnails?.freed_bytes||0)+Number(cleanup.log_freed_bytes||0);
+          output.textContent=cleanup.skipped?'Sprzątanie już trwa. Odśwież panel za chwilę.':`Zwolniono ${formatBytes(freed)}. Oryginalne nagrania pozostały bez zmian.${cleanup.playback?.skipped||cleanup.thumbnails?.skipped?' Część cache jest używana; ponów sprzątanie za chwilę.':''}`;
+        }catch(error){output.textContent=error.message;}finally{button.disabled=false;}
+      });
       let nvrRequest = null;
       let nvrRequestID = 0;
+      function renderRecordingStorage() {
+        document.querySelectorAll('[data-recording-disk-usage]').forEach(output => {
+          if (!recordingStorage) return;
+          const usage=recordingStorage;
+          const daily=Object.values(recordingStatus).reduce((sum,item)=>sum+Number(item.bytes_per_day_estimate||0),0);
+          const retention=Number(config.nvr?.retention_days||14);
+          output.textContent=`Nagrania: ${formatBytes(usage.recordings_bytes)} · Kopie odtwarzania: ${formatBytes(usage.playback_cache_bytes)} / ${formatBytes(usage.playback_cache_limit_bytes)} · Miniatury: ${formatBytes(usage.thumbnail_cache_bytes)} / ${formatBytes(usage.thumbnail_cache_limit_bytes)}. Wolne na dysku nagrań: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}; wolne w konfiguracji HA: ${usage.cache_volume?.free_bytes==null?'—':formatBytes(usage.cache_volume.free_bytes)}.${daily?' Szacunek ciągłego nagrywania: '+formatBytes(daily)+'/dobę, '+formatBytes(daily*retention)+' na '+retention+' dni. Zależy od bitrate i sceny.':''}`;
+        });
+      }
       function recordingDayLoadMessage(message) {
         nvrGrid.querySelectorAll('[data-nvr-index]').forEach(card => {
           let output = card.querySelector('[data-recording-day-load]');
@@ -8886,6 +9036,7 @@ INDEX_HTML = r"""<!doctype html>
               }))
             });
           }
+          recordingStorage = data.storage || null;
           recordingStatus = {};
           (Array.isArray(data.cameras) ? data.cameras : []).forEach((item) => {
             recordingStatus[item.index] = item;
@@ -8912,6 +9063,7 @@ INDEX_HTML = r"""<!doctype html>
               delete recordingStreamNonce[item.index];
             }
           });
+          renderRecordingStorage();
           updateCameraOverview();
           const nextSignature = recordingStatusSignature();
           const protectedPlayback = isNvrPlaybackProtected();
@@ -10033,6 +10185,16 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/config":
             self.save_config()
             return
+        if parsed.path == '/api/storage/cleanup':
+            try:
+                self.read_body_json()
+                config = load_config()
+                report = cleanup_disposable_storage(config, wait_for_thumbnail=True)
+                write_debug_event('recording_storage_maintenance',report)
+                self.send_json({'cleanup':report,'storage':storage_usage_payload(config)})
+            except (OSError,ValueError) as error:
+                self.send_json({'error':str(error)},HTTPStatus.BAD_REQUEST)
+            return
         if parsed.path == "/api/core/engine":
             try:
                 payload = self.read_body_json()
@@ -10344,6 +10506,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
             requested = parse_qs(query).get('at', [])
             seek = min(86400, max(0, safe_int(requested[0], 0))) // 5 * 5 if requested else None
             thumb = ensure_recording_thumbnail(key, source, filename, seek_seconds=seek)
+            data = thumb.read_bytes()
+            os.utime(thumb, None)  # Access time for bounded LRU; no change to image data.
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             payload = {
                 "key": key,
@@ -10355,7 +10519,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             write_debug_event("recording_thumbnail_error", payload)
             self.send_json({"error": str(error)}, HTTPStatus.TOO_MANY_REQUESTS if str(error) == 'thumbnail_generation_busy' else HTTPStatus.BAD_GATEWAY)
             return
-        self.send_bytes(thumb.read_bytes(), "image/jpeg")
+        self.send_bytes(data, "image/jpeg")
 
     def serve_mp4_file(
         self,
@@ -10456,6 +10620,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if not target.exists():
             self.send_json({"error": "recording_cache_not_ready"}, HTTPStatus.NOT_FOUND)
             return
+        if recording_cache_budget(config) <= 0:
+            self.send_json({'error':'recording_cache_disabled'}, HTTPStatus.NOT_FOUND)
+            return
+        with RECORDING_CACHE_LOCK:
+            RECORDING_CACHE_ACCESS[target] = time.monotonic()
+        os.utime(target, None)
         meta_path = recording_cache_meta_path(key, cache_name)
         metadata = read_json(meta_path, {}) if meta_path.exists() else {}
         self.serve_mp4_file(
