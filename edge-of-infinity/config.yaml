@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.11.5"
+version: "0.11.6"
 slug: edge_of_infinity
 description: Local live and NVR core for Hikvision, Uniview, Reolink and ONVIF/RTSP cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -67,7 +67,18 @@ options:
   local_detection_enabled: false
   detection_fps: 1
   detection_confidence: 0.45
+  detection_animal_confidence: 0.35
   detection_hold_seconds: 10
+  detection_person_enabled: true
+  detection_animal_enabled: true
+  detection_vehicle_enabled: true
+  detection_alert_media_mb: 256
+  detection_pre_seconds: 5
+  detection_post_seconds: 15
+  detection_notifications_enabled: false
+  detection_notify_service: ""
+  detection_notify_cooldown: 30
+  detection_notify_path: ""
   mediamtx_enabled: true
   mediamtx_rtsp_port: 8556
   mediamtx_hls_port: 8888
@@ -170,7 +181,18 @@ schema:
   local_detection_enabled: bool?
   detection_fps: float(0.2,3)?
   detection_confidence: float(0.1,0.95)?
+  detection_animal_confidence: float(0.1,0.95)?
   detection_hold_seconds: int(1,120)?
+  detection_person_enabled: bool?
+  detection_animal_enabled: bool?
+  detection_vehicle_enabled: bool?
+  detection_alert_media_mb: int(32,4096)?
+  detection_pre_seconds: int(0,10)?
+  detection_post_seconds: int(5,60)?
+  detection_notifications_enabled: bool?
+  detection_notify_service: str?
+  detection_notify_cooldown: int(5,3600)?
+  detection_notify_path: str?
   mediamtx_enabled: bool
   mediamtx_rtsp_port: port
   mediamtx_hls_port: port

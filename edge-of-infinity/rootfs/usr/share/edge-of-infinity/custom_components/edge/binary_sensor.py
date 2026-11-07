@@ -17,7 +17,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
             if not ident or ident in known:
                 continue
             known.add(ident)
-            entities.extend(EdgeDetectionSensor(coordinator, entry.entry_id, camera, kind) for kind in ('motion', 'person', 'vehicle'))
+            entities.extend(EdgeDetectionSensor(coordinator, entry.entry_id, camera, kind) for kind in ('motion', 'person', 'vehicle', 'animal'))
         if entities:
             async_add_entities(entities)
     add_new()
@@ -30,9 +30,9 @@ class EdgeDetectionSensor(CoordinatorEntity, BinarySensorEntity):
         super().__init__(coordinator)
         self.camera_id, self.kind = camera['id'], kind
         self._attr_unique_id = f'{entry_id}_{self.camera_id}_detection_{kind}'
-        self._attr_name = {'motion': 'Motion', 'person': 'Person', 'vehicle': 'Vehicle'}[kind]
+        self._attr_name = {'motion': 'Motion', 'person': 'Person', 'vehicle': 'Vehicle', 'animal':'Animal'}[kind]
         self._attr_device_class = BinarySensorDeviceClass.MOTION if kind == 'motion' else BinarySensorDeviceClass.OCCUPANCY
-        self._attr_icon = {'motion': 'mdi:motion-sensor', 'person': 'mdi:account', 'vehicle': 'mdi:car'}[kind]
+        self._attr_icon = {'motion': 'mdi:motion-sensor', 'person': 'mdi:account', 'vehicle': 'mdi:car', 'animal':'mdi:paw'}[kind]
         self._attr_device_info = {'identifiers': {(DOMAIN, f'{entry_id}_{self.camera_id}')}, 'name': camera.get('name', self.camera_id)}
 
     def _camera(self):

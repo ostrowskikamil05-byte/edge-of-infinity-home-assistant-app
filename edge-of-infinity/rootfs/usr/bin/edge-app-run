@@ -829,7 +829,7 @@ write_addon_options_config() {
     jq --slurpfile options "${OPTIONS_PATH}" '.cameras = $options[0].cameras' "${output}" > "${output}.cameras.tmp"
     mv "${output}.cameras.tmp" "${output}"
   fi
-  jq --slurpfile options "${OPTIONS_PATH}" '.detection = {camera_events_enabled: ($options[0].camera_events_enabled // false), local_enabled: ($options[0].local_detection_enabled // false), max_fps: ($options[0].detection_fps // 1), confidence: ($options[0].detection_confidence // 0.45), hold_seconds: ($options[0].detection_hold_seconds // 10)}' "${output}" > "${output}.detection.tmp"
+  jq --slurpfile options "${OPTIONS_PATH}" 'def opt($key;$default): if $options[0]|has($key) then $options[0][$key] else $default end; .detection = {camera_events_enabled: opt("camera_events_enabled";false), local_enabled: opt("local_detection_enabled";false), max_fps: opt("detection_fps";1), confidence: opt("detection_confidence";0.45), animal_confidence: opt("detection_animal_confidence";0.35), hold_seconds: opt("detection_hold_seconds";10), person_enabled: opt("detection_person_enabled";true), animal_enabled: opt("detection_animal_enabled";true), vehicle_enabled: opt("detection_vehicle_enabled";true), alert_media_mb: opt("detection_alert_media_mb";256), pre_seconds: opt("detection_pre_seconds";5), post_seconds: opt("detection_post_seconds";15), notifications_enabled: opt("detection_notifications_enabled";false), notify_service: opt("detection_notify_service";""), notify_cooldown: opt("detection_notify_cooldown";30), notify_path: opt("detection_notify_path";"")}' "${output}" > "${output}.detection.tmp"
   mv "${output}.detection.tmp" "${output}"
 }
 

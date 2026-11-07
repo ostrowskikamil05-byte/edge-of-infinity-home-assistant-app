@@ -157,6 +157,28 @@ class EdgeClient:
             return {}
         return payload if isinstance(payload, dict) else {}
 
+    async def event_image(self, camera_id: str, ident: int) -> bytes:
+        if not 0 < int(ident) <= 9223372036854775807:
+            raise EdgeClientError('Invalid alert ID')
+        if self.is_local:
+            def read():
+                for base in (Path('/config/edge/alerts'),Path('/homeassistant/edge/alerts')):
+                    image,meta=base/f'event-{ident}.jpg',base/f'event-{ident}.json'
+                    if base.is_symlink() or image.is_symlink() or meta.is_symlink():continue
+                    if not image.is_file() or not meta.is_file():continue
+                    if json_lib.loads(meta.read_text()).get('camera_id') != camera_id:
+                        raise EdgeClientError('Alert camera mismatch')
+                    with image.open('rb') as handle:return handle.read(2*1024*1024+1)
+                raise EdgeClientError('Alert image is not available')
+            data=await self.hass.async_add_executor_job(read) if self.hass else read()
+        else:
+            meta=await self._request('GET',f'/api/alerts/{int(ident)}')
+            if meta.get('camera_id') != camera_id:raise EdgeClientError('Alert camera mismatch')
+            data=await self._request('GET',f'/api/alerts/{int(ident)}/image',expect_json=False)
+        if len(data)>2*1024*1024 or not data.startswith(b'\xff\xd8\xff'):
+            raise EdgeClientError('Invalid alert image')
+        return data
+
     async def cameras(self) -> list[dict[str, Any]]:
         """Return cameras from core API or the current add-on shell."""
         if self.is_local:

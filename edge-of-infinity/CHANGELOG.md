@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.6
+
+- Decode recording thumbnails in one shared browser video decoder and keep 64 recent previews in memory. Reuse the recorded MP4 files for hover and film tiles, with the existing bounded JPEG fallback for unsupported codecs. Stop background thumbnail extraction on the server.
+- Hold the last valid video frame during all seeks, including delayed segment changes, until the requested frame is decoded. Add paused previous/next frame controls using the actual MP4 video sample clock, plus one-second navigation. Preserve the single seek bar and original resolution, codec and FPS.
+- Add simple person/animal/camera switches, a separate animal confidence threshold and animal HA occupancy sensors. Use the packaged local NanoDet model and the shared Edge recording relay, with the conservative total one-frame-per-second default for HP t530.
+- Put exact person/animal intrusion dots on the existing video seek bar. A dot opens saved event thumbnails; selecting one seeks the original recording to that event. Keep thumbnails accessible inside fullscreen and in the Alerts history. Dense dots group nearby events without creating another timeline.
+- Automatically save a cropped detection thumbnail and a short intrusion clip from closed recording segments before/after the event. Remux H264/H265 without re-encoding; the clip may include whole boundary segments. Wait for the post-event buffer and segment closure, and show pending/ready/expired status. Recording must be enabled to save clips.
+- Bound clips to 256 MiB by default (configurable), alert pictures to 32 MiB / 2000 images, and both to recording retention. Evict oldest alert media; never remove or change original recordings to satisfy alert quotas. Show clip/picture usage alongside existing storage usage.
+- Add opt-in Home Assistant Companion notifications with a saved event picture, a recording link, selected mobile_app service and cooldown. Require authenticated camera read permission for the image; suppress initial history, stale events and duplicates. Update/restart the bundled HA integration before enabling this feature.
+- Test actual HEVC alert pixels/FPS, recording, native EdgeRTC, local analysis, preview and microphone together with exactly one camera upstream connection. Add responsive no-server-thumbnail, held-frame, frame-step, event-dot, fullscreen and settings tests, plus media limits, persistence and notification access tests.
+
 ## 0.11.5
 
 - Use one full-day seek bar inside the video picture. Remove the separate calendar-day slider below the player; day selection and event jumps remain available. Overlay controls remain inside the picture in native and in-page fullscreen, with a compact settings menu for narrow players.

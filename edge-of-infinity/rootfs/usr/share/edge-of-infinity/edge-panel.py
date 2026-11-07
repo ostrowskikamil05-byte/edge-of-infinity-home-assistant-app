@@ -29,13 +29,69 @@ if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
 from edge_detection import DetectionService, settings as detection_settings, zone_settings, ZONE_FIELDS
 from edge_storage import MIB, SEGMENT, managed_files, prune_cache, trim_log
+from edge_recording_media import AlertMediaService, video_timing
 
 DETECTION_SERVICE = None
+ALERT_SERVICE = None
 
 
-APP_VERSION = "0.11.5"
+def alert_image_path(ident):
+    if not 0<int(ident)<=9223372036854775807:raise ValueError('invalid_alert_id')
+    return HOME_DIR/'alerts'/f'event-{int(ident)}.jpg'
+
+
+def save_alert_image(event, frame):
+    data=DETECTION_SERVICE.store.get(event['id']) or {}
+    target=alert_image_path(event['id']);target.parent.mkdir(parents=True,exist_ok=True)
+    if target.parent.is_symlink():raise RuntimeError('invalid_alert_directory')
+    payload=frame.jpeg(data.get('objects'))
+    temporary=target.with_suffix('.tmp');temporary.write_bytes(payload);temporary.replace(target)
+    target.chmod(0o600);os.utime(target,(time.time(),event['timestamp']))
+    write_json(target.with_suffix('.json'),{key:event[key] for key in ('id','camera_id','kind','timestamp')})
+    DETECTION_SERVICE.store.update_media(event['id'],has_image=True)
+
+
+def save_alert_fallback_image(event, clip, offset):
+    target=alert_image_path(event['id']);target.parent.mkdir(parents=True,exist_ok=True)
+    temporary=target.with_suffix('.tmp')
+    try:
+        result=subprocess_run_low_priority(build_recording_thumbnail_command(clip,temporary,offset),capture_output=True,timeout=15)
+        if result.returncode or not temporary.exists():raise RuntimeError('alert_thumbnail_failed')
+        temporary.replace(target);target.chmod(0o600);os.utime(target,(time.time(),event['timestamp']))
+        write_json(target.with_suffix('.json'),{key:event[key] for key in ('id','camera_id','kind','timestamp')})
+        DETECTION_SERVICE.store.update_media(event['id'],has_image=True)
+    finally:temporary.unlink(missing_ok=True)
+
+
+def alert_source_entries(camera_id, start, end):
+    config=load_config();match=next(((i,c) for i,c in enumerate(config.get('cameras',[])) if c['id']==camera_id),None)
+    if not match:return []
+    index,camera=match;rows=[]
+    for path,stat,stamp in recording_file_candidates(recording_base_dir(camera,index))[0]:
+        if stamp>end or stamp<start-3600:continue
+        timing=video_timing(path);duration=timing['duration'] or mp4_duration_seconds(path)
+        if duration and stamp+duration>start:rows.append({'path':path,'start_ts':stamp,'duration':duration})
+    return sorted(rows,key=lambda row:row['start_ts'])
+
+
+def enqueue_alert(event, frame):
+    if frame is not None:
+        try:save_alert_image(event,frame);frame=None
+        except Exception:write_debug_event('alert_image_error',{'id':event['id']})
+    if ALERT_SERVICE:ALERT_SERVICE.enqueue(event,frame)
+
+
+def alert_payload(event):
+    if not event:return None
+    result=dict(event)
+    result['image_url']=f"api/alerts/{event['id']}/image" if alert_image_path(event['id']).is_file() else ''
+    result['clip_url']=f"api/alerts/{event['id']}/clip.mp4" if ALERT_SERVICE and ALERT_SERVICE.path(event['id']).is_file() else ''
+    return result
+
+
+APP_VERSION = "0.11.6"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "in-player-scrub-v115"
+UI_BUILD = "intrusion-alerts-v116"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -2325,7 +2381,7 @@ def addon_options_from_config(config: dict, existing: dict) -> dict:
         projected.update(dict(zip(ZONE_FIELDS, [zone['enabled'], *zone['bounds']])))
     options["cameras"] = cameras
     detect = detection_settings(config.get("detection"))
-    for option, field in (("camera_events_enabled", "camera_events_enabled"), ("local_detection_enabled", "local_enabled"), ("detection_fps", "max_fps"), ("detection_confidence", "confidence"), ("detection_hold_seconds", "hold_seconds")):
+    for option, field in (("camera_events_enabled", "camera_events_enabled"), ("local_detection_enabled", "local_enabled"), ("detection_fps", "max_fps"), ("detection_confidence", "confidence"), ("detection_hold_seconds", "hold_seconds"), ("detection_animal_confidence", "animal_confidence"), ("detection_person_enabled", "person_enabled"), ("detection_animal_enabled", "animal_enabled"), ("detection_vehicle_enabled", "vehicle_enabled"), ("detection_alert_media_mb", "alert_media_mb"), ("detection_pre_seconds", "pre_seconds"), ("detection_post_seconds", "post_seconds"), ("detection_notifications_enabled", "notifications_enabled"), ("detection_notify_service", "notify_service"), ("detection_notify_cooldown", "notify_cooldown"), ("detection_notify_path", "notify_path")):
         options[option] = detect[field]
     for index in range(2):
         camera = cameras[index] if index < len(cameras) else {}
@@ -3139,7 +3195,8 @@ def cleanup_disposable_storage(config: dict, wait_for_thumbnail: bool = False) -
 
 def storage_usage_payload(config: dict) -> dict:
     root = Path((config.get('storage') or {}).get('recordings_dir') or '/media/edge-of-infinity/recordings')
-    signature = (str(root), recording_cache_budget(config), thumbnail_cache_budget(config))
+    alert_limit=int((config.get('detection') or {}).get('alert_media_mb',256))*MIB
+    signature = (str(root), recording_cache_budget(config), thumbnail_cache_budget(config),alert_limit)
     with STORAGE_USAGE_LOCK:
         cached = STORAGE_USAGE_CACHE.get(signature)
     if cached and time.monotonic() - cached[0] < 60:
@@ -3164,7 +3221,19 @@ def storage_usage_payload(config: dict) -> dict:
             return {'free_bytes':usage.free,'total_bytes':usage.total}
         except OSError:
             return {'free_bytes':None,'total_bytes':None}
+    def alert_bytes(folder,suffix):
+        total=0
+        if folder.is_symlink():return total
+        for path in folder.glob('event-*'+suffix):
+            if not path.stem[6:].isdigit() or path.is_symlink():continue
+            try:total+=path.stat().st_size
+            except OSError:pass
+        return total
     result = {'recordings_bytes':total,
+              'alert_clip_bytes':alert_bytes(root/'.alerts','.mp4'),
+              'alert_clip_limit_bytes':alert_limit,
+              'alert_image_bytes':alert_bytes(HOME_DIR/'alerts','.jpg'),
+              'alert_image_limit_bytes':32*MIB,
               'playback_cache_bytes':sum(stat.st_size for _,stat in managed_files(RECORDING_CACHE_DIR,'playback')),
               'thumbnail_cache_bytes':sum(stat.st_size for _,stat in managed_files(RECORDING_THUMB_DIR,'thumbnail')),
               'playback_cache_limit_bytes':recording_cache_budget(config),
@@ -3648,7 +3717,7 @@ def recording_thumbnail_path(key: str, filename: str) -> Path:
     return RECORDING_THUMB_DIR / safe_id(key) / f"{safe_name}.jpg"
 
 
-def build_recording_thumbnail_command(source: Path, target: Path, seek_seconds: float = 0.6) -> list[str]:
+def build_recording_thumbnail_command(source: Path, target: Path, seek_seconds: float = 0.0) -> list[str]:
     return [
         "ffmpeg",
         "-hide_banner",
@@ -3735,7 +3804,7 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_secon
         raise RuntimeError("ffmpeg_not_installed_in_addon")
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{time.time_ns()}.tmp")
-    command = build_recording_thumbnail_command(source, tmp, seek_seconds=0.6 if seek_seconds is None else seek_seconds)
+    command = build_recording_thumbnail_command(source, tmp, seek_seconds=0 if seek_seconds is None else seek_seconds)
     acquired = RECORDING_THUMBNAIL_SEMAPHORE.acquire(timeout=20 if seek_seconds is None else 0.2)
     if not acquired:
         append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_busy", {
@@ -5549,6 +5618,20 @@ INDEX_HTML = r"""<!doctype html>
       .recording-player-wrap .nvr-playback-toolbar select { min-height:34px; padding:3px; width:54px; background:#14202be0; color:#fff; }
       .recording-player-wrap .nvr-playback-clock { width:auto; margin-left:auto; margin-right:auto; font-size:12px; color:#fff; }
       .recording-player-wrap .nvr-playback-seek { margin:0; padding:0; border:0; appearance:none; min-height:24px; height:24px; background:transparent; cursor:pointer; touch-action:none; }
+      .nvr-seek-shell { position:relative; height:36px; min-width:0; }
+      .recording-player-wrap .nvr-seek-shell .nvr-playback-seek { position:absolute; left:0; bottom:0; }
+      .nvr-alert-dots { position:absolute; left:6px; right:6px; top:0; height:12px; }
+      .nvr-alert-dots button { position:absolute; top:0; transform:translateX(-50%); width:12px; height:12px; min-height:12px; min-width:12px; padding:0; border:0; background:transparent; }
+      .nvr-alert-dots button::after { content:''; display:block; width:7px; height:7px; border-radius:50%; margin:auto; background:#60a5fa; box-shadow:0 0 0 1px #0008; }
+      .nvr-alert-dots button[data-animal="true"]::after { background:#e9a8ff; }
+      .nvr-alert-detail { display:flex; gap:8px; overflow:auto; padding:8px; background:var(--panel); border-radius:8px; }
+      .nvr-alert-detail[hidden], .nvr-alert-popup[hidden] { display:none; }
+      .nvr-alert-card { display:grid; flex:0 0 145px; gap:4px; color:var(--text); text-align:left; }
+      .nvr-alert-card > button { text-align:left; display:grid; gap:4px; }
+      .nvr-alert-card img { width:100%; height:95px; object-fit:contain; background:#080e15; border-radius:5px; }
+      .nvr-alert-popup { position:absolute; z-index:6; bottom:100px; left:8px; right:8px; display:flex; gap:8px; max-height:calc(100% - 115px); overflow:auto; padding:8px; background:#101c29ee; border-radius:8px; }
+      .alert-history-image { width:160px; max-width:100%; height:110px; object-fit:contain; display:block; margin:5px 0; }
+      @container nvrplayer (max-width:420px) { .recording-player-wrap .nvr-playback-controls { padding-top:14px; } }
       .nvr-playback-seek::-webkit-slider-runnable-track { height:4px; border-radius:2px; background:linear-gradient(to right,var(--accent) var(--seek-percent,0%),#ffffff66 var(--seek-percent,0%)); }
       .nvr-playback-seek::-webkit-slider-thumb { appearance:none; width:12px; height:12px; margin-top:-4px; border-radius:50%; background:var(--accent); }
       .nvr-playback-seek::-moz-range-track { height:4px; border-radius:2px; background:#ffffff66; }
@@ -5561,7 +5644,7 @@ INDEX_HTML = r"""<!doctype html>
       .recording-player-wrap .nvr-playback-extra { display:flex; align-items:center; gap:5px; }
       .recording-player-wrap .nvr-playback-toolbar .nvr-player-more { display:none; }
       @container nvrplayer (max-width:420px) {
-        .recording-player-wrap .nvr-playback-toolbar { justify-content:space-between; }
+        .recording-player-wrap .nvr-playback-toolbar { justify-content:space-between; gap:2px; }
         .recording-player-wrap .nvr-playback-toolbar button { min-width:44px; min-height:44px; }
         .recording-player-wrap .nvr-playback-clock { position:absolute; right:12px; top:1px; margin:0; font-size:11px; }
         .recording-player-wrap .nvr-playback-toolbar .nvr-player-more { display:grid; }
@@ -6042,7 +6125,7 @@ INDEX_HTML = r"""<!doctype html>
           <header><div><p class="eyebrow">DETECTION</p><h1>Zdarzenia / Events</h1><p>Ruch, osoby i pojazdy z kamery oraz lokalnej analizy.</p></div><div class="toolbar"><button id="refresh-events" type="button">Odśwież / Refresh</button><button data-page-target="edge-settings">Ustawienia detekcji</button></div></header>
           <section class="panel">
             <p id="detection-runtime" role="status"></p><div id="detection-cameras" class="grid"></div>
-            <div class="form-grid"><label>Kamera<select id="event-camera-filter"><option value="">Wszystkie / All</option></select></label><label>Typ<select id="event-kind-filter"><option value="">Wszystkie / All</option><option value="motion">Ruch / Motion</option><option value="person">Osoba / Person</option><option value="vehicle">Pojazd / Vehicle</option></select></label><label>Dzień rejestratora<input type="date" id="event-day-filter"></label></div>
+            <div class="form-grid"><label>Kamera<select id="event-camera-filter"><option value="">Wszystkie / All</option></select></label><label>Typ<select id="event-kind-filter"><option value="">Wszystkie / All</option><option value="motion">Ruch / Motion</option><option value="person">Osoba / Person</option><option value="vehicle">Pojazd / Vehicle</option><option value="animal">Zwierzę / Animal</option></select></label><label>Dzień rejestratora<input type="date" id="event-day-filter"></label></div>
             <div class="event-history-row"><button type="button" id="event-clear-day">Wszystkie dni / All days</button><span class="field-help">Historia pozostaje na wybranej stronie. Przycisk Odśwież pobiera najnowsze zdarzenia.</span></div>
             <p id="event-history-status" role="status"></p><div id="event-list"></div>
             <div class="event-history-row" id="event-pagination"><button type="button" id="events-newer" disabled>Nowsze / Newer</button><span id="event-page-label"></span><button type="button" id="events-older" disabled>Starsze / Older</button></div>
@@ -6767,6 +6850,56 @@ INDEX_HTML = r"""<!doctype html>
         return { timeline, target: first, requested: first.offset, input: first.offset, seek: 0, playbackSeek: Number(first.playbackOffset || 0) };
       }
 
+      // One browser decoder shared by hover and tile previews. No camera reads,
+      // server transcoding, autoplay or persistent preview files.
+      const recordedPreviewCache=new Map(),recordedPreviewJobs=[];
+      let recordedPreviewVideo=null,recordedPreviewBusy=false;
+      function previewFileUrl(thumbnail) {
+        const url=new URL(thumbnail,location.href);
+        url.pathname=url.pathname.replace('/recording-thumbs/','/recordings/').replace(/\.jpg$/,'');
+        url.searchParams.delete('at');return url.href;
+      }
+      function recordedPreview(url,second=0,priority=false) {
+        const key=`${url}|${Math.round(Number(second)*10)/10}`;
+        if(recordedPreviewCache.has(key))return Promise.resolve(recordedPreviewCache.get(key));
+        return new Promise((resolve,reject)=>{
+          const job={url,second,key,resolve,reject};
+          if(priority)recordedPreviewJobs.unshift(job);else recordedPreviewJobs.push(job);
+          pumpRecordedPreviews();
+        });
+      }
+      async function pumpRecordedPreviews() {
+        if(recordedPreviewBusy||!recordedPreviewJobs.length)return;
+        recordedPreviewBusy=true;const job=recordedPreviewJobs.shift();
+        try {
+          if(recordedPreviewCache.has(job.key)){job.resolve(recordedPreviewCache.get(job.key));return;}
+          const video=recordedPreviewVideo||(recordedPreviewVideo=document.createElement('video'));
+          video.muted=true;video.playsInline=true;video.preload='auto';
+          await new Promise((resolve,reject)=>{
+            let seeked=false;
+            const cleanup=()=>{clearTimeout(timeout);for(const type of ['loadedmetadata','loadeddata','seeked','error'])video.removeEventListener(type,progress);};
+            const fail=()=>{cleanup();reject(new Error('browser_preview_unavailable'));};
+            const progress=event=>{
+              if(event?.type==='error'){fail();return;}
+              if(video.readyState<1)return;
+              const target=Math.min(Math.max(0,job.second),Math.max(0,video.duration-.05));
+              if(!seeked){seeked=true;video.currentTime=target;}
+              if(video.readyState>=2&&!video.seeking&&Math.abs(video.currentTime-target)<.11){cleanup();resolve();}
+            };
+            const timeout=setTimeout(fail,5000);
+            for(const type of ['loadedmetadata','loadeddata','seeked','error'])video.addEventListener(type,progress);
+            if(video.src!==job.url){video.src=job.url;video.load();}else progress();
+          });
+          const canvas=document.createElement('canvas');canvas.width=480;canvas.height=Math.max(2,Math.round(480*video.videoHeight/video.videoWidth));
+          canvas.getContext('2d',{alpha:false}).drawImage(video,0,0,canvas.width,canvas.height);
+          const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.85));if(!blob)throw new Error('preview_encoding_failed');
+          const image=URL.createObjectURL(blob);recordedPreviewCache.set(job.key,image);
+          while(recordedPreviewCache.size>64){const oldest=recordedPreviewCache.keys().next().value,url=recordedPreviewCache.get(oldest);for(const [key,value] of scrubCache)if(value===url)scrubCache.delete(key);URL.revokeObjectURL(url);recordedPreviewCache.delete(oldest);}
+          job.resolve(image);
+        }catch(error){job.reject(error);}finally{recordedPreviewBusy=false;pumpRecordedPreviews();}
+      }
+      window.addEventListener('pagehide',()=>{recordedPreviewVideo?.pause();if(recordedPreviewVideo){recordedPreviewVideo.removeAttribute('src');recordedPreviewVideo.load();}for(const job of recordedPreviewJobs.splice(0))job.reject(new Error('page_closed'));for(const url of recordedPreviewCache.values())URL.revokeObjectURL(url);recordedPreviewCache.clear();});
+
       const recordingThumbnailQueue = [];
       let recordingThumbnailActive = 0;
       function thumbnailContainer(image) { return image.closest('.recording-thumb-wrap, .recording-day-thumb'); }
@@ -6795,11 +6928,11 @@ INDEX_HTML = r"""<!doctype html>
             recordingThumbnailActive -= 1;
             pumpRecordingThumbnails();
           };
-          const expectedUrl = new URL(source, window.location.href).href;
+          let expectedUrl = new URL(source, window.location.href).href;
           image.onload = () => { if (image.currentSrc === expectedUrl && image.naturalWidth > 1) finish(true); };
           image.onerror = () => { if (image.currentSrc === expectedUrl) finish(false); };
           image.loading = 'eager';
-          image.src = source;
+          recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>{expectedUrl=new URL(source,location.href).href;image.src=source;});
         }
       }
       function loadRecordingThumbnail(image) {
@@ -6854,13 +6987,15 @@ INDEX_HTML = r"""<!doctype html>
 
       function holdRecordingFrame(video) {
         const frame = video.closest('.recording-player-wrap')?.querySelector('[data-recording-transition]');
-        if (!frame || video.readyState < 2 || !video.videoWidth) return;
+        if (!frame) return;
+        if(video.readyState<2||video.seeking||!video.videoWidth){if(frame.width&&frame.dataset.valid==='true')frame.hidden=false;return;}
         try {
           frame.width = video.videoWidth; frame.height = video.videoHeight;
           frame.style.height = `${video.clientHeight}px`;
           frame.getContext('2d').drawImage(video, 0, 0);
+          frame.dataset.valid='true';
           frame.hidden = false;
-        } catch (_) { frame.hidden = true; }
+        } catch (_) { if(frame.dataset.valid==='true')frame.hidden=false; }
       }
       function releaseRecordingFrame(video) {
         video.removeAttribute('poster');
@@ -6868,7 +7003,9 @@ INDEX_HTML = r"""<!doctype html>
         if (!frame) return;
         const source=video.currentSrc||video.src, expectedSeek=Number(video.dataset.recordingSeek||0);
         const release = () => {
-          if ((video.currentSrc||video.src)===source&&Number(video.dataset.recordingSeek||0)===expectedSeek&&!video.seeking&&video.readyState>=2&&video.currentTime+0.1>=expectedSeek) frame.hidden=true;
+          if ((video.currentSrc||video.src)!==source||Number(video.dataset.recordingSeek||0)!==expectedSeek||video.seeking||video.readyState<2||video.currentTime+.1<expectedSeek)return;
+          try{frame.width=video.videoWidth;frame.height=video.videoHeight;frame.style.height=`${video.clientHeight}px`;frame.getContext('2d').drawImage(video,0,0);frame.dataset.valid='true';}catch(_){return;}
+          requestAnimationFrame(()=>{if((video.currentSrc||video.src)===source&&!video.seeking&&Number(video.dataset.recordingSeek||0)===expectedSeek)frame.hidden=true;});
         };
         // Paused seeks can be fully occluded by the held frame; some browsers
         // then defer video-frame callbacks until playback resumes.
@@ -6888,6 +7025,7 @@ INDEX_HTML = r"""<!doctype html>
         const nextSrc = mediaUrlWithTimeFragment(nextPath, target.seek);
         const fileSeek=video.dataset.recordingLoadedFile===fileUrl&&Number.isFinite(video.duration)
           ? Math.min(target.seek,Math.max(0,video.duration-.05)) : target.seek;
+        holdRecordingFrame(video);
         selectedRecording[index] = fileUrl;
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
@@ -7350,6 +7488,15 @@ INDEX_HTML = r"""<!doctype html>
           .map((part) => String(part).padStart(2, '0')).join(':');
       }
 
+      async function loadRecordingTiming(video) {
+        const index=video.dataset.recordingPlayer,file=recordingTargetForPlaybackOffset(index,recordingPlaybackPosition(video))?.target?.file;
+        if(!file)return;const source=video.dataset.recordingLoadedFile;
+        try{
+          const response=await fetch(panelPath(`api/recording/timing?${new URLSearchParams({key:recordingStatus[index].key,name:file.name})}`));
+          if(!response.ok)return;const data=await response.json();if(!video.isConnected||video.dataset.recordingLoadedFile!==source)return;
+          video.dataset.recordingFps=String(data.fps||0);updateRecordingPlayerControls(video);
+        }catch(_){}
+      }
       const recordingScrubs = new Map(), recordingControlsTimers = new WeakMap();
       function showRecordingControls(wrap) {
         if (!wrap) return;
@@ -7427,15 +7574,16 @@ INDEX_HTML = r"""<!doctype html>
       function recordingPlayerControls(index, timeline, position = 0) {
         const total = Math.max(0, Number(timeline.playbackTotal || 0));
         return `<div class="nvr-playback-controls">
-          <input class="nvr-playback-seek" type="range" min="0" max="${Math.max(0,total-0.1)}" step="0.1" value="${position}" data-recording-playback-seek="${index}" aria-label="Seek through all recorded video in selected day" aria-valuetext="${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}">
+          <div class="nvr-seek-shell"><div class="nvr-alert-dots" data-alert-axis="${index}" role="group" aria-label="Wykrycia osób i zwierząt na nagraniu"></div>          <input class="nvr-playback-seek" type="range" min="0" max="${Math.max(0,total-0.1)}" step="0.1" value="${position}" data-recording-playback-seek="${index}" aria-label="Seek through all recorded video in selected day" aria-valuetext="${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}"></div>
           <div class="nvr-playback-toolbar">
             <button type="button" data-recording-toggle="${index}" aria-label="Play selected day's recordings" title="Play">${recordingControlIcon('play')}</button>
 
+<button type="button" data-recording-frame="-1" data-record-index="${index}" aria-label="Poprzednia klatka" title="Poprzednia klatka" disabled>‹|</button><button type="button" data-recording-frame="1" data-record-index="${index}" aria-label="Następna klatka" title="Następna klatka" disabled>|›</button>
             <output class="nvr-playback-clock" data-recording-duration="${index}">${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}</output>
-            <button type="button" data-recording-mute="${index}" aria-label="Mute or unmute" title="Mute">${recordingControlIcon('sound')}</button>
 
-<div class="nvr-playback-extra" id="recording-extra-${index}">            <button class="nvr-skip" type="button" data-recording-jump="-10" data-record-index="${index}" aria-label="Back 10 seconds" title="Back 10 seconds">−10</button>
-            <button class="nvr-skip" type="button" data-recording-jump="10" data-record-index="${index}" aria-label="Forward 10 seconds" title="Forward 10 seconds">+10</button>            <label class="nvr-speed-label"><select data-recording-speed="${index}" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label></div>
+
+<div class="nvr-playback-extra" id="recording-extra-${index}">            <button type="button" data-recording-mute="${index}" aria-label="Mute or unmute" title="Mute">${recordingControlIcon('sound')}</button>            <button class="nvr-skip" type="button" data-recording-jump="-1" data-record-index="${index}" aria-label="Back 1 second" title="Back 1 second">−1 s</button>
+            <button class="nvr-skip" type="button" data-recording-jump="1" data-record-index="${index}" aria-label="Forward 1 second" title="Forward 1 second">+1 s</button>            <label class="nvr-speed-label"><select data-recording-speed="${index}" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label></div>
             <button class="nvr-player-more" type="button" data-recording-more="${index}" aria-label="Playback settings" title="Playback settings" aria-controls="recording-extra-${index}" aria-expanded="false">${recordingControlIcon('settings')}</button>
             <button type="button" data-recording-fullscreen="${index}" aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>
           </div>
@@ -7443,7 +7591,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       // One extractor request at a time; drag events replace the pending target.
-      const scrubCache = new Map();
+      const scrubCache = new Map(),scrubFallbackUrls=new Set();
       let scrubDesired = null, scrubFetching = false, scrubTimer = null, scrubHideTimer = null;
       function hideRecordingScrubPreview() {
         scrubDesired = null; clearTimeout(scrubTimer); clearTimeout(scrubHideTimer);
@@ -7461,17 +7609,17 @@ INDEX_HTML = r"""<!doctype html>
           box.innerHTML = '<img alt="Podgląd nagrania" style="display:block;width:100%;aspect-ratio:16/9;object-fit:contain"><span></span>';
           parent.append(box);
         }
-        const file = selection.target.file, bucket = Math.floor(selection.seek / 5) * 5;
+        const file = selection.target.file, bucket = Math.round(selection.seek*10)/10;
         const url = new URL(panelPath(file.thumbnail_url), location.href); url.searchParams.set('at',bucket);
         const rect = slider.getBoundingClientRect(), width = Math.min(192,innerWidth*.7)+12;
         const x = clientX ?? rect.left + rect.width * Number(value)/Math.max(1,Number(slider.max));
         box.hidden = false; box.style.left = `${Math.max(4,Math.min(innerWidth-width-4,x-width/2))}px`;
         box.style.top = `${Math.max(4,Math.min(innerHeight-150,rect.top-145))}px`;
         const gap = false;
-        const label = `${recordingPlaybackClock(Number(file.timeline_offset || 0)+bucket)} · ${gap?'najbliższy fragment · ':''}podgląd co 5 s`;
+        const label = `${recordingPlaybackClock(Number(file.timeline_offset || 0)+bucket)} · ${gap?'najbliższy fragment · ':''}podgląd nagrania`;
         const image = box.querySelector('img');
         const previous = scrubDesired;
-        scrubDesired = {url:url.href,box,label};
+        scrubDesired = {url:url.href,videoUrl:previewFileUrl(url.href),second:bucket,box,label};
         box.querySelector('span').textContent = label;
         if (scrubCache.has(url.href)) { image.src = scrubCache.get(url.href); image.hidden = false; }
         else { image.hidden = true; box.querySelector('span').textContent = 'Ładowanie miniatury…'; }
@@ -7483,12 +7631,11 @@ INDEX_HTML = r"""<!doctype html>
         const wanted = scrubDesired, controller = new AbortController(); scrubFetching = true;
         const timeout = setTimeout(()=>controller.abort(),6000);
         try {
-          const response = await fetch(wanted.url,{signal:controller.signal});
-          if (!response.ok) throw new Error('thumbnail unavailable');
-          const blob = await response.blob();
-          if (!blob.type.startsWith('image/')) throw new Error('thumbnail unavailable');
-          const objectURL = URL.createObjectURL(blob); scrubCache.set(wanted.url,objectURL);
-          while (scrubCache.size > 64) { const key = scrubCache.keys().next().value; URL.revokeObjectURL(scrubCache.get(key)); scrubCache.delete(key); }
+          let objectURL;
+          try{objectURL=await recordedPreview(new URL(wanted.videoUrl,location.href).href,wanted.second,true);}
+          catch(_){const response=await fetch(wanted.url,{signal:controller.signal});if(!response.ok)throw new Error('thumbnail unavailable');const blob=await response.blob();if(!blob.type.startsWith('image/'))throw new Error('thumbnail unavailable');objectURL=URL.createObjectURL(blob);scrubFallbackUrls.add(objectURL);}
+          scrubCache.set(wanted.url,objectURL);
+          while (scrubCache.size > 64) { const key = scrubCache.keys().next().value,url=scrubCache.get(key);if(scrubFallbackUrls.delete(url))URL.revokeObjectURL(url);scrubCache.delete(key); }
           if (scrubDesired?.url === wanted.url && wanted.box.isConnected && !wanted.box.hidden) {
             const image = wanted.box.querySelector('img'); image.src = objectURL; image.hidden = false;
             wanted.box.querySelector('span').textContent = wanted.label;
@@ -7513,7 +7660,7 @@ INDEX_HTML = r"""<!doctype html>
         const scrubbing = recordingScrubs.get(String(index));
         const position = Math.min(total, scrubbing ? scrubbing.desired : recordingPlaybackPosition(video));
         const clock = nvrGrid.querySelector(`[data-recording-duration="${index}"]`);
-        if (clock) clock.textContent = `${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}`;
+        if(clock)clock.textContent=`${recordingPlaybackClock(position)}${video.paused?'.'+String(Math.floor((position%1)*1000)).padStart(3,'0'):''} / ${recordingPlaybackClock(total)}`;
         const slider = nvrGrid.querySelector(`[data-recording-playback-seek="${index}"]`);
         if (slider) {
           slider.max = String(Math.max(0, total - 0.1));
@@ -7521,6 +7668,8 @@ INDEX_HTML = r"""<!doctype html>
           slider.setAttribute('aria-valuetext',`${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}`);
           slider.style.setProperty('--seek-percent',`${Math.min(100,position/Math.max(.1,total-.1)*100)}%`);
         }
+        const fps=Number(video.dataset.recordingFps||0);
+        video.closest('[data-recording-wrap]')?.querySelectorAll('[data-recording-frame]').forEach(button=>button.disabled=!(fps>0));
         const toggle = nvrGrid.querySelector(`[data-recording-toggle="${index}"]`);
         if (toggle) { const label=video.paused?'Play':'Pause';toggle.innerHTML=recordingControlIcon(video.paused?'play':'pause');toggle.title=label;toggle.setAttribute('aria-label',label);toggle.setAttribute('aria-pressed',String(!video.paused)); }
         const mute = nvrGrid.querySelector(`[data-recording-mute="${index}"]`);
@@ -7979,7 +8128,7 @@ INDEX_HTML = r"""<!doctype html>
           ? `<div class="recording-player-wrap" data-recording-wrap="${index}" data-controls-visible="true">
               <video class="recording-player" tabindex="0" aria-label="Recordings for selected day" src="${escapeHtml(playerSrc)}" ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ''} preload="${preloadMode}" playsinline webkit-playsinline data-recording-player="${index}" data-recording-file-url="${escapeHtml(selectedFile?.url || '')}" data-recording-loaded-file="${escapeHtml(selectedFile?.url || '')}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-start="${escapeHtml(playerPlaybackStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
               <canvas class="recording-transition-frame" data-recording-transition hidden aria-hidden="true"></canvas>
-              ${recordingPlayerControls(index, timeline, targetForPoster?.playbackSeek || 0)}
+              ${recordingPlayerControls(index, timeline, targetForPoster?.playbackSeek || 0)}<section class="nvr-alert-popup" data-alert-popup="${index}" hidden></section>
               <p class="nvr-player-status" data-recording-playback-message="${index}" role="status" hidden></p>
             </div>`
           : `<div class="recording-empty">No video yet</div>`;
@@ -8006,7 +8155,7 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="rec-badge ${isRecording ? '' : 'off'}">${badgeText}</div>
               </div>
               ${daySelector}
-              ${player}
+              ${player}<section class="nvr-alert-detail" data-alert-detail="${index}" hidden></section>
               ${currentDay ? `<section class="recording-events" data-recording-events="${index}"><div class="event-history-row"><b>Zdarzenia dnia / Day events</b><button type="button" data-recording-events-refresh="${index}">Odśwież</button></div><div data-recording-event-content><p class="field-help">Ładowanie zdarzeń…</p></div><p class="nvr-playback-message" data-recording-event-message role="status"></p></section>` : ''}
               ${diagnostics}
               <div class="actions">
@@ -8451,7 +8600,14 @@ INDEX_HTML = r"""<!doctype html>
         const nvrConfig = config.nvr || {};
         const detection = config.detection || {};
         edgeForm.innerHTML = `
-          <section class="field-section" id="detection-settings"><h2>Detekcja / Detection</h2><p class="field-help">Zdarzenia ONVIF wykonuje kamera. Lokalne AI korzysta ze wspólnego strumienia Edge. Włącz wybrane kamery w ich ustawieniach. / Enable detection separately on each camera.</p><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-camera-events" ${detection.camera_events_enabled ? 'checked' : ''}> Zdarzenia z kamer / Camera events</label><label class="check-row"><input type="checkbox" name="detection-local" ${detection.local_enabled ? 'checked' : ''}> Lokalne AI: osoba i pojazd / Local AI</label><label>Łączny limit klatek/s / Total FPS<input type="number" name="detection-fps" min="0.2" max="3" step="0.2" value="${escapeHtml(detection.max_fps || 1)}"></label><label>Pewność / Confidence<input type="number" name="detection-confidence" min="0.1" max="0.95" step="0.05" value="${escapeHtml(detection.confidence || 0.45)}"></label><label>Podtrzymanie alarmu AI (s)<input type="number" name="detection-hold" min="1" max="120" value="${escapeHtml(detection.hold_seconds || 10)}"></label></div><p class="field-help">HP t530: zacznij od jednej kamery i 1 klatki/s łącznie. Analiza działa kolejno, na jednym wątku CPU. / One CPU worker, no cloud inference.</p></section>
+          <section class="field-section" id="detection-settings"><h2>Wykrywanie i alerty</h2><p class="field-help">Włącz wykrywanie, wybierz kamery i zapisz ustawienia. Analiza czyta wyłącznie wspólny strumień Edge; klipy powstają z zapisanych plików. Jakość i FPS nagrań pozostają bez zmian.</p>
+            <div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-local" ${detection.local_enabled?'checked':''}> Wykrywanie lokalne w Edge</label>
+              <label class="check-row"><input type="checkbox" name="detection-person" ${detection.person_enabled!==false?'checked':''}> Osoba</label><label class="check-row"><input type="checkbox" name="detection-animal" ${detection.animal_enabled!==false?'checked':''}> Zwierzę (m.in. kot, pies, ptak)</label><label class="check-row"><input type="checkbox" name="detection-vehicle" ${detection.vehicle_enabled!==false?'checked':''}> Pojazd</label>
+              ${(config.cameras||[]).map((camera,index)=>`<label class="check-row"><input type="checkbox" data-easy-detection-camera="${index}" ${camera.local_detection_enabled?'checked':''} ${camera.enabled?'':'disabled'}> ${escapeHtml(camera.name||camera.id)}${camera.enabled?'':' · kamera wyłączona'}</label>`).join('')}
+            </div><p class="field-help">Punkt na pasku filmu → zdjęcie osoby lub zwierzęcia → właściwy moment nagrania. Fragment alertu obejmuje najbliższe zamknięte części nagrania przed i po wykryciu. Nagrywanie wybranej kamery musi być włączone.</p>
+            <div class="form-grid"><label>Limit klipów alertów (MB)<input type="number" min="32" max="4096" name="detection-alert-mb" value="${detection.alert_media_mb||256}"></label><label>Sekundy przed wykryciem<input type="number" min="0" max="10" name="detection-pre" value="${detection.pre_seconds??5}"></label><label>Sekundy po wykryciu<input type="number" min="5" max="60" name="detection-post" value="${detection.post_seconds||15}"></label></div><p class="field-help">Zdjęcia alertów mają limit 32 MB. Klipy mają osobny limit powyżej i retencję taką jak nagrania; najstarsze alerty wygasają po zapełnieniu limitu. Oryginalny zapis pozostaje niezależny. Klip pojawi się po zamknięciu części nagrania, zdjęcie lokalnego wykrycia od razu.</p>
+            <details class="settings-group"><summary>Powiadomienia na telefon</summary><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-notifications" ${detection.notifications_enabled?'checked':''}> Powiadamiaj o osobie lub zwierzęciu</label><label>Telefon w Home Assistant<input name="detection-notify-service" list="edge-notify-services" placeholder="notify.mobile_app_twoj_telefon" value="${escapeHtml(detection.notify_service||'')}"><datalist id="edge-notify-services"></datalist></label><label>Przerwa między alertami (s)<input type="number" name="detection-notify-cooldown" min="5" max="3600" value="${detection.notify_cooldown||30}"></label></div><p class="field-help" data-phone-services>Wybierz usługę telefonu z aplikacją Home Assistant Companion. Zapisz ustawienia; zaktualizowana integracja Edge wysyła nowe alerty ze zdjęciem, bez dodatkowej automatyzacji YAML.</p></details>
+            <details class="settings-group"><summary>Zaawansowana detekcja</summary><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-camera-events" ${detection.camera_events_enabled?'checked':''}> Zdarzenia ONVIF z kamery</label><label>Łączny limit analizy klatek/s<input type="number" name="detection-fps" min="0.2" max="3" step="0.2" value="${detection.max_fps||1}"></label><label>Pewność<input type="number" name="detection-confidence" min="0.1" max="0.95" step="0.05" value="${detection.confidence||.45}"></label><label>Pewność zwierzęcia<input type="number" name="detection-animal-confidence" min="0.1" max="0.95" step="0.05" value="${detection.animal_confidence||.35}"></label><label>Podtrzymanie wykrycia (s)<input type="number" name="detection-hold" min="1" max="120" value="${detection.hold_seconds||10}"></label></div></details><p class="field-help">HP t530: jedna kamera i 1 analizowana klatka/s łącznie. Rozpoznawanie nie identyfikuje tożsamości osoby; możliwości zależą od wielkości obiektu i oświetlenia.</p></section>
           <section class="field-section settings-main" id="recording-settings"><div class="section-heading"><span class="step-number">01</span><div><h2>Recording</h2><p>How long to keep footage and how it plays in the browser.</p></div></div><div class="form-grid"><label>Keep recordings (days)<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label><label>Recording compatibility<select name="nvr-browser-playback">
 
                 <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Oryginalna jakość i kodek (zalecane)</option>
@@ -8891,8 +9047,12 @@ INDEX_HTML = r"""<!doctype html>
           detection: {
             camera_events_enabled: get('detection-camera-events').checked,
             local_enabled: get('detection-local').checked,
+            person_enabled:get('detection-person').checked,animal_enabled:get('detection-animal').checked,vehicle_enabled:get('detection-vehicle').checked,
+            alert_media_mb:Number(get('detection-alert-mb').value||256),pre_seconds:Number(get('detection-pre').value||0),post_seconds:Number(get('detection-post').value||15),
+            notifications_enabled:get('detection-notifications').checked,notify_service:get('detection-notify-service').value.trim(),notify_cooldown:Number(get('detection-notify-cooldown').value||30),notify_path:notificationPanelPath(),
             max_fps: Number(get('detection-fps').value || 1),
             confidence: Number(get('detection-confidence').value || 0.45),
+            animal_confidence:Number(get('detection-animal-confidence').value||.35),
             hold_seconds: Number(get('detection-hold').value || 10)
           },
           nvr: {
@@ -9081,7 +9241,7 @@ INDEX_HTML = r"""<!doctype html>
           const usage=recordingStorage;
           const daily=Object.values(recordingStatus).reduce((sum,item)=>sum+Number(item.bytes_per_day_estimate||0),0);
           const retention=Number(config.nvr?.retention_days||14);
-          output.textContent=`Nagrania: ${formatBytes(usage.recordings_bytes)} · Kopie odtwarzania: ${formatBytes(usage.playback_cache_bytes)} / ${formatBytes(usage.playback_cache_limit_bytes)} · Miniatury: ${formatBytes(usage.thumbnail_cache_bytes)} / ${formatBytes(usage.thumbnail_cache_limit_bytes)}. Wolne na dysku nagrań: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}; wolne w konfiguracji HA: ${usage.cache_volume?.free_bytes==null?'—':formatBytes(usage.cache_volume.free_bytes)}.${daily?' Szacunek ciągłego nagrywania: '+formatBytes(daily)+'/dobę, '+formatBytes(daily*retention)+' na '+retention+' dni. Zależy od bitrate i sceny.':''}`;
+          output.textContent=`Nagrania: ${formatBytes(usage.recordings_bytes)} · Kopie odtwarzania: ${formatBytes(usage.playback_cache_bytes)} / ${formatBytes(usage.playback_cache_limit_bytes)} · Miniatury: ${formatBytes(usage.thumbnail_cache_bytes)} / ${formatBytes(usage.thumbnail_cache_limit_bytes)} · Klipy alertów: ${formatBytes(usage.alert_clip_bytes)} / ${formatBytes(usage.alert_clip_limit_bytes)} · Zdjęcia alertów: ${formatBytes(usage.alert_image_bytes)} / ${formatBytes(usage.alert_image_limit_bytes)}. Wolne na dysku nagrań: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}; wolne w konfiguracji HA: ${usage.cache_volume?.free_bytes==null?'—':formatBytes(usage.cache_volume.free_bytes)}.${daily?' Szacunek ciągłego nagrywania: '+formatBytes(daily)+'/dobę, '+formatBytes(daily*retention)+' na '+retention+' dni. Zależy od bitrate i sceny.':''}`;
         });
       }
       function recordingDayLoadMessage(message) {
@@ -9265,7 +9425,7 @@ INDEX_HTML = r"""<!doctype html>
         renderConfig();
       }
 
-      const eventKindNames = {motion: 'Ruch', person: 'Osoba', vehicle: 'Pojazd'};
+      const eventKindNames = {motion: 'Ruch', person: 'Osoba', vehicle: 'Pojazd', animal:'Zwierzę'};
       let detectionData = {cameras: []}, detectionTimer = null, detectionLoading = false;
       const eventHistory = {events: [], before: null, stack: [], next: null, serial: 0, controller: null, key: ''};
       const recordingEventCache = new Map();
@@ -9348,7 +9508,8 @@ INDEX_HTML = r"""<!doctype html>
         const cameras = config.cameras || [];
         document.getElementById('event-list').innerHTML = eventHistory.events.length ? eventHistory.events.map(item => {
           const camera = cameras.find(camera => camera.id === item.camera_id);
-          return `<article class="field-section"><div class="event-history-row"><b>${escapeHtml(camera?.name || item.camera_id)} · ${escapeHtml(eventKindNames[item.kind] || item.kind)} <small>(${escapeHtml(item.kind)})</small></b><span>${escapeHtml(item.day)} ${escapeHtml(item.time_label || new Date(item.timestamp * 1000).toLocaleTimeString())}</span></div><p>${item.source === 'local' ? (item.zone_id === 'local_zone' ? 'Local AI · Strefa Edge' : 'Local AI') : 'Camera / ONVIF'}${item.score ? ` · ${Math.round(item.score * 100)}%` : ''}</p><button type="button" data-event-recording="${Number(item.id)}" ${camera ? '' : 'disabled'}>Otwórz nagranie / Open recording</button></article>`;
+          alertItems.set(String(item.id),item);
+          return `<article class="field-section"><div class="event-history-row"><b>${escapeHtml(camera?.name || item.camera_id)} · ${escapeHtml(eventKindNames[item.kind] || item.kind)} <small>(${escapeHtml(item.kind)})</small></b><span>${escapeHtml(item.day)} ${escapeHtml(item.time_label || new Date(item.timestamp * 1000).toLocaleTimeString())}</span></div><p>${item.source === 'local' ? (item.zone_id === 'local_zone' ? 'Local AI · Strefa Edge' : 'Local AI') : 'Camera / ONVIF'}${item.score ? ` · ${Math.round(item.score * 100)}%` : ''}</p>${['person','animal'].includes(item.kind)?intrusionCard(item):''}<button type="button" data-event-recording="${Number(item.id)}" ${camera ? '' : 'disabled'}>Otwórz nagranie / Open recording</button></article>`;
         }).join('') : '<p class="notice">Brak zdarzeń dla wybranych filtrów. Sprawdź dzień, kamerę oraz ustawienia detekcji.</p>';
       }
       function enterEventsPage() {
@@ -9372,6 +9533,7 @@ INDEX_HTML = r"""<!doctype html>
       });
       let openingEventRecording = false;
       document.getElementById('event-list').addEventListener('click', async event => {
+        const alert=event.target.closest('[data-alert-watch]');if(alert){try{await openAlertById(alert.dataset.alertWatch);}catch(error){document.getElementById('event-history-status').textContent=error.message;}return;}
         const button = event.target.closest('[data-event-recording]');
         if (!button || openingEventRecording) return;
         const item = eventHistory.events.find(row => String(row.id) === button.dataset.eventRecording);
@@ -9398,17 +9560,82 @@ INDEX_HTML = r"""<!doctype html>
         selectRecordingAtOffset(index, item.day_seconds);
         return true;
       }
+      const alertItems=new Map();let alertDetailSerial=0;
+      function renderAlertAxis(index,data) {
+        const axis=nvrGrid.querySelector(`[data-alert-axis="${index}"]`);if(!axis)return;
+        const total=Math.max(.1,Number(recordingStatus[index]?.timeline?.playback_total_seconds||0));
+        const width=Math.max(1,axis.getBoundingClientRect().width),bins=new Map(),timeline=recordingTimeline(recordingStatus[index]?.files||[],recordingStatus[index]||{}),entries=timeline.entries;
+        for(const event of data.alerts||[]){
+          if(!entries.length)continue;let low=0,high=entries.length;
+          while(low<high){const middle=(low+high)>>1;if(entries[middle].offset<=event.day_seconds)low=middle+1;else high=middle;}
+          let entry=entries[Math.max(0,low-1)];if(event.day_seconds>=entry.offset+entry.duration&&low<entries.length)entry=entries[low];
+          const seek=Math.max(0,Math.min(event.day_seconds-entry.offset,entry.duration-.1));
+          const position=Math.max(0,Math.min(1,(entry.playbackOffset+seek)/Math.max(.1,total-.1))),bin=Math.round(position*width/12);
+          const group=bins.get(bin)||{position,events:[]};group.events.push(event);bins.set(bin,group);
+        }
+        const html=[...bins.values()].map(group=>{
+          const label=group.events.map(event=>eventKindNames[event.kind]||event.kind).filter((value,index,values)=>values.indexOf(value)===index).join(', ');
+          return `<button type="button" data-alert-point="${index}" data-alert-ids="${[...group.events].reverse().map(event=>Number(event.id)).join(',')}" data-animal="${group.events.some(event=>event.kind==='animal')}" style="left:${group.position*100}%" aria-label="${escapeHtml(label)} · ${group.events.length} alertów" title="${escapeHtml(label)} · ${new Date(group.events[0].timestamp*1000).toLocaleTimeString()}"></button>`;
+        }).join('');
+        if(axis.dataset.signature!==html){axis.innerHTML=html;axis.dataset.signature=html;}
+      }
+      function intrusionCard(event, index=null) {
+        const kind=eventKindNames[event.kind]||event.kind,state={pending:'Zapisywanie fragmentu…',ready:'Fragment zapisany',expired:'Fragment wygasł',unavailable:'Brak klipu · dostępne zdjęcie',error:'Nie udało się zapisać klipu'}[event.clip_state]||'';
+        return `<div class="nvr-alert-card"><button type="button" data-alert-watch="${Number(event.id)}" ${index===null?'':`data-alert-index="${index}"`}><b>${escapeHtml(kind)} · ${escapeHtml(event.time_label||new Date(event.timestamp*1000).toLocaleTimeString())}</b>${event.image_url?`<img src="${escapeHtml(panelPath(event.image_url))}" alt="${escapeHtml(kind)} w chwili wykrycia" loading="lazy">`:'<span class="field-help">Miniatura oczekuje lub wygasła</span>'}<small>${escapeHtml(state)}</small><span>Obejrzyj od tego momentu</span></button>${event.clip_url?`<button type="button" data-alert-clip="${Number(event.id)}">Zapisany fragment</button>`:''}</div>`;
+      }
+      async function showAlertDetails(index,ids) {
+        const wrap=nvrGrid.querySelector(`[data-recording-wrap="${index}"]`);
+        const fullscreen=document.fullscreenElement===wrap||wrap?.classList.contains('edge-soft-fullscreen');
+        const holder=nvrGrid.querySelector(`[data-alert-${fullscreen?'popup':'detail'}="${index}"]`);if(!holder)return;
+        const serial=String(++alertDetailSerial);holder.dataset.request=serial;holder.hidden=false;holder.innerHTML='<p role="status">Odczyt alertów…</p>';
+        const events=[];
+        for(const id of ids.slice(0,12)){
+          try{const event=await eventJson(`api/alerts/${id}`);events.push(event);alertItems.set(String(event.id),event);}catch(_){}
+          if(holder.dataset.request!==serial||!holder.isConnected)return;
+        }
+        while(alertItems.size>100)alertItems.delete(alertItems.keys().next().value);
+        holder.innerHTML=events.map(event=>intrusionCard(event,index)).join('')||'<p>Alert wygasł.</p>';
+        if(ids.length>12)holder.insertAdjacentHTML('beforeend','<p>Więcej alertów znajdziesz w pełnej historii dnia.</p>');
+        if(!fullscreen)holder.scrollIntoView({block:'nearest',behavior:'smooth'});
+      }
+      async function openAlertRecording(event) {
+        const index=(config.cameras||[]).findIndex(camera=>camera.id===event.camera_id);
+        if(index>=0){
+          selectedRecordingDay[index]=event.day;delete selectedRecording[index];delete recordingStreamNonce[index];
+          showPage('nvr');await loadRecordingStatus({forceRender:true,reason:'alert_recording'});
+          if(seekRecordingEvent(index,event)){
+            nvrGrid.querySelectorAll('[data-alert-detail],[data-alert-popup]').forEach(node=>node.hidden=true);
+            const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+            video?.closest('[data-recording-wrap]')?.scrollIntoView({block:'center',behavior:'smooth'});
+            try{await video?.play();}catch(_){}return;
+          }
+        }
+        if(event.clip_url){showSavedAlertClip(event);return;}
+        throw new Error('W tym momencie brak zapisanego wideo. Zdjęcie alertu pozostaje w historii.');
+      }
+      function showSavedAlertClip(event) {
+          nvrGrid.querySelectorAll('video').forEach(video=>video.pause());
+          const dialog=document.createElement('dialog');dialog.setAttribute('aria-label','Zapisany fragment alertu');dialog.style.cssText='max-width:95vw;width:850px;background:#101c29;color:white;border:0;border-radius:8px';
+          dialog.innerHTML=`<p>${escapeHtml(eventKindNames[event.kind]||event.kind)} · zapisany fragment alertu</p><video controls playsinline style="width:100%;max-height:75vh" src="${escapeHtml(panelPath(event.clip_url))}#t=${Number(event.clip_offset_seconds||0)}"></video><button type="button">Zamknij</button>`;
+          const close=()=>{const video=dialog.querySelector('video');video.pause();video.removeAttribute('src');video.load();dialog.remove();};dialog.querySelector('button').onclick=close;dialog.addEventListener('cancel',close);document.body.append(dialog);dialog.showModal();
+      }
+      document.addEventListener('click',async event=>{const button=event.target.closest('[data-alert-clip]');if(!button)return;try{const item=await eventJson(`api/alerts/${button.dataset.alertClip}`);if(item.clip_url)showSavedAlertClip(item);}catch(_){button.textContent='Fragment chwilowo niedostępny';}});
+      async function openAlertById(id){const event=alertItems.get(String(id))||await eventJson(`api/alerts/${id}`);return openAlertRecording(event);}
+      nvrGrid.addEventListener('click',async event=>{
+        const point=event.target.closest('[data-alert-point]');if(point){event.preventDefault();void showAlertDetails(point.dataset.alertPoint,point.dataset.alertIds.split(',').map(Number));return;}
+        const watch=event.target.closest('[data-alert-watch]');if(watch){event.preventDefault();try{await openAlertById(watch.dataset.alertWatch);}catch(error){watch.closest('[data-alert-detail],[data-alert-popup]')?.insertAdjacentHTML('beforeend',`<p role="status">${escapeHtml(error.message)}</p>`);}}
+      });
+      document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)nvrGrid.querySelectorAll('[data-alert-popup]').forEach(node=>node.hidden=true);});
+      const repaintAlertAxes=()=>{for(const section of nvrGrid.querySelectorAll('[data-recording-events]')){const data=recordingEventCache.get(section.dataset.eventKey)?.data;if(data)renderAlertAxis(section.dataset.recordingEvents,data);}};window.addEventListener('resize',repaintAlertAxes);document.addEventListener('fullscreenchange',repaintAlertAxes);
+
       function renderRecordingEvents(section, data) {
+        renderAlertAxis(section.dataset.recordingEvents,data);
         const content = section.querySelector('[data-recording-event-content]');
         const signature = JSON.stringify(data);
         if (content.dataset.signature === signature || (section.contains(document.activeElement) && document.activeElement.matches('select'))) return;
         const index = section.dataset.recordingEvents;
         const total = Math.max(1, Number(data.day_total_seconds || 86400));
-        content.innerHTML = `<p>${Number(data.count || 0)} zdarzeń · <span style="color:#22c55e">Ruch</span> · <span style="color:#60a5fa">Osoba</span> · <span style="color:#fbbf24">Pojazd</span></p><div class="recording-event-track" role="img" aria-label="Zdarzenia wybranego dnia">${(data.markers || []).map(marker => {
-          const kind = marker.kinds.includes('person') ? 'person' : marker.kinds.includes('vehicle') ? 'vehicle' : 'motion';
-          const label = `${marker.time_label} · ${marker.kinds.map(kind => eventKindNames[kind] || kind).join(', ')} · ${marker.count} zdarzeń`;
-          return `<span class="recording-event-marker" data-kind="${kind}" data-recording-event-slot="${Number(marker.slot)}" style="left:${Number(marker.slot) * 300 / total * 100}%;width:${Math.min(300,total - Number(marker.slot) * 300) / total * 100}%" title="${escapeHtml(label)}"></span>`;
-        }).join('')}</div><div class="timeline-row"><span>00:00</span><span>${escapeHtml(data.midpoint_label || '12:00')}</span><span>24:00</span></div><label>Godzina zdarzeń<select data-recording-event-select="${index}"><option value="">Wybierz znacznik…</option>${(data.markers || []).map(marker => `<option value="${Number(marker.slot)}">${escapeHtml(marker.time_label)} · ${escapeHtml(marker.kinds.map(kind => eventKindNames[kind] || kind).join(", "))} · ${Number(marker.count)}</option>`).join('')}</select></label><div class="event-history-row"><button type="button" data-recording-event-step="previous" data-record-index="${index}" ${data.markers?.length ? '' : 'disabled'}>Poprzednie zdarzenia</button><button type="button" data-recording-event-step="next" data-record-index="${index}" ${data.markers?.length ? '' : 'disabled'}>Następne zdarzenia</button><button type="button" data-recording-event-history="${index}">Pełna historia dnia</button></div><p class="field-help">Znaczniki grupują 5 minut. Wybierz godzinę z listy lub przyciskami, aby otworzyć pierwsze zdarzenie. Historia pokazuje każde osobno.</p>`;
+        content.innerHTML=`<p>${Number(data.count||0)} zdarzeń · ${(data.alerts||[]).length} alertów osoby / zwierzęcia zaznaczonych kropkami na pasku filmu.</p><label>Wszystkie zdarzenia dnia<select data-recording-event-select="${index}"><option value="">Wybierz godzinę…</option>${(data.markers||[]).map(marker=>`<option value="${Number(marker.slot)}">${escapeHtml(marker.time_label)} · ${escapeHtml(marker.kinds.map(kind=>eventKindNames[kind]||kind).join(', '))} · ${Number(marker.count)}</option>`).join('')}</select></label><div class="event-history-row"><button type="button" data-recording-event-step="previous" data-record-index="${index}" ${data.markers?.length?'':'disabled'}>Poprzednie zdarzenia</button><button type="button" data-recording-event-step="next" data-record-index="${index}" ${data.markers?.length?'':'disabled'}>Następne zdarzenia</button><button type="button" data-recording-event-history="${index}">Pełna historia i alerty</button></div>`;
         content.dataset.signature = signature;
       }
       function pumpRecordingEvents() {
@@ -9481,14 +9708,14 @@ INDEX_HTML = r"""<!doctype html>
         document.getElementById('event-copy-notification').disabled = !valid;
         document.getElementById('event-notification-status').textContent = valid ? 'Gotowe do wklejenia w HA → Automatyzacje → Edytuj w YAML.' : source === 'zone' && !camera?.detection_zone_enabled ? 'Najpierw włącz i zapisz strefę Edge dla tej kamery.' : 'Wybierz kamerę i wpisz usługę notify.mobile_app_… z Home Assistanta.';
         const lines = valid ? [
-          `alias: ${JSON.stringify('Edge: osoba lub pojazd — ' + (camera.name || camera.id))}`,
+          `alias: ${JSON.stringify('Edge: osoba, zwierzę lub pojazd — ' + (camera.name || camera.id))}`,
           'description: "Powiadomienia ze zdarzeń Edge of Infinity"',
           'triggers:', '  - trigger: event', '    event_type: edge_event', '    event_data:', `      camera_id: ${JSON.stringify(camera.id)}`,
           ...(source ? [`      source: ${source === 'camera' ? 'camera' : 'local'}`] : []),
           ...(source === 'zone' ? ['      zone_id: local_zone'] : []),
-          'conditions:', '  - condition: template', `    value_template: "{{ trigger.event.data.kind in ['person', 'vehicle'] }}"`,
+          'conditions:', '  - condition: template', `    value_template: "{{ trigger.event.data.kind in ['person', 'animal', 'vehicle'] }}"`,
           'actions:', `  - action: ${service}`, '    data:', '      title: "Edge of Infinity"', '      message: >-',
-          "        {{ 'Osoba' if trigger.event.data.kind == 'person' else 'Pojazd' }}",
+          "        {{ 'Osoba' if trigger.event.data.kind == 'person' else ('Zwierzę' if trigger.event.data.kind == 'animal' else 'Pojazd') }}",
           '        · {{ trigger.event.data.camera_id }}',
           "        · {{ as_local(as_datetime(trigger.event.data.timestamp)).strftime('%d.%m.%Y %H:%M:%S') }}",
           '  - delay:', `      seconds: ${cooldown}`, 'mode: single', 'max_exceeded: silent', ''
@@ -9509,6 +9736,7 @@ INDEX_HTML = r"""<!doctype html>
       function showPage(pageName) {
         if(pageName!=='nvr'){for(const state of recordingScrubs.values()){state.video.pause();discardRecordingScrub(state.index);}hideRecordingScrubPreview();}
         activePage = pageName;
+        if(pageName==='edge-settings')void loadPhoneServices();
         document.querySelectorAll('[data-page]').forEach((page) => {
           page.hidden = page.dataset.page !== pageName;
         });
@@ -9663,6 +9891,21 @@ INDEX_HTML = r"""<!doctype html>
 
       document.getElementById('apply-preset').addEventListener('click', applyPresetToSlot);
 
+      function notificationPanelPath(){try{return config.detection?.notify_path||window.top.location.pathname;}catch(_){return config.detection?.notify_path||'';}}
+      async function loadPhoneServices(){
+        try{const hass=window.top.document.querySelector('home-assistant')?.hass;if(!hass)return;const services=await hass.callWS({type:'get_services'});const options=Object.keys(services.notify||{}).filter(name=>name.startsWith('mobile_app_'));document.getElementById('edge-notify-services').innerHTML=options.map(name=>`<option value="notify.${escapeHtml(name)}"></option>`).join('');}catch(_){}
+      }
+      edgeForm.addEventListener('change',event=>{
+        const input=event.target;
+        if(input.hasAttribute('data-easy-detection-camera')){
+          form.elements[`camera-${input.dataset.easyDetectionCamera}-local-detection-enabled`].checked=input.checked;
+          if(input.checked)edgeForm.elements['detection-local'].checked=true;
+        }
+        if(input.name==='detection-local'&&input.checked&&!edgeForm.querySelector('[data-easy-detection-camera]:checked')){
+          const first=edgeForm.querySelector('[data-easy-detection-camera]:not(:disabled)');if(first){first.checked=true;form.elements[`camera-${first.dataset.easyDetectionCamera}-local-detection-enabled`].checked=true;}
+        }
+        syncConfigDraftFromForm();
+      });
       edgeForm.addEventListener('input', syncConfigDraftFromForm);
       edgeForm.addEventListener('change', syncConfigDraftFromForm);
 
@@ -9799,6 +10042,8 @@ INDEX_HTML = r"""<!doctype html>
           if(event.pointerType!=='touch')nvrGrid.querySelector(`[data-recording-toggle="${clickedVideo.dataset.recordingPlayer}"]`)?.click();
           return;
         }
+        const frameStep=event.target.closest('[data-recording-frame]');
+        if(frameStep){const index=frameStep.dataset.recordIndex,video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`),fps=Number(video?.dataset.recordingFps||0);if(video&&fps>0){video.pause();seekRecordingPlayback(index,recordingPlaybackPosition(video)+Number(frameStep.dataset.recordingFrame)/fps);}return;}
         const more=event.target.closest('[data-recording-more]');
         if(more){const wrap=more.closest('[data-recording-wrap]');const open=wrap.dataset.extraOpen!=='true';wrap.dataset.extraOpen=String(open);more.setAttribute('aria-expanded',String(open));showRecordingControls(wrap);return;}
         const toggle = event.target.closest('[data-recording-toggle]');
@@ -9889,7 +10134,7 @@ INDEX_HTML = r"""<!doctype html>
         event.preventDefault();
         const index = video.dataset.recordingPlayer;
         if (event.key === ' ') nvrGrid.querySelector(`[data-recording-toggle="${index}"]`)?.click();
-        else seekRecordingPlayback(index, recordingPlaybackPosition(video) + (event.key === 'ArrowLeft' ? -10 : 10));
+        else seekRecordingPlayback(index, recordingPlaybackPosition(video) + (event.key === 'ArrowLeft' ? -1 : 1)*(event.shiftKey?10:1));
       });
 
       nvrGrid.addEventListener('keyup',event=>{
@@ -9978,6 +10223,7 @@ INDEX_HTML = r"""<!doctype html>
           const requested=Number(video.dataset.recordingSeek||0),seek=Number.isFinite(video.duration)?Math.min(requested,Math.max(0,video.duration-.05)):requested;
           video.dataset.recordingSeek=String(seek);if(Math.abs(video.currentTime-seek)>.01)video.currentTime=seek;
         }
+        if(video)loadRecordingTiming(video);
         if (video) debugEvent('ui_recording_video_loadedmetadata', recordingVideoDiagnostics(video));
       }, true);
 
@@ -10054,6 +10300,7 @@ INDEX_HTML = r"""<!doctype html>
         await loadConfig();
         void loadEngineSettings();
         await Promise.all([loadPresets(), loadCameras(), loadRecordingStatus({ forceRender: true, reason: 'boot' })]);
+        let eventId=new URLSearchParams(location.search).get('edge_event');try{eventId=eventId||new URLSearchParams(window.top.location.search).get('edge_event');}catch(_){}if(/^[1-9][0-9]{0,18}$/.test(eventId||''))await openAlertById(eventId);
       }
 
       boot().catch((error) => {
@@ -10215,10 +10462,22 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 query = parse_qs(parsed.query)
                 result = DETECTION_SERVICE.store.page(camera_id=(query.get("camera") or [None])[0], limit=int((query.get("limit") or [200])[0]),
                     day=(query.get("day") or [None])[0], kind=(query.get("kind") or [None])[0], before=(query.get("before") or [None])[0]) if DETECTION_SERVICE else {"events": [], "has_more": False, "next_before": None}
+                result['events']=[alert_payload(event) for event in result['events']]
                 self.send_json(result)
             except ValueError:
                 self.send_json({"error": "invalid_event_query"}, HTTPStatus.BAD_REQUEST)
             return
+        if path == '/api/recording/timing':
+            query=parse_qs(parsed.query)
+            source=recording_file_for_key((query.get('key') or [''])[0],(query.get('name') or [''])[0])
+            try:
+                if source is None:raise FileNotFoundError()
+                self.send_json(video_timing(source))
+            except (OSError,ValueError):self.send_json({'error':'recording_timing_unavailable'},HTTPStatus.NOT_FOUND)
+            return
+        alert_match=re.fullmatch(r'/api/alerts/([1-9][0-9]{0,18})(?:/(image|clip[.]mp4))?',path)
+        if alert_match:
+            self.serve_alert(int(alert_match[1]),alert_match[2]);return
         if path == "/api/events/timeline":
             try:
                 query = parse_qs(parsed.query)
@@ -10288,6 +10547,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = route_path(parsed.path)
+        alert_match=re.fullmatch(r'/api/alerts/([1-9][0-9]{0,18})/clip[.]mp4',path)
+        if alert_match:
+            self.serve_alert(int(alert_match[1]),'clip.mp4',False);return
         if path.startswith("/recording-cache/") and path.endswith("/timeline.mp4"):
             self.serve_recording_cache(path, send_body=False)
             return
@@ -10614,6 +10876,19 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "plan": {name: value for name, value in plan.items() if name != "concat_path"},
             })
 
+    def serve_alert(self, ident, kind=None, send_body=True):
+        if not 0<ident<=9223372036854775807:self.send_json({'error':'invalid_alert_id'},HTTPStatus.BAD_REQUEST);return
+        event=DETECTION_SERVICE.store.get(ident) if DETECTION_SERVICE else None
+        if not event:self.send_json({'error':'alert_not_found'},HTTPStatus.NOT_FOUND);return
+        if kind is None:self.send_json(alert_payload(event));return
+        if kind=='image':
+            target=alert_image_path(ident)
+            if not target.is_file() or target.is_symlink():self.send_json({'error':'alert_image_expired'},HTTPStatus.NOT_FOUND);return
+            self.send_bytes(target.read_bytes(),'image/jpeg');return
+        target=ALERT_SERVICE.path(ident) if ALERT_SERVICE else AlertMediaService.directory(load_config())/f'event-{ident}.mp4'
+        if not target.is_file() or target.is_symlink():self.send_json({'error':'alert_clip_pending_or_expired'},HTTPStatus.NOT_FOUND);return
+        self.serve_mp4_file(target,self.path,f'alert-{ident}.mp4','alert_clip_request',{'id':ident},send_body=send_body,cache_control='private, max-age=60')
+
     def serve_recording_thumbnail(self, request_path: str, query: str = '') -> None:
         parts = request_path.removeprefix("/recording-thumbs/").split("/", 1)
         if len(parts) != 2:
@@ -10626,7 +10901,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         try:
             requested = parse_qs(query).get('at', [])
-            seek = min(86400, max(0, safe_int(requested[0], 0))) // 5 * 5 if requested else None
+            seek = min(86400, max(0, safe_int(requested[0], 0))) if requested else None
             thumb = ensure_recording_thumbnail(key, source, filename, seek_seconds=seek)
             data = thumb.read_bytes()
             os.utime(thumb, None)  # Access time for bounded LRU; no change to image data.
@@ -10791,7 +11066,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         )
 
 def main() -> None:
-    global DETECTION_SERVICE
+    global DETECTION_SERVICE, ALERT_SERVICE
     HOME_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -10817,10 +11092,11 @@ def main() -> None:
         schedule_recording_ensure(config, "boot")
         start_recording_retention_loop()
         start_recording_cache_refresh_loop()
-        start_recording_thumbnail_warmup_loop()
+        # Previews decode in the browser; avoid competing background FFmpeg jobs.
         DETECTION_SERVICE = DetectionService(HOME_DIR, onvif_request,
             lambda camera, index: mediamtx_rtsp_url(camera, index, camera.get("record_stream") or "main") if EDGE_RTC_ENABLED or MEDIAMTX_ENABLED else "",
-            write_json)
+            write_json, on_event=enqueue_alert)
+        ALERT_SERVICE=AlertMediaService(DETECTION_SERVICE.store,load_config,alert_source_entries,save_alert_image,save_alert_fallback_image,write_debug_event)
         DETECTION_SERVICE.apply(config)
     except Exception as error:
         write_debug_event("boot_refresh_status_error", {"error": str(error), "type": type(error).__name__})
@@ -10831,6 +11107,8 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        if ALERT_SERVICE:
+            ALERT_SERVICE.close()
         if DETECTION_SERVICE:
             DETECTION_SERVICE.close()
 
