@@ -89,11 +89,14 @@ class RecordingStorageTests(unittest.TestCase):
     def test_pruning_never_follows_links_or_removes_foreign_files(self):
         root = self.root/'thumbs'
         root.mkdir()
+        foreign_empty = root/'family-album'
+        foreign_empty.mkdir()
         outside = self.file(self.root/'outside/20260728-000000.mp4.jpg')
         (root/'linked-camera').symlink_to(outside.parent,target_is_directory=True)
         (root/outside.name).symlink_to(outside)
         self.s.prune_cache(root,'thumbnail',0)
         self.assertTrue(outside.exists())
+        self.assertTrue(foreign_empty.is_dir())
         self.assertTrue((root/outside.name).is_symlink())
         self.assertEqual(self.s.prune_cache(root/'linked-camera','thumbnail',0)['removed'],0)
 

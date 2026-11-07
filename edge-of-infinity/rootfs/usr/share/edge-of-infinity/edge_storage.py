@@ -41,12 +41,14 @@ def prune_cache(root: Path, kind: str, byte_limit: int, max_files: int = 2048,
     protected = protected or set()
     files = managed_files(root, kind)
     kept, removed, freed = [], 0, 0
+    removed_parents = set()
 
     def unlink(path, stat):
         nonlocal removed, freed
         try:
             if not path.is_symlink():
                 path.unlink()
+                removed_parents.add(path.parent)
                 removed += 1
                 freed += stat.st_size
         except OSError:
@@ -110,15 +112,13 @@ def prune_cache(root: Path, kind: str, byte_limit: int, max_files: int = 2048,
                 used -= stat.st_size
                 count -= 1
     # Remove empty generated folders only; nonempty foreign folders survive.
-    if root.is_dir() and not root.is_symlink():
-        for parent, directories, _ in os.walk(root, topdown=False, followlinks=False):
-            for name in directories:
-                directory = Path(parent) / name
-                try:
-                    if not directory.is_symlink():
-                        directory.rmdir()
-                except OSError:
-                    pass
+    for parent in sorted(removed_parents, key=lambda path: len(path.parts), reverse=True):
+        while parent != root and root in parent.parents and not parent.is_symlink():
+            try:
+                parent.rmdir()
+                parent = parent.parent
+            except OSError:
+                break
     return {'bytes': used, 'files': count, 'removed': removed, 'freed_bytes': freed}
 
 
