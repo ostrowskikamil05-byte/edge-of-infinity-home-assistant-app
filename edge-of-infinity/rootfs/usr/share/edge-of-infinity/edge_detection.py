@@ -20,6 +20,7 @@ import threading
 import time
 from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
+from edge_analysis_capture import SharedFrameReader
 
 KINDS = ('motion', 'person', 'vehicle', 'animal')
 ANIMAL_CLASSES = {14:'bird',15:'cat',16:'dog',17:'horse',18:'sheep',19:'cow',20:'elephant',21:'bear',22:'zebra',23:'giraffe'}
@@ -374,7 +375,7 @@ def capture_frame(proxy_url):
 
 
 class DetectionService:
-    def __init__(self, home, soap, proxy_url, publish, on_event=None):
+    def __init__(self, home, soap, proxy_url, publish, on_event=None, frame_source=None):
         self.home, self.soap, self.proxy_url, self.publish = Path(home), soap, proxy_url, publish
         self.lock = threading.RLock()
         self.stop = threading.Event()
@@ -384,6 +385,8 @@ class DetectionService:
         self.workers, self.states, self.status, self.reported = {}, {}, {}, {}
         self.capture_lock, self.preview_lock = threading.Lock(), threading.Lock()
         self.frames = {}
+        self.readers={};self.reader_lock=threading.RLock();self.frame_source=frame_source
+        self.errors={};self.last_analysis={}
         self.model, self.model_error = None, ''
         self.analysis_ms = 0
         self.thread = threading.Thread(target=self._analysis_loop, daemon=True)
@@ -425,6 +428,27 @@ class DetectionService:
             for ident, source, kind in list(self.states):
                 if source == 'local' and ident not in allowed:
                     self.states.pop((ident, source, kind), None)
+        with self.reader_lock:
+            stale=[self.readers.pop(ident) for ident in list(self.readers) if ident not in allowed]
+        for _,reader in stale:reader.close()
+
+    def _analysis_frame(self,camera,index,fps):
+        url=self._proxy(camera,index)
+        if self.frame_source:return self.frame_source(url),time.time()
+        ident=str(camera['id']);signature=(url,fps)
+        with self.reader_lock:
+            with self.lock:
+                if self.stop.is_set() or not self.config['detection']['local_enabled'] or not camera.get('enabled') or not camera.get('local_detection_enabled') or camera not in self.config.get('cameras',[]):
+                    raise RuntimeError('configuration_changed')
+            previous=self.readers.get(ident)
+            if previous and (previous[0]!=signature or previous[1].stopped.is_set()):
+                previous[1].close();self.readers.pop(ident,None);previous=None
+            if previous is None:
+                if len(self.readers)>=4:raise RuntimeError('analysis_camera_limit')
+                previous=(signature,SharedFrameReader(url,fps));self.readers[ident]=previous
+            reader=previous[1]
+        pixels,stamp=reader.read()
+        return AnalysisFrame(*pixels),stamp
 
     def _clear(self, ident, source):
         for key in list(self.states):
@@ -583,17 +607,20 @@ class DetectionService:
             index, camera = cameras[cursor % len(cameras)]
             cursor += 1
             ident, started = str(camera['id']), time.monotonic()
+            phase='model'
             try:
-                self._set_status(ident, 'local', 'loading' if self.model is None else 'running')
+                if self.model is None:self._set_status(ident,'local','loading')
+                elif ident not in self.last_analysis and (ident,'local') not in self.status:self._set_status(ident,'local','waiting_frame')
                 if self.model is None:
                     self.model = NanoDet()
+                phase='capture'
                 with self.capture_lock:
-                    frame = capture_frame(self._proxy(camera, index))
-                    captured_at = time.time()
+                    frame,captured_at = self._analysis_frame(camera,index,options['max_fps']/len(cameras))
                 with self.lock:
                     if self.config != config:
                         continue
                     self._remember_frame(camera, frame, captured_at)
+                phase='inference';inference_started=time.monotonic()
                 threshold=min(options['confidence'],options['animal_confidence']) if options['animal_enabled'] else options['confidence']
                 objects = zone_objects(frame.scene_objects(self.model.infer(frame.pixels, threshold)), camera)
                 objects=[obj for obj in objects if obj['score'] >= options['animal_confidence' if obj['kind']=='animal' else 'confidence']]
@@ -610,8 +637,14 @@ class DetectionService:
                                         **({'zone_id': 'local_zone'} if zone_settings(camera)['enabled'] else {}))
                         elif not old.get('active') or time.time() - old.get('last_seen', 0) > options['hold_seconds']:
                             self.record(ident, kind, 'local', False)
-                    self.analysis_ms = round((time.monotonic() - started) * 1000)
-            except Exception:
+                    self.analysis_ms = round((time.monotonic() - inference_started) * 1000)
+                    self.errors.pop(ident,None);self.last_analysis[ident]={'timestamp':captured_at,'objects':len(objects),'analysis_ms':self.analysis_ms}
+            except Exception as error:
+                with self.lock:
+                    if self.config!=config or self.stop.is_set():continue
+                known={'shared_source_required','analysis_frame_timeout','analysis_stream_closed','analysis_decoder_start_failed','analysis_camera_limit','model_checksum_failed'}
+                code=str(error) if str(error) in known else f'{phase}_{type(error).__name__}'
+                with self.lock:self.errors[ident]={'code':code,'phase':phase,'timestamp':time.time()}
                 self._set_status(ident, 'local', 'error')
                 self.stop.wait(5)
             self.stop.wait(max(0, 1 / options['max_fps'] - (time.monotonic() - started)))
@@ -634,9 +667,11 @@ class DetectionService:
                 rows.append({'id': ident, 'index': index, 'name': camera.get('name', ident), 'states': states, 'supported_kinds': sorted(supported),
                              'camera_status': self.status.get((ident, 'camera'), 'connecting') if camera_on else 'disabled',
                              'local_status': self.status.get((ident, 'local'), 'loading') if local_on else 'disabled',
+                             'local_error':self.errors.get(ident) if local_on else None,'last_analysis':self.last_analysis.get(ident),
                              'local_zone': zone_settings(camera)})
             return {'updated_at': now, 'cameras': rows, 'recent_events': self.store.recent(limit=200),
                     'model': 'NanoDet-m-plus-1.5x_416', 'model_installed': MODEL_PATH.is_file(), 'backend': 'CPU (1 thread)',
+                    'model_loaded':self.model is not None,'worker_alive':self.thread.is_alive(),'capture_mode':'persistent_shared_relay','reader_count':len(self.readers),
                     'max_fps': self.config['detection']['max_fps'], 'analysis_ms': self.analysis_ms,
                     'notifications': {key:self.config['detection'][key] for key in ('notifications_enabled','notify_service','notify_cooldown','notify_path')}}
 
@@ -655,6 +690,9 @@ class DetectionService:
 
     def close(self):
         self.stop.set()
+        with self.reader_lock:
+            readers=list(self.readers.values());self.readers.clear()
+        for _,reader in readers:reader.close()
         with self.lock:
             for _, event in self.workers.values():
                 event.set()

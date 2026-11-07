@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 import threading
 import time
 import unittest
@@ -15,6 +16,7 @@ PATH = ROOT / 'edge-of-infinity/rootfs/usr/share/edge-of-infinity/edge_detection
 
 
 def module():
+    if str(PATH.parent) not in sys.path:sys.path.insert(0,str(PATH.parent))
     spec = importlib.util.spec_from_file_location('detection_test', PATH)
     result = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(result)
@@ -112,7 +114,7 @@ class DetectionTests(unittest.TestCase):
             captured.set()
             return m.AnalysisFrame(bytes(416 * 416 * 3))
         with tempfile.TemporaryDirectory() as directory, patch.object(m, 'NanoDet', Detector), patch.object(m, 'capture_frame', frame):
-            service = m.DetectionService(directory, lambda *a: self.fail('Unexpected ONVIF request'), lambda *a: 'rtsp://127.0.0.1:8556/front_main', lambda *a: None)
+            service = m.DetectionService(directory, lambda *a: self.fail('Unexpected ONVIF request'), lambda *a: 'rtsp://127.0.0.1:8556/front_main', lambda *a: None, frame_source=frame)
             try:
                 service.apply({'detection': {'local_enabled': True}, 'cameras': [{**camera('front', '192.0.2.10', 'sub'), 'local_detection_enabled': True}]})
                 self.assertTrue(captured.wait(2))

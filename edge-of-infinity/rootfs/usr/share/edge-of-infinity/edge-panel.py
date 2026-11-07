@@ -89,9 +89,9 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.11.6"
+APP_VERSION = "0.11.7"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "intrusion-alerts-v116"
+UI_BUILD = "nvr-speed-ai-v117"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -1423,7 +1423,7 @@ def runtime_parameters_payload(config: dict, hardware: dict, recordings_dir: Pat
     )
 
 
-def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording_logs: list[dict]) -> list[dict]:
+def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording_logs: list[dict], detection: dict | None = None) -> list[dict]:
     diagnostics = []
     ffmpeg_path = hardware.get("ffmpeg_path") or ""
     ffprobe_path = hardware.get("ffprobe_path") or ""
@@ -1514,6 +1514,10 @@ def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording
         )
     )
 
+    if detection is not None:
+        selected=[camera for camera in detection.get('cameras',[]) if camera.get('local_status')!='disabled']
+        severity='error' if any(camera.get('local_status')=='error' for camera in selected) else 'warning' if any(camera.get('local_status')!='running' for camera in selected) else 'ok'
+        diagnostics.append(diagnostic_item(severity,'Local AI',f"{len(selected)} selected camera(s); model {'loaded' if detection.get('model_loaded') else 'not loaded'}.",detection))
     for title, tail in tails.items():
         diagnostics.append(diagnostic_from_tail(title, tail))
     for item in recording_logs[:4]:
@@ -1541,6 +1545,7 @@ def collect_panel_logs() -> dict:
         "Recording thumbnails": redact_rtsp(read_text_tail(RECORDING_THUMB_LOG_PATH, 12000)),
     }
     hardware = system_diagnostics_payload(recordings_dir)
+    detection=DETECTION_SERVICE.snapshot() if DETECTION_SERVICE else {}
 
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -1552,7 +1557,8 @@ def collect_panel_logs() -> dict:
         "config_summary": config_summary(config),
         "hardware": hardware,
         "runtime_parameters": runtime_parameters_payload(config, hardware, recordings_dir),
-        "diagnostics": build_panel_diagnostics(config, hardware, tails, recording_logs),
+        "diagnostics": build_panel_diagnostics(config, hardware, tails, recording_logs,detection),
+        "detection":detection,
         "edge_debug": tails["Edge debug"],
         "last_save_debug": safe_json_file(HOME_DIR / "last-save-debug.json"),
         "last_runtime_sync": safe_json_file(HOME_DIR / "edge.last-runtime-sync.json"),
@@ -2906,6 +2912,7 @@ def recording_file_candidates(directory: Path) -> tuple[list, int]:
     """One metadata pass per request; never open video payloads for the day list."""
     candidates, total = [], 0
     now = time.time()
+    opened=active_recording_files()
     try:
         with os.scandir(directory) as files:
             for item in files:
@@ -2919,10 +2926,26 @@ def recording_file_candidates(directory: Path) -> tuple[list, int]:
                 if stat.st_size < RECORDING_FILE_MIN_PLAYABLE_BYTES or now - stat.st_mtime < MIN_RECORDING_FILE_READY_SECONDS:
                     continue
                 path = Path(item.path)
+                if str(path) in opened:continue
                 candidates.append((path, stat, recording_segment_start_ts(path, stat.st_mtime)))
     except FileNotFoundError:
         pass
     return candidates, total
+
+
+def active_recording_files() -> set[str]:
+    """Find the actual writer's open MP4s, even during long buffered GOP gaps."""
+    result=set()
+    for process in list(RECORDING_PROCESSES.values()):
+        pid=getattr(process,'pid',None)
+        if not isinstance(pid,int):continue
+        try:
+            for descriptor in (Path('/proc')/str(pid)/'fd').iterdir():
+                try:target=os.readlink(descriptor)
+                except OSError:continue
+                if target.endswith('.mp4'):result.add(target)
+        except OSError:continue
+    return result
 
 
 def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_seconds: int = 10, day_key: str = "", candidates: list | None = None, measure_durations: bool = True) -> list[dict]:
@@ -3766,12 +3789,12 @@ def recording_thumbnail_ready(target: Path, source: Path) -> bool:
 
 def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_seconds: int | None = None) -> Path:
     target = recording_thumbnail_path(key, filename)
-    if seek_seconds is not None:
+    if seek_seconds is not None and seek_seconds>0:
         stat = source.stat()
         target = target.parent / 'scrub' / f'{source.name}.{stat.st_size}-{stat.st_mtime_ns}.{seek_seconds}.jpg'
     if recording_thumbnail_ready(target, source):
         return target
-    if not recording_file_ready(source):
+    if not recording_file_ready(source) or str(source) in active_recording_files():
         try:
             source_size = source.stat().st_size
         except OSError:
@@ -3814,6 +3837,10 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_secon
         })
         raise RuntimeError("thumbnail_generation_busy")
     started_at = time.monotonic()
+    # A simultaneous poster/tile/hover request may have filled the same cache.
+    if recording_thumbnail_ready(target,source):
+        RECORDING_THUMBNAIL_SEMAPHORE.release()
+        return target
     append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_start", {
         "key": key,
         "source": source.name,
@@ -3822,10 +3849,10 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_secon
     })
     try:
         try:
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
+            result = subprocess_run_low_priority(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
             if seek_seconds is None and result.returncode == 0 and not recording_thumbnail_ready(tmp, source):
                 command = build_recording_thumbnail_command(source, tmp, seek_seconds=0)
-                result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
+                result = subprocess_run_low_priority(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
         except subprocess.TimeoutExpired as error:
             try:
                 tmp.unlink(missing_ok=True)
@@ -4257,6 +4284,7 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
                 "bytes_per_day_estimate": daily_estimate,
                 "segments_pending": max(0, total_segment_count - segment_count),
                 "files": segment_files,
+                "files_revision":recording_files_revision(key,selected_day,segment_files),
                 "days": days,
                 "selected_day": selected_day,
                 "segment_seconds": segment_seconds,
@@ -4285,6 +4313,25 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
             }
         )
     return {"cameras": cameras, "storage": storage_usage_payload(config)}
+
+
+def recording_files_revision(key,day,files):
+    digest=hashlib.sha256(f'{key}:{day}'.encode())
+    for item in files:
+        digest.update(json.dumps([item.get(field) for field in ('name','size_bytes','modified_at','duration_seconds','timeline_offset','playback_offset')],separators=(',',':')).encode())
+    return digest.hexdigest()[:32]
+
+
+def recording_status_response(config,query):
+    data=recording_status_payload(config,day_selection=parse_recording_day_query(query))
+    known={}
+    for value in str((query.get('known') or [''])[0]).split(','):
+        if re.fullmatch(r'[0-9]+:[a-f0-9]{32}',value):
+            index,revision=value.split(':');known[index]=revision
+    for camera in data['cameras']:
+        if known.get(str(camera['index']))==camera['files_revision']:
+            camera.pop('files',None);camera['files_unchanged']=True
+    return data
 
 
 def serialized_recording(function):
@@ -6676,11 +6723,14 @@ INDEX_HTML = r"""<!doctype html>
           });
       }
 
+      const recordingTimelines=new WeakMap();
       function recordingTimeline(files, status = {}) {
         let playbackOffset = 0;
         const timelineMeta = status?.timeline || {};
         const dayStart = Number(timelineMeta.day_start_ts || 0);
         const requestedTotal = Number(timelineMeta.day_total_seconds || timelineMeta.total_seconds || 0);
+        const cached=Array.isArray(files)&&recordingTimelines.get(files);
+        if(cached&&cached.dayStart===dayStart&&cached.requestedTotal===requestedTotal&&cached.length===files.length)return cached.timeline;
         const entries = sortedRecordingFiles(files).map((file) => {
           const duration = Math.max(1, Math.floor(Number(file.duration_seconds || 10)));
           const rawTimelineOffset = Number(file.timeline_offset);
@@ -6701,7 +6751,16 @@ INDEX_HTML = r"""<!doctype html>
         });
         const maxEnd = entries.reduce((max, entry) => Math.max(max, entry.offset + entry.duration), 0);
         const total = Math.max(0, Math.floor(requestedTotal || maxEnd || playbackOffset));
-        return { entries, total, playbackTotal: playbackOffset, dayStart };
+        const timeline={ entries, total, playbackTotal: playbackOffset, dayStart, byUrl:new Map(entries.map(entry=>[entry.file.url,entry])) };
+        if(Array.isArray(files))recordingTimelines.set(files,{dayStart,requestedTotal,length:files.length,timeline});
+        return timeline;
+      }
+
+      function recordingEntryAt(entries,value,field) {
+        let low=0,high=entries.length;
+        while(low<high){const middle=(low+high)>>1;if(entries[middle][field]<=value)low=middle+1;else high=middle;}
+        const previous=entries[Math.max(0,low-1)];
+        return previous&&value<previous[field]+previous.duration?previous:entries[low]||entries[entries.length-1];
       }
 
       function recordingFilmstripFiles(files, selectedUrl = '', maxItems = 72) {
@@ -6728,8 +6787,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!entries.length) return null;
         const timelineMax = Math.max(0, Number(timeline.total || 0) - 1);
         const input = Math.max(0, Math.min(Number(offset || 0), timelineMax));
-        let target = entries.find((entry) => input >= entry.offset && input < entry.offset + entry.duration);
-        if (!target) target = entries.find((entry) => input < entry.offset) || entries[entries.length - 1];
+        const target=recordingEntryAt(entries,input,'offset');
         const seek = Math.max(0, Math.min(input - target.offset, Math.max(0, target.duration - 0.1)));
         const requested = target.offset + seek;
         const playbackSeek = Math.max(0, Number(target.playbackOffset || 0) + seek);
@@ -6738,7 +6796,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function recordingOffsetForSelection(files, selectedUrl, seekSeconds = 0, status = {}) {
         const timeline = recordingTimeline(files, status);
-        const entry = timeline.entries.find((item) => item.file.url === selectedUrl) || timeline.entries[timeline.entries.length - 1];
+        const entry = timeline.byUrl.get(selectedUrl) || timeline.entries[timeline.entries.length - 1];
         if (!entry) return { timeline, value: 0, seek: 0 };
         const seek = Math.max(0, Math.min(Math.floor(Number(seekSeconds || 0)), Math.max(0, entry.duration - 1)));
         return { timeline, value: entry.offset + seek, seek, playbackValue: Number(entry.playbackOffset || 0) + seek };
@@ -6930,9 +6988,12 @@ INDEX_HTML = r"""<!doctype html>
           };
           let expectedUrl = new URL(source, window.location.href).href;
           image.onload = () => { if (image.currentSrc === expectedUrl && image.naturalWidth > 1) finish(true); };
-          image.onerror = () => { if (image.currentSrc === expectedUrl) finish(false); };
+          let fallback=false;
+          image.onerror = () => { if (image.currentSrc !== expectedUrl)return;if(fallback){finish(false);return;}fallback=true;recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>finish(false)); };
           image.loading = 'eager';
-          recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>{expectedUrl=new URL(source,location.href).href;image.src=source;});
+          // A small cached JPEG avoids downloading/decoding full 4K clips for
+          // every film tile, especially through Nabu Casa.
+          image.src=source;
         }
       }
       function loadRecordingThumbnail(image) {
@@ -7014,6 +7075,18 @@ INDEX_HTML = r"""<!doctype html>
         else requestAnimationFrame(() => requestAnimationFrame(release));
       }
 
+      function pauseRecording(video) {
+        video.dataset.recordingWantsPlay='false';video.dataset.recordingPlayEpoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.pause();
+      }
+      function playRecording(video) {
+        video.dataset.recordingWantsPlay='true';
+        if(video.readyState<2||video.seeking||recordingScrubs.has(video.dataset.recordingPlayer)){updateRecordingPlayerControls(video,'');return;}
+        const epoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.dataset.recordingPlayEpoch=epoch;
+        video.play().catch(error=>{
+          if(video.dataset.recordingPlayEpoch!==epoch||video.dataset.recordingWantsPlay!=='true'||error.name==='AbortError')return;
+          video.dataset.recordingWantsPlay='false';updateRecordingPlayerControls(video,error.name==='NotAllowedError'?'Przeglądarka wymaga kliknięcia Play.':'Nie udało się odtworzyć nagrania. Spróbuj ponownie.');
+        });
+      }
       function switchRecordingVideoToFile(index, target, autoplay = false, reason = 'server_file_seek') {
         if (!target?.target?.file?.url) return false;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
@@ -7025,6 +7098,7 @@ INDEX_HTML = r"""<!doctype html>
         const nextSrc = mediaUrlWithTimeFragment(nextPath, target.seek);
         const fileSeek=video.dataset.recordingLoadedFile===fileUrl&&Number.isFinite(video.duration)
           ? Math.min(target.seek,Math.max(0,video.duration-.05)) : target.seek;
+        video.preload='auto';
         holdRecordingFrame(video);
         selectedRecording[index] = fileUrl;
         selectedRecordingSeek[index] = target.seek;
@@ -7044,18 +7118,17 @@ INDEX_HTML = r"""<!doctype html>
           } catch (error) {
             debugEvent('ui_recording_server_file_seek_error', { index, reason, message: error.message });
           }
-          if (autoplay) video.play().catch((error) => debugEvent('ui_recording_server_file_autoplay_error', { index, reason, message: error.message }));
+          if (autoplay) playRecording(video);
           if(!recordingScrubs.has(String(index)))debugEvent('ui_recording_server_file_fast_seek', { index, reason, recording: target.target.file.name, timeline_second: target.requested, playback_second: target.playbackSeek, segment_second: target.seek });
           return true;
         }
-        holdRecordingFrame(video);
         video.removeAttribute("poster");
         video.dataset.recordingLoadedFile = fileUrl;
         video.src = nextSrc;
         video.dataset.recordingSrc = nextSrc;
         video.load();
         if (autoplay) {
-          video.play().catch((error) => debugEvent('ui_recording_server_file_autoplay_error', { index, reason, message: error.message }));
+          playRecording(video);
         }
         if(!recordingScrubs.has(String(index)))debugEvent('ui_recording_server_file_switch', { index, reason, recording: target.target.file.name, timeline_second: target.requested, playback_second: target.playbackSeek, segment_second: target.seek });
         return true;
@@ -7076,7 +7149,7 @@ INDEX_HTML = r"""<!doctype html>
         updateRecordingTileSelection(index, target.target.file.url);
         setCurrentRecordingTime(index, target.requested);
         if (autoplay) {
-          video.play().catch((error) => debugEvent('ui_recording_cache_autoplay_error', { index, reason, message: error.message }));
+          playRecording(video);
         }
         debugEvent('ui_recording_cache_seek', {
           index,
@@ -7155,7 +7228,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!entries.length) return null;
         const playbackMax = Math.max(0, Number(timeline.playbackTotal || 0) - 0.1);
         const input = Math.max(0, Math.min(Number(playbackOffset || 0), playbackMax));
-        const target = entries.find((entry) => input >= entry.playbackOffset && input < entry.playbackOffset + entry.duration) || entries[entries.length - 1];
+        const target = recordingEntryAt(entries,input,'playbackOffset');
         const seek = Math.max(0, Math.min(input - target.playbackOffset, Math.max(0, target.duration - 0.1)));
         const requested = target.offset + seek;
         return { timeline, target, requested, input, seek, playbackSeek: target.playbackOffset + seek };
@@ -7252,7 +7325,7 @@ INDEX_HTML = r"""<!doctype html>
         const target = recordingTargetForOffset(index, offset);
         if (!target) return;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
-        const wasPlaying = Boolean(video && !video.paused && !video.ended);
+        const wasPlaying = Boolean(video && (!video.paused||video.dataset.recordingWantsPlay==='true') && !video.ended);
         selectedRecording[index] = target.target.file.url;
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
@@ -7315,9 +7388,7 @@ INDEX_HTML = r"""<!doctype html>
             }
             if (recordingAutoplayAfterRender[index]) {
               delete recordingAutoplayAfterRender[index];
-              video.play().catch((error) => {
-                debugEvent('ui_recording_autoplay_error', { index, message: error.message });
-              });
+              playRecording(video);
             }
           };
           updateRecordingPlayerControls(video);
@@ -7518,7 +7589,7 @@ INDEX_HTML = r"""<!doctype html>
         let state=recordingScrubs.get(index);
         if(state){state.active=true;state.finishing=false;clearTimeout(state.deadline);return state;}
         const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);if(!video)return null;
-        state={index,video,slider,active:true,finishing:false,resume:!video.paused&&!video.ended,original:recordingPlaybackPosition(video),desired:Number(slider.value),applied:null,lastSeek:0};
+        state={index,video,slider,active:true,finishing:false,resume:(!video.paused||video.dataset.recordingWantsPlay==='true')&&!video.ended,original:recordingPlaybackPosition(video),desired:Number(slider.value),applied:null,lastSeek:0};
         recordingScrubs.set(index,state);clearRecordingContinuation(index);video.pause();
         markNvrInteraction('recording_scrub_start',{index});
         const wrap=video.closest('[data-recording-wrap]');wrap.dataset.scrubbing='true';showRecordingControls(wrap);
@@ -7526,7 +7597,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       function queueRecordingScrub(slider) {
         const state=beginRecordingScrub(slider);if(!state)return;
-        state.desired=Number(slider.value);updateRecordingPlayerControls(state.video);
+        state.desired=Number(slider.value);state.changedAt=performance.now();updateRecordingPlayerControls(state.video);
         markNvrInteraction('timeupdate');
         flushRecordingScrub(state);
       }
@@ -7537,7 +7608,10 @@ INDEX_HTML = r"""<!doctype html>
         if(!video.isConnected){discardRecordingScrub(state.index);return;}
         const delay=state.active?Math.max(0,80-(performance.now()-state.lastSeek)):0;
         const desiredTarget=recordingTargetForPlaybackOffset(state.index,state.desired);
-        const supersede=state.applied!==state.desired&&(video.error||(desiredTarget?.target?.file?.url!==video.dataset.recordingLoadedFile&&performance.now()-state.lastSeek>1000));
+        const crossFile=desiredTarget?.target?.file?.url!==video.dataset.recordingLoadedFile;
+        const settle=state.active&&crossFile?Math.max(0,100-(performance.now()-(state.changedAt||0))):0;
+        if(settle){state.timer=setTimeout(()=>flushRecordingScrub(state),settle);return;}
+        const supersede=state.applied!==state.desired&&(video.error||(crossFile&&performance.now()-state.lastSeek>160));
         if(((video.seeking||video.readyState<1)&&!supersede)||delay){state.timer=setTimeout(()=>flushRecordingScrub(state),Math.max(40,delay));return;}
         if(state.applied!==state.desired){
           state.applied=state.desired;state.lastSeek=performance.now();
@@ -7547,19 +7621,19 @@ INDEX_HTML = r"""<!doctype html>
         if(state.finishing&&!video.seeking&&video.readyState>=2&&Math.abs(recordingPlaybackPosition(video)-expected)<.2){
           const resume=state.resume;discardRecordingScrub(state.index);hideRecordingScrubPreview();
           updateRecordingPlayerControls(video,'');showRecordingControls(video.closest('[data-recording-wrap]'));
-          if(resume)video.play().catch(error=>updateRecordingPlayerControls(video,error.message));
+          if(resume)playRecording(video);else pauseRecording(video);
           return;
         }
         state.timer=setTimeout(()=>flushRecordingScrub(state),80);
       }
       function finishRecordingScrub(slider,cancel=false) {
-        const state=recordingScrubs.get(slider.dataset.recordingPlaybackSeek)||beginRecordingScrub(slider);if(!state)return;
+        const state=recordingScrubs.get(slider.dataset.recordingPlaybackSeek);if(!state)return;
         state.desired=cancel?state.original:Number(slider.value);state.slider.value=String(state.desired);
         state.active=false;state.finishing=true;hideRecordingScrubPreview();
         debugEvent('ui_recording_scrub_commit',{index:state.index,position:state.desired,cancel});
         clearTimeout(state.deadline);state.deadline=setTimeout(()=>{
           if(recordingScrubs.get(state.index)!==state)return;
-          discardRecordingScrub(state.index);state.video.pause();
+          discardRecordingScrub(state.index);pauseRecording(state.video);
           updateRecordingPlayerControls(state.video,'Nie udało się wczytać wybranego momentu. Spróbuj ponownie.');
         },15000);
         flushRecordingScrub(state);
@@ -7671,7 +7745,7 @@ INDEX_HTML = r"""<!doctype html>
         const fps=Number(video.dataset.recordingFps||0);
         video.closest('[data-recording-wrap]')?.querySelectorAll('[data-recording-frame]').forEach(button=>button.disabled=!(fps>0));
         const toggle = nvrGrid.querySelector(`[data-recording-toggle="${index}"]`);
-        if (toggle) { const label=video.paused?'Play':'Pause';toggle.innerHTML=recordingControlIcon(video.paused?'play':'pause');toggle.title=label;toggle.setAttribute('aria-label',label);toggle.setAttribute('aria-pressed',String(!video.paused)); }
+        if (toggle) { const playing=scrubbing?scrubbing.resume:(!video.paused||video.dataset.recordingWantsPlay==='true');const label=playing?'Pause':'Play';toggle.innerHTML=recordingControlIcon(playing?'pause':'play');toggle.title=label;toggle.setAttribute('aria-label',label);toggle.setAttribute('aria-pressed',String(playing)); }
         const mute = nvrGrid.querySelector(`[data-recording-mute="${index}"]`);
         if (mute) {mute.innerHTML=recordingControlIcon(video.muted?'muted':'sound');mute.title=video.muted?'Unmute':'Mute';mute.setAttribute('aria-label',mute.title);}
         const note = nvrGrid.querySelector(`[data-recording-playback-message="${index}"]`);
@@ -7827,6 +7901,7 @@ INDEX_HTML = r"""<!doctype html>
           ...(EDGE_NATIVE_RTC ? [logBlock('EdgeRTC source connections', panelLogs.runtime_config?.edge_rtc || {})] : []),
           logBlock('Hardware diagnostics', panelLogs.hardware || {}, hardwareSeverity),
           logBlock('Runtime parameters', panelLogs.runtime_parameters || {}, 'ok'),
+          logBlock('Local AI',panelLogs.detection||{}),
           logBlock('Edge debug', panelLogs.edge_debug || 'No debug log yet.'),
           logBlock('Last save debug', panelLogs.last_save_debug || {}),
           logBlock('Last runtime sync', panelLogs.last_runtime_sync || {}),
@@ -8107,7 +8182,7 @@ INDEX_HTML = r"""<!doctype html>
           ? mediaUrlWithTimeFragment(rawPlayerSrc, playerSeek)
           : rawPlayerSrc;
         const posterUrl = targetForPoster?.target?.file?.thumbnail_url ? panelPath(targetForPoster.target.file.thumbnail_url) : '';
-        const preloadMode = 'metadata';
+        const preloadMode = Number(index)===0?'auto':'metadata';
         const playable = Boolean(timelineTotal && playerSrc);
         const daySelector = days.length
           ? `<div class="recording-day-bar" data-recording-day-swipe="${index}">
@@ -9266,10 +9341,16 @@ INDEX_HTML = r"""<!doctype html>
             .map(([index, day]) => `${encodeURIComponent(index)}:${encodeURIComponent(day)}`)
             .join(',');
           const statusPath = dayQuery ? `api/recording/status?days=${dayQuery}` : 'api/recording/status';
-          const response = await fetch(panelPath(statusPath), { cache: 'no-store', signal: controller.signal });
+          const known=options.forceRender?'':Object.values(recordingStatus).filter(item=>item.files_revision).map(item=>`${item.index}:${item.files_revision}`).join(',');
+          const response = await fetch(panelPath(statusPath+(known?(dayQuery?'&':'?')+`known=${encodeURIComponent(known)}`:'')), { cache: 'no-store', signal: controller.signal });
           if (!response.ok) throw new Error(`Recording status failed: ${response.status}`);
           const data = await response.json();
           if (requestID !== nvrRequestID || requestedDays !== JSON.stringify(selectedRecordingDay)) return;
+          for(const item of data.cameras||[]){
+            if(!item.files_unchanged)continue;const previous=recordingStatus[item.index];
+            if(!previous||previous.files_revision!==item.files_revision||previous.key!==item.key||previous.selected_day!==item.selected_day)throw new Error('Lista nagrań zmieniła się. Odśwież wybrany dzień.');
+            item.files=previous.files;
+          }
           const shouldLogStatus = options.reason !== 'timer' || Date.now() - lastRecordingStatusLogAt > NVR_TIMER_LOG_THROTTLE_MS;
           if (shouldLogStatus) {
             lastRecordingStatusLogAt = Date.now();
@@ -9463,7 +9544,7 @@ INDEX_HTML = r"""<!doctype html>
         try {
           detectionData = await eventJson('api/detection');
           document.getElementById('detection-runtime').textContent = `${detectionData.model || 'Detection'} · ${detectionData.backend || 'CPU'} · limit ${detectionData.max_fps || 1} FPS total · analysis ${detectionData.analysis_ms || 0} ms. Model: ${detectionData.model_installed ? 'ready' : 'not installed / starting'}`;
-          document.getElementById('detection-cameras').innerHTML = (detectionData.cameras || []).map(camera => `<article class="camera"><div class="body"><b>${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)}</p><p>Strefa Edge (tylko lokalne AI): ${camera.local_zone?.enabled ? (camera.local_zone.valid ? 'włączona' : 'nieprawidłowa — popraw ustawienia') : 'cały kadr'}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(eventKindNames[kind] || kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
+          document.getElementById('detection-cameras').innerHTML = (detectionData.cameras || []).map(camera => `<article class="camera"><div class="body"><b>${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)}</p>${camera.local_error?`<p role="status">AI: ${escapeHtml(camera.local_error.code)} (${escapeHtml(camera.local_error.phase)}). Szczegóły znajdziesz w logach Local AI.</p>`:''}${camera.last_analysis?`<p>Ostatnia analiza: ${escapeHtml(new Date(camera.last_analysis.timestamp*1000).toLocaleTimeString())} · ${Number(camera.last_analysis.objects)} obiektów · ${Number(camera.last_analysis.analysis_ms)} ms.</p>`:''}<p>Strefa Edge (tylko lokalne AI): ${camera.local_zone?.enabled ? (camera.local_zone.valid ? 'włączona' : 'nieprawidłowa — popraw ustawienia') : 'cały kadr'}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(eventKindNames[kind] || kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
         } finally {detectionLoading = false;}
       }
       function eventFilters() {
@@ -9734,7 +9815,7 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       function showPage(pageName) {
-        if(pageName!=='nvr'){for(const state of recordingScrubs.values()){state.video.pause();discardRecordingScrub(state.index);}hideRecordingScrubPreview();}
+        if(pageName!=='nvr'){for(const state of recordingScrubs.values())discardRecordingScrub(state.index);nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);hideRecordingScrubPreview();}
         activePage = pageName;
         if(pageName==='edge-settings')void loadPhoneServices();
         document.querySelectorAll('[data-page]').forEach((page) => {
@@ -10043,7 +10124,7 @@ INDEX_HTML = r"""<!doctype html>
           return;
         }
         const frameStep=event.target.closest('[data-recording-frame]');
-        if(frameStep){const index=frameStep.dataset.recordIndex,video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`),fps=Number(video?.dataset.recordingFps||0);if(video&&fps>0){video.pause();seekRecordingPlayback(index,recordingPlaybackPosition(video)+Number(frameStep.dataset.recordingFrame)/fps);}return;}
+        if(frameStep){const index=frameStep.dataset.recordIndex,video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`),fps=Number(video?.dataset.recordingFps||0);if(video&&fps>0){pauseRecording(video);seekRecordingPlayback(index,recordingPlaybackPosition(video)+Number(frameStep.dataset.recordingFrame)/fps);}return;}
         const more=event.target.closest('[data-recording-more]');
         if(more){const wrap=more.closest('[data-recording-wrap]');const open=wrap.dataset.extraOpen!=='true';wrap.dataset.extraOpen=String(open);more.setAttribute('aria-expanded',String(open));showRecordingControls(wrap);return;}
         const toggle = event.target.closest('[data-recording-toggle]');
@@ -10051,11 +10132,13 @@ INDEX_HTML = r"""<!doctype html>
           const video = nvrGrid.querySelector(`video[data-recording-player="${toggle.dataset.recordingToggle}"]`);
           if (video) {
             clearRecordingContinuation(toggle.dataset.recordingToggle);
-            if (!video.paused) video.pause();
+            const scrub=recordingScrubs.get(video.dataset.recordingPlayer);
+            if(scrub){scrub.resume=!scrub.resume;video.dataset.recordingWantsPlay=String(scrub.resume);if(scrub.finishing)flushRecordingScrub(scrub);updateRecordingPlayerControls(video,'');return;}
+            if (!video.paused||video.dataset.recordingWantsPlay==='true') pauseRecording(video);
             else {
               const total = Number(recordingStatus[toggle.dataset.recordingToggle]?.timeline?.playback_total_seconds || 0);
               if (video.ended && recordingPlaybackPosition(video) >= total - 0.5) seekRecordingPlayback(toggle.dataset.recordingToggle, 0);
-              try { await video.play(); } catch (error) { updateRecordingPlayerControls(video, error.message); }
+              playRecording(video);
             }
             updateRecordingPlayerControls(video);
           }
@@ -10094,10 +10177,10 @@ INDEX_HTML = r"""<!doctype html>
           return;
         }
         const playTarget = event.target.closest('[data-play-recording]');
-        const playRecording = playTarget?.dataset?.playRecording;
+        const recordingUrl = playTarget?.dataset?.playRecording;
         let index = playTarget?.dataset?.recordIndex;
-        if (index !== undefined && playRecording) {
-          selectRecordingAtOffset(index, playTarget.dataset.recordingOffset || offsetForRecordingUrl(index, playRecording));
+        if (index !== undefined && recordingUrl) {
+          selectRecordingAtOffset(index, playTarget.dataset.recordingOffset || offsetForRecordingUrl(index, recordingUrl));
           return;
         }
         const stepTarget = event.target.closest('[data-playback-step]');
@@ -10196,13 +10279,15 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('play', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if(video&&recordingScrubs.has(video.dataset.recordingPlayer)){video.pause();return;}
+        if(video&&recordingScrubs.has(video.dataset.recordingPlayer)){const scrub=recordingScrubs.get(video.dataset.recordingPlayer);if(scrub.finishing)scrub.resume=true;video.pause();return;}
+        if(video)video.dataset.recordingWantsPlay='true';
         if(video)showRecordingControls(video.closest('[data-recording-wrap]'));
         if (video) { markNvrInteraction('recording_video_play', recordingVideoDiagnostics(video)); updateRecordingPlayerControls(video, 'Playing recordings for selected day'); }
       }, true);
 
       nvrGrid.addEventListener('pause', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if(video&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.readyState>=2&&!video.seeking)video.dataset.recordingWantsPlay='false';
         if(video)showRecordingControls(video.closest('[data-recording-wrap]'));
         if (video) { markNvrInteraction('recording_video_pause', recordingVideoDiagnostics(video)); updateRecordingPlayerControls(video); }
       }, true);
@@ -10229,6 +10314,7 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('canplay', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if(video&&video.dataset.recordingWantsPlay==='true'&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.paused)playRecording(video);
         if (video) debugEvent('ui_recording_video_canplay', recordingVideoDiagnostics(video));
       }, true);
 
@@ -10291,7 +10377,21 @@ INDEX_HTML = r"""<!doctype html>
 
       restoreNavState();
 
+      async function checkPanelVersion() {
+        if(document.hidden)return;
+        try{
+          const response=await fetch(panelPath('api/version'),{cache:'no-store',signal:AbortSignal.timeout(4000)});
+          if(!response.ok)return;const current=await response.json();
+          if(current.version===EDGE_PANEL_VERSION&&current.ui_build===EDGE_UI_BUILD)return;
+          let notice=document.querySelector('[data-panel-update]');
+          if(!notice){notice=document.createElement('aside');notice.dataset.panelUpdate='';notice.setAttribute('role','status');notice.style.cssText='position:fixed;bottom:12px;left:12px;right:12px;z-index:2147483646;background:#142536;color:white;padding:12px;border-radius:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap';document.body.append(notice);}
+          notice.replaceChildren(document.createTextNode(`Dostępny panel ${current.version}. Odśwież kartę, aby wczytać poprawki.`));const button=document.createElement('button');button.textContent='Odśwież panel';button.onclick=()=>location.reload();notice.append(button);
+        }catch(_){}
+      }
+      document.addEventListener('visibilitychange',()=>{if(!document.hidden)void checkPanelVersion();});setInterval(checkPanelVersion,60000);
+
       async function boot() {
+        void checkPanelVersion();
         debugEvent('ui_boot', {
           panel_version: EDGE_PANEL_VERSION,
           ui_build: EDGE_UI_BUILD,
@@ -10495,7 +10595,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/recording/status":
             config = load_config()
             schedule_recording_ensure(config, "recording_status")
-            self.send_json(recording_status_payload(config, day_selection=parse_recording_day_query(parse_qs(parsed.query))))
+            self.send_json(recording_status_response(config,parse_qs(parsed.query)))
             return
         if path == "/api/logs":
             self.send_json(collect_panel_logs())

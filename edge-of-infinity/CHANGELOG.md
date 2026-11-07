@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.7
+
+- Index each recording list once and use binary search while scrubbing. Reuse the index across metadata refreshes when the files are unchanged. Let polling send only a revision token and omit the unchanged file list from responses, reducing repeated full-day transfers through Home Assistant ingress/Nabu Casa.
+- Load small cached JPEG film/date thumbnails first, with browser decoding as a fallback. Reuse the same JPEG for zero-second hover/poster/tile previews and recheck the cache after acquiring the extraction worker, so simultaneous requests decode once. Keep the existing storage limits and one low-priority extraction worker.
+- Exclude MP4s still held open by the tracked recorder from playback/thumbnail candidates, including cameras with long GOPs and infrequent disk flushes. Do not delete recordings or require header scans of all retained footage.
+- Preserve Play intent across rapid and unfinished seeks. Play pressed during loading resumes the selected moment when ready; Pause cancels that intent. Ignore trailing change events and expected Chrome AbortError/new-load interruptions instead of displaying raw goo.gl error links. Coalesce cross-file dragging, prioritize the final target, and preload the selected video. Preserve paused seeks, frame steps and the last valid picture.
+- Replace per-sample RTSP/FFmpeg restarts and the ten-second I-frame wait with a persistent low-priority decoder of the existing shared Edge relay. Analyze sampled frames between keyframes, retain one latest frame per selected camera, cap readers at four and stop them when disabled/removed. Original live/recording video and the physical camera connection count are unchanged. HP t530 should start with one selected analysis camera and the total one-FPS default.
+- Report running only after successful inference. Include capture/model/inference error codes, last analysis time/object count, decoder state and model readiness in the Events page and exported Local AI diagnostics. Keep the publisher independent of decoder waits. Warn when an old browser tab is using a different panel build and provide an explicit refresh button.
+- Read the typical video sample interval for frame stepping instead of an average distorted by a final sample/audio tail; preserve encoded media and timestamps. Test actual animal detection in P-frames after a black I-frame, decoder lifecycle/bounds, one HEVC upstream with live/recording/analysis/talk/alerts, 12000-file indexing, status-transfer suppression, small-JPEG loading and responsive Play/load/seek races.
+
 ## 0.11.6
 
 - Decode recording thumbnails in one shared browser video decoder and keep 64 recent previews in memory. Reuse the recorded MP4 files for hover and film tiles, with the existing bounded JPEG fallback for unsupported codecs. Stop background thumbnail extraction on the server.
