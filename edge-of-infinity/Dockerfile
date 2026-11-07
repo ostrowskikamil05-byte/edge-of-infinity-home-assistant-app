@@ -11,7 +11,7 @@ FROM bluenviron/mediamtx:1.19.2 AS mediamtx
 
 FROM ghcr.io/home-assistant/base:latest
 
-ARG BUILD_VERSION=0.11.4
+ARG BUILD_VERSION=0.11.5
 ARG BUILD_ARCH=amd64
 
 LABEL \
