@@ -5627,7 +5627,7 @@ INDEX_HTML = r"""<!doctype html>
       .nvr-alert-detail { display:flex; gap:8px; overflow:auto; padding:8px; background:var(--panel); border-radius:8px; }
       .nvr-alert-detail[hidden], .nvr-alert-popup[hidden] { display:none; }
       .nvr-alert-card { display:grid; flex:0 0 145px; gap:4px; color:var(--text); text-align:left; }
-      .nvr-alert-card > button { text-align:left; }
+      .nvr-alert-card > button { text-align:left; display:grid; gap:4px; }
       .nvr-alert-card img { width:100%; height:95px; object-fit:contain; background:#080e15; border-radius:5px; }
       .nvr-alert-popup { position:absolute; z-index:6; bottom:100px; left:8px; right:8px; display:flex; gap:8px; max-height:calc(100% - 115px); overflow:auto; padding:8px; background:#101c29ee; border-radius:8px; }
       .alert-history-image { width:160px; max-width:100%; height:110px; object-fit:contain; display:block; margin:5px 0; }
