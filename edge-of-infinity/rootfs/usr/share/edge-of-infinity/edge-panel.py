@@ -7076,15 +7076,17 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function pauseRecording(video) {
-        video.dataset.recordingWantsPlay='false';video.dataset.recordingPlayEpoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.pause();
+        video.dataset.recordingWantsPlay='false';video.dataset.recordingPlayPending='false';video.dataset.recordingPlayEpoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.pause();
       }
       function playRecording(video) {
-        video.dataset.recordingWantsPlay='true';
-        if(video.readyState<2||video.seeking||recordingScrubs.has(video.dataset.recordingPlayer)){updateRecordingPlayerControls(video,'');return;}
+        video.dataset.recordingWantsPlay='true';video.dataset.recordingPlayPending='true';
         const epoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.dataset.recordingPlayEpoch=epoch;
-        video.play().catch(error=>{
+        if(video.readyState<2||video.seeking||recordingScrubs.has(video.dataset.recordingPlayer)){updateRecordingPlayerControls(video,'');return;}
+        const request=video.play();
+        if(!video.paused)video.dataset.recordingPlayPending='false';
+        request.catch(error=>{
           if(video.dataset.recordingPlayEpoch!==epoch||video.dataset.recordingWantsPlay!=='true'||error.name==='AbortError')return;
-          video.dataset.recordingWantsPlay='false';updateRecordingPlayerControls(video,error.name==='NotAllowedError'?'Przeglądarka wymaga kliknięcia Play.':'Nie udało się odtworzyć nagrania. Spróbuj ponownie.');
+          video.dataset.recordingWantsPlay='false';video.dataset.recordingPlayPending='false';updateRecordingPlayerControls(video,error.name==='NotAllowedError'?'Przeglądarka wymaga kliknięcia Play.':'Nie udało się odtworzyć nagrania. Spróbuj ponownie.');
         });
       }
       function switchRecordingVideoToFile(index, target, autoplay = false, reason = 'server_file_seek') {
@@ -7325,7 +7327,7 @@ INDEX_HTML = r"""<!doctype html>
         const target = recordingTargetForOffset(index, offset);
         if (!target) return;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
-        const wasPlaying = Boolean(video && (!video.paused||video.dataset.recordingWantsPlay==='true') && !video.ended);
+        const wasPlaying = Boolean(video && (!video.paused||video.dataset.recordingPlayPending==='true') && !video.ended);
         selectedRecording[index] = target.target.file.url;
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
@@ -7589,7 +7591,7 @@ INDEX_HTML = r"""<!doctype html>
         let state=recordingScrubs.get(index);
         if(state){state.active=true;state.finishing=false;clearTimeout(state.deadline);return state;}
         const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);if(!video)return null;
-        state={index,video,slider,active:true,finishing:false,resume:(!video.paused||video.dataset.recordingWantsPlay==='true')&&!video.ended,original:recordingPlaybackPosition(video),desired:Number(slider.value),applied:null,lastSeek:0};
+        state={index,video,slider,active:true,finishing:false,resume:(!video.paused||video.dataset.recordingPlayPending==='true')&&!video.ended,original:recordingPlaybackPosition(video),desired:Number(slider.value),applied:null,lastSeek:0};
         recordingScrubs.set(index,state);clearRecordingContinuation(index);video.pause();
         markNvrInteraction('recording_scrub_start',{index});
         const wrap=video.closest('[data-recording-wrap]');wrap.dataset.scrubbing='true';showRecordingControls(wrap);
@@ -7745,7 +7747,7 @@ INDEX_HTML = r"""<!doctype html>
         const fps=Number(video.dataset.recordingFps||0);
         video.closest('[data-recording-wrap]')?.querySelectorAll('[data-recording-frame]').forEach(button=>button.disabled=!(fps>0));
         const toggle = nvrGrid.querySelector(`[data-recording-toggle="${index}"]`);
-        if (toggle) { const playing=scrubbing?scrubbing.resume:(!video.paused||video.dataset.recordingWantsPlay==='true');const label=playing?'Pause':'Play';toggle.innerHTML=recordingControlIcon(playing?'pause':'play');toggle.title=label;toggle.setAttribute('aria-label',label);toggle.setAttribute('aria-pressed',String(playing)); }
+        if (toggle) { const playing=scrubbing?scrubbing.resume:(!video.paused||video.dataset.recordingPlayPending==='true');const label=playing?'Pause':'Play';toggle.innerHTML=recordingControlIcon(playing?'pause':'play');toggle.title=label;toggle.setAttribute('aria-label',label);toggle.setAttribute('aria-pressed',String(playing)); }
         const mute = nvrGrid.querySelector(`[data-recording-mute="${index}"]`);
         if (mute) {mute.innerHTML=recordingControlIcon(video.muted?'muted':'sound');mute.title=video.muted?'Unmute':'Mute';mute.setAttribute('aria-label',mute.title);}
         const note = nvrGrid.querySelector(`[data-recording-playback-message="${index}"]`);
@@ -10134,7 +10136,7 @@ INDEX_HTML = r"""<!doctype html>
             clearRecordingContinuation(toggle.dataset.recordingToggle);
             const scrub=recordingScrubs.get(video.dataset.recordingPlayer);
             if(scrub){scrub.resume=!scrub.resume;video.dataset.recordingWantsPlay=String(scrub.resume);if(scrub.finishing)flushRecordingScrub(scrub);updateRecordingPlayerControls(video,'');return;}
-            if (!video.paused||video.dataset.recordingWantsPlay==='true') pauseRecording(video);
+            if (!video.paused||video.dataset.recordingPlayPending==='true') pauseRecording(video);
             else {
               const total = Number(recordingStatus[toggle.dataset.recordingToggle]?.timeline?.playback_total_seconds || 0);
               if (video.ended && recordingPlaybackPosition(video) >= total - 0.5) seekRecordingPlayback(toggle.dataset.recordingToggle, 0);
@@ -10280,14 +10282,15 @@ INDEX_HTML = r"""<!doctype html>
       nvrGrid.addEventListener('play', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if(video&&recordingScrubs.has(video.dataset.recordingPlayer)){const scrub=recordingScrubs.get(video.dataset.recordingPlayer);if(scrub.finishing)scrub.resume=true;video.pause();return;}
-        if(video)video.dataset.recordingWantsPlay='true';
+        if(video&&video.paused)return;
+        if(video){video.dataset.recordingWantsPlay='true';video.dataset.recordingPlayPending='false';}
         if(video)showRecordingControls(video.closest('[data-recording-wrap]'));
         if (video) { markNvrInteraction('recording_video_play', recordingVideoDiagnostics(video)); updateRecordingPlayerControls(video, 'Playing recordings for selected day'); }
       }, true);
 
       nvrGrid.addEventListener('pause', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if(video&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.readyState>=2&&!video.seeking)video.dataset.recordingWantsPlay='false';
+        if(video&&video.paused&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.readyState>=2&&!video.seeking&&video.dataset.recordingPlayPending!=='true')video.dataset.recordingWantsPlay='false';
         if(video)showRecordingControls(video.closest('[data-recording-wrap]'));
         if (video) { markNvrInteraction('recording_video_pause', recordingVideoDiagnostics(video)); updateRecordingPlayerControls(video); }
       }, true);
