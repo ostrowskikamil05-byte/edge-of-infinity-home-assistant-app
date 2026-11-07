@@ -187,3 +187,11 @@ and timeline responses, Companion notification YAML/clipboard, event markers,
 missing-footage handling and actual MP4 playback seeks at four screen widths.
 `nvr_playback.cjs` also runs against this fixture in CI to protect clip transitions,
 paused playback, growing days, thumbnails and fullscreen controls.
+
+`detection_zones.cjs` uses the isolated detection fixture's generated 416×234 JPEG
+to verify explicit preview loading, mouse and real emulated-touch drawing,
+cancelled gestures, percentage inputs, disk/reload persistence, rejected-save
+preservation and camera/local/zone-only notification YAML at four widths. The
+browser fixture never contacts a camera. The separate real HEVC pipeline test
+calls the actual preview service, checks its JPEG dimensions/cropping and confirms
+preview, analysis, recording and microphone still share one upstream connection.

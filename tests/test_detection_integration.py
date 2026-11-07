@@ -39,10 +39,13 @@ class DetectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await coordinator._async_update_data()
             await coordinator._async_update_data()
             hass.bus.async_fire.assert_called_once_with('edge_event', {'id':2,'camera_id':'front','kind':'person','source':'local','timestamp':2})
+            events.append({'id':3,'camera_id':'front','kind':'person','source':'local','timestamp':3,'zone_id':'local_zone','private_extra':'not forwarded'})
+            await coordinator._async_update_data()
+            hass.bus.async_fire.assert_called_with('edge_event',{'id':3,'camera_id':'front','kind':'person','source':'local','timestamp':3,'zone_id':'local_zone'})
             client.detection = AsyncMock(return_value={'updated_at': time.time() - 60, 'recent_events': events})
             with self.assertRaisesRegex(RuntimeError, 'stale'):
                 await coordinator._async_update_data()
-            self.assertEqual(hass.bus.async_fire.call_count, 1)
+            self.assertEqual(hass.bus.async_fire.call_count, 2)
 
     async def test_binary_sensor_availability_tracks_reported_capabilities(self):
         names = ['homeassistant','homeassistant.components','homeassistant.components.binary_sensor','homeassistant.helpers','homeassistant.helpers.update_coordinator','edge_sensor_test','edge_sensor_test.const']

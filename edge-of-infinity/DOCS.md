@@ -1,5 +1,71 @@
 # Edge of Infinity App Documentation
 
+## 0.11.2: local AI zones
+
+After updating the app, restart Home Assistant Core so `zone_id` is forwarded
+by the updated integration, then refresh the panel/card in your browser.
+
+1. Enable **Settings → Detection → Local AI** and **Cameras → Detection → Local AI**
+   for the selected camera. Zones apply to local person/vehicle detection.
+2. Save camera connection or recording-profile changes before loading a preview.
+3. In that camera's **Detection**, enable **Restrict local AI to zone** and open
+   **Set zone on image / Local AI zone**. Click **Refresh frame**.
+4. Click **Draw zone** and drag a rectangle with the mouse or a finger. Drawing
+   enables the zone. A tap or cancelled gesture keeps the previous rectangle.
+   Percentage inputs provide a keyboard alternative; **Full frame** resets bounds.
+5. Save cameras. The region must be inside the frame, at least 0.5% wide and high.
+   Bounds are restored after a restart. Zone edits apply without restarting the
+   recorder, camera RTSP connection or existing ONVIF subscription.
+6. For zone-based alerts, use **Events → Phone notifications → Source → Only Edge
+   zone**, then copy/save the generated automation in HA. Existing generic
+   automations continue using their saved filters; replace their YAML if you
+   want them to use the new zone-only source.
+
+There is one rectangular zone per camera. The **bottom-center point** of each
+object's bounding box determines membership; overlapping the region with only
+the top/side of the box does not trigger it. Filtering occurs before new local
+history events and local detection states are published. Model padding is removed
+before checking coordinates, and the editor preview shows that same unpadded
+scene. New local `objects[].box` values use normalized original-scene coordinates
+`[left, top, right, bottom]`. Existing history is preserved.
+
+The zone filters **local AI**. ONVIF events use the analytics/regions configured
+inside the camera; Edge does not program the Uniview's own regions. Camera and
+local states still feed the existing combined HA person/vehicle sensors. For an
+alert restricted to the Edge region, use the generated event filter:
+
+```yaml
+event_type: edge_event
+event_data:
+  camera_id: your_camera_id
+  source: local
+  zone_id: local_zone
+```
+
+`zone_id: local_zone` is attached only when the local region is enabled. A zone-only
+automation therefore stops matching if the region is disabled. The generator
+also supports camera-only, local-only and both sources. It does not modify existing
+HA automations or send a notification itself.
+
+Preview is an explicit single-frame request from the existing recording-profile
+loopback relay. Edge reuses analysis frames captured within five seconds, keeps
+at most four small frames in memory and serializes capture/preview work. JPEGs
+are not written to disk. Disabled/unavailable cameras return a preview error;
+the editor requires a saved, enabled camera and a working shared relay. It never
+falls back to a direct camera URL. The region limits alerts; inference still
+processes its normal 416×416 input, and recordings/live/audio keep their complete
+original streams. HP t530 settings remain one selected camera and 1 total FPS as
+a conservative starting point.
+
+The camera config adds optional `detection_zone_enabled` and normalized
+`detection_zone_left/top/right/bottom` fields. Supervisor options mirror those
+fields. Invalid submissions fail before persistence; invalid enabled regions
+found in an existing file suppress local detections until repaired.
+`GET /api/detection/preview?camera=ID` is a read-only JPEG response with no-store
+headers, frame dimensions and capture time; concurrent requests can return 429.
+Credential-free detection metadata includes `local_zone` and HA binary sensors
+expose `local_zone_enabled` as an attribute.
+
 ## 0.11.1: event history, recording markers and phone notifications
 
 **Events** now browses the complete retained SQLite history, up to its existing

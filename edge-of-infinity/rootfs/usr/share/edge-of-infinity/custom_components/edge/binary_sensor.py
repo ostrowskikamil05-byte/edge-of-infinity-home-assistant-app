@@ -50,4 +50,4 @@ class EdgeDetectionSensor(CoordinatorEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self):
         camera = self._camera()
-        return {'edge_camera_id': self.camera_id, 'camera_events': camera.get('camera_status'), 'local_detection': camera.get('local_status')}
+        return {'edge_camera_id': self.camera_id, 'camera_events': camera.get('camera_status'), 'local_detection': camera.get('local_status'), 'local_zone_enabled': (camera.get('local_zone') or {}).get('enabled', False)}

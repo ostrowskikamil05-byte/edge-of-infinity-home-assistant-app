@@ -27,14 +27,14 @@ from xml.sax.saxutils import escape as xml_escape
 
 if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
-from edge_detection import DetectionService, settings as detection_settings
+from edge_detection import DetectionService, settings as detection_settings, zone_settings, ZONE_FIELDS
 
 DETECTION_SERVICE = None
 
 
-APP_VERSION = "0.11.1"
+APP_VERSION = "0.11.2"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "event-history-v111"
+UI_BUILD = "local-zone-v112"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -117,6 +117,7 @@ CAMERA_OVERRIDE_FIELDS = (
     "enabled",
     "events_enabled",
     "local_detection_enabled",
+    *ZONE_FIELDS,
     "record",
     "low_latency",
     *STREAM_ROLE_FIELDS,
@@ -857,6 +858,7 @@ def normalize_camera(raw: dict, index: int) -> dict:
         "enabled": bool(raw.get("enabled")),
         "events_enabled": safe_bool(raw.get("events_enabled"), False),
         "local_detection_enabled": safe_bool(raw.get("local_detection_enabled"), False),
+        **dict(zip(ZONE_FIELDS, [zone_settings(raw)['enabled'], *zone_settings(raw)['bounds']])),
         "record": bool(raw.get("record", True)),
         "low_latency": bool(raw.get("low_latency", True)),
         "snapshot_stream": snapshot_stream,
@@ -1582,6 +1584,12 @@ def validate_config_for_save(payload: dict) -> None:
     ]
     if not meaningful:
         raise ValueError("Refusing to save cameras without host or RTSP.")
+    for camera in cameras:
+        if not isinstance(camera, dict):
+            raise ValueError('Invalid camera settings.')
+        zone = zone_settings(camera)
+        if zone['enabled'] and not zone['valid']:
+            raise ValueError("Strefa AI musi mieścić się w obrazie i mieć co najmniej 0,5% szerokości oraz wysokości.")
     storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
     try:
         retention_days = int(storage.get("retention_days") or 14)
@@ -2287,6 +2295,9 @@ def supervisor_self_request(path: str, payload: dict | None = None) -> dict:
 def addon_options_from_config(config: dict, existing: dict) -> dict:
     options = dict(existing)
     cameras = [{key: camera.get(key) for key in ("id", "name", "vendor", "host", "username", "password", "rtsp_main", "rtsp_sub", "camera_number", "access_protocol", "rtsp_transport", "onvif_url", "isapi_base_url", "manufacturer", "model", "firmware", "enabled", "events_enabled", "local_detection_enabled", "record", "low_latency", "snapshot_stream", "live_stream", "tile_stream", "record_stream")} for camera in config.get("cameras", [])]
+    for projected, camera in zip(cameras, config.get("cameras", [])):
+        zone = zone_settings(camera)
+        projected.update(dict(zip(ZONE_FIELDS, [zone['enabled'], *zone['bounds']])))
     options["cameras"] = cameras
     detect = detection_settings(config.get("detection"))
     for option, field in (("camera_events_enabled", "camera_events_enabled"), ("local_detection_enabled", "local_enabled"), ("detection_fps", "max_fps"), ("detection_confidence", "confidence"), ("detection_hold_seconds", "hold_seconds")):
@@ -5358,6 +5369,17 @@ INDEX_HTML = r"""<!doctype html>
       .recording-event-marker[data-kind="person"] { background: #60a5fa; }
       .recording-event-marker[data-kind="vehicle"] { background: #fbbf24; }
       .recording-events select { width: 100%; min-width: 0; min-height: 44px; }
+      .zone-editor { margin-top: 12px; min-width: 0; }
+      .zone-editor summary { cursor: pointer; min-height: 44px; padding: 10px 0; }
+      .zone-editor .event-history-row { margin: 10px 0; }
+      .zone-stage { position: relative; width: 100%; max-width: 640px; aspect-ratio: 16 / 9; background: #05080a; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; touch-action: pan-y; }
+      .zone-stage[data-drawing="true"] { touch-action: none; cursor: crosshair; outline: 2px solid var(--accent); }
+      .zone-stage img, .zone-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+      .zone-stage img { pointer-events: none; object-fit: fill; }
+      .zone-stage [hidden] { display: none !important; }
+      .zone-stage rect { fill: rgba(34,197,94,.18); stroke: #22c55e; stroke-width: 2; vector-effect: non-scaling-stroke; }
+      [data-zone-placeholder] { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; text-align: center; pointer-events: none; color: var(--muted); }
+
       .recording-timeline {
         display: grid;
         gap: 6px;
@@ -5716,7 +5738,7 @@ INDEX_HTML = r"""<!doctype html>
       .field-section { border: 0; padding: 22px 0; margin: 0; min-width: 0; }
       .field-section + .field-section { border-top: 1px solid var(--line); }
       .field-section legend { float: left; width: 100%; font-size: 17px; font-weight: 650; margin: 0 0 6px; padding: 0; }
-      .field-section legend + .field-help { clear: both; }
+      .field-section legend + .field-help, .field-section legend + .form-grid { clear: both; }
       .field-help { color: var(--muted); font-size: 12px; margin: 4px 0 16px; }
       .form-grid { grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 16px; }
       .settings-group { border: 1px solid var(--line); border-radius: 9px; padding: 0 16px; margin: 14px 0; min-width: 0; }
@@ -5813,7 +5835,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="event-history-row"><button type="button" id="event-clear-day">Wszystkie dni / All days</button><span class="field-help">Historia pozostaje na wybranej stronie. Przycisk Odśwież pobiera najnowsze zdarzenia.</span></div>
             <p id="event-history-status" role="status"></p><div id="event-list"></div>
             <div class="event-history-row" id="event-pagination"><button type="button" id="events-newer" disabled>Nowsze / Newer</button><span id="event-page-label"></span><button type="button" id="events-older" disabled>Starsze / Older</button></div>
-            <details class="field-section" id="event-notifications"><summary>Powiadomienia na telefon / Home Assistant</summary><p class="field-help">Wybierz kamerę i usługę powiadomień aplikacji Companion. Skopiuj YAML do nowej automatyzacji HA i zapisz ją tam. Edge przygotowuje kod; automatyzację uruchamiasz w HA.</p><div class="form-grid"><label>Kamera<select id="event-notify-camera"></select></label><label>Usługa powiadomień<input id="event-notify-service" placeholder="notify.mobile_app_twoj_telefon" autocomplete="off"></label><label>Przerwa między powiadomieniami (s)<input id="event-notify-cooldown" type="number" min="0" max="3600" value="60"></label></div><textarea id="event-notification-yaml" readonly spellcheck="false" aria-label="YAML automatyzacji powiadomień"></textarea><div class="event-history-row"><button type="button" id="event-copy-notification" disabled>Kopiuj YAML</button><span id="event-notification-status" role="status"></span></div></details>
+            <details class="field-section" id="event-notifications"><summary>Powiadomienia na telefon / Home Assistant</summary><p class="field-help">Wybierz kamerę i usługę powiadomień aplikacji Companion. Skopiuj YAML do nowej automatyzacji HA i zapisz ją tam. Edge przygotowuje kod; automatyzację uruchamiasz w HA.</p><div class="form-grid"><label>Kamera<select id="event-notify-camera"></select></label><label>Źródło zdarzeń<select id="event-notify-source"><option value="">Kamera i lokalne AI</option><option value="camera">Kamera / ONVIF</option><option value="local">Lokalne AI</option><option value="zone">Tylko strefa Edge</option></select></label><label>Usługa powiadomień<input id="event-notify-service" placeholder="notify.mobile_app_twoj_telefon" autocomplete="off"></label><label>Przerwa między powiadomieniami (s)<input id="event-notify-cooldown" type="number" min="0" max="3600" value="60"></label></div><textarea id="event-notification-yaml" readonly spellcheck="false" aria-label="YAML automatyzacji powiadomień"></textarea><div class="event-history-row"><button type="button" id="event-copy-notification" disabled>Kopiuj YAML</button><span id="event-notification-status" role="status"></span></div></details>
           </section>
         </section>
 
@@ -7849,6 +7871,103 @@ INDEX_HTML = r"""<!doctype html>
       let expandedCameraIds = new Set();
       let cameraExpansionInitialized = false;
       let cameraToExpand = '';
+      const zonePreviewUrls = new Map(), zonePreviewRequests = new Map();
+      const zoneNames = ['left','top','right','bottom'];
+      const zoneDefaults = [0,0,1,1];
+      function zoneEditor(camera,index) {
+        const zone = zoneNames.map((name,i) => Number(camera[`detection_zone_${name}`] ?? zoneDefaults[i]));
+        return `<label class="check-row"><input type="checkbox" name="camera-${index}-zone-enabled" ${camera.detection_zone_enabled ? 'checked' : ''}> Ogranicz lokalne AI do strefy</label><details class="zone-editor" data-zone-editor="${index}"><summary>Ustaw strefę na obrazie / Local AI zone</summary><p class="field-help">Zaznacz jeden prostokąt. Obiekt należy do strefy, gdy dolny środek jego ramki znajduje się w obszarze. Strefa dotyczy lokalnego AI; reguły ONVIF ustawiasz w kamerze. Nagrania obejmują cały kadr.</p><div class="event-history-row"><button type="button" data-zone-action="preview">Odśwież klatkę</button><button type="button" data-zone-action="draw" disabled aria-pressed="false">Rysuj strefę</button><button type="button" data-zone-action="full">Cały kadr</button></div><div class="zone-stage" data-zone-stage><img data-zone-image hidden draggable="false" alt="Klatka ze strumienia nagrywania do ustawienia strefy"><svg viewBox="0 0 1000 1000" preserveAspectRatio="none" role="img" aria-label="Obszar lokalnego AI"><rect data-zone-rect x="${zone[0]*1000}" y="${zone[1]*1000}" width="${Math.max(0,zone[2]-zone[0])*1000}" height="${Math.max(0,zone[3]-zone[1])*1000}"/></svg><span data-zone-placeholder>Odśwież klatkę z zapisanej kamery. Możesz też wpisać granice poniżej.</span></div><div class="form-grid">${zoneNames.map((name,i) => `<label>${['Lewa','Górna','Prawa','Dolna'][i]} granica (%)<input type="number" name="camera-${index}-zone-${name}" min="0" max="100" step="0.1" value="${Math.round(zone[i]*100000)/1000}" data-zone-coordinate></label>`).join('')}</div><p class="field-help" data-zone-message role="status">Domyślnie cały kadr. Po zmianach zapisz kamery.</p></details>`;
+      }
+      function zoneFromForm(section,index) {
+        const enabled = section.querySelector(`[name="camera-${index}-zone-enabled"]`).checked;
+        const bounds = zoneNames.map(name => Number(section.querySelector(`[name="camera-${index}-zone-${name}"]`).value) / 100);
+        const valid = bounds.every(value => Number.isFinite(value) && value >= 0 && value <= 1) && bounds[2]-bounds[0] >= .005-1e-9 && bounds[3]-bounds[1] >= .005-1e-9;
+        return {enabled,bounds,valid};
+      }
+      function zoneFormValues(section,index,strict=false) {
+        const zone = zoneFromForm(section,index);
+        if (strict && zone.enabled && !zone.valid) throw new Error('Strefa AI: granice muszą mieścić się w kadrze, a szerokość i wysokość wynosić co najmniej 0,5%.');
+        const result = {detection_zone_enabled:zone.enabled};
+        zoneNames.forEach((name,i) => result[`detection_zone_${name}`] = Math.round((Number.isFinite(zone.bounds[i]) ? zone.bounds[i] : zoneDefaults[i])*1000000)/1000000);
+        return result;
+      }
+      function zoneShape(editor,bounds) {
+        const rect=editor.querySelector('[data-zone-rect]');
+        for(const [key,value] of Object.entries({x:bounds[0]*1000,y:bounds[1]*1000,width:Math.max(0,bounds[2]-bounds[0])*1000,height:Math.max(0,bounds[3]-bounds[1])*1000}))rect.setAttribute(key,Number.isFinite(value)?value:0);
+      }
+      function updateZoneVisual(editor) {
+        const index=Number(editor.dataset.zoneEditor), section=editor.closest('[data-camera-form]');
+        const zone=zoneFromForm(section,index);zoneShape(editor,zone.bounds);
+        editor.querySelector('[data-zone-message]').textContent = zone.enabled && !zone.valid ? 'Nieprawidłowy obszar. Popraw granice przed zapisem.' : 'Zapisz kamery, aby zastosować strefę. Zdarzenia ONVIF mają własne reguły w kamerze.';
+      }
+      function clearZonePreviews() {
+        zoneDrag=null;
+        zonePreviewRequests.forEach(controller=>controller.abort());zonePreviewRequests.clear();
+        zonePreviewUrls.forEach(url=>URL.revokeObjectURL(url));zonePreviewUrls.clear();
+      }
+      async function loadZonePreview(editor) {
+        const index=Number(editor.dataset.zoneEditor), id=config.cameras[index]?.id;
+        const button=editor.querySelector('[data-zone-action="preview"]'), message=editor.querySelector('[data-zone-message]');
+        zonePreviewRequests.get(id)?.abort();
+        const controller=new AbortController();zonePreviewRequests.set(id,controller);
+        const timer=setTimeout(()=>controller.abort(),13000);button.disabled=true;message.textContent='Pobieranie jednej klatki ze wspólnego strumienia…';
+        try {
+          const response=await fetch(panelPath(`api/detection/preview?${new URLSearchParams({camera:id||''})}`),{cache:'no-store',signal:controller.signal});
+          if(!response.ok||!response.headers.get('Content-Type')?.startsWith('image/jpeg'))throw new Error(response.status===429?'Analiza jest zajęta. Spróbuj za chwilę.':'Brak podglądu. Najpierw zapisz aktywną kamerę i sprawdź jej strumień nagrywania.');
+          const blob=await response.blob();if(!editor.isConnected||controller.signal.aborted)return;
+          const image=editor.querySelector('[data-zone-image]'),stage=editor.querySelector('[data-zone-stage]');
+          const url=URL.createObjectURL(blob),old=zonePreviewUrls.get(id);zonePreviewUrls.set(id,url);
+          image.onload=()=>{
+            if(!editor.isConnected)return;
+            stage.style.aspectRatio=`${image.naturalWidth} / ${image.naturalHeight}`;
+            image.hidden=false;editor.querySelector('[data-zone-placeholder]').hidden=true;
+            editor.querySelector('[data-zone-action="draw"]').disabled=false;
+            message.textContent='Klatka gotowa. Wybierz Rysuj strefę i przeciągnij po obrazie. Po zmianie zapisz kamery.';
+          };
+          image.onerror=()=>{message.textContent='Nie udało się wyświetlić klatki. Spróbuj ponownie.';};
+          image.src=url;if(old)URL.revokeObjectURL(old);
+        }catch(error){if(editor.isConnected)message.textContent=error.name==='AbortError'?'Pobieranie przerwane lub przekroczyło czas. Spróbuj ponownie.':error.message;}
+        finally{clearTimeout(timer);if(zonePreviewRequests.get(id)===controller)zonePreviewRequests.delete(id);button.disabled=false;}
+      }
+      form.addEventListener('click',event=>{
+        const button=event.target.closest('[data-zone-action]');if(!button)return;
+        event.preventDefault();const editor=button.closest('[data-zone-editor]'),index=Number(editor.dataset.zoneEditor),stage=editor.querySelector('[data-zone-stage]');
+        if(button.dataset.zoneAction==='preview'){loadZonePreview(editor);return;}
+        if(button.dataset.zoneAction==='draw'){
+          const drawing=stage.dataset.drawing!=='true';stage.dataset.drawing=String(drawing);button.setAttribute('aria-pressed',String(drawing));
+          editor.querySelector('[data-zone-message]').textContent=drawing?'Przeciągnij prostokąt na obrazie.':'Rysowanie wyłączone.';return;
+        }
+        zoneNames.forEach((name,i)=>editor.querySelector(`[name="camera-${index}-zone-${name}"]`).value=zoneDefaults[i]*100);
+        editor.querySelector('[data-zone-coordinate]').dispatchEvent(new Event('input',{bubbles:true}));
+      });
+      form.addEventListener('input',event=>{const editor=event.target.closest('[data-zone-editor]');if(editor&&event.target.matches('[data-zone-coordinate]'))updateZoneVisual(editor);});
+      let zoneDrag=null;
+      const zonePointer=(event,stage)=>{const box=stage.querySelector('svg').getBoundingClientRect();return [Math.max(0,Math.min(1,(event.clientX-box.left)/box.width)),Math.max(0,Math.min(1,(event.clientY-box.top)/box.height))];};
+      form.addEventListener('pointerdown',event=>{
+        const stage=event.target.closest('[data-zone-stage]');
+        if(!stage||stage.dataset.drawing!=='true'||!event.isPrimary||event.button!==0)return;
+        event.preventDefault();stage.setPointerCapture(event.pointerId);zoneDrag={stage,pointer:event.pointerId,start:zonePointer(event,stage)};
+      });
+      form.addEventListener('pointermove',event=>{
+        if(!zoneDrag||zoneDrag.pointer!==event.pointerId)return;
+        const end=zonePointer(event,zoneDrag.stage),start=zoneDrag.start;
+        zoneShape(zoneDrag.stage.closest('[data-zone-editor]'),[Math.min(start[0],end[0]),Math.min(start[1],end[1]),Math.max(start[0],end[0]),Math.max(start[1],end[1])]);
+      });
+      function finishZoneDrag(event,cancelled=false) {
+        if(!zoneDrag||zoneDrag.pointer!==event.pointerId)return;
+        const {stage,start}=zoneDrag;zoneDrag=null;
+        const editor=stage.closest('[data-zone-editor]'),index=Number(editor.dataset.zoneEditor),end=zonePointer(event,stage);
+        const bounds=[Math.min(start[0],end[0]),Math.min(start[1],end[1]),Math.max(start[0],end[0]),Math.max(start[1],end[1])];
+        stage.dataset.drawing='false';editor.querySelector('[data-zone-action="draw"]').setAttribute('aria-pressed','false');
+        if(!cancelled&&bounds[2]-bounds[0]>=.005&&bounds[3]-bounds[1]>=.005){
+          zoneNames.forEach((name,i)=>editor.querySelector(`[name="camera-${index}-zone-${name}"]`).value=Math.round(bounds[i]*1000)/10);
+          editor.closest('[data-camera-form]').querySelector(`[name="camera-${index}-zone-enabled"]`).checked=true;
+          editor.querySelector('[data-zone-coordinate]').dispatchEvent(new Event('input',{bubbles:true}));
+        }else{updateZoneVisual(editor);editor.querySelector('[data-zone-message]').textContent='Rysowanie anulowane lub obszar zbyt mały. Poprzednia strefa została zachowana.';}
+      }
+      form.addEventListener('pointerup',event=>finishZoneDrag(event));
+      form.addEventListener('pointercancel',event=>finishZoneDrag(event,true));
+
       function cameraForm(camera, index) {
         const prefix = `camera-${index}`;
         const cameraNumber = camera.camera_number || String(index + 1);
@@ -7864,7 +7983,7 @@ INDEX_HTML = r"""<!doctype html>
                 ${Object.entries(CAMERA_VENDORS).map(([value, label]) => option(value, camera.vendor, label)).join('')}
               </select></label><label>Host/IP<input name="${prefix}-host" value="${escapeHtml(camera.host || '')}"></label><label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label><label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label></div></fieldset>
               ${cameraAutoconfig(index)}
-              <fieldset class="field-section"><legend>Detekcja / Detection</legend><div class="form-grid"><label class="check-row"><input name="${prefix}-events-enabled" type="checkbox" ${camera.events_enabled ? 'checked' : ''}> Zdarzenia ONVIF: ruch, osoba, pojazd</label><label class="check-row"><input name="${prefix}-local-detection-enabled" type="checkbox" ${camera.local_detection_enabled ? 'checked' : ''}> Lokalne AI na tej kamerze</label></div><p class="field-help">Włącz także odpowiedni moduł w Settings → Detection. Typy zdarzeń i mikrofon zależą od modelu kamery.</p></fieldset><fieldset class="field-section"><legend>Live & recording</legend><p class="field-help">Sub stream is lighter for live tiles. Main stream gives the best recording detail.</p><div class="form-grid"><label class="check-row"><input name="${prefix}-enabled" type="checkbox" ${camera.enabled ? 'checked' : ''}> Camera enabled</label><label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record continuously</label><label>Live stream<select name="${prefix}-live-stream">
+              <fieldset class="field-section"><legend>Detekcja / Detection</legend><div class="form-grid"><label class="check-row"><input name="${prefix}-events-enabled" type="checkbox" ${camera.events_enabled ? 'checked' : ''}> Zdarzenia ONVIF: ruch, osoba, pojazd</label><label class="check-row"><input name="${prefix}-local-detection-enabled" type="checkbox" ${camera.local_detection_enabled ? 'checked' : ''}> Lokalne AI na tej kamerze</label></div><p class="field-help">Włącz także odpowiedni moduł w Settings → Detection. Typy zdarzeń i mikrofon zależą od modelu kamery.</p>${zoneEditor(camera,index)}</fieldset><fieldset class="field-section"><legend>Live & recording</legend><p class="field-help">Sub stream is lighter for live tiles. Main stream gives the best recording detail.</p><div class="form-grid"><label class="check-row"><input name="${prefix}-enabled" type="checkbox" ${camera.enabled ? 'checked' : ''}> Camera enabled</label><label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record continuously</label><label>Live stream<select name="${prefix}-live-stream">
                 <option value="sub" ${camera.live_stream !== 'main' ? 'selected' : ''}>sub</option>
                 <option value="main" ${camera.live_stream === 'main' ? 'selected' : ''}>main</option>
               </select></label><label>Tile stream<select name="${prefix}-tile-stream">
@@ -7904,6 +8023,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!cameraExpansionInitialized && cameras[0]) { expandedCameraIds.add(cameras[0].id); cameraExpansionInitialized = true; }
         if (cameraToExpand) expandedCameraIds.add(cameraToExpand);
         config = { ...config, cameras };
+        clearZonePreviews();
         form.innerHTML = cameras.map(cameraForm).join('');
         if (cameraToExpand) {
           const card = Array.from(form.querySelectorAll('[data-camera-form]')).find((node) => node.dataset.cameraId === cameraToExpand);
@@ -8188,6 +8308,9 @@ INDEX_HTML = r"""<!doctype html>
             rtsp_sub_channel: value('rtsp-sub-channel'),
             rtsp_main: value('rtsp-main'),
             rtsp_sub: value('rtsp-sub'),
+            ...zoneFormValues(section,index),
+            events_enabled: value('events-enabled'),
+            local_detection_enabled: value('local-detection-enabled'),
             enabled: value('enabled'),
             record: value('record'),
             low_latency: value('low-latency'),
@@ -8253,6 +8376,7 @@ INDEX_HTML = r"""<!doctype html>
             enabled: get('enabled').checked,
             events_enabled: get('events-enabled').checked,
             local_detection_enabled: get('local-detection-enabled').checked,
+            ...zoneFormValues(section,index,true),
             record: get('record').checked,
             low_latency: get('low-latency').checked,
             snapshot_stream: get('snapshot-stream').value,
@@ -8777,7 +8901,7 @@ INDEX_HTML = r"""<!doctype html>
         try {
           detectionData = await eventJson('api/detection');
           document.getElementById('detection-runtime').textContent = `${detectionData.model || 'Detection'} · ${detectionData.backend || 'CPU'} · limit ${detectionData.max_fps || 1} FPS total · analysis ${detectionData.analysis_ms || 0} ms. Model: ${detectionData.model_installed ? 'ready' : 'not installed / starting'}`;
-          document.getElementById('detection-cameras').innerHTML = (detectionData.cameras || []).map(camera => `<article class="camera"><div class="body"><b>${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(eventKindNames[kind] || kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
+          document.getElementById('detection-cameras').innerHTML = (detectionData.cameras || []).map(camera => `<article class="camera"><div class="body"><b>${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)}</p><p>Strefa Edge (tylko lokalne AI): ${camera.local_zone?.enabled ? (camera.local_zone.valid ? 'włączona' : 'nieprawidłowa — popraw ustawienia') : 'cały kadr'}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(eventKindNames[kind] || kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
         } finally {detectionLoading = false;}
       }
       function eventFilters() {
@@ -8822,7 +8946,7 @@ INDEX_HTML = r"""<!doctype html>
         const cameras = config.cameras || [];
         document.getElementById('event-list').innerHTML = eventHistory.events.length ? eventHistory.events.map(item => {
           const camera = cameras.find(camera => camera.id === item.camera_id);
-          return `<article class="field-section"><div class="event-history-row"><b>${escapeHtml(camera?.name || item.camera_id)} · ${escapeHtml(eventKindNames[item.kind] || item.kind)} <small>(${escapeHtml(item.kind)})</small></b><span>${escapeHtml(item.day)} ${escapeHtml(item.time_label || new Date(item.timestamp * 1000).toLocaleTimeString())}</span></div><p>${item.source === 'local' ? 'Local AI' : 'Camera / ONVIF'}${item.score ? ` · ${Math.round(item.score * 100)}%` : ''}</p><button type="button" data-event-recording="${Number(item.id)}" ${camera ? '' : 'disabled'}>Otwórz nagranie / Open recording</button></article>`;
+          return `<article class="field-section"><div class="event-history-row"><b>${escapeHtml(camera?.name || item.camera_id)} · ${escapeHtml(eventKindNames[item.kind] || item.kind)} <small>(${escapeHtml(item.kind)})</small></b><span>${escapeHtml(item.day)} ${escapeHtml(item.time_label || new Date(item.timestamp * 1000).toLocaleTimeString())}</span></div><p>${item.source === 'local' ? (item.zone_id === 'local_zone' ? 'Local AI · Strefa Edge' : 'Local AI') : 'Camera / ONVIF'}${item.score ? ` · ${Math.round(item.score * 100)}%` : ''}</p><button type="button" data-event-recording="${Number(item.id)}" ${camera ? '' : 'disabled'}>Otwórz nagranie / Open recording</button></article>`;
         }).join('') : '<p class="notice">Brak zdarzeń dla wybranych filtrów. Sprawdź dzień, kamerę oraz ustawienia detekcji.</p>';
       }
       function enterEventsPage() {
@@ -8950,13 +9074,16 @@ INDEX_HTML = r"""<!doctype html>
         const camera = (config.cameras || []).find(camera => camera.id === document.getElementById('event-notify-camera').value);
         const service = document.getElementById('event-notify-service').value.trim();
         const cooldown = Number(document.getElementById('event-notify-cooldown').value);
-        const valid = camera && /^notify\.mobile_app_[a-z0-9_]+$/.test(service) && Number.isInteger(cooldown) && cooldown >= 0 && cooldown <= 3600;
+        const source = document.getElementById('event-notify-source').value;
+        const valid = camera && /^notify\.mobile_app_[a-z0-9_]+$/.test(service) && Number.isInteger(cooldown) && cooldown >= 0 && cooldown <= 3600 && ['', 'camera', 'local', 'zone'].includes(source) && (source !== 'zone' || camera.detection_zone_enabled);
         document.getElementById('event-copy-notification').disabled = !valid;
-        document.getElementById('event-notification-status').textContent = valid ? 'Gotowe do wklejenia w HA → Automatyzacje → Edytuj w YAML.' : 'Wybierz kamerę i wpisz usługę notify.mobile_app_… z Home Assistanta.';
+        document.getElementById('event-notification-status').textContent = valid ? 'Gotowe do wklejenia w HA → Automatyzacje → Edytuj w YAML.' : source === 'zone' && !camera?.detection_zone_enabled ? 'Najpierw włącz i zapisz strefę Edge dla tej kamery.' : 'Wybierz kamerę i wpisz usługę notify.mobile_app_… z Home Assistanta.';
         const lines = valid ? [
           `alias: ${JSON.stringify('Edge: osoba lub pojazd — ' + (camera.name || camera.id))}`,
           'description: "Powiadomienia ze zdarzeń Edge of Infinity"',
           'triggers:', '  - trigger: event', '    event_type: edge_event', '    event_data:', `      camera_id: ${JSON.stringify(camera.id)}`,
+          ...(source ? [`      source: ${source === 'camera' ? 'camera' : 'local'}`] : []),
+          ...(source === 'zone' ? ['      zone_id: local_zone'] : []),
           'conditions:', '  - condition: template', `    value_template: "{{ trigger.event.data.kind in ['person', 'vehicle'] }}"`,
           'actions:', `  - action: ${service}`, '    data:', '      title: "Edge of Infinity"', '      message: >-',
           "        {{ 'Osoba' if trigger.event.data.kind == 'person' else 'Pojazd' }}",
@@ -8966,7 +9093,7 @@ INDEX_HTML = r"""<!doctype html>
         ] : [];
         document.getElementById('event-notification-yaml').value = lines.join('\n');
       }
-      for (const id of ['event-notify-camera','event-notify-service','event-notify-cooldown']) document.getElementById(id).addEventListener('input', updateNotificationYaml);
+      for (const id of ['event-notify-camera','event-notify-service','event-notify-cooldown','event-notify-source']) document.getElementById(id).addEventListener('input', updateNotificationYaml);
       document.getElementById('event-copy-notification').addEventListener('click', async () => {
         const area = document.getElementById('event-notification-yaml');area.focus();area.select();
         let copied = false;
@@ -9626,6 +9753,19 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/detection":
             self.send_json(DETECTION_SERVICE.snapshot() if DETECTION_SERVICE else {"cameras": [], "recent_events": [], "status": "starting"})
+            return
+        if path == "/api/detection/preview":
+            try:
+                if not DETECTION_SERVICE:
+                    raise RuntimeError('detection_starting')
+                camera_id = (parse_qs(parsed.query).get('camera') or [''])[0]
+                payload, width, height, stamp = DETECTION_SERVICE.preview(camera_id)
+                self.send_bytes(payload, 'image/jpeg', extra_headers={'Cache-Control': 'no-store', 'X-Edge-Frame-Width': str(width), 'X-Edge-Frame-Height': str(height), 'X-Edge-Captured-At': str(stamp)})
+            except KeyError:
+                self.send_json({'error': 'camera_unavailable'}, HTTPStatus.NOT_FOUND)
+            except (RuntimeError, OSError, ValueError, ImportError, subprocess.SubprocessError) as error:
+                busy = isinstance(error, RuntimeError) and str(error) == 'preview_busy'
+                self.send_json({'error': 'preview_busy' if busy else 'detection_preview_unavailable'}, HTTPStatus.TOO_MANY_REQUESTS if busy else HTTPStatus.SERVICE_UNAVAILABLE)
             return
         if path == "/api/events":
             try:

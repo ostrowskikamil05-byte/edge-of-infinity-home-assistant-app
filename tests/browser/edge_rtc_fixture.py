@@ -86,6 +86,7 @@ async def main():
                 if os.environ.get('EDGE_RTC_TEST_DETECTION'):
                     detector = DetectionService(panel.HOME_DIR, lambda *args: None, lambda *args: info['rtsp'], panel.write_json)
                     detector.apply({'detection':{'local_enabled':True},'cameras':[{**camera('front','192.0.2.10','sub'),'local_detection_enabled':True}]})
+                    panel.DETECTION_SERVICE = detector
                 async def detection_status(request):
                     return web.json_response(detector.snapshot() if detector else {})
                 async def record(request):

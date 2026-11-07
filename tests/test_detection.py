@@ -110,7 +110,7 @@ class DetectionTests(unittest.TestCase):
         def frame(url):
             self.assertEqual(url, 'rtsp://127.0.0.1:8556/front_main')
             captured.set()
-            return b'fixture'
+            return m.AnalysisFrame(bytes(416 * 416 * 3))
         with tempfile.TemporaryDirectory() as directory, patch.object(m, 'NanoDet', Detector), patch.object(m, 'capture_frame', frame):
             service = m.DetectionService(directory, lambda *a: self.fail('Unexpected ONVIF request'), lambda *a: 'rtsp://127.0.0.1:8556/front_main', lambda *a: None)
             try:
