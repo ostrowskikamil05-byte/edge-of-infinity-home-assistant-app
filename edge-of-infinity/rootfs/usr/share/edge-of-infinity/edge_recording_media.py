@@ -22,7 +22,7 @@ def video_timing(path):
         cached = _TIMING.get(str(path))
     if cached and cached[0] == signature:
         return cached[1]
-    result = {'fps': 0.0, 'duration': 0.0, 'frame_seconds': 0.0}
+    result = {'fps': 0.0, 'duration': 0.0, 'frame_seconds': 0.0,'audio_codec':'','audio_clock_regular':True}
     with path.open('rb') as handle:
         def boxes(start,end):
             cursor=start
@@ -45,10 +45,10 @@ def video_timing(path):
                 if child!=b'trak':continue
                 for child,media_start,media_end in boxes(track_start,track_end):
                     if child!=b'mdia':continue
-                    timescale=duration=0;video=False;table=None;sample_entry=''
+                    timescale=duration=0;video=audio=False;table=None;sample_entry=''
                     for child,a,b in boxes(media_start,media_end):
                         if child==b'hdlr':
-                            handle.seek(a);video=handle.read(12)[8:12]==b'vide'
+                            handle.seek(a);handler=handle.read(12)[8:12];video=handler==b'vide';audio=handler==b'soun'
                         elif child==b'mdhd':
                             handle.seek(a);data=handle.read(min(32,b-a))
                             offset=20 if data and data[0]==1 else 12
@@ -64,8 +64,8 @@ def video_timing(path):
                                         handle.seek(e);data=handle.read(min(16,f-e))
                                         if len(data)==16 and int.from_bytes(data[4:8],'big'):
                                             sample_entry=data[12:16].decode('ascii',errors='replace')
-                    if not video or not timescale:continue
-                    count=ticks=0;intervals={}
+                    if not (video or audio) or not timescale:continue
+                    count=ticks=0;intervals={};runs=[]
                     if table:
                         handle.seek(table[0]);head=handle.read(8)
                         entries=int.from_bytes(head[4:8],'big') if len(head)==8 else 0
@@ -73,6 +73,7 @@ def video_timing(path):
                             for _ in range(entries):
                                 raw=handle.read(8);n=int.from_bytes(raw[:4],'big');delta=int.from_bytes(raw[4:],'big')
                                 count+=n;ticks+=n*delta
+                                runs.append((n,delta))
                                 if delta>0:intervals[delta]=intervals.get(delta,0)+n
                     # Audio padding / a final sample can extend the average
                     # duration. The weighted median is the video frame clock.
@@ -80,10 +81,14 @@ def video_timing(path):
                     for delta,n in sorted(intervals.items()):
                         accumulated+=n
                         if accumulated>=half:median=delta;break
+                    if audio:
+                        result['audio_codec']=sample_entry
+                        result['audio_clock_regular']=bool(median and runs) and all(delta==median or (i==len(runs)-1 and n==1 and 0<delta<=median) for i,(n,delta) in enumerate(runs))
+                        continue
                     fps=timescale/median if median else (timescale*count/ticks if ticks else 0)
-                    result={'fps':round(fps,6) if .1<=fps<=240 else 0.0,'duration':duration/timescale if duration else 0.0,
+                    result.update({'fps':round(fps,6) if .1<=fps<=240 else 0.0,'duration':duration/timescale if duration else 0.0,
                             'frame_seconds':1/fps if .1<=fps<=240 else 0.0,
-                            'sample_entry':sample_entry,'codec_name':{'hev1':'hevc','hvc1':'hevc','avc1':'h264','avc3':'h264'}.get(sample_entry,'')}
+                            'sample_entry':sample_entry,'codec_name':{'hev1':'hevc','hvc1':'hevc','avc1':'h264','avc3':'h264'}.get(sample_entry,'')})
     with _TIMING_LOCK:
         if len(_TIMING)>=512:_TIMING.pop(next(iter(_TIMING)))
         _TIMING[str(path)]=(signature,result)

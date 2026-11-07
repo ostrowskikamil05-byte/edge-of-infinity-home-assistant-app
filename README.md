@@ -110,3 +110,23 @@ black lead-in; AAC timing is repaired. These copies do not replace originals.
 A failed AI VAAPI decoder is disabled for the rest of that app run, with CPU
 fallback. Native phone tests now include WebKit 26.5 plus real saved HEVC/H264
 and audio, rather than only Chromium with a phone user agent.
+
+## Recording continuation and CPU diagnostics (0.11.10)
+
+Same-day intrusion alerts reuse the current player. Opening a saved clip releases
+inactive phone decoders. Playback keeps its Play intent across buffering and
+can retry one transient network failure at the current position; explicit Pause
+remains final. The next segment is prepared through a JSON request from saved
+files, without starting another video decoder or camera connection.
+
+All browsers use the bounded normalized-container cache. Healthy AAC packets
+are copied, while irregular audio clocks are repaired; video pixels and FPS are
+unchanged. H.265 can still take longer to decode/seek than a smaller H.264 source.
+CPU diagnostics separate measured CPU utilization from I/O wait and load average,
+and label a short startup load spike as a warning. Refresh diagnostics for the
+first measured CPU sample. Disabled playback-copy cache logs are marked historical.
+
+The Edge live card in EdgeRTC mode signs a Home Assistant WebSocket URL and
+receives the shared Edge/NVR feed through `/api/edge/rtc/…`. It does not give the
+browser a direct camera RTSP connection. The generated-camera integration test
+checks this routing and one physical upstream with multiple viewers/microphone.
