@@ -101,3 +101,31 @@ class RecordingCompatibilityTests(unittest.TestCase):
         current=self.p.current_recording_log_tail(log)
         self.assertNotIn('Non-monotonic',current);self.assertIn('recording_start_command',current)
         self.assertEqual(log.read_text(),content,'Keep full historical logs on disk')
+
+    def test_regular_aac_is_copied_and_cached_reads_do_not_wait_for_another_worker(self):
+        source=self.sample();audio=self.root/'audio.mp4'
+        subprocess.run(['ffmpeg','-v','error','-i',str(source),'-f','lavfi','-i','sine=sample_rate=48000',
+                        '-map','0:v','-map','1:a','-c:v','copy','-c:a','aac','-t','1.5',str(audio)],check=True)
+        self.assertTrue(self.timing(audio)['audio_clock_regular'])
+        original_run=subprocess.run
+        with patch('edge_recording_compat.subprocess.run',wraps=original_run) as run:
+            target=self.cache.prepare(audio)
+        command=run.call_args.args[0]
+        self.assertEqual(command[command.index('-c:a')+1],'copy')
+        def aac_packets(path):
+            result=original_run(['ffmpeg','-v','error','-i',str(path),'-map','0:a:0','-c','copy','-f','adts','pipe:1'],capture_output=True,check=True)
+            return result.stdout
+        self.assertEqual(aac_packets(audio),aac_packets(target))
+        with self.cache.lock:
+            self.assertEqual(self.cache.prepare(audio),target,'An unrelated warming job must not block a cached Range request')
+
+    def test_irregular_aac_is_detected_and_repaired_instead_of_copied(self):
+        source=self.sample();audio=self.root/'backward-audio.mp4'
+        subprocess.run(['ffmpeg','-v','error','-i',str(source),'-f','lavfi','-i','sine=sample_rate=48000,asetpts=PTS-if(gte(T\\,0.5)\\,0.03/TB\\,0)',
+                        '-map','0:v','-map','1:a','-c:v','copy','-c:a','aac','-t','1.5',str(audio)],check=True,capture_output=True)
+        self.assertFalse(self.timing(audio)['audio_clock_regular'])
+        original_run=subprocess.run
+        with patch('edge_recording_compat.subprocess.run',wraps=original_run) as run:target=self.cache.prepare(audio)
+        command=run.call_args.args[0]
+        self.assertEqual(command[command.index('-c:a')+1],'aac')
+        self.assertTrue(self.timing(target)['audio_clock_regular'])

@@ -69,6 +69,16 @@ class HttpDisconnectTests(unittest.TestCase):
                 with patch.object(handler,'send_json') as send:handler.serve_mp4_file(target,'/clip.mp4','clip.mp4','test',{})
                 self.assertEqual(send.call_args.args[1],416);self.assertEqual(send.call_args.args[2]['Content-Range'],'bytes */100')
 
+    def test_active_mp4_response_survives_cache_eviction_after_headers_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target=Path(directory)/'clip.mp4';target.write_bytes(b'active recording bytes')
+            output=io.BytesIO();handler=self.handler(output);handler.command='GET';handler.requestline='GET /clip.mp4 HTTP/1.1';handler.request_version='HTTP/1.1';handler.headers={}
+            send=handler.send_response
+            def evict(status):target.unlink();send(status)
+            with patch.object(handler,'log_message'),patch.object(handler,'send_response',side_effect=evict):
+                handler.serve_mp4_file(target,'/clip.mp4','clip.mp4','test',{})
+            self.assertTrue(output.getvalue().endswith(b'active recording bytes'))
+
 
 if __name__ == '__main__':
     unittest.main()

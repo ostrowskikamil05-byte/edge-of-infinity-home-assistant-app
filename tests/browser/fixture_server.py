@@ -44,7 +44,10 @@ if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  # Keep historical paging IDs/counts stable while adding one intrusion to today.
  with p.DETECTION_SERVICE.store.connect() as db:
   db.execute("UPDATE edge_events SET kind='animal',timestamp=? WHERE id=3",(datetime(2026,7,28,0,0,6).timestamp(),))
- for ident in (1,3):
+ fixture_alert_ids=[1,3]
+ if os.environ.get('EDGE_TEST_MULTI_CAMERA'):
+  fixture_alert_ids.append(p.DETECTION_SERVICE.store.add('back','person','local',datetime(2026,7,28,0,0,9).timestamp(),{'score':.95}))
+ for ident in fixture_alert_ids:
   event=p.DETECTION_SERVICE.store.get(ident)
   image=p.alert_image_path(ident);image.parent.mkdir(parents=True,exist_ok=True);image.write_bytes(preview_jpeg)
   p.write_json(image.with_suffix('.json'),{key:event[key] for key in ('id','camera_id','kind','timestamp')})
@@ -70,6 +73,6 @@ if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  p.ALERT_SERVICE=p.AlertMediaService(p.DETECTION_SERVICE.store,p.load_config,p.alert_source_entries,p.save_alert_image,p.save_alert_fallback_image,start=False)
  # Fixture dates are intentionally historical; retention is covered separately.
  p.ALERT_SERVICE.prune=lambda reserve=0:{'bytes':0,'limit_bytes':256*1024*1024}
- for ident in (1,3):p.ALERT_SERVICE.build(p.DETECTION_SERVICE.store.get(ident))
+ for ident in fixture_alert_ids:p.ALERT_SERVICE.build(p.DETECTION_SERVICE.store.get(ident))
 Path(os.environ.get('EDGE_NVR_FIXTURE_INFO', '/tmp/edge-nvr-browser-fixture.json')).write_text(json.dumps({'recordings_dir': str(d), 'recording_cache_dir':str(p.RECORDING_CACHE_DIR), 'thumbnail_dir':str(p.RECORDING_THUMB_DIR)}))
 p.ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('EDGE_NVR_TEST_PORT', '18088'))),p.EdgeHandler).serve_forever()

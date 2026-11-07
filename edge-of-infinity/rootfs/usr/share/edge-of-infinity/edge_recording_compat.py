@@ -47,8 +47,15 @@ class CompatibleRecordings:
         # No full-day copies or transcodes. One original segment, copied once.
         reserve=int(stat.st_size*1.1)+MIB
         if reserve>self.budget:raise RuntimeError('recording_compat_budget')
-        signature=f'{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:hvc1-clock-v3'
+        signature=f'{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:hvc1-clock-v4'
         name=hashlib.sha256(signature.encode()).hexdigest()+'.mp4'
+        target=self.directory/name
+        # Serving a cached Range/HEAD must not wait behind another remux.
+        if not self.directory.is_symlink() and not target.is_symlink():
+            try:
+                if target.is_file() and target.stat().st_size:
+                    os.utime(target,None);return target
+            except FileNotFoundError:pass
         if not self.lock.acquire(timeout=20):raise RuntimeError('recording_compat_busy')
         temporary=None
         try:
@@ -65,13 +72,18 @@ class CompatibleRecordings:
             # growing collection. Foreign files/symlinks are never removed.
             temporary=self.directory/'remux.tmp'
             if temporary.is_symlink():raise RuntimeError('invalid_compat_temporary')
-            command=['ffmpeg','-hide_banner','-loglevel','error','-nostdin','-y','-threads','1',
+            timing=video_timing(source)
+            command=['ffmpeg','-hide_banner','-loglevel','error','-nostdin','-y','-threads','1','-filter_threads','1',
                      '-fflags','+genpts','-i',str(source),'-map','0:v:0','-map','0:a?',
-                     '-c:v','copy','-c:a','aac','-b:a','96k','-ar','48000','-ac','1',
-                     '-af','asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0',
+                     '-c:v','copy',
                      '-bsf:v','setts=pts=PTS-STARTPTS:dts=DTS-STARTPTS',
                      '-avoid_negative_ts','disabled','-movflags','+faststart']
-            if video_timing(source).get('codec_name')=='hevc':command+=['-tag:v','hvc1']
+            if not timing.get('audio_codec') or timing.get('audio_codec')=='mp4a' and timing.get('audio_clock_regular'):
+                command+=['-c:a','copy','-bsf:a','setts=pts=PTS-STARTPTS:dts=DTS-STARTPTS']
+            else:
+                command+=['-c:a','aac','-threads:a','1','-b:a','96k','-ar','48000','-ac','1',
+                          '-af','asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0']
+            if timing.get('codec_name')=='hevc':command+=['-tag:v','hvc1']
             command+=['-fs',str(reserve),'-f','mp4',str(temporary)]
             if shutil.which('nice'):command=['nice','-n','10',*command]
             result=subprocess.run(command,capture_output=True,timeout=20)

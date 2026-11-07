@@ -52,7 +52,7 @@ const assert=require('node:assert/strict');
    await page.locator('[data-alert-popup] [data-alert-watch="3"] img').waitFor();
    assert(await page.evaluate(()=>{const full=document.fullscreenElement||document.querySelector('.edge-soft-fullscreen');return full.contains(document.querySelector('[data-alert-popup]'));}));
    await page.evaluate(()=>document.fullscreenElement?document.exitFullscreen():exitSoftFullscreen('test'));
-   await nav('events');await page.locator('#event-kind-filter').selectOption('animal');
+   await nav('events');await page.waitForFunction(()=>!recordedPreviewVideo||!recordedPreviewVideo.getAttribute('src'));await page.locator('#event-kind-filter').selectOption('animal');
    await page.locator('#event-list [data-alert-watch="3"]').waitFor();
    assert.equal(await page.locator('#event-list [data-alert-watch]').count(),1);
    await nav('edge-settings');

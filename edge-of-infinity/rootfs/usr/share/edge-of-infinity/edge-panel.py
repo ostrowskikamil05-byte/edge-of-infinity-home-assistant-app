@@ -31,9 +31,11 @@ from edge_detection import DetectionService, settings as detection_settings, zon
 from edge_storage import MIB, SEGMENT, managed_files, prune_cache, trim_log
 from edge_recording_media import AlertMediaService, video_timing
 from edge_recording_compat import CompatibleRecordings
+from edge_metrics import CpuSampler, cpu_load_severity
 
 DETECTION_SERVICE = None
 ALERT_SERVICE = None
+CPU_SAMPLER=CpuSampler()
 
 
 def alert_image_path(ident):
@@ -90,9 +92,9 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.11.9"
+APP_VERSION = "0.11.10"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "phone-native-v119"
+UI_BUILD = "alert-buffer-v1110"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -1283,6 +1285,7 @@ def system_diagnostics_payload(recordings_dir: Path) -> dict:
     cache_workers = sorted(RECORDING_CACHE_WORKERS)
     return {
         "cpu_count": cpu_count,
+        "cpu_usage": CPU_SAMPLER.sample(),
         "loadavg": loadavg,
         "load_per_core_1m": load_per_core,
         "memory": proc_meminfo_payload(),
@@ -1448,13 +1451,19 @@ def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording
 
     load_per_core = hardware.get("load_per_core_1m")
     if isinstance(load_per_core, (int, float)):
-        severity = "error" if load_per_core >= 1.25 else "warning" if load_per_core >= 0.75 else "ok"
+        severity = cpu_load_severity(hardware)
+        usage=hardware.get('cpu_usage') or {}
+        detail=f"Host load per core: {load_per_core} (1 minute)."
+        if usage:detail+=f" CPU busy {usage['busy_percent']}%; I/O wait {usage['io_wait_percent']}%."
+        else:detail+=' Refresh diagnostics for measured CPU usage.'
+        if (hardware.get('system_uptime_seconds') or 0)<600:detail+=' Host is still in its first 10 minutes after boot.'
+        detail+=' Load includes all Home Assistant apps and I/O waits.'
         diagnostics.append(
             diagnostic_item(
                 severity,
                 "CPU load",
-                f"1 minute load per CPU core is {load_per_core}.",
-                {"loadavg": hardware.get("loadavg"), "cpu_count": hardware.get("cpu_count")},
+                detail,
+                {"loadavg": hardware.get("loadavg"), "cpu_count": hardware.get("cpu_count"),'cpu_usage':usage},
             )
         )
     else:
@@ -1575,6 +1584,7 @@ def collect_panel_logs() -> dict:
         "runtime_janus_streaming_config": redact_rtsp(read_text_tail(JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg", 20000)),
         "recording_stream_log": tails["Recording stream"],
         "recording_cache_log": tails["Recording cache"],
+        "recording_cache_enabled":recording_cache_budget(config)>0,
         "recording_thumbnail_log": tails["Recording thumbnails"],
         "recording_logs": recording_logs,
     }
@@ -4088,6 +4098,8 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
         "0",
         "-user_agent",
         "EdgeRecorder/1",
+        "-threads",
+        "1",
         "-i",
         stream,
         "-map",
@@ -4133,7 +4145,7 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
         command+=['-tag:v','hvc1']
     # Camera audio clocks can jump backwards while RTP video remains valid.
     # Keep original video timestamps; repair only the AAC sample clock.
-    command+=['-af','aresample=async=1:first_pts=0']
+    command+=['-threads:a','1','-filter_threads','1','-af','aresample=async=1:first_pts=0']
     command += [
         "-f",
         "segment",
@@ -6916,12 +6928,12 @@ INDEX_HTML = r"""<!doctype html>
         const seek = Math.max(0, Number(seekSeconds || 0));
         if (!url) return url;
         let clean = String(url).split('#', 1)[0];
-        // WKWebView and Android need a seekable, normalized MP4 container.
+        // Every browser uses the same seekable, normalized MP4 container.
         // A bounded stream-copy cache uses saved clips, never camera streams.
-        if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1)) {
+        {
           const parsed=new URL(clean,location.href);
           if (/\/recordings\/|\/api\/alerts\/\d+\/clip\.mp4$/.test(parsed.pathname)) {
-            parsed.searchParams.set('compat','1');parsed.searchParams.set('container','hvc1-clock-v3');clean=parsed.href;
+            parsed.searchParams.set('compat','1');parsed.searchParams.set('container','hvc1-clock-v4');clean=parsed.href;
           }
         }
         return seek?`${clean}#t=${seek.toFixed(3)}`:clean;
@@ -6931,8 +6943,8 @@ INDEX_HTML = r"""<!doctype html>
         return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
       }
 
-      function releaseInactiveRecordingPlayers(selected) {
-        if(!phonePlayback())return;
+      function releaseInactiveRecordingPlayers(selected,force=false) {
+        if(!force&&!phonePlayback())return;
         nvrGrid.querySelectorAll('video[data-recording-player]').forEach(other=>{
           if(other===selected)return;
           pauseRecording(other);
@@ -6950,6 +6962,7 @@ INDEX_HTML = r"""<!doctype html>
       function restoreRecordingPlayer(video) {
         const source=video.dataset.recordingSuspendedSrc;
         if(!source)return;
+        if(video.dataset.recordingPoster&&!video.getAttribute('poster'))video.poster=video.dataset.recordingPoster;
         delete video.dataset.recordingSuspendedSrc;video.preload='auto';video.src=source;video.load();
       }
 
@@ -6963,7 +6976,11 @@ INDEX_HTML = r"""<!doctype html>
       // One browser decoder shared by hover and tile previews. No camera reads,
       // server transcoding, autoplay or persistent preview files.
       const recordedPreviewCache=new Map(),recordedPreviewJobs=[];
-      let recordedPreviewVideo=null,recordedPreviewBusy=false;
+      let recordedPreviewVideo=null,recordedPreviewBusy=false,recordedPreviewReleaseTimer=null;
+      function releaseRecordedPreviewDecoder() {
+        if(recordedPreviewBusy||!recordedPreviewVideo)return;
+        recordedPreviewVideo.pause();recordedPreviewVideo.removeAttribute('src');recordedPreviewVideo.load();
+      }
       function previewFileUrl(thumbnail) {
         const url=new URL(thumbnail,location.href);
         url.pathname=url.pathname.replace('/recording-thumbs/','/recordings/').replace(/\.jpg$/,'');
@@ -6973,6 +6990,7 @@ INDEX_HTML = r"""<!doctype html>
         // On phones keep the hardware decoder for the watched recording.
         // Hover falls back to a small server JPEG; tiles already prefer JPEG.
         if(phonePlayback())return Promise.reject(new Error('phone_preview_uses_jpeg'));
+        if(activePage!=='nvr')return Promise.reject(new Error('preview_not_visible'));
         const key=`${url}|${Math.round(Number(second)*10)/10}`;
         if(recordedPreviewCache.has(key))return Promise.resolve(recordedPreviewCache.get(key));
         return new Promise((resolve,reject)=>{
@@ -6983,6 +7001,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       async function pumpRecordedPreviews() {
         if(recordedPreviewBusy||!recordedPreviewJobs.length)return;
+        clearTimeout(recordedPreviewReleaseTimer);
         recordedPreviewBusy=true;const job=recordedPreviewJobs.shift();
         try {
           if(recordedPreviewCache.has(job.key)){job.resolve(recordedPreviewCache.get(job.key));return;}
@@ -7009,7 +7028,10 @@ INDEX_HTML = r"""<!doctype html>
           const image=URL.createObjectURL(blob);recordedPreviewCache.set(job.key,image);
           while(recordedPreviewCache.size>64){const oldest=recordedPreviewCache.keys().next().value,url=recordedPreviewCache.get(oldest);for(const [key,value] of scrubCache)if(value===url)scrubCache.delete(key);URL.revokeObjectURL(url);recordedPreviewCache.delete(oldest);}
           job.resolve(image);
-        }catch(error){job.reject(error);}finally{recordedPreviewBusy=false;pumpRecordedPreviews();}
+        }catch(error){job.reject(error);}finally{
+          recordedPreviewBusy=false;pumpRecordedPreviews();
+          if(!recordedPreviewBusy)recordedPreviewReleaseTimer=setTimeout(releaseRecordedPreviewDecoder,500);
+        }
       }
       window.addEventListener('pagehide',()=>{recordedPreviewVideo?.pause();if(recordedPreviewVideo){recordedPreviewVideo.removeAttribute('src');recordedPreviewVideo.load();}for(const job of recordedPreviewJobs.splice(0))job.reject(new Error('page_closed'));for(const url of recordedPreviewCache.values())URL.revokeObjectURL(url);recordedPreviewCache.clear();});
 
@@ -7024,6 +7046,7 @@ INDEX_HTML = r"""<!doctype html>
         image.src = THUMB_PLACEHOLDER;
       }
       function pumpRecordingThumbnails() {
+        if(activePage!=='nvr')return;
         while (recordingThumbnailActive < 2 && recordingThumbnailQueue.length) {
           const image = recordingThumbnailQueue.shift();
           if (!image.isConnected) continue;
@@ -7075,6 +7098,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function hydrateRecordingThumbnails() {
+        if(activePage!=='nvr')return;
         if (thumbnailObserver) {
           thumbnailObserver.disconnect();
           thumbnailObserver = null;
@@ -7133,12 +7157,12 @@ INDEX_HTML = r"""<!doctype html>
         } catch (_) { if(frame.dataset.valid==='true')frame.hidden=false; }
       }
       function releaseRecordingFrame(video) {
-        video.removeAttribute('poster');
         const frame = video.closest('.recording-player-wrap')?.querySelector('[data-recording-transition]');
         if (!frame) return;
         const source=video.currentSrc||video.src, expectedSeek=Number(video.dataset.recordingSeek||0);
         const release = () => {
           if ((video.currentSrc||video.src)!==source||Number(video.dataset.recordingSeek||0)!==expectedSeek||video.seeking||video.readyState<2||video.currentTime+.1<expectedSeek)return;
+          video.removeAttribute('poster');
           // A working native video must never remain hidden behind a canvas
           // if WebKit refuses a canvas readback of a hardware decoded frame.
           frame.hidden=true;
@@ -7153,12 +7177,44 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function pauseRecording(video) {
+        cancelRecordingWarmup(video);delete video.dataset.recordingBuffering;
         video.dataset.recordingWantsPlay='false';video.dataset.recordingPlayPending='false';video.dataset.recordingPlayEpoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.pause();
+      }
+
+      let recordingWarmJob=null;
+      const recordingWarmPlans=new WeakMap(),recordingWarmDone=new Map();
+      function cancelRecordingWarmup(video) {
+        if(recordingWarmJob?.video===video){recordingWarmJob.controller.abort();recordingWarmJob=null;}
+      }
+      function warmNextRecording(video) {
+        if(activePage!=='nvr'||document.hidden||video.paused||video.readyState<3||recordingScrubs.has(video.dataset.recordingPlayer)||recordingWarmJob)return;
+        const status=recordingStatus[video.dataset.recordingPlayer]||{},timeline=recordingTimeline(status.files||[],status),source=video.dataset.recordingLoadedFile;
+        let plan=recordingWarmPlans.get(video);
+        if(!plan||plan.source!==source||plan.timeline!==timeline){
+          const current=timeline.entries.findIndex(entry=>entry.file.url===source),entry=timeline.entries[current],next=timeline.entries[current+1];
+          plan={source,timeline,next:current>=0?next:null,current:entry};recordingWarmPlans.set(video,plan);
+        }
+        if(!plan.next||Number(plan.next.file.size_bytes||0)+Number(plan.current?.file.size_bytes||0)>56*1024*1024)return;
+        const url=mediaUrlWithTimeFragment(panelPath(plan.next.file.url),0),now=performance.now();
+        if(recordingWarmDone.has(url)&&now-recordingWarmDone.get(url)<30000)return;
+        const job={video,url,controller:new AbortController()};recordingWarmJob=job;
+        // Prepare a saved segment through JSON, without a speculative video
+        // download, decoder or physical camera read. One bounded worker.
+        job.timer=setTimeout(()=>job.controller.abort(),15000);
+        fetch(panelPath('api/recording/prepare'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:status.key,name:plan.next.file.name}),cache:'no-store',signal:job.controller.signal}).then(async response=>{
+          const data=await response.json(),ready=response.ok&&data.ready;
+          recordingWarmDone.set(url,performance.now()-(ready?0:25000));
+          if(ready)video.dataset.recordingNextReady=plan.next.file.url;
+          while(recordingWarmDone.size>16)recordingWarmDone.delete(recordingWarmDone.keys().next().value);
+        }).catch(error=>{if(error.name!=='AbortError')recordingWarmDone.set(url,performance.now()-25000);}).finally(()=>{clearTimeout(job.timer);if(recordingWarmJob===job)recordingWarmJob=null;});
       }
       function playRecording(video) {
         releaseInactiveRecordingPlayers(video);restoreRecordingPlayer(video);
         if(recordingPictureUnavailable(video))return;
-        if(video.error)video.load();
+        if(video.error){
+          const position=video.currentTime||Number(video.dataset.recordingSeek||0);
+          video.dataset.recordingSeek=String(position);video.src=mediaUrlWithTimeFragment(video.dataset.recordingSrc||video.src,position);video.load();
+        }
         video.dataset.recordingWantsPlay='true';video.dataset.recordingPlayPending='true';
         const epoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.dataset.recordingPlayEpoch=epoch;
         const scrub=recordingScrubs.get(video.dataset.recordingPlayer);
@@ -7205,6 +7261,7 @@ INDEX_HTML = r"""<!doctype html>
           return true;
         }
         video.removeAttribute("poster");
+        video.dataset.recordingLoading='true';video.dataset.recordingNetworkRetries='0';video.dataset.recordingWantsPlay=String(autoplay);video.dataset.recordingPlayPending='false';
         video.dataset.recordingLoadedFile = fileUrl;
         video.src = nextSrc;
         video.dataset.recordingSrc = nextSrc;
@@ -7853,6 +7910,9 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function recordingVideoDiagnostics(video) {
+        const buffered=[];
+        try{for(let i=0;i<Math.min(4,video.buffered.length);i++)buffered.push([video.buffered.start(i),video.buffered.end(i)]);}catch(_){}
+        const current=Number(video?.currentTime||0),range=buffered.find(([a,b])=>a<=current&&current<=b);
         const errorNames = {
           1: 'MEDIA_ERR_ABORTED',
           2: 'MEDIA_ERR_NETWORK',
@@ -7871,6 +7931,10 @@ INDEX_HTML = r"""<!doctype html>
           current_time: Number(video?.currentTime || 0),
           duration: Number.isFinite(Number(video?.duration)) ? Number(video.duration) : String(video?.duration || ''),
           paused: Boolean(video?.paused),
+          wants_play:video?.dataset.recordingWantsPlay==='true',
+          loading:video?.dataset.recordingLoading==='true',
+          buffering:video?.dataset.recordingBuffering==='true',
+          buffered_ranges:buffered,buffered_ahead_seconds:range?Math.max(0,range[1]-current):0,
           error_code: video?.error?.code || 0,
           error_name: errorNames[video?.error?.code] || '',
           error_message: video?.error?.message || '',
@@ -8005,7 +8069,7 @@ INDEX_HTML = r"""<!doctype html>
           logBlock('MediaMTX runtime config', panelLogs.runtime_mediamtx_config || 'missing'),
           logBlock('Janus streaming config', panelLogs.runtime_janus_streaming_config || 'missing'),
           logBlock('Recording stream', panelLogs.recording_stream_log || 'empty'),
-          logBlock('Recording cache', panelLogs.recording_cache_log || 'empty'),
+          logBlock(panelLogs.recording_cache_enabled===false?'Recording cache · historia (wyłączony)':'Recording cache', panelLogs.recording_cache_log || 'empty', panelLogs.recording_cache_enabled===false?'ok':''),
           logBlock('Recording thumbnails', panelLogs.recording_thumbnail_log || 'empty'),
           logBlock('Last saved response', panelLogs.last_saved_config || {}),
           ...recordingLogs.map((item) => logBlock(`Recording ffmpeg: ${item.path}`, item.tail || 'empty'))
@@ -8295,7 +8359,7 @@ INDEX_HTML = r"""<!doctype html>
           : rawPlayerSrc;
         const posterUrl = targetForPoster?.target?.file?.thumbnail_url ? panelPath(targetForPoster.target.file.thumbnail_url) : '';
         const preloadMode = Number(index)===0?'auto':'metadata';
-        const deferredPlayer=phonePlayback()&&(Number(index)!==0||activePage!=='nvr');
+        const deferredPlayer=activePage!=='nvr'||phonePlayback()&&Number(index)!==0;
         const playable = Boolean(timelineTotal && playerSrc);
         const daySelector = days.length
           ? `<div class="recording-day-bar" data-recording-day-swipe="${index}">
@@ -8314,7 +8378,7 @@ INDEX_HTML = r"""<!doctype html>
           : '';
         const player = playable
           ? `<div class="recording-player-wrap" data-recording-wrap="${index}" data-controls-visible="true">
-              <video class="recording-player" tabindex="0" aria-label="Recordings for selected day" ${deferredPlayer?`data-recording-suspended-src="${escapeHtml(playerSrc)}"`:`src="${escapeHtml(playerSrc)}"`} ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ''} data-recording-poster="${escapeHtml(posterUrl)}" preload="${deferredPlayer?'none':preloadMode}" ${phonePlayback()?'muted':''} playsinline webkit-playsinline data-recording-player="${index}" data-recording-file-url="${escapeHtml(selectedFile?.url || '')}" data-recording-loaded-file="${escapeHtml(selectedFile?.url || '')}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-start="${escapeHtml(playerPlaybackStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
+              <video class="recording-player" tabindex="0" aria-label="Recordings for selected day" ${deferredPlayer?`data-recording-suspended-src="${escapeHtml(playerSrc)}"`:`src="${escapeHtml(playerSrc)}"`} ${posterUrl&&activePage==='nvr' ? `poster="${escapeHtml(posterUrl)}"` : ''} data-recording-poster="${escapeHtml(posterUrl)}" preload="${deferredPlayer?'none':preloadMode}" ${phonePlayback()?'muted':''} playsinline webkit-playsinline data-recording-player="${index}" data-recording-file-url="${escapeHtml(selectedFile?.url || '')}" data-recording-loaded-file="${escapeHtml(selectedFile?.url || '')}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-start="${escapeHtml(playerPlaybackStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
               <canvas class="recording-transition-frame" data-recording-transition hidden aria-hidden="true"></canvas>
               ${recordingPlayerControls(index, timeline, targetForPoster?.playbackSeek || 0)}<section class="nvr-alert-popup" data-alert-popup="${index}" hidden></section>
               <p class="nvr-player-status" data-recording-playback-message="${index}" role="status" hidden></p>
@@ -9429,7 +9493,7 @@ INDEX_HTML = r"""<!doctype html>
           const usage=recordingStorage;
           const daily=Object.values(recordingStatus).reduce((sum,item)=>sum+Number(item.bytes_per_day_estimate||0),0);
           const retention=Number(config.nvr?.retention_days||14);
-          output.textContent=`Nagrania: ${formatBytes(usage.recordings_bytes)} · Kopie odtwarzania: ${formatBytes(usage.playback_cache_bytes)} / ${formatBytes(usage.playback_cache_limit_bytes)} · Kopie dla telefonów: ${formatBytes(usage.phone_cache_bytes)} / ${formatBytes(usage.phone_cache_limit_bytes)} · Miniatury: ${formatBytes(usage.thumbnail_cache_bytes)} / ${formatBytes(usage.thumbnail_cache_limit_bytes)} · Klipy alertów: ${formatBytes(usage.alert_clip_bytes)} / ${formatBytes(usage.alert_clip_limit_bytes)} · Zdjęcia alertów: ${formatBytes(usage.alert_image_bytes)} / ${formatBytes(usage.alert_image_limit_bytes)}. Wolne na dysku nagrań: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}; wolne w konfiguracji HA: ${usage.cache_volume?.free_bytes==null?'—':formatBytes(usage.cache_volume.free_bytes)}.${daily?' Szacunek ciągłego nagrywania: '+formatBytes(daily)+'/dobę, '+formatBytes(daily*retention)+' na '+retention+' dni. Zależy od bitrate i sceny.':''}`;
+          output.textContent=`Nagrania: ${formatBytes(usage.recordings_bytes)} · Kopie odtwarzania: ${formatBytes(usage.playback_cache_bytes)} / ${formatBytes(usage.playback_cache_limit_bytes)} · Kopie zgodności: ${formatBytes(usage.phone_cache_bytes)} / ${formatBytes(usage.phone_cache_limit_bytes)} · Miniatury: ${formatBytes(usage.thumbnail_cache_bytes)} / ${formatBytes(usage.thumbnail_cache_limit_bytes)} · Klipy alertów: ${formatBytes(usage.alert_clip_bytes)} / ${formatBytes(usage.alert_clip_limit_bytes)} · Zdjęcia alertów: ${formatBytes(usage.alert_image_bytes)} / ${formatBytes(usage.alert_image_limit_bytes)}. Wolne na dysku nagrań: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}; wolne w konfiguracji HA: ${usage.cache_volume?.free_bytes==null?'—':formatBytes(usage.cache_volume.free_bytes)}.${daily?' Szacunek ciągłego nagrywania: '+formatBytes(daily)+'/dobę, '+formatBytes(daily*retention)+' na '+retention+' dni. Zależy od bitrate i sceny.':''}`;
         });
       }
       function recordingDayLoadMessage(message) {
@@ -9800,23 +9864,30 @@ INDEX_HTML = r"""<!doctype html>
       async function openAlertRecording(event) {
         const index=(config.cameras||[]).findIndex(camera=>camera.id===event.camera_id);
         if(index>=0){
-          selectedRecordingDay[index]=event.day;delete selectedRecording[index];delete recordingStreamNonce[index];
-          showPage('nvr');await loadRecordingStatus({forceRender:true,reason:'alert_recording'});
-          if(seekRecordingEvent(index,event)){
+          const loaded=recordingStatus[index]?.selected_day===event.day&&nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+          if(!loaded){selectedRecordingDay[index]=event.day;delete selectedRecording[index];delete recordingStreamNonce[index];}
+          if(activePage!=='nvr')showPage('nvr');if(!loaded)await loadRecordingStatus({forceRender:true,reason:'alert_recording'});
+          let found=seekRecordingEvent(index,event);
+          if(!found&&loaded){await loadRecordingStatus({reason:'alert_recording_refresh'});found=seekRecordingEvent(index,event);}
+          if(found){
             nvrGrid.querySelectorAll('[data-alert-detail],[data-alert-popup]').forEach(node=>node.hidden=true);
             const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
-            video?.closest('[data-recording-wrap]')?.scrollIntoView({block:'center',behavior:'smooth'});
-            try{await video?.play();}catch(_){}return;
+            video?.closest('[data-recording-wrap]')?.scrollIntoView({block:'center',behavior:'auto'});
+            if(video){if(video.readyState<2&&event.image_url)video.poster=panelPath(event.image_url);playRecording(video);}return;
           }
         }
         if(event.clip_url){showSavedAlertClip(event);return;}
         throw new Error('W tym momencie brak zapisanego wideo. Zdjęcie alertu pozostaje w historii.');
       }
       function showSavedAlertClip(event) {
-          nvrGrid.querySelectorAll('video').forEach(video=>video.pause());
+          nvrGrid.querySelectorAll('video').forEach(pauseRecording);
+          releaseInactiveRecordingPlayers(null,true);
           const dialog=document.createElement('dialog');dialog.setAttribute('aria-label','Zapisany fragment alertu');dialog.style.cssText='max-width:95vw;width:850px;background:#101c29;color:white;border:0;border-radius:8px';
-          dialog.innerHTML=`<p>${escapeHtml(eventKindNames[event.kind]||event.kind)} · zapisany fragment alertu</p><video controls playsinline style="width:100%;max-height:75vh" src="${escapeHtml(mediaUrlWithTimeFragment(panelPath(event.clip_url),event.clip_offset_seconds))}"></video><button type="button">Zamknij</button>`;
+          dialog.innerHTML=`<p>${escapeHtml(eventKindNames[event.kind]||event.kind)} · zapisany fragment alertu</p><video controls playsinline preload="auto" ${phonePlayback()?'muted':''} ${event.image_url?`poster="${escapeHtml(panelPath(event.image_url))}"`:''} style="width:100%;max-height:75vh" src="${escapeHtml(mediaUrlWithTimeFragment(panelPath(event.clip_url),event.clip_offset_seconds))}"></video><p data-clip-status role="status">Wczytywanie fragmentu…</p><button type="button">Zamknij</button>`;
           const close=()=>{const video=dialog.querySelector('video');video.pause();video.removeAttribute('src');video.load();dialog.remove();};dialog.querySelector('button').onclick=close;dialog.addEventListener('cancel',close);document.body.append(dialog);dialog.showModal();
+          const clip=dialog.querySelector('video'),note=dialog.querySelector('[data-clip-status]');
+          clip.addEventListener('playing',()=>{note.hidden=true;});clip.addEventListener('error',()=>{note.hidden=false;note.textContent='Nie udało się wczytać fragmentu. Spróbuj ponownie.';});
+          clip.play().catch(()=>{note.textContent='Naciśnij Play, aby obejrzeć fragment.';});
       }
       document.addEventListener('click',async event=>{const button=event.target.closest('[data-alert-clip]');if(!button)return;try{const item=await eventJson(`api/alerts/${button.dataset.alertClip}`);if(item.clip_url)showSavedAlertClip(item);}catch(_){button.textContent='Fragment chwilowo niedostępny';}});
       async function openAlertById(id){const event=alertItems.get(String(id))||await eventJson(`api/alerts/${id}`);return openAlertRecording(event);}
@@ -9934,7 +10005,8 @@ INDEX_HTML = r"""<!doctype html>
 
       function showPage(pageName) {
         if(pageName!=='nvr'){for(const state of recordingScrubs.values())discardRecordingScrub(state.index);nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);hideRecordingScrubPreview();}
-        if(pageName!=='nvr')releaseInactiveRecordingPlayers(null);
+        if(pageName!=='nvr')releaseInactiveRecordingPlayers(null,true);
+        if(pageName!=='nvr')releaseRecordedPreviewDecoder();
         activePage = pageName;
         updateLivePlaybackVisibility();
         if(pageName==='edge-settings')void loadPhoneServices();
@@ -9948,8 +10020,10 @@ INDEX_HTML = r"""<!doctype html>
         if (detectionTimer) {clearInterval(detectionTimer);detectionTimer=null;}
         if (pageName === 'events') enterEventsPage();
         if (pageName === 'nvr') refreshRecordingEvents();
-        if (pageName === 'nvr'&&phonePlayback()) {
-          const first=nvrGrid.querySelector('video[data-recording-player]');if(first)restoreRecordingPlayer(first);
+        if (pageName === 'nvr'){scheduleRecordingThumbnailHydration();pumpRecordingThumbnails();}
+        if (pageName === 'nvr') {
+          const videos=nvrGrid.querySelectorAll('video[data-recording-player]');
+          (phonePlayback()?[...videos].slice(0,1):videos).forEach(restoreRecordingPlayer);
         }
         if (pageName === 'ha-dashboard') loadDashboardEntities();
         if (pageName === 'home') loadCameras().catch((error) => debugEvent('ui_cameras_refresh_error', { message: error.message }));
@@ -10377,6 +10451,7 @@ INDEX_HTML = r"""<!doctype html>
         if (video) {
           nvrInteractionUntil = Math.max(nvrInteractionUntil, Date.now() + 5000);
           syncRecordingVideoProgress(video);
+          warmNextRecording(video);
         }
       }, true);
 
@@ -10411,10 +10486,17 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('pause', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if(video&&video.paused&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.readyState>=2&&!video.seeking&&video.dataset.recordingPlayPending!=='true')video.dataset.recordingWantsPlay='false';
+        if(video&&video.paused&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.readyState>=2&&!video.seeking&&video.dataset.recordingPlayPending!=='true'&&video.dataset.recordingLoading!=='true'&&video.dataset.recordingBuffering!=='true')video.dataset.recordingWantsPlay='false';
         if(video)showRecordingControls(video.closest('[data-recording-wrap]'));
         if (video) { markNvrInteraction('recording_video_pause', recordingVideoDiagnostics(video)); updateRecordingPlayerControls(video); }
       }, true);
+
+      nvrGrid.addEventListener('playing',event=>{
+        const video=event.target?.matches?.('video[data-recording-player]')?event.target:null;
+        if(!video)return;
+        video.dataset.recordingLoading='false';video.dataset.recordingBuffering='false';
+        updateRecordingPlayerControls(video,'Playing recordings for selected day');warmNextRecording(video);
+      },true);
 
       nvrGrid.addEventListener('ratechange', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
@@ -10446,16 +10528,23 @@ INDEX_HTML = r"""<!doctype html>
       nvrGrid.addEventListener('waiting', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if (video) debugEvent('ui_recording_video_waiting', recordingVideoDiagnostics(video));
+        if(video&&video.dataset.recordingWantsPlay==='true'){video.dataset.recordingBuffering='true';holdRecordingFrame(video);updateRecordingPlayerControls(video,'Buforowanie nagrania…');}
       }, true);
 
       nvrGrid.addEventListener('stalled', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if (video) debugEvent('ui_recording_video_stalled', recordingVideoDiagnostics(video));
+        if(video&&video.readyState<3&&video.dataset.recordingWantsPlay==='true')video.dataset.recordingBuffering='true';
       }, true);
 
       nvrGrid.addEventListener('error', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if (video) debugEvent('ui_recording_video_error', recordingVideoDiagnostics(video));
+        if(video?.error?.code===2&&video.dataset.recordingWantsPlay==='true'&&Number(video.dataset.recordingNetworkRetries||0)<1&&activePage==='nvr'&&!document.hidden){
+          video.dataset.recordingNetworkRetries=String(Number(video.dataset.recordingNetworkRetries||0)+1);
+          video.dataset.recordingLoading='true';holdRecordingFrame(video);cancelRecordingWarmup(video);
+          playRecording(video);updateRecordingPlayerControls(video,'Ponowne łączenie z nagraniem…');return;
+        }
         if(video&&video.error){
           discardRecordingScrub(video.dataset.recordingPlayer);pauseRecording(video);
           updateRecordingPlayerControls(video,'Nie można odtworzyć tego fragmentu. Naciśnij Play, aby ponowić, lub wybierz inny moment.');
@@ -10797,6 +10886,17 @@ class EdgeHandler(BaseHTTPRequestHandler):
         write_debug_event("api_post", {"path": parsed.path, "query": parse_qs(parsed.query), "client": self.client_address[0]})
         if parsed.path == "/api/config":
             self.save_config()
+            return
+        if parsed.path=='/api/recording/prepare':
+            try:
+                payload=self.read_body_json()
+                if not isinstance(payload,dict):raise ValueError('invalid_recording')
+                source=recording_file_for_key(str(payload.get('key') or ''),str(payload.get('name') or ''))
+                if source is None:self.send_json({'error':'recording_not_found'},HTTPStatus.NOT_FOUND);return
+                target=RECORDING_COMPAT.prepare(source)
+                self.send_json({'ready':True,'size_bytes':target.stat().st_size})
+            except (ValueError,json.JSONDecodeError):self.send_json({'error':'invalid_recording'},HTTPStatus.BAD_REQUEST)
+            except (OSError,RuntimeError,subprocess.TimeoutExpired):self.send_json({'error':'recording_prepare_busy'},HTTPStatus.SERVICE_UNAVAILABLE,{'Retry-After':'1'})
             return
         if parsed.path == '/api/storage/cleanup':
             try:
@@ -11169,63 +11269,63 @@ class EdgeHandler(BaseHTTPRequestHandler):
         send_body: bool = True,
         cache_control: str = "public, max-age=86400, immutable",
     ) -> None:
-        file_size = target.stat().st_size
-        if file_size <= 0:
-            self.send_json({"error": "recording_empty"}, HTTPStatus.NOT_FOUND)
-            return
-
-        range_header = self.headers.get("Range", "")
-        start = 0
-        end = file_size - 1
-        status = HTTPStatus.OK
-
-        if range_header.startswith("bytes="):
-            requested = range_header.removeprefix("bytes=").split("-", 1)
-            try:
-                if not requested[0]:
-                    suffix=int(requested[1])
-                    if suffix<=0:raise ValueError('empty_suffix')
-                    start=max(0,file_size-suffix);end=file_size-1
-                else:
-                    start=int(requested[0]);end=int(requested[1]) if len(requested)>1 and requested[1] else file_size-1
-                    if start<0 or start>=file_size or end<start:raise ValueError('unsatisfied_range')
-                    end=min(end,file_size-1)
-                status = HTTPStatus.PARTIAL_CONTENT
-            except (ValueError,IndexError):
-                self.send_json({"error": "invalid_range"}, HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE,{'Content-Range':f'bytes */{file_size}'})
+        with target.open("rb") as handle:
+            file_size = os.fstat(handle.fileno()).st_size
+            if file_size <= 0:
+                self.send_json({"error": "recording_empty"}, HTTPStatus.NOT_FOUND)
                 return
 
-        length = end - start + 1
-        safe_disposition = disposition_name.replace('"', "_")
-        self.send_response(status)
-        self.send_header("Content-Type", "video/mp4")
-        self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Length", str(length))
-        self.send_header("Content-Disposition", f'inline; filename="{safe_disposition}"')
-        if status == HTTPStatus.PARTIAL_CONTENT:
-            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-        self.send_header("Cache-Control", cache_control)
-        self.send_header("X-Edge-Version", APP_VERSION)
-        self.send_header("X-Edge-UI-Build", UI_BUILD)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
+            range_header = self.headers.get("Range", "")
+            start = 0
+            end = file_size - 1
+            status = HTTPStatus.OK
 
-        write_debug_event(debug_event_name, {
-            "method": self.command,
-            "path": request_path,
-            "range": range_header,
-            "status": int(status),
-            "start": start,
-            "end": end,
-            "length": length,
-            "file_size": file_size,
-            "send_body": send_body,
-            **debug_payload,
-        })
-        if not send_body:
-            return
+            if range_header.startswith("bytes="):
+                requested = range_header.removeprefix("bytes=").split("-", 1)
+                try:
+                    if not requested[0]:
+                        suffix=int(requested[1])
+                        if suffix<=0:raise ValueError('empty_suffix')
+                        start=max(0,file_size-suffix);end=file_size-1
+                    else:
+                        start=int(requested[0]);end=int(requested[1]) if len(requested)>1 and requested[1] else file_size-1
+                        if start<0 or start>=file_size or end<start:raise ValueError('unsatisfied_range')
+                        end=min(end,file_size-1)
+                    status = HTTPStatus.PARTIAL_CONTENT
+                except (ValueError,IndexError):
+                    self.send_json({"error": "invalid_range"}, HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE,{'Content-Range':f'bytes */{file_size}'})
+                    return
 
-        with target.open("rb") as handle:
+            length = end - start + 1
+            safe_disposition = disposition_name.replace('"', "_")
+            self.send_response(status)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(length))
+            self.send_header("Content-Disposition", f'inline; filename="{safe_disposition}"')
+            if status == HTTPStatus.PARTIAL_CONTENT:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+            self.send_header("Cache-Control", cache_control)
+            self.send_header("X-Edge-Version", APP_VERSION)
+            self.send_header("X-Edge-UI-Build", UI_BUILD)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            write_debug_event(debug_event_name, {
+                "method": self.command,
+                "path": request_path,
+                "range": range_header,
+                "status": int(status),
+                "start": start,
+                "end": end,
+                "length": length,
+                "file_size": file_size,
+                "send_body": send_body,
+                **debug_payload,
+            })
+            if not send_body:
+                return
+
             handle.seek(start)
             remaining = length
             while remaining > 0:

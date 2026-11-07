@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.10
+
+- Fix black second-camera alerts on phones by using the common source-restoration/Play path. Reuse a loaded same-day player instead of rebuilding it or awaiting a status request before every alert. Refresh only when the selected event is absent from the current file index. Make the chosen video visible before Play, and release inactive phone decoders before saved clips open.
+- Preserve Play through native pauses during loading/buffering, clear buffering only on actual playback, respect explicit Pause and retry one transient network error per segment at the current position. Export buffered ranges and playback intent for diagnosing stalls. These changes cover desktop and phone playback.
+- Prepare the next saved segment through a small JSON request while the current one plays. No speculative video body, extra decoder or physical camera read. Keep one client preparation request, one backend remux worker and the existing 64 MiB / 12-file / 48-hour compatibility budget. Cached byte-range reads bypass an unrelated remux; an already-open file response survives cache eviction.
+- Normalize recording/alert containers for desktop as well as phones. Read AAC sample-clock regularity directly from MP4 metadata, copy healthy AAC packets unchanged, and repair only irregular clocks. Video remains stream-copy with original pixels/FPS. Limit recording/audio filter threads, defer hidden recording sources/posters on desktop and phones, and defer NVR thumbnail work while another page is visible, and release the temporary desktop preview decoder after a short idle period or page departure. H.265 decode/seek speed still depends on the original profile, GOP, device and connection.
+- Add nonblocking measured CPU busy/I/O-wait sampling. A startup load average of 1.302/core is an elevated-load warning, not by itself a hardware failure; an error requires measured busy CPU, sustained queue pressure and time after boot. Keep genuine sustained overload visible. Label disabled playback-cache logs as historical in the log viewer; full history and originals are retained.
+- Verify the live card connects through authenticated Home Assistant `/api/edge/rtc/…` WebSockets to the shared Edge core. Add actual WebKit/Chromium alert/clip/segment/buffering tests, bounded network-recovery checks, unchanged AAC-packet tests, CPU classification and cache-eviction streaming tests. Physical phone and WAN performance still require user-device verification.
+
 ## 0.11.9
 
 - Release hidden live iframe decoders when navigating away from Live, and restore them when returning. On phones, defer inactive recording sources and retain only the selected recording decoder; start muted and release paused recording decoders when leaving NVR. Temporary held pictures use screen-sized buffers; original recording/live pixels and FPS are unchanged.

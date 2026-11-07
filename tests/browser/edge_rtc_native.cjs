@@ -3,6 +3,7 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
 (async()=>{const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH||undefined,args:['--no-sandbox']});
 try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],['phone',390,844],['small-phone',320,740]]){
  const context=await browser.newContext({viewport:{width,height}});const page=await context.newPage();page.setDefaultTimeout(20000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ page.on('websocket',socket=>{const url=new URL(socket.url());assert.equal(url.host,'127.0.0.1:18089','card bypassed the authenticated Home Assistant proxy');assert(url.pathname.startsWith('/api/edge/rtc/'),'card used a direct camera or alternate streaming path');});
  await page.goto('http://127.0.0.1:18089');await page.addScriptTag({url:'/edge/edge-live-card.js'});
  await page.evaluate(()=>{
   // Prove this path does not invoke either browser WebRTC or MSE.
