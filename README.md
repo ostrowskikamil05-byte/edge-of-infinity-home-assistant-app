@@ -96,3 +96,17 @@ that mode and warns that short events between keyframes may be missed. Choose
 load explicitly. Recording quality and FPS are independent of AI sampling. No
 mode creates an extra physical camera stream. GPU behavior on HP t530 and native
 phone playback must still be checked on the actual devices.
+
+## Mobile playback and inline alerts (0.11.9)
+
+The phone player releases hidden live/recording decoders when you change views
+or cameras and starts muted; use the player's sound control to enable audio.
+Alert points sit on the video's seek track, gray ahead of the cursor and green
+behind it. Selecting a point still opens its intrusion pictures.
+
+Existing files are prepared in the same bounded 64 MiB compatibility cache.
+Video is copied without re-encoding, with track origins normalized to avoid a
+black lead-in; AAC timing is repaired. These copies do not replace originals.
+A failed AI VAAPI decoder is disabled for the rest of that app run, with CPU
+fallback. Native phone tests now include WebKit 26.5 plus real saved HEVC/H264
+and audio, rather than only Chromium with a phone user agent.

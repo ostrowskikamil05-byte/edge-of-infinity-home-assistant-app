@@ -10,6 +10,15 @@ from urllib.parse import urlparse
 
 _GPU_LOCK=threading.Lock()
 _GPU_CACHE=(-1e9,'')
+_GPU_FAILED=set()
+
+
+def reject_vaapi_device(device):
+    """Do not repeatedly submit a broken stream to the same kernel decoder."""
+    global _GPU_CACHE
+    with _GPU_LOCK:
+        if device:_GPU_FAILED.add(device)
+        _GPU_CACHE=(-1e9,'')
 
 
 def vaapi_device():
@@ -19,6 +28,7 @@ def vaapi_device():
         if time.monotonic()-_GPU_CACHE[0]<300:return _GPU_CACHE[1]
         device=''
         for node in sorted(Path('/dev/dri').glob('renderD*')):
+            if str(node) in _GPU_FAILED:continue
             if not os.access(node,os.R_OK|os.W_OK):continue
             command=['ffmpeg','-v','error','-nostdin','-init_hw_device',f'vaapi=edge:{node}','-filter_hw_device','edge','-f','lavfi','-i','color=s=64x64','-vf','format=nv12,hwupload,hwdownload,format=nv12','-frames:v','1','-f','null','-']
             try:
@@ -78,7 +88,8 @@ class SharedFrameReader:
         self.url,self.fps,self.mode=url,fps,mode
         self.device=vaapi_device() if mode=='auto' else ''
         self.backend='vaapi' if self.device else ('cpu_keyframes' if mode=='keyframes' else 'cpu')
-        self.fallback_reason='';self.last_delivery=0.;self.frame_interval=0.
+        self.fallback_reason='vaapi_disabled_after_error' if mode=='auto' and not self.device and _GPU_FAILED else ''
+        self.last_delivery=0.;self.frame_interval=0.
         self.command=analysis_command(url,fps,self.backend,self.device)
         self.condition=threading.Condition();self.stopped=threading.Event()
         self.process=None;self.latest=None;self.sequence=0;self.consumed=0;self.error=''
@@ -104,6 +115,7 @@ class SharedFrameReader:
                             self.sequence+=1;self.latest=(frame,self.last_delivery);self.condition.notify_all()
                 except Exception:
                     if self.backend=='vaapi' and not self.stopped.is_set():
+                        reject_vaapi_device(self.device)
                         self.backend='cpu';self.fallback_reason='vaapi_unavailable_for_stream';restart=True
                     else:raise
                 finally:self._stop_process()
@@ -126,7 +138,11 @@ class SharedFrameReader:
     def read(self,timeout=45):
         with self.condition:
             ready=self.condition.wait_for(lambda:self.sequence>self.consumed or self.stopped.is_set(),timeout)
-            if not ready:raise RuntimeError('analysis_frame_timeout')
+            if not ready:
+                if self.backend=='vaapi':
+                    reject_vaapi_device(self.device)
+                    self.stopped.set();self._stop_process()
+                raise RuntimeError('analysis_frame_timeout')
             if self.sequence<=self.consumed:raise RuntimeError(self.error or 'analysis_stream_closed')
             self.consumed=self.sequence
             return self.latest

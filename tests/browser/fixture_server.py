@@ -8,7 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from test_edge_panel_config import load_panel_module, camera
 p=load_panel_module()
 p.MIN_RECORDING_FILE_READY_SECONDS=0
-config=p.normalize_config({'storage': {'recordings_dir': str(p.HOME_DIR/'recordings')}, 'nvr': {'segment_seconds': 7}, 'cameras': [camera('front', '192.0.2.10', 'sub')]})
+fixture_cameras=[camera('front','192.0.2.10','sub')]
+if os.environ.get('EDGE_TEST_MULTI_CAMERA'):fixture_cameras.append(camera('back','192.0.2.11','main'))
+config=p.normalize_config({'storage': {'recordings_dir': str(p.HOME_DIR/'recordings')}, 'nvr': {'segment_seconds': 7}, 'cameras': fixture_cameras})
 p.commit_panel_config(config)
 p.sync_runtime_engine_config=lambda *a: {}
 p.sync_supervisor_options=lambda *a: {"synced": True, "status": "synced"}
@@ -17,6 +19,8 @@ p.schedule_recording_cache_refresh=lambda *a,**kw: False
 p.refresh_status=lambda: {}
 p.remember_camera_presets=lambda *a: None
 p.write_json(p.DATA_DIR/'cameras.json', {'cameras': []})
+if os.environ.get('EDGE_TEST_MULTI_CAMERA'):
+ p.write_json(p.DATA_DIR/'cameras.json',{'cameras':[{**c,'index':i,'key':p.recording_key(c,i),'status':'online','video_codec':'hevc' if i==0 else 'h264'} for i,c in enumerate(config['cameras'])]})
 if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  from edge_detection import DetectionService
  from datetime import datetime
@@ -52,6 +56,16 @@ subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=160x90:ra
 for name in ['20260727-000000.mp4','20260727-000007.mp4','20260727-000014.mp4','20260728-000000.mp4','20260728-000007.mp4','20260728-000014.mp4']:
  shutil.copyfile(sample,d/name)
 sample.unlink()
+if os.environ.get('EDGE_TEST_MULTI_CAMERA'):
+ for i,c in enumerate(config['cameras']):
+  folder=p.recording_base_dir(c,i);folder.mkdir(exist_ok=True,parents=True)
+  sample=folder/'sample.mp4'
+  encoding=['-c:v','libx265','-x265-params','pools=none:frame-threads=1:log-level=error','-tag:v','hev1'] if i==0 else ['-c:v','libx264','-threads','1','-g','20']
+  subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=640x360:rate=20','-f','lavfi','-i','sine=sample_rate=48000',
+                  '-t','7',*encoding,'-c:a','aac','-movflags','+faststart',str(sample)],check=True)
+  for day in ('20260727','20260728'):
+   for second in (0,7,14):shutil.copyfile(sample,folder/f'{day}-0000{second:02d}.mp4')
+  sample.unlink()
 if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  p.ALERT_SERVICE=p.AlertMediaService(p.DETECTION_SERVICE.store,p.load_config,p.alert_source_entries,p.save_alert_image,p.save_alert_fallback_image,start=False)
  # Fixture dates are intentionally historical; retention is covered separately.

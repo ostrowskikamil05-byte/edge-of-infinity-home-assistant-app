@@ -1,5 +1,7 @@
 import io
 import unittest
+from pathlib import Path
+import tempfile
 from unittest.mock import patch
 
 from test_edge_panel_config import load_panel_module
@@ -52,6 +54,20 @@ class HttpDisconnectTests(unittest.TestCase):
     def test_other_io_failures_are_not_hidden(self):
         with self.assertRaisesRegex(OSError, 'client disconnected'):
             self.request(self.handler(DroppedResponse(OSError, 2)))
+
+    def test_mp4_suffix_range_and_invalid_range_follow_http_byte_semantics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target=Path(directory)/'clip.mp4';target.write_bytes(bytes(range(100)))
+            for value,expected in [('bytes=-10',bytes(range(90,100))),('bytes=0-1',bytes(range(2))),('bytes=95-',bytes(range(95,100)))]:
+                output=io.BytesIO();handler=self.handler(output);handler.command='GET';handler.requestline='GET /clip.mp4 HTTP/1.1';handler.request_version='HTTP/1.1';handler.headers={'Range':value}
+                with patch.object(handler,'log_message'):
+                    handler.serve_mp4_file(target,'/clip.mp4','clip.mp4','test',{})
+                header,body=output.getvalue().split(b'\r\n\r\n',1)
+                self.assertIn(b'206 Partial Content',header);self.assertEqual(body,expected)
+            for value in ('bytes=-0','bytes=100-','bytes=20-10'):
+                handler=self.handler(io.BytesIO());handler.headers={'Range':value}
+                with patch.object(handler,'send_json') as send:handler.serve_mp4_file(target,'/clip.mp4','clip.mp4','test',{})
+                self.assertEqual(send.call_args.args[1],416);self.assertEqual(send.call_args.args[2]['Content-Range'],'bytes */100')
 
 
 if __name__ == '__main__':

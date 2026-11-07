@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -63,6 +64,17 @@ class RecordingCompatibilityTests(unittest.TestCase):
         self.assertNotIn('-use_wallclock_as_timestamps',command)
         self.assertEqual(command[command.index('-tag:v')+1],'hvc1')
         self.assertEqual(command[command.index('-c:v')+1],'copy')
+        self.assertEqual(command[command.index('-af')+1],'aresample=async=1:first_pts=0')
+
+    def test_backward_audio_clock_is_repaired_without_nonmonotonic_dts(self):
+        if not shutil.which('ffmpeg'):self.skipTest('FFmpeg required')
+        audio='sine=sample_rate=48000:duration=3,asetpts=PTS-if(gte(T\\,1)\\,0.03/TB\\,0)'
+        common=['ffmpeg','-hide_banner','-loglevel','warning','-f','lavfi','-i',audio]
+        broken=subprocess.run([*common,'-c:a','aac',str(self.root/'broken.mp4')],capture_output=True,text=True,check=True)
+        self.assertIn('backward in time',broken.stderr)
+        command=self.p.build_recording_command('rtsp://127.0.0.1:8554/front','unused',10,'copy','hevc')
+        fixed=subprocess.run([*common,'-af',command[command.index('-af')+1],'-c:a','aac',str(self.root/'fixed.mp4')],capture_output=True,text=True,check=True)
+        self.assertNotIn('Non-monotonic',fixed.stderr);self.assertNotIn('backward in time',fixed.stderr)
 
     def test_cache_rejects_symlink_and_removes_failed_temporary(self):
         source=self.sample();link=self.root/'link.mp4';link.symlink_to(source)
@@ -70,3 +82,14 @@ class RecordingCompatibilityTests(unittest.TestCase):
         with patch('edge_recording_compat.subprocess.run',side_effect=subprocess.TimeoutExpired('ffmpeg',20)):
             with self.assertRaises(subprocess.TimeoutExpired):self.cache.prepare(source)
         self.assertFalse((self.cache.directory/'remux.tmp').exists());self.assertTrue(source.exists())
+
+    def test_old_video_track_with_large_start_offset_has_no_black_lead_in(self):
+        source=self.sample();delayed=self.root/'delayed.mp4'
+        subprocess.run(['ffmpeg','-v','error','-itsoffset','9','-i',str(source),'-c','copy','-avoid_negative_ts','disabled',str(delayed)],check=True)
+        def start(path):
+            result=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries','stream=start_time','-of','json',str(path)],capture_output=True,text=True,check=True)
+            return float(json.loads(result.stdout)['streams'][0]['start_time'])
+        self.assertGreater(start(delayed),8)
+        prepared=self.cache.prepare(delayed)
+        self.assertLess(abs(start(prepared)),.03)
+        self.assertEqual(self.timing(prepared)['fps'],self.timing(delayed)['fps'])

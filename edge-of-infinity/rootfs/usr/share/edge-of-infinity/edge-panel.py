@@ -90,9 +90,9 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.11.8"
+APP_VERSION = "0.11.9"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "mobile-relay-v118"
+UI_BUILD = "phone-native-v119"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -4125,6 +4125,9 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
         ]
     if mode=='copy' and video_codec.lower() in ('hevc','h265'):
         command+=['-tag:v','hvc1']
+    # Camera audio clocks can jump backwards while RTP video remains valid.
+    # Keep original video timestamps; repair only the AAC sample clock.
+    command+=['-af','aresample=async=1:first_pts=0']
     command += [
         "-f",
         "segment",
@@ -5239,7 +5242,7 @@ def health_payload() -> dict:
 EDGE_RTC_PLAYER_HTML = r"""<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;height:100%;background:#080e15;color:#d9e7ee;font:13px system-ui}canvas{width:100%;height:100%;object-fit:contain}button{position:absolute;bottom:12px;right:12px;padding:10px;border:0;border-radius:8px;background:#20384b;color:white}p{position:absolute;top:8px;left:10px}</style><canvas></canvas><p>EdgeRTC · connecting…</p><button>Sound</button><script type="module">
 import{EdgeRTCClient}from'../client.js';
 const path=location.pathname.split('/').pop(),url=new URL('../stream/'+path,location.href);let client,timer,retries=0,muted=true;
-function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;document.querySelector('p').textContent='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264');}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
+function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;const label='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264'),note=document.querySelector('p');if(note.textContent!==label)note.textContent=label;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
 connect();document.querySelector('button').onclick=()=>{muted=!muted;client?.setAudio(.6,muted);document.querySelector('button').textContent=muted?'Sound':'Mute';};document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(document.hidden)client?.close();else connect();});window.addEventListener('pagehide',()=>{clearTimeout(timer);client?.close();});
 </script>"""
 
@@ -5674,12 +5677,12 @@ INDEX_HTML = r"""<!doctype html>
       .recording-player-wrap .nvr-playback-toolbar select { min-height:34px; padding:3px; width:54px; background:#14202be0; color:#fff; }
       .recording-player-wrap .nvr-playback-clock { width:auto; margin-left:auto; margin-right:auto; font-size:12px; color:#fff; }
       .recording-player-wrap .nvr-playback-seek { margin:0; padding:0; border:0; appearance:none; min-height:24px; height:24px; background:transparent; cursor:pointer; touch-action:none; }
-      .nvr-seek-shell { position:relative; height:36px; min-width:0; }
+      .nvr-seek-shell { position:relative; height:32px; min-width:0; }
       .recording-player-wrap .nvr-seek-shell .nvr-playback-seek { position:absolute; left:0; bottom:0; }
-      .nvr-alert-dots { position:absolute; left:6px; right:6px; top:0; height:12px; }
-      .nvr-alert-dots button { position:absolute; top:0; transform:translateX(-50%); width:12px; height:12px; min-height:12px; min-width:12px; padding:0; border:0; background:transparent; }
-      .nvr-alert-dots button::after { content:''; display:block; width:7px; height:7px; border-radius:50%; margin:auto; background:#60a5fa; box-shadow:0 0 0 1px #0008; }
-      .nvr-alert-dots button[data-animal="true"]::after { background:#e9a8ff; }
+      .nvr-alert-dots { position:absolute; left:8px; right:8px; bottom:12px; height:0; z-index:2; pointer-events:none; }
+      .nvr-alert-dots button { position:absolute; top:0; transform:translate(-50%,-50%); width:12px; height:12px; min-height:12px; min-width:12px; padding:0; border:0; background:transparent; pointer-events:auto; touch-action:manipulation; }
+      .nvr-alert-dots button::after { content:''; display:block; width:7px; height:7px; border-radius:50%; margin:auto; background:#a3aab3; box-shadow:0 0 0 1px #091018; }
+      .nvr-alert-dots button[data-passed="true"]::after { background:var(--accent); }
       .nvr-alert-detail { display:flex; gap:8px; overflow:auto; padding:8px; background:var(--panel); border-radius:8px; }
       .nvr-alert-detail[hidden], .nvr-alert-popup[hidden] { display:none; }
       .nvr-alert-card { display:grid; flex:0 0 145px; gap:4px; color:var(--text); text-align:left; }
@@ -6912,10 +6915,36 @@ INDEX_HTML = r"""<!doctype html>
         if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1)) {
           const parsed=new URL(clean,location.href);
           if (/\/recordings\/|\/api\/alerts\/\d+\/clip\.mp4$/.test(parsed.pathname)) {
-            parsed.searchParams.set('compat','1');parsed.searchParams.set('container','hvc1-v1');clean=parsed.href;
+            parsed.searchParams.set('compat','1');parsed.searchParams.set('container','hvc1-clock-v3');clean=parsed.href;
           }
         }
         return seek?`${clean}#t=${seek.toFixed(3)}`:clean;
+      }
+
+      function phonePlayback() {
+        return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+      }
+
+      function releaseInactiveRecordingPlayers(selected) {
+        if(!phonePlayback())return;
+        nvrGrid.querySelectorAll('video[data-recording-player]').forEach(other=>{
+          if(other===selected)return;
+          pauseRecording(other);
+          if(other.getAttribute('src')){
+            if(other.readyState>=1)other.dataset.recordingSeek=String(other.currentTime);
+            other.dataset.recordingSuspendedSrc=mediaUrlWithTimeFragment(other.getAttribute('src'),other.dataset.recordingSeek);
+            if(other.dataset.recordingPoster)other.poster=other.dataset.recordingPoster;
+            other.removeAttribute('src');other.load();
+          }
+          const held=other.closest('[data-recording-wrap]')?.querySelector('[data-recording-transition]');
+          if(held){held.hidden=true;held.width=0;held.height=0;delete held.dataset.valid;}
+        });
+      }
+
+      function restoreRecordingPlayer(video) {
+        const source=video.dataset.recordingSuspendedSrc;
+        if(!source)return;
+        delete video.dataset.recordingSuspendedSrc;video.preload='auto';video.src=source;video.load();
       }
 
       function recordingDefaultTarget(files, status = {}) {
@@ -6935,6 +6964,9 @@ INDEX_HTML = r"""<!doctype html>
         url.searchParams.delete('at');return url.href;
       }
       function recordedPreview(url,second=0,priority=false) {
+        // On phones keep the hardware decoder for the watched recording.
+        // Hover falls back to a small server JPEG; tiles already prefer JPEG.
+        if(phonePlayback())return Promise.reject(new Error('phone_preview_uses_jpeg'));
         const key=`${url}|${Math.round(Number(second)*10)/10}`;
         if(recordedPreviewCache.has(key))return Promise.resolve(recordedPreviewCache.get(key));
         return new Promise((resolve,reject)=>{
@@ -7084,9 +7116,12 @@ INDEX_HTML = r"""<!doctype html>
         if (!frame) return;
         if(video.readyState<2||video.seeking||!video.videoWidth){if(frame.width&&frame.dataset.valid==='true')frame.hidden=false;return;}
         try {
-          frame.width = video.videoWidth; frame.height = video.videoHeight;
+          // Only the temporary hold picture follows screen size. The video
+          // decoder and saved recording retain their original pixels and FPS.
+          frame.width = Math.min(video.videoWidth,Math.max(480,Math.ceil(video.clientWidth*devicePixelRatio)));
+          frame.height = Math.round(frame.width*video.videoHeight/video.videoWidth);
           frame.style.height = `${video.clientHeight}px`;
-          frame.getContext('2d').drawImage(video, 0, 0);
+          frame.getContext('2d').drawImage(video, 0, 0,frame.width,frame.height);
           frame.dataset.valid='true';
           frame.hidden = false;
         } catch (_) { if(frame.dataset.valid==='true')frame.hidden=false; }
@@ -7098,7 +7133,9 @@ INDEX_HTML = r"""<!doctype html>
         const source=video.currentSrc||video.src, expectedSeek=Number(video.dataset.recordingSeek||0);
         const release = () => {
           if ((video.currentSrc||video.src)!==source||Number(video.dataset.recordingSeek||0)!==expectedSeek||video.seeking||video.readyState<2||video.currentTime+.1<expectedSeek)return;
-          try{frame.width=video.videoWidth;frame.height=video.videoHeight;frame.style.height=`${video.clientHeight}px`;frame.getContext('2d').drawImage(video,0,0);frame.dataset.valid='true';}catch(_){return;}
+          // A working native video must never remain hidden behind a canvas
+          // if WebKit refuses a canvas readback of a hardware decoded frame.
+          frame.hidden=true;
           requestAnimationFrame(()=>{if((video.currentSrc||video.src)===source&&!video.seeking&&Number(video.dataset.recordingSeek||0)===expectedSeek)frame.hidden=true;});
         };
         // Paused seeks can be fully occluded by the held frame; some browsers
@@ -7113,6 +7150,9 @@ INDEX_HTML = r"""<!doctype html>
         video.dataset.recordingWantsPlay='false';video.dataset.recordingPlayPending='false';video.dataset.recordingPlayEpoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.pause();
       }
       function playRecording(video) {
+        releaseInactiveRecordingPlayers(video);restoreRecordingPlayer(video);
+        if(recordingPictureUnavailable(video))return;
+        if(video.error)video.load();
         video.dataset.recordingWantsPlay='true';video.dataset.recordingPlayPending='true';
         const epoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.dataset.recordingPlayEpoch=epoch;
         const scrub=recordingScrubs.get(video.dataset.recordingPlayer);
@@ -7128,6 +7168,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!target?.target?.file?.url) return false;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         if (!video) return false;
+        releaseInactiveRecordingPlayers(video);delete video.dataset.recordingSuspendedSrc;
         const fileUrl = target.target.file.url;
         const nextPath = panelPath(fileUrl);
         const nextSrc = mediaUrlWithTimeFragment(nextPath, target.seek);
@@ -7600,7 +7641,8 @@ INDEX_HTML = r"""<!doctype html>
         try{
           const response=await fetch(panelPath(`api/recording/timing?${new URLSearchParams({key:recordingStatus[index].key,name:file.name})}`));
           if(!response.ok)return;const data=await response.json();if(!video.isConnected||video.dataset.recordingLoadedFile!==source)return;
-          video.dataset.recordingFps=String(data.fps||0);updateRecordingPlayerControls(video);
+          video.dataset.recordingFps=String(data.fps||0);video.dataset.recordingCodec=data.codec_name||'';
+          if(!recordingPictureUnavailable(video))updateRecordingPlayerControls(video);
         }catch(_){}
       }
       const recordingScrubs = new Map(), recordingControlsTimers = new WeakMap();
@@ -7762,6 +7804,16 @@ INDEX_HTML = r"""<!doctype html>
         return Math.max(0, Number(video?.dataset?.recordingPlaybackStart || 0) + Number(video?.currentTime || 0));
       }
 
+      function recordingPictureUnavailable(video) {
+        // A browser can report canplay and advance audio while silently
+        // ignoring an unsupported HEVC video track. Do not show black Play.
+        if(video.readyState<2||video.videoWidth||!video.dataset.recordingCodec)return false;
+        const hevc=video.dataset.recordingCodec==='hevc';
+        discardRecordingScrub(video.dataset.recordingPlayer);pauseRecording(video);
+        updateRecordingPlayerControls(video,hevc?'Ta przeglądarka nie odtwarza obrazu H.265 z tego pliku. Otwórz nagranie w przeglądarce z obsługą H.265.':'Ta przeglądarka nie odtwarza obrazu z tego fragmentu nagrania.');
+        return true;
+      }
+
       function updateRecordingPlayerControls(video, message = null) {
         if (!video) return;
         const index = video.dataset.recordingPlayer;
@@ -7778,6 +7830,7 @@ INDEX_HTML = r"""<!doctype html>
           slider.setAttribute('aria-valuetext',`${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}`);
           slider.style.setProperty('--seek-percent',`${Math.min(100,position/Math.max(.1,total-.1)*100)}%`);
         }
+        updateAlertProgress(index,position);
         const fps=Number(video.dataset.recordingFps||0);
         video.closest('[data-recording-wrap]')?.querySelectorAll('[data-recording-frame]').forEach(button=>button.disabled=!(fps>0));
         const toggle = nvrGrid.querySelector(`[data-recording-toggle="${index}"]`);
@@ -8043,7 +8096,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         const preview = live[liveKey]
           ? (plan.canEmbed
-            ? `<iframe class="live-frame" src="${escapeHtml(mediamtxUrl)}" data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} ${EDGE_NATIVE_RTC ? 'EdgeRTC' : 'WebRTC'} live" loading="eager" allow="autoplay; fullscreen; encrypted-media" allowfullscreen onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
+            ? `<iframe class="live-frame" src="${escapeHtml(activePage==='home'&&!document.hidden?mediamtxUrl:'about:blank')}" ${activePage==='home'&&!document.hidden?'':'data-live-suspended="true"'} data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} ${EDGE_NATIVE_RTC ? 'EdgeRTC' : 'WebRTC'} live" loading="eager" allow="autoplay; fullscreen; encrypted-media" allowfullscreen onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
             : liveBlockedPreview(plan))
           : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         const fullscreenButton = live[liveKey] && plan.canEmbed
@@ -8090,6 +8143,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function monitorLiveFrames() {
         document.querySelectorAll('iframe.live-frame[data-live-key]').forEach((frame) => {
+          if(frame.dataset.liveSuspended==='true')return;
           const liveKey = frame.dataset.liveKey || 'unknown';
           const url = frame.dataset.liveUrl || frame.src || '';
           if (liveFrameTimers.has(liveKey)) {
@@ -8122,6 +8176,22 @@ INDEX_HTML = r"""<!doctype html>
           });
         });
       }
+
+      function updateLivePlaybackVisibility() {
+        const visible=activePage==='home'&&!document.hidden;
+        grid.querySelectorAll('iframe.live-frame').forEach(frame=>{
+          if(!visible&&frame.dataset.liveSuspended!=='true'){
+            frame.dataset.liveSuspended='true';frame.src='about:blank';
+            clearTimeout(liveFrameTimers.get(frame.dataset.liveKey));liveFrameTimers.delete(frame.dataset.liveKey);
+          }else if(visible&&frame.dataset.liveSuspended==='true'){
+            delete frame.dataset.liveSuspended;frame.src=frame.dataset.liveUrl;
+          }
+        });
+      }
+      document.addEventListener('visibilitychange',()=>{
+        updateLivePlaybackVisibility();
+        if(document.hidden)nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);
+      });
 
       function addCameraTile() {
         return `
@@ -8219,6 +8289,7 @@ INDEX_HTML = r"""<!doctype html>
           : rawPlayerSrc;
         const posterUrl = targetForPoster?.target?.file?.thumbnail_url ? panelPath(targetForPoster.target.file.thumbnail_url) : '';
         const preloadMode = Number(index)===0?'auto':'metadata';
+        const deferredPlayer=phonePlayback()&&(Number(index)!==0||activePage!=='nvr');
         const playable = Boolean(timelineTotal && playerSrc);
         const daySelector = days.length
           ? `<div class="recording-day-bar" data-recording-day-swipe="${index}">
@@ -8237,7 +8308,7 @@ INDEX_HTML = r"""<!doctype html>
           : '';
         const player = playable
           ? `<div class="recording-player-wrap" data-recording-wrap="${index}" data-controls-visible="true">
-              <video class="recording-player" tabindex="0" aria-label="Recordings for selected day" src="${escapeHtml(playerSrc)}" ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ''} preload="${preloadMode}" playsinline webkit-playsinline data-recording-player="${index}" data-recording-file-url="${escapeHtml(selectedFile?.url || '')}" data-recording-loaded-file="${escapeHtml(selectedFile?.url || '')}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-start="${escapeHtml(playerPlaybackStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
+              <video class="recording-player" tabindex="0" aria-label="Recordings for selected day" ${deferredPlayer?`data-recording-suspended-src="${escapeHtml(playerSrc)}"`:`src="${escapeHtml(playerSrc)}"`} ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ''} data-recording-poster="${escapeHtml(posterUrl)}" preload="${deferredPlayer?'none':preloadMode}" ${phonePlayback()?'muted':''} playsinline webkit-playsinline data-recording-player="${index}" data-recording-file-url="${escapeHtml(selectedFile?.url || '')}" data-recording-loaded-file="${escapeHtml(selectedFile?.url || '')}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-start="${escapeHtml(playerPlaybackStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
               <canvas class="recording-transition-frame" data-recording-transition hidden aria-hidden="true"></canvas>
               ${recordingPlayerControls(index, timeline, targetForPoster?.playbackSeek || 0)}<section class="nvr-alert-popup" data-alert-popup="${index}" hidden></section>
               <p class="nvr-player-status" data-recording-playback-message="${index}" role="status" hidden></p>
@@ -9692,9 +9763,14 @@ INDEX_HTML = r"""<!doctype html>
         }
         const html=[...bins.values()].map(group=>{
           const label=group.events.map(event=>eventKindNames[event.kind]||event.kind).filter((value,index,values)=>values.indexOf(value)===index).join(', ');
-          return `<button type="button" data-alert-point="${index}" data-alert-ids="${[...group.events].reverse().map(event=>Number(event.id)).join(',')}" data-animal="${group.events.some(event=>event.kind==='animal')}" style="left:${group.position*100}%" aria-label="${escapeHtml(label)} · ${group.events.length} alertów" title="${escapeHtml(label)} · ${new Date(group.events[0].timestamp*1000).toLocaleTimeString()}"></button>`;
+          return `<button type="button" data-alert-point="${index}" data-alert-position="${group.position*Math.max(.1,total-.1)}" data-alert-ids="${[...group.events].reverse().map(event=>Number(event.id)).join(',')}" style="left:${group.position*100}%" aria-label="${escapeHtml(label)} · ${group.events.length} alertów" title="${escapeHtml(label)} · ${new Date(group.events[0].timestamp*1000).toLocaleTimeString()}"></button>`;
         }).join('');
         if(axis.dataset.signature!==html){axis.innerHTML=html;axis.dataset.signature=html;}
+        const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+        updateAlertProgress(index,recordingScrubs.get(String(index))?.desired??recordingPlaybackPosition(video));
+      }
+      function updateAlertProgress(index,position) {
+        nvrGrid.querySelectorAll(`[data-alert-point="${index}"]`).forEach(point=>point.dataset.passed=String(Number(point.dataset.alertPosition)<=position+.05));
       }
       function intrusionCard(event, index=null) {
         const kind=eventKindNames[event.kind]||event.kind,state={pending:'Zapisywanie fragmentu…',ready:'Fragment zapisany',expired:'Fragment wygasł',unavailable:'Brak klipu · dostępne zdjęcie',error:'Nie udało się zapisać klipu'}[event.clip_state]||'';
@@ -9852,7 +9928,9 @@ INDEX_HTML = r"""<!doctype html>
 
       function showPage(pageName) {
         if(pageName!=='nvr'){for(const state of recordingScrubs.values())discardRecordingScrub(state.index);nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);hideRecordingScrubPreview();}
+        if(pageName!=='nvr')releaseInactiveRecordingPlayers(null);
         activePage = pageName;
+        updateLivePlaybackVisibility();
         if(pageName==='edge-settings')void loadPhoneServices();
         document.querySelectorAll('[data-page]').forEach((page) => {
           page.hidden = page.dataset.page !== pageName;
@@ -9864,6 +9942,9 @@ INDEX_HTML = r"""<!doctype html>
         if (detectionTimer) {clearInterval(detectionTimer);detectionTimer=null;}
         if (pageName === 'events') enterEventsPage();
         if (pageName === 'nvr') refreshRecordingEvents();
+        if (pageName === 'nvr'&&phonePlayback()) {
+          const first=nvrGrid.querySelector('video[data-recording-player]');if(first)restoreRecordingPlayer(first);
+        }
         if (pageName === 'ha-dashboard') loadDashboardEntities();
         if (pageName === 'home') loadCameras().catch((error) => debugEvent('ui_cameras_refresh_error', { message: error.message }));
         if (pageName === 'logs') {
@@ -10351,6 +10432,7 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('canplay', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if(video&&recordingPictureUnavailable(video))return;
         if(video&&video.dataset.recordingWantsPlay==='true'&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.paused)playRecording(video);
         if (video) debugEvent('ui_recording_video_canplay', recordingVideoDiagnostics(video));
       }, true);
@@ -10368,6 +10450,10 @@ INDEX_HTML = r"""<!doctype html>
       nvrGrid.addEventListener('error', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if (video) debugEvent('ui_recording_video_error', recordingVideoDiagnostics(video));
+        if(video&&video.error){
+          discardRecordingScrub(video.dataset.recordingPlayer);pauseRecording(video);
+          updateRecordingPlayerControls(video,'Nie można odtworzyć tego fragmentu. Naciśnij Play, aby ponowić, lub wybierz inny moment.');
+        }
         const image = event.target?.matches?.('img.recording-thumb, .recording-day-thumb img') ? event.target : null;
         if (image && !String(image.src || '').startsWith('data:image')) {
           debugEvent('ui_recording_thumbnail_error', { src: image.currentSrc || image.src || '' });
@@ -11090,13 +11176,17 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if range_header.startswith("bytes="):
             requested = range_header.removeprefix("bytes=").split("-", 1)
             try:
-                start = int(requested[0]) if requested[0] else 0
-                end = int(requested[1]) if len(requested) > 1 and requested[1] else file_size - 1
-                start = max(0, min(start, file_size - 1))
-                end = max(start, min(end, file_size - 1))
+                if not requested[0]:
+                    suffix=int(requested[1])
+                    if suffix<=0:raise ValueError('empty_suffix')
+                    start=max(0,file_size-suffix);end=file_size-1
+                else:
+                    start=int(requested[0]);end=int(requested[1]) if len(requested)>1 and requested[1] else file_size-1
+                    if start<0 or start>=file_size or end<start:raise ValueError('unsatisfied_range')
+                    end=min(end,file_size-1)
                 status = HTTPStatus.PARTIAL_CONTENT
-            except ValueError:
-                self.send_json({"error": "invalid_range"}, HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            except (ValueError,IndexError):
+                self.send_json({"error": "invalid_range"}, HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE,{'Content-Range':f'bytes */{file_size}'})
                 return
 
         length = end - start + 1

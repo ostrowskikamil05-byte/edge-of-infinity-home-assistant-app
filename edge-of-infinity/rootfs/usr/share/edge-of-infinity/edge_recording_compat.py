@@ -47,7 +47,7 @@ class CompatibleRecordings:
         # No full-day copies or transcodes. One original segment, copied once.
         reserve=int(stat.st_size*1.1)+MIB
         if reserve>self.budget:raise RuntimeError('recording_compat_budget')
-        signature=f'{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:hvc1-v1'
+        signature=f'{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:hvc1-clock-v3'
         name=hashlib.sha256(signature.encode()).hexdigest()+'.mp4'
         if not self.lock.acquire(timeout=20):raise RuntimeError('recording_compat_busy')
         temporary=None
@@ -67,7 +67,10 @@ class CompatibleRecordings:
             if temporary.is_symlink():raise RuntimeError('invalid_compat_temporary')
             command=['ffmpeg','-hide_banner','-loglevel','error','-nostdin','-y','-threads','1',
                      '-fflags','+genpts','-i',str(source),'-map','0:v:0','-map','0:a?',
-                     '-c','copy','-avoid_negative_ts','make_zero','-movflags','+faststart']
+                     '-c:v','copy','-c:a','aac','-b:a','96k','-ar','48000','-ac','1',
+                     '-af','asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0',
+                     '-bsf:v','setts=pts=PTS-STARTPTS:dts=DTS-STARTPTS',
+                     '-avoid_negative_ts','disabled','-movflags','+faststart']
             if video_timing(source).get('codec_name')=='hevc':command+=['-tag:v','hvc1']
             command+=['-fs',str(reserve),'-f','mp4',str(temporary)]
             if shutil.which('nice'):command=['nice','-n','10',*command]
