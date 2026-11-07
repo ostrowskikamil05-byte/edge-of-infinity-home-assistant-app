@@ -23,7 +23,9 @@ for (const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],['p
  for(const box of geometry.thumbs) {assert(box.width>=80);assert(box.height>=45);assert(Math.abs(box.width/box.height-16/9)<.1);}
  assert(geometry.player.width<=width&&geometry.player.height>100);
  await page.evaluate(()=>{window.savedVideo=document.querySelector('video[data-recording-player]');window.savedSrc=window.savedVideo.src;});
+ if(!(await page.locator('[data-recording-speed]').isVisible()))await page.locator('[data-recording-more]').click();
  await page.locator('[data-recording-speed]').selectOption('4');
+ if(await page.locator('[data-recording-more]').isVisible())await page.locator('[data-recording-more]').click();
  await page.locator('[data-recording-toggle]').click();
  await page.waitForFunction(()=>{const v=document.querySelector('video');const f=document.querySelector('[data-recording-transition]');return v?.dataset.recordingFileUrl.endsWith('000007.mp4')&&f&&!f.hidden},null,{timeout:15000});
  assert(await page.locator('video').evaluate(v=>!v.hasAttribute('poster')),'poster returned during playback transition');

@@ -27,7 +27,7 @@ const assert=require('node:assert/strict');
    await page.waitForFunction(()=>{const v=document.querySelector('video');return v?.readyState>=2&&!v.paused;});
    await page.evaluate(()=>{const v=document.querySelector('video');v.pause();window.previewVideo=v;window.previewSrc=v.src;});
    async function preview(value){
-    await page.locator('[data-recording-playback-seek]').evaluate((slider,value)=>{slider.value=String(value);slider.dispatchEvent(new Event('input',{bubbles:true}));},value);
+    await page.locator('[data-recording-playback-seek]').evaluate((slider,value)=>{const r=slider.getBoundingClientRect();slider.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerType:'mouse',clientX:r.left+6+(r.width-12)*value/Number(slider.max),buttons:0}));},value);
     await page.waitForFunction(()=>{const box=document.querySelector('[data-recording-scrub-preview]');const img=box?.querySelector('img');return box&&!box.hidden&&img&&!img.hidden&&img.naturalWidth>100;});
     return page.locator('[data-recording-scrub-preview] img').evaluate(img=>img.src);
    }

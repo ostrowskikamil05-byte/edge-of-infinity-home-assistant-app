@@ -40,7 +40,7 @@ if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
 d=p.recording_base_dir(config['cameras'][0],0); d.mkdir(parents=True)
 import subprocess
 sample=d/'sample.mp4'
-subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=160x90:rate=10','-t','7','-c:v','libx264','-threads','1','-g','10',str(sample)],check=True)
+subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=160x90:rate=10','-t',os.environ.get('EDGE_TEST_RECORDING_DURATION','7'),'-c:v','libx264','-threads','1','-g','10',str(sample)],check=True)
 for name in ['20260727-000000.mp4','20260727-000007.mp4','20260727-000014.mp4','20260728-000000.mp4','20260728-000007.mp4','20260728-000014.mp4']:
  shutil.copyfile(sample,d/name)
 sample.unlink()

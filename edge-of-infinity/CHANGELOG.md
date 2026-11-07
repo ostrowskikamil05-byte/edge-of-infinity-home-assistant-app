@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.5
+
+- Use one full-day seek bar inside the video picture. Remove the separate calendar-day slider below the player; day selection and event jumps remain available. Overlay controls remain inside the picture in native and in-page fullscreen, with a compact settings menu for narrow players.
+- Dragging the bar now seeks the actual recorded video during the gesture, including across segment boundaries. Preserve fractional positions, coalesce rapid updates and wait for an in-flight decoder/load instead of launching every requested seek. Hover still shows the bounded recorded-video thumbnail preview without changing playback.
+- Pause while dragging and resume only if the video was playing before the gesture. Support pointer capture, real touch, held keyboard keys, Escape to cancel and stale/slow seek cancellation. Keep requested position visible while a frame loads, and prevent old pointer callbacks from finishing a new keyboard gesture.
+- Release held transition frames after paused seeks even when a browser defers video-frame callbacks for occluded video. Guard release callbacks against superseded sources/positions. Show a bounded error on an unfinished seek and cancel pending gestures on day/page changes.
+- Preserve original recorded video, storage budgets, retention, AI and EdgeRTC frame pacing. Add responsive real-decoder tests for in-picture controls, changing pixels before pointer release, segment transitions, pause/resume, keyboard cancel, touch, fullscreen and latest-target behavior under a delayed clip load.
+
 ## 0.11.4
 
 - Stop generating full-day playback copies by default: the day player keeps one timeline and seeks original segments. Remove recognized legacy playback-cache files automatically at startup/maintenance when the copy budget is zero. An optional global copy budget is capped at 2 GB, with space reservation and refusal of oversized day builds; active cached players are protected from ordinary eviction.

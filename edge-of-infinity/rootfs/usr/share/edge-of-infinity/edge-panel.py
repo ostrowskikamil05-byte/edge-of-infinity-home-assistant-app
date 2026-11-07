@@ -33,9 +33,9 @@ from edge_storage import MIB, SEGMENT, managed_files, prune_cache, trim_log
 DETECTION_SERVICE = None
 
 
-APP_VERSION = "0.11.4"
+APP_VERSION = "0.11.5"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "recording-storage-v114"
+UI_BUILD = "in-player-scrub-v115"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -5539,7 +5539,36 @@ INDEX_HTML = r"""<!doctype html>
         height: 100% !important; min-height: 0; aspect-ratio: auto; object-fit: contain;
       }
       .recording-player-wrap:fullscreen .nvr-playback-controls, .recording-player-wrap.edge-soft-fullscreen .nvr-playback-controls { width: 100%; }
-      .recording-day-seek { width: 100%; accent-color: #22c55e; cursor: pointer; }
+      .recording-player-wrap { aspect-ratio:16/9; container-type:inline-size; container-name:nvrplayer; background:#05080a; }
+      .recording-player-wrap .recording-player { height:100%; aspect-ratio:auto; border:0; }
+      .recording-player-wrap .nvr-playback-controls { position:absolute; inset:auto 0 0; z-index:3; width:100%; box-sizing:border-box; padding:20px 10px max(6px,env(safe-area-inset-bottom)); gap:2px; background:linear-gradient(transparent,rgba(0,0,0,.92)); transition:opacity .16s; }
+      .recording-player-wrap[data-controls-visible="false"] .nvr-playback-controls { opacity:0; pointer-events:none; }
+      .recording-player-wrap .nvr-playback-toolbar { flex-wrap:nowrap; gap:5px; }
+      .recording-player-wrap .nvr-playback-toolbar button { display:grid; place-items:center; min-height:34px; min-width:34px; padding:5px; border:0; background:transparent; color:#fff; }
+      .recording-player-wrap .nvr-playback-toolbar svg { width:18px; height:18px; }
+      .recording-player-wrap .nvr-playback-toolbar select { min-height:34px; padding:3px; width:54px; background:#14202be0; color:#fff; }
+      .recording-player-wrap .nvr-playback-clock { width:auto; margin-left:auto; margin-right:auto; font-size:12px; color:#fff; }
+      .recording-player-wrap .nvr-playback-seek { margin:0; padding:0; border:0; appearance:none; min-height:24px; height:24px; background:transparent; cursor:pointer; touch-action:none; }
+      .nvr-playback-seek::-webkit-slider-runnable-track { height:4px; border-radius:2px; background:linear-gradient(to right,var(--accent) var(--seek-percent,0%),#ffffff66 var(--seek-percent,0%)); }
+      .nvr-playback-seek::-webkit-slider-thumb { appearance:none; width:12px; height:12px; margin-top:-4px; border-radius:50%; background:var(--accent); }
+      .nvr-playback-seek::-moz-range-track { height:4px; border-radius:2px; background:#ffffff66; }
+      .nvr-playback-seek::-moz-range-progress { height:4px; background:var(--accent); }
+      .nvr-playback-seek::-moz-range-thumb { width:12px; height:12px; border:0; border-radius:50%; background:var(--accent); }
+      .recording-player-wrap .nvr-player-status { position:absolute; z-index:2; top:8px; left:8px; right:8px; margin:0; padding:5px 8px; background:#061018dc; color:white; font-size:12px; pointer-events:none; }
+      .recording-player-wrap .nvr-player-status[hidden] { display:none; }
+      .recording-player-wrap .recording-transition-frame { z-index:1; }
+      .recording-player-wrap:fullscreen, .recording-player-wrap.edge-soft-fullscreen { display:block !important; aspect-ratio:auto; }
+      .recording-player-wrap .nvr-playback-extra { display:flex; align-items:center; gap:5px; }
+      .recording-player-wrap .nvr-playback-toolbar .nvr-player-more { display:none; }
+      @container nvrplayer (max-width:420px) {
+        .recording-player-wrap .nvr-playback-toolbar { justify-content:space-between; }
+        .recording-player-wrap .nvr-playback-toolbar button { min-width:44px; min-height:44px; }
+        .recording-player-wrap .nvr-playback-clock { position:absolute; right:12px; top:1px; margin:0; font-size:11px; }
+        .recording-player-wrap .nvr-playback-toolbar .nvr-player-more { display:grid; }
+        .recording-player-wrap .nvr-playback-extra { display:none; position:absolute; bottom:54px; right:8px; z-index:5; max-width:calc(100% - 16px); padding:8px; border-radius:8px; background:#101c29; box-shadow:0 2px 8px #0008; }
+        .recording-player-wrap[data-extra-open="true"] .nvr-playback-extra { display:flex; }
+      }
+
       .event-history-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
       .event-history-row button { min-height: 44px; }
       #event-pagination { justify-content: space-between; }
@@ -6615,10 +6644,10 @@ INDEX_HTML = r"""<!doctype html>
         const entries = timeline.entries || [];
         if (!entries.length) return null;
         const timelineMax = Math.max(0, Number(timeline.total || 0) - 1);
-        const input = Math.max(0, Math.min(Math.floor(Number(offset || 0)), timelineMax));
+        const input = Math.max(0, Math.min(Number(offset || 0), timelineMax));
         let target = entries.find((entry) => input >= entry.offset && input < entry.offset + entry.duration);
         if (!target) target = entries.find((entry) => input < entry.offset) || entries[entries.length - 1];
-        const seek = Math.max(0, Math.min(input - target.offset, Math.max(0, target.duration - 1)));
+        const seek = Math.max(0, Math.min(input - target.offset, Math.max(0, target.duration - 0.1)));
         const requested = target.offset + seek;
         const playbackSeek = Math.max(0, Number(target.playbackOffset || 0) + seek);
         return { timeline, target, requested, input, seek, playbackSeek };
@@ -6663,6 +6692,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function selectRecordingDay(index, day, reason = 'select') {
         if (!day) return;
+        discardRecordingScrub(index);
         hideRecordingScrubPreview();
         selectedRecordingDay[index] = day;
         delete selectedRecording[index];
@@ -6836,11 +6866,14 @@ INDEX_HTML = r"""<!doctype html>
         video.removeAttribute('poster');
         const frame = video.closest('.recording-player-wrap')?.querySelector('[data-recording-transition]');
         if (!frame) return;
+        const source=video.currentSrc||video.src, expectedSeek=Number(video.dataset.recordingSeek||0);
         const release = () => {
-          const expectedSeek = Number(video.dataset.recordingSeek || 0);
-          if (!video.seeking && video.currentTime + 0.1 >= expectedSeek) frame.hidden = true;
+          if ((video.currentSrc||video.src)===source&&Number(video.dataset.recordingSeek||0)===expectedSeek&&!video.seeking&&video.readyState>=2&&video.currentTime+0.1>=expectedSeek) frame.hidden=true;
         };
-        if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(release);
+        // Paused seeks can be fully occluded by the held frame; some browsers
+        // then defer video-frame callbacks until playback resumes.
+        if (video.paused) requestAnimationFrame(()=>requestAnimationFrame(release));
+        else if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(release);
         else requestAnimationFrame(() => requestAnimationFrame(release));
       }
 
@@ -6853,11 +6886,13 @@ INDEX_HTML = r"""<!doctype html>
         const cleanNext = new URL(panelPath(fileUrl), window.location.href).href;
         const nextPath = panelPath(fileUrl);
         const nextSrc = mediaUrlWithTimeFragment(nextPath, target.seek);
+        const fileSeek=video.dataset.recordingLoadedFile===fileUrl&&Number.isFinite(video.duration)
+          ? Math.min(target.seek,Math.max(0,video.duration-.05)) : target.seek;
         selectedRecording[index] = fileUrl;
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
         recordingStreamStartOffset[index] = target.target.offset;
-        video.dataset.recordingSeek = String(target.seek);
+        video.dataset.recordingSeek = String(fileSeek);
         video.dataset.recordingStreamStart = String(target.target.offset);
         video.dataset.recordingPlaybackStart = String(target.target.playbackOffset || 0);
         video.dataset.recordingPlaybackMode = 'server_file_sequence';
@@ -6867,12 +6902,12 @@ INDEX_HTML = r"""<!doctype html>
         updateRecordingTileSelection(index, fileUrl);
         if (video.dataset.recordingLoadedFile === fileUrl && video.readyState >= 1) {
           try {
-            video.currentTime = target.seek;
+            video.currentTime = fileSeek;
           } catch (error) {
             debugEvent('ui_recording_server_file_seek_error', { index, reason, message: error.message });
           }
           if (autoplay) video.play().catch((error) => debugEvent('ui_recording_server_file_autoplay_error', { index, reason, message: error.message }));
-          debugEvent('ui_recording_server_file_fast_seek', { index, reason, recording: target.target.file.name, timeline_second: target.requested, playback_second: target.playbackSeek, segment_second: target.seek });
+          if(!recordingScrubs.has(String(index)))debugEvent('ui_recording_server_file_fast_seek', { index, reason, recording: target.target.file.name, timeline_second: target.requested, playback_second: target.playbackSeek, segment_second: target.seek });
           return true;
         }
         holdRecordingFrame(video);
@@ -6884,7 +6919,7 @@ INDEX_HTML = r"""<!doctype html>
         if (autoplay) {
           video.play().catch((error) => debugEvent('ui_recording_server_file_autoplay_error', { index, reason, message: error.message }));
         }
-        debugEvent('ui_recording_server_file_switch', { index, reason, recording: target.target.file.name, timeline_second: target.requested, playback_second: target.playbackSeek, segment_second: target.seek });
+        if(!recordingScrubs.has(String(index)))debugEvent('ui_recording_server_file_switch', { index, reason, recording: target.target.file.name, timeline_second: target.requested, playback_second: target.playbackSeek, segment_second: target.seek });
         return true;
       }
 
@@ -6959,8 +6994,6 @@ INDEX_HTML = r"""<!doctype html>
         const safeValue = Math.max(0, Math.floor(Number(value || 0)));
         const safeTotal = Math.max(0, Math.floor(Number(total || 0)));
         selectedRecordingTimeline[index] = Math.min(safeValue, Math.max(0, safeTotal - 1));
-        const slider = nvrGrid.querySelector(`[data-recording-day-seek="${index}"]`);
-        if (slider && document.activeElement !== slider) slider.value = String(selectedRecordingTimeline[index]);
         const label = nvrGrid.querySelector(`[data-recording-timeline-label="${index}"]`);
         if (label) {
           label.textContent = recordingTimelineLabel(index, safeValue, safeTotal);
@@ -6982,10 +7015,10 @@ INDEX_HTML = r"""<!doctype html>
         const timeline = recordingTimeline(files, status);
         const entries = timeline.entries || [];
         if (!entries.length) return null;
-        const playbackMax = Math.max(0, Number(timeline.playbackTotal || 0) - 1);
-        const input = Math.max(0, Math.min(Math.floor(Number(playbackOffset || 0)), playbackMax));
+        const playbackMax = Math.max(0, Number(timeline.playbackTotal || 0) - 0.1);
+        const input = Math.max(0, Math.min(Number(playbackOffset || 0), playbackMax));
         const target = entries.find((entry) => input >= entry.playbackOffset && input < entry.playbackOffset + entry.duration) || entries[entries.length - 1];
-        const seek = Math.max(0, Math.min(input - target.playbackOffset, Math.max(0, target.duration - 1)));
+        const seek = Math.max(0, Math.min(input - target.playbackOffset, Math.max(0, target.duration - 0.1)));
         const requested = target.offset + seek;
         return { timeline, target, requested, input, seek, playbackSeek: target.playbackOffset + seek };
       }
@@ -7074,9 +7107,10 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
 
-      function selectRecordingAtOffset(index, offset) {
+      function selectRecordingAtOffset(index, offset, options = {}) {
+        if(!options.scrubbing)discardRecordingScrub(index);
         clearRecordingContinuation(index);
-        markNvrInteraction('select_recording_offset', { index, offset });
+        markNvrInteraction(options.scrubbing?'timeupdate':'select_recording_offset', { index, offset });
         const target = recordingTargetForOffset(index, offset);
         if (!target) return;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
@@ -7160,6 +7194,7 @@ INDEX_HTML = r"""<!doctype html>
       function syncRecordingVideoProgress(video) {
         const index = video?.dataset?.recordingPlayer;
         if (index === undefined) return;
+        if (recordingScrubs.has(String(index))) {updateRecordingPlayerControls(video);return;}
         const status = recordingStatus[index] || {};
         const files = Array.isArray(status.files) ? status.files : [];
         const streamStart = Math.max(0, Number(video.dataset.recordingStreamStart || recordingStreamStartOffset[index] || 0));
@@ -7315,21 +7350,95 @@ INDEX_HTML = r"""<!doctype html>
           .map((part) => String(part).padStart(2, '0')).join(':');
       }
 
+      const recordingScrubs = new Map(), recordingControlsTimers = new WeakMap();
+      function showRecordingControls(wrap) {
+        if (!wrap) return;
+        wrap.dataset.controlsVisible = 'true';
+        clearTimeout(recordingControlsTimers.get(wrap));
+        recordingControlsTimers.set(wrap,setTimeout(()=>{
+          const video=wrap.querySelector('video'), focus=wrap.querySelector(':focus-visible');
+          if (video&&!video.paused&&!recordingScrubs.has(video.dataset.recordingPlayer)&&!focus&&wrap.dataset.extraOpen!=='true') wrap.dataset.controlsVisible='false';
+        },2500));
+      }
+      function discardRecordingScrub(index) {
+        const state=recordingScrubs.get(String(index));if(!state)return;
+        clearTimeout(state.timer);clearTimeout(state.deadline);
+        state.video.closest('[data-recording-wrap]')?.removeAttribute('data-scrubbing');
+        recordingScrubs.delete(String(index));
+      }
+      function beginRecordingScrub(slider) {
+        const index=slider.dataset.recordingPlaybackSeek;
+        let state=recordingScrubs.get(index);
+        if(state){state.active=true;state.finishing=false;clearTimeout(state.deadline);return state;}
+        const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);if(!video)return null;
+        state={index,video,slider,active:true,finishing:false,resume:!video.paused&&!video.ended,original:recordingPlaybackPosition(video),desired:Number(slider.value),applied:null,lastSeek:0};
+        recordingScrubs.set(index,state);clearRecordingContinuation(index);video.pause();
+        markNvrInteraction('recording_scrub_start',{index});
+        const wrap=video.closest('[data-recording-wrap]');wrap.dataset.scrubbing='true';showRecordingControls(wrap);
+        return state;
+      }
+      function queueRecordingScrub(slider) {
+        const state=beginRecordingScrub(slider);if(!state)return;
+        state.desired=Number(slider.value);updateRecordingPlayerControls(state.video);
+        markNvrInteraction('timeupdate');
+        flushRecordingScrub(state);
+      }
+      function flushRecordingScrub(state) {
+        if(recordingScrubs.get(state.index)!==state)return;
+        clearTimeout(state.timer);
+        const video=state.video;
+        if(!video.isConnected){discardRecordingScrub(state.index);return;}
+        const delay=state.active?Math.max(0,80-(performance.now()-state.lastSeek)):0;
+        const desiredTarget=recordingTargetForPlaybackOffset(state.index,state.desired);
+        const supersede=state.applied!==state.desired&&(video.error||(desiredTarget?.target?.file?.url!==video.dataset.recordingLoadedFile&&performance.now()-state.lastSeek>1000));
+        if(((video.seeking||video.readyState<1)&&!supersede)||delay){state.timer=setTimeout(()=>flushRecordingScrub(state),Math.max(40,delay));return;}
+        if(state.applied!==state.desired){
+          state.applied=state.desired;state.lastSeek=performance.now();
+          seekRecordingPlayback(state.index,state.desired,true);
+        }
+        const expected=Number.isFinite(video.duration)?Math.min(state.desired,Number(video.dataset.recordingPlaybackStart||0)+Math.max(0,video.duration-.05)):state.desired;
+        if(state.finishing&&!video.seeking&&video.readyState>=2&&Math.abs(recordingPlaybackPosition(video)-expected)<.2){
+          const resume=state.resume;discardRecordingScrub(state.index);hideRecordingScrubPreview();
+          updateRecordingPlayerControls(video,'');showRecordingControls(video.closest('[data-recording-wrap]'));
+          if(resume)video.play().catch(error=>updateRecordingPlayerControls(video,error.message));
+          return;
+        }
+        state.timer=setTimeout(()=>flushRecordingScrub(state),80);
+      }
+      function finishRecordingScrub(slider,cancel=false) {
+        const state=recordingScrubs.get(slider.dataset.recordingPlaybackSeek)||beginRecordingScrub(slider);if(!state)return;
+        state.desired=cancel?state.original:Number(slider.value);state.slider.value=String(state.desired);
+        state.active=false;state.finishing=true;hideRecordingScrubPreview();
+        debugEvent('ui_recording_scrub_commit',{index:state.index,position:state.desired,cancel});
+        clearTimeout(state.deadline);state.deadline=setTimeout(()=>{
+          if(recordingScrubs.get(state.index)!==state)return;
+          discardRecordingScrub(state.index);state.video.pause();
+          updateRecordingPlayerControls(state.video,'Nie udało się wczytać wybranego momentu. Spróbuj ponownie.');
+        },15000);
+        flushRecordingScrub(state);
+      }
+      window.addEventListener('pagehide',()=>{for(const index of recordingScrubs.keys())discardRecordingScrub(index);});
+      window.addEventListener('blur',()=>{for(const state of recordingScrubs.values()){state.resume=false;if(state.active)finishRecordingScrub(state.slider);}});
+
+      function recordingControlIcon(name) {
+        const shapes={play:'<path d="m8 5 11 7-11 7z"/>',pause:'<path d="M8 5v14M16 5v14"/>',settings:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',sound:'<path d="m11 5-6 5H2v4h3l6 5zM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14"/>',muted:'<path d="m11 5-6 5H2v4h3l6 5zM16 9l5 6M21 9l-5 6"/>'};
+        return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">${shapes[name]||shapes.play}</svg>`;
+      }
       function recordingPlayerControls(index, timeline, position = 0) {
         const total = Math.max(0, Number(timeline.playbackTotal || 0));
         return `<div class="nvr-playback-controls">
+          <input class="nvr-playback-seek" type="range" min="0" max="${Math.max(0,total-0.1)}" step="0.1" value="${position}" data-recording-playback-seek="${index}" aria-label="Seek through all recorded video in selected day" aria-valuetext="${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}">
           <div class="nvr-playback-toolbar">
-            <button type="button" data-recording-toggle="${index}" aria-label="Play selected day's recordings">Play</button>
-            <button type="button" data-recording-jump="-10" data-record-index="${index}" aria-label="Back 10 seconds">−10 s</button>
-            <button type="button" data-recording-jump="10" data-record-index="${index}" aria-label="Forward 10 seconds">+10 s</button>
-            <button type="button" data-recording-mute="${index}" aria-label="Mute or unmute">Mute</button>
-            <label>Speed <select data-recording-speed="${index}" aria-label="Playback speed">
-              <option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
-            </select></label>
+            <button type="button" data-recording-toggle="${index}" aria-label="Play selected day's recordings" title="Play">${recordingControlIcon('play')}</button>
+
             <output class="nvr-playback-clock" data-recording-duration="${index}">${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}</output>
+            <button type="button" data-recording-mute="${index}" aria-label="Mute or unmute" title="Mute">${recordingControlIcon('sound')}</button>
+
+<div class="nvr-playback-extra" id="recording-extra-${index}">            <button class="nvr-skip" type="button" data-recording-jump="-10" data-record-index="${index}" aria-label="Back 10 seconds" title="Back 10 seconds">−10</button>
+            <button class="nvr-skip" type="button" data-recording-jump="10" data-record-index="${index}" aria-label="Forward 10 seconds" title="Forward 10 seconds">+10</button>            <label class="nvr-speed-label"><select data-recording-speed="${index}" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label></div>
+            <button class="nvr-player-more" type="button" data-recording-more="${index}" aria-label="Playback settings" title="Playback settings" aria-controls="recording-extra-${index}" aria-expanded="false">${recordingControlIcon('settings')}</button>
+            <button type="button" data-recording-fullscreen="${index}" aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>
           </div>
-          <input class="nvr-playback-seek" type="range" min="0" max="${Math.max(0, total - 0.1)}" step="0.1" value="${position}" data-recording-playback-seek="${index}" aria-label="Seek through all recorded video in selected day">
-          <p class="nvr-playback-message" data-recording-playback-message="${index}" role="status">${recordingPlaybackClock(total)} recorded in this day</p>
         </div>`;
       }
 
@@ -7341,9 +7450,8 @@ INDEX_HTML = r"""<!doctype html>
         document.querySelectorAll('[data-recording-scrub-preview]').forEach(node => node.hidden = true);
       }
       function showRecordingScrubPreview(slider, value, clientX) {
-        const playback = slider.hasAttribute('data-recording-playback-seek');
-        const index = playback ? slider.dataset.recordingPlaybackSeek : slider.dataset.recordingDaySeek;
-        const selection = playback ? recordingTargetForPlaybackOffset(index,value) : recordingTargetForOffset(index,value);
+        const index = slider.dataset.recordingPlaybackSeek;
+        const selection = recordingTargetForPlaybackOffset(index,value);
         if (!selection?.target?.file) return;
         const card = slider.closest('[data-nvr-index]'), parent = card.querySelector('[data-recording-wrap]') || card;
         let box = parent.querySelector('[data-recording-scrub-preview]');
@@ -7359,7 +7467,7 @@ INDEX_HTML = r"""<!doctype html>
         const x = clientX ?? rect.left + rect.width * Number(value)/Math.max(1,Number(slider.max));
         box.hidden = false; box.style.left = `${Math.max(4,Math.min(innerWidth-width-4,x-width/2))}px`;
         box.style.top = `${Math.max(4,Math.min(innerHeight-150,rect.top-145))}px`;
-        const gap = !playback && Number(selection.requested) !== Number(selection.input);
+        const gap = false;
         const label = `${recordingPlaybackClock(Number(file.timeline_offset || 0)+bucket)} · ${gap?'najbliższy fragment · ':''}podgląd co 5 s`;
         const image = box.querySelector('img');
         const previous = scrubDesired;
@@ -7402,25 +7510,28 @@ INDEX_HTML = r"""<!doctype html>
         const index = video.dataset.recordingPlayer;
         const status = recordingStatus[index] || {};
         const total = Number(status.timeline?.playback_total_seconds || status.timeline?.recorded_seconds || 0);
-        const position = Math.min(total, recordingPlaybackPosition(video));
+        const scrubbing = recordingScrubs.get(String(index));
+        const position = Math.min(total, scrubbing ? scrubbing.desired : recordingPlaybackPosition(video));
         const clock = nvrGrid.querySelector(`[data-recording-duration="${index}"]`);
         if (clock) clock.textContent = `${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}`;
         const slider = nvrGrid.querySelector(`[data-recording-playback-seek="${index}"]`);
         if (slider) {
           slider.max = String(Math.max(0, total - 0.1));
-          if (document.activeElement !== slider) slider.value = String(position);
+          if (!scrubbing) slider.value = String(position);
+          slider.setAttribute('aria-valuetext',`${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}`);
+          slider.style.setProperty('--seek-percent',`${Math.min(100,position/Math.max(.1,total-.1)*100)}%`);
         }
         const toggle = nvrGrid.querySelector(`[data-recording-toggle="${index}"]`);
-        if (toggle) { toggle.textContent = video.paused ? 'Play' : 'Pause'; toggle.setAttribute('aria-pressed', String(!video.paused)); }
+        if (toggle) { const label=video.paused?'Play':'Pause';toggle.innerHTML=recordingControlIcon(video.paused?'play':'pause');toggle.title=label;toggle.setAttribute('aria-label',label);toggle.setAttribute('aria-pressed',String(!video.paused)); }
         const mute = nvrGrid.querySelector(`[data-recording-mute="${index}"]`);
-        if (mute) mute.textContent = video.muted ? 'Unmute' : 'Mute';
+        if (mute) {mute.innerHTML=recordingControlIcon(video.muted?'muted':'sound');mute.title=video.muted?'Unmute':'Mute';mute.setAttribute('aria-label',mute.title);}
         const note = nvrGrid.querySelector(`[data-recording-playback-message="${index}"]`);
-        if (note && message !== null) note.textContent = message;
+        if (note && message !== null) {note.textContent=message;note.hidden=!message||message==='Playing recordings for selected day';}
       }
 
-      function seekRecordingPlayback(index, position) {
+      function seekRecordingPlayback(index, position, scrubbing = false) {
         const target = recordingTargetForPlaybackOffset(index, position);
-        if (target) selectRecordingAtOffset(index, target.requested);
+        if (target) selectRecordingAtOffset(index, target.requested, {scrubbing});
       }
 
       function recordingVideoDiagnostics(video) {
@@ -7865,30 +7976,13 @@ INDEX_HTML = r"""<!doctype html>
             </div>`
           : '';
         const player = playable
-          ? `<div class="recording-player-wrap" data-recording-wrap="${index}">
+          ? `<div class="recording-player-wrap" data-recording-wrap="${index}" data-controls-visible="true">
               <video class="recording-player" tabindex="0" aria-label="Recordings for selected day" src="${escapeHtml(playerSrc)}" ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ''} preload="${preloadMode}" playsinline webkit-playsinline data-recording-player="${index}" data-recording-file-url="${escapeHtml(selectedFile?.url || '')}" data-recording-loaded-file="${escapeHtml(selectedFile?.url || '')}" data-recording-src="${escapeHtml(playerSrc)}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-start="${escapeHtml(playerPlaybackStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
               <canvas class="recording-transition-frame" data-recording-transition hidden aria-hidden="true"></canvas>
               ${recordingPlayerControls(index, timeline, targetForPoster?.playbackSeek || 0)}
-              <button class="fullscreen-button" type="button" data-recording-fullscreen="${index}" aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>
+              <p class="nvr-player-status" data-recording-playback-message="${index}" role="status" hidden></p>
             </div>`
           : `<div class="recording-empty">No video yet</div>`;
-        const timelineControl = timelineTotal
-          ? `<div class="recording-timeline recording-native-timeline">
-              <label>Day timeline
-                <input class="recording-day-seek" type="range" min="0" max="${timelineMax}" step="1" value="${timelineValue}" data-recording-day-seek="${index}" aria-label="Seek within selected recording day">
-              </label>
-              <div class="timeline-row"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
-              <p class="notice">${escapeHtml(recordingDayLabel(currentDay))}: one continuous day. Empty periods jump to the next available recording.</p>
-              <div class="timeline-row">
-                <span>Recording time</span>
-                <span data-recording-timeline-label="${index}">${escapeHtml(recordingTimelineLabel(index, timelineValue, timelineTotal))}</span>
-              </div>
-              <div class="timeline-row">
-                <span>${escapeHtml(text(status.timeline?.oldest_at, 'oldest'))}</span>
-                <span>${escapeHtml(text(status.timeline?.newest_at, 'newest'))}</span>
-              </div>
-            </div>`
-          : '';
         const recordingList = displayFiles.length
           ? `<div class="recording-film-grid">${displayFiles.map((file) => `
               <button class="recording-tile ${file.url === selected ? 'active' : ''}" type="button" data-play-recording="${escapeHtml(file.url)}" data-recording-offset="${escapeHtml(offsetForRecordingUrl(index, file.url))}" data-record-index="${index}">
@@ -7913,7 +8007,6 @@ INDEX_HTML = r"""<!doctype html>
               </div>
               ${daySelector}
               ${player}
-              ${timelineControl}
               ${currentDay ? `<section class="recording-events" data-recording-events="${index}"><div class="event-history-row"><b>Zdarzenia dnia / Day events</b><button type="button" data-recording-events-refresh="${index}">Odśwież</button></div><div data-recording-event-content><p class="field-help">Ładowanie zdarzeń…</p></div><p class="nvr-playback-message" data-recording-event-message role="status"></p></section>` : ''}
               ${diagnostics}
               <div class="actions">
@@ -8329,6 +8422,7 @@ INDEX_HTML = r"""<!doctype html>
             return;
           }
           clearRecordingContinuation(index);
+          discardRecordingScrub(index);
           const template = document.createElement('template');
           template.innerHTML = nvrCard(camera, index);
           if (existing) { existing.querySelector('video')?.pause(); existing.replaceWith(template.content); }
@@ -9413,6 +9507,7 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       function showPage(pageName) {
+        if(pageName!=='nvr'){for(const state of recordingScrubs.values()){state.video.pause();discardRecordingScrub(state.index);}hideRecordingScrubPreview();}
         activePage = pageName;
         document.querySelectorAll('[data-page]').forEach((page) => {
           page.hidden = page.dataset.page !== pageName;
@@ -9646,34 +9741,40 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       nvrGrid.addEventListener('pointermove', event => {
-        const slider = event.target.closest('[data-recording-playback-seek],[data-recording-day-seek]');
-        if (!slider || (event.pointerType === 'touch' && !event.buttons)) return;
-        const rect = slider.getBoundingClientRect();
-        const value = Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width))*Number(slider.max);
-        showRecordingScrubPreview(slider,value,event.clientX);
+        showRecordingControls(event.target.closest('[data-recording-wrap]'));
+        const slider=event.target.closest('[data-recording-playback-seek]');
+        if(!slider||recordingScrubs.has(slider.dataset.recordingPlaybackSeek)||event.pointerType==='touch')return;
+        const rect=slider.getBoundingClientRect();
+        showRecordingScrubPreview(slider,Math.max(0,Math.min(1,(event.clientX-rect.left-6)/Math.max(1,rect.width-12)))*Number(slider.max),event.clientX);
       });
-      nvrGrid.addEventListener('pointerout',event => { if (event.target.matches('[data-recording-playback-seek],[data-recording-day-seek]')) hideRecordingScrubPreview(); });
-      nvrGrid.addEventListener('focusout',event => { if (event.target.matches('[data-recording-playback-seek],[data-recording-day-seek]')) hideRecordingScrubPreview(); });
-      nvrGrid.addEventListener('input', (event) => {
-        if (event.target.matches('[data-recording-playback-seek],[data-recording-day-seek]')) showRecordingScrubPreview(event.target,Number(event.target.value));
-        const playback = event.target.closest('[data-recording-playback-seek]');
-        if (playback) {
-          const index = playback.dataset.recordingPlaybackSeek;
-          markNvrInteraction('playback_scrub', { index });
-          const clock = nvrGrid.querySelector(`[data-recording-duration="${index}"]`);
-          const total = recordingStatus[index]?.timeline?.playback_total_seconds || 0;
-          if (clock) clock.textContent = `${recordingPlaybackClock(playback.value)} / ${recordingPlaybackClock(total)}`;
-          return;
-        }
-        const slider = event.target.closest('[data-recording-day-seek]');
-        if (!slider) return;
-        const index = slider.dataset.recordingDaySeek;
-        markNvrInteraction('day_timeline_preview', { index });
-        const label = nvrGrid.querySelector(`[data-recording-timeline-label="${index}"]`);
-        if (label) label.textContent = recordingTimelineLabel(index, Number(slider.value), Number(slider.max) + 1);
+      nvrGrid.addEventListener('pointerdown',event=>{
+        const slider=event.target.closest('[data-recording-playback-seek]');
+        if(!slider||event.button!==0)return;
+        hideRecordingScrubPreview();beginRecordingScrub(slider);
+        try{slider.setPointerCapture(event.pointerId);}catch(_){}
+      });
+      for(const name of ['pointerup','lostpointercapture'])nvrGrid.addEventListener(name,event=>{
+        const slider=event.target.closest('[data-recording-playback-seek]');if(!slider)return;
+        const state=recordingScrubs.get(slider.dataset.recordingPlaybackSeek);
+        setTimeout(()=>{if(state&&recordingScrubs.get(state.index)===state&&state.active&&!state.keyboard)finishRecordingScrub(slider);},0);
+      });
+      nvrGrid.addEventListener('pointercancel',event=>{
+        const slider=event.target.closest('[data-recording-playback-seek]');
+        if(slider&&recordingScrubs.get(slider.dataset.recordingPlaybackSeek)?.active)finishRecordingScrub(slider,true);
+      });
+      nvrGrid.addEventListener('pointerout',event=>{
+        const slider=event.target.closest('[data-recording-playback-seek]');if(slider&&!recordingScrubs.has(slider.dataset.recordingPlaybackSeek))hideRecordingScrubPreview();
+      });
+      nvrGrid.addEventListener('focusin',event=>showRecordingControls(event.target.closest('[data-recording-wrap]')));
+      nvrGrid.addEventListener('focusout',event=>{
+        const slider=event.target.closest('[data-recording-playback-seek]');if(!slider)return;
+        if(recordingScrubs.get(slider.dataset.recordingPlaybackSeek)?.active)finishRecordingScrub(slider);
+        hideRecordingScrubPreview();
+      });
+      nvrGrid.addEventListener('input',event=>{
+        const slider=event.target.closest('[data-recording-playback-seek]');if(slider)queueRecordingScrub(slider);
       });
       nvrGrid.addEventListener('change', (event) => {
-        if (event.target.matches('[data-recording-playback-seek],[data-recording-day-seek]')) hideRecordingScrubPreview();
         const eventSelect = event.target.closest('[data-recording-event-select]');
         if (eventSelect) {
           const section = eventSelect.closest('[data-recording-events]');
@@ -9681,20 +9782,25 @@ INDEX_HTML = r"""<!doctype html>
           if (eventSelect.value) showRecordingMarker(section,data?.markers.find(marker => String(marker.slot) === eventSelect.value));
           return;
         }
-        const playback = event.target.closest('[data-recording-playback-seek]');
-        if (playback) { seekRecordingPlayback(playback.dataset.recordingPlaybackSeek, Number(playback.value)); return; }
+        const playback=event.target.closest('[data-recording-playback-seek]');
+        if(playback){if(!recordingScrubs.get(playback.dataset.recordingPlaybackSeek)?.keyboard)finishRecordingScrub(playback);return;}
         const speed = event.target.closest('[data-recording-speed]');
         if (speed) {
           const video = nvrGrid.querySelector(`video[data-recording-player="${speed.dataset.recordingSpeed}"]`);
           if (video) { video.playbackRate = Number(speed.value); video.defaultPlaybackRate = video.playbackRate; }
-          return;
         }
-        const slider = event.target.closest('[data-recording-day-seek]');
-        if (slider) selectRecordingAtOffset(slider.dataset.recordingDaySeek, Number(slider.value));
       });
 
       nvrGrid.addEventListener('click', async (event) => {
         if (handleRecordingEventClick(event)) return;
+        const clickedVideo=event.target.closest('video[data-recording-player]');
+        if(clickedVideo){
+          showRecordingControls(clickedVideo.closest('[data-recording-wrap]'));
+          if(event.pointerType!=='touch')nvrGrid.querySelector(`[data-recording-toggle="${clickedVideo.dataset.recordingPlayer}"]`)?.click();
+          return;
+        }
+        const more=event.target.closest('[data-recording-more]');
+        if(more){const wrap=more.closest('[data-recording-wrap]');const open=wrap.dataset.extraOpen!=='true';wrap.dataset.extraOpen=String(open);more.setAttribute('aria-expanded',String(open));showRecordingControls(wrap);return;}
         const toggle = event.target.closest('[data-recording-toggle]');
         if (toggle) {
           const video = nvrGrid.querySelector(`video[data-recording-player="${toggle.dataset.recordingToggle}"]`);
@@ -9774,12 +9880,21 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       nvrGrid.addEventListener('keydown', (event) => {
+        const slider=event.target.closest('[data-recording-playback-seek]');
+        if(slider&&event.key==='Escape'&&recordingScrubs.has(slider.dataset.recordingPlaybackSeek)){event.preventDefault();finishRecordingScrub(slider,true);return;}
+        if(slider&&['ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(event.key)){const state=beginRecordingScrub(slider);if(state)state.keyboard=event.key;}
+
         const video = event.target.closest('video[data-recording-player]');
         if (!video || ![' ', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
         event.preventDefault();
         const index = video.dataset.recordingPlayer;
         if (event.key === ' ') nvrGrid.querySelector(`[data-recording-toggle="${index}"]`)?.click();
         else seekRecordingPlayback(index, recordingPlaybackPosition(video) + (event.key === 'ArrowLeft' ? -10 : 10));
+      });
+
+      nvrGrid.addEventListener('keyup',event=>{
+        const slider=event.target.closest('[data-recording-playback-seek]');
+        if(slider&&['ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(event.key)&&recordingScrubs.get(slider.dataset.recordingPlaybackSeek)?.active)finishRecordingScrub(slider);
       });
 
       nvrGrid.addEventListener('pointerdown', (event) => {
@@ -9817,7 +9932,7 @@ INDEX_HTML = r"""<!doctype html>
       nvrGrid.addEventListener('seeking', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if (video) {
-          markNvrInteraction('recording_video_seeking', recordingVideoDiagnostics(video));
+          markNvrInteraction(recordingScrubs.has(video.dataset.recordingPlayer)?'timeupdate':'recording_video_seeking', recordingVideoDiagnostics(video));
           syncRecordingVideoProgress(video);
         }
       }, true);
@@ -9825,7 +9940,7 @@ INDEX_HTML = r"""<!doctype html>
       nvrGrid.addEventListener('seeked', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if (video) {
-          markNvrInteraction('recording_video_seeked', recordingVideoDiagnostics(video));
+          markNvrInteraction(recordingScrubs.has(video.dataset.recordingPlayer)?'timeupdate':'recording_video_seeked', recordingVideoDiagnostics(video));
           syncRecordingVideoProgress(video);
         }
       }, true);
@@ -9836,11 +9951,14 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('play', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if(video&&recordingScrubs.has(video.dataset.recordingPlayer)){video.pause();return;}
+        if(video)showRecordingControls(video.closest('[data-recording-wrap]'));
         if (video) { markNvrInteraction('recording_video_play', recordingVideoDiagnostics(video)); updateRecordingPlayerControls(video, 'Playing recordings for selected day'); }
       }, true);
 
       nvrGrid.addEventListener('pause', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if(video)showRecordingControls(video.closest('[data-recording-wrap]'));
         if (video) { markNvrInteraction('recording_video_pause', recordingVideoDiagnostics(video)); updateRecordingPlayerControls(video); }
       }, true);
 
@@ -9851,11 +9969,15 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('ended', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if (video) playNextRecordingSegment(video.dataset.recordingPlayer, video);
+        if (video&&!recordingScrubs.has(video.dataset.recordingPlayer)) playNextRecordingSegment(video.dataset.recordingPlayer, video);
       }, true);
 
       nvrGrid.addEventListener('loadedmetadata', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if(video&&recordingScrubs.has(video.dataset.recordingPlayer)){
+          const requested=Number(video.dataset.recordingSeek||0),seek=Number.isFinite(video.duration)?Math.min(requested,Math.max(0,video.duration-.05)):requested;
+          video.dataset.recordingSeek=String(seek);if(Math.abs(video.currentTime-seek)>.01)video.currentTime=seek;
+        }
         if (video) debugEvent('ui_recording_video_loadedmetadata', recordingVideoDiagnostics(video));
       }, true);
 
