@@ -27,6 +27,7 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
      const endpoint=url.pathname.slice(prefix.length);
      const json=data=>route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
      if(!endpoint)return route.fulfill({contentType:'text/html',body:fixtures[mode].html});
+     if(endpoint==='api/version')return json({version:fixtures[mode].version,ui_build:fixtures[mode].ui_build});
      if(endpoint==='api/config'){
       if(request.method()==='POST')config=request.postDataJSON();
       return route.fulfill({contentType:'application/json',headers:{'X-Edge-Options-Sync':'synced'},body:JSON.stringify(config)});

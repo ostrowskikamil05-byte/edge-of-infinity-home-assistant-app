@@ -15,5 +15,7 @@ for mode, engine in [('native', 'edge_rtc'), ('legacy', 'mediamtx_janus')]:
         'html': panel.INDEX_HTML,
         'config': panel.normalize_config({'cameras': [camera('front', '192.0.2.10', 'sub')]}),
         'engine': engine,
+        'version': panel.APP_VERSION,
+        'ui_build': panel.UI_BUILD,
     }
 print(json.dumps(fixtures))
