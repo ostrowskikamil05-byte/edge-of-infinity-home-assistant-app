@@ -24,9 +24,10 @@ async def main():
     with tempfile.TemporaryDirectory() as folder:
         folder = Path(folder)
         hevc = os.environ.get('EDGE_RTC_TEST_CODEC') == 'h265'
+        fps = max(1, min(60, int(os.environ.get('EDGE_RTC_TEST_FPS', '10'))))
         video = folder/('camera.hevc' if hevc else 'camera.h264')
         encoding = ['-c:v','libx265','-x265-params','aud=1:repeat-headers=1:pools=1:frame-threads=1:keyint=10:bframes=0:log-level=error','-f','hevc'] if hevc else ['-c:v','libx264','-threads','1','-preset','ultrafast','-tune','zerolatency','-profile:v','baseline','-g','10','-x264-params','aud=1:repeat-headers=1','-f','h264']
-        subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=640x360:rate=10','-t','1',*encoding,str(video)],check=True)
+        subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i',f'testsrc2=size=640x360:rate={fps}','-t','1',*encoding,str(video)],check=True)
         info_file = folder/'info.json'
         log = (folder/'fixture.log').open('wb')
         process = subprocess.Popen([os.environ['EDGE_RTC_TEST_BINARY'],'-test.run=^TestBrowserFixture$','-test.v'],env={**os.environ,'EDGE_RTC_TEST_VIDEO':str(video),'EDGE_RTC_TEST_INFO':str(info_file)},stdout=log,stderr=log)

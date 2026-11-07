@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.3
+
+- Fix recording-day navigation behind a stalled refresh: a new selection cancels the older request, stale replies cannot switch the day back, requests have a timeout and errors/loading are visible. Keep explicitly requested empty days instead of silently opening the latest day.
+- Scan recording metadata once per camera/status request and measure clip durations only in the selected day. Other day summaries use cached/estimated durations, avoiding video-payload reads across the entire retention period.
+- Add desktop hover, keyboard and touch scrub thumbnails from recorded footage, sampled every five seconds. Keep playback untouched during preview; coalesce requests, use one extraction worker and bound preview caches to 128 disk images per camera / 64 browser images.
+- Pace decoded EdgeRTC frames using original camera timestamps instead of replacing every pending frame with the newest one. Decode the cached GOP for references and start display at its newest frame. Bound slow-device backlog, release frames on close, and reduce card-control DOM refreshes to four per second. Source resolution, codec and FPS remain unchanged; no frame interpolation or transcoding. Display measured source FPS in the card.
+- Move camera configuration method beside IP/login/password, show credential-free address previews, refresh non-Hikvision ONVIF hosts while preserving custom HTTPS ports/paths and honor an explicit ONVIF/ISAPI discovery selection. Existing manual/discovered RTSP paths remain supported. RTSP uses vendor discovery; ONVIF/ISAPI are configuration/control protocols.
+- Add real-media responsive navigation/scrub tests and deterministic 20/25/30 FPS burst-pacing tests. AI functionality is unchanged.
+
 ## 0.11.2
 
 - Add an opt-in rectangular local-AI zone per camera, with explicit still-image preview, mouse/touch drawing and percentage inputs. Validate bounds before saving; reject invalid saves without changing the authoritative file and keep invalid startup zones closed to detections.
