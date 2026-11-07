@@ -24,6 +24,13 @@ try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],
  try{await page.waitForFunction(()=>[...card._players.values()].every(p=>p._edgeRTC?.frames>=3));}catch(e){console.error(await page.evaluate(()=>({secure:isSecureContext,decoder:typeof VideoDecoder,players:[...card._players.values()].map(p=>({status:p._status.textContent,frames:p._edgeRTC?.frames,pc:p._pc?.connectionState})),errors:document.body.textContent})));throw e;}
  const metrics=await page.evaluate(()=>[...card._players.values()].map(p=>({firstFrameMS:p._edgeRTC.firstFrameMS,width:p._edgeRTC.width,height:p._edgeRTC.height})));
  assert(metrics.every(m=>m.width===640&&m.height===360));assert(metrics.every(m=>m.firstFrameMS<5000),'unreasonable first frame delay');assert.equal(await page.evaluate(()=>permissions),0);
+ if(process.env.EDGE_RTC_TEST_FPS){
+  const expected=Number(process.env.EDGE_RTC_TEST_FPS),before=await page.evaluate(()=>[...card._players.values()].map(p=>p._edgeRTC.frames));
+  const started=Date.now();await page.waitForTimeout(2000);const elapsed=(Date.now()-started)/1000;
+  const after=await page.evaluate(()=>[...card._players.values()].map(p=>({frames:p._edgeRTC.frames,fps:1000/p._edgeRTC.frameInterval,dropped:p._edgeRTC.droppedFrames})));
+  after.forEach((row,i)=>{assert(Math.abs(row.fps-expected)<1,'camera timestamps changed');assert((row.frames-before[i])/elapsed>=expected*.8,'rendered FPS dropped below source-rate tolerance');});
+  console.log(`Measured ${expected} FPS source: rendered ${after.map((row,i)=>((row.frames-before[i])/elapsed).toFixed(1)).join('/')} FPS`);
+ }
  if(name==='desktop'){const recording=await page.evaluate(()=>fetch('/test/record').then(r=>r.json()));assert(recording.copy_video);assert(recording.files.length>0);assert(recording.files.every(s=>s.codec_name===(hevc?'hevc':'h264')&&s.width===640&&s.height===360));}
  if(process.env.EDGE_RTC_TEST_DETECTION){await page.waitForFunction(async()=>{const d=await fetch('/test/detection').then(r=>r.json());return d.cameras?.[0]?.local_status==='running'&&d.analysis_ms>0;});}
  const status=await page.evaluate(()=>fetch('/test/status').then(r=>r.json()));assert.equal(status.sources[0].upstream_connections,1);assert.equal(status.sources[0].connection_attempts,1);

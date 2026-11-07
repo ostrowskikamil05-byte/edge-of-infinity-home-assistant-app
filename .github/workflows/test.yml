@@ -48,6 +48,7 @@ jobs:
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
           node tests/browser/remote_live.cjs
           node tests/browser/edge_rtc_support.cjs
+          node tests/edge_rtc_pacing.cjs
       - name: Install fixture media tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Test detection settings, history and NVR seeking
@@ -71,7 +72,9 @@ jobs:
           node tests/browser/detection_zones.cjs
           node tests/browser/detection_ui.cjs
           node tests/browser/nvr_playback.cjs
+          node tests/browser/nvr_navigation.cjs
           node tests/browser/ui_dashboard.cjs
+          node tests/browser/camera_settings.cjs
 
   detection-media:
     runs-on: ubuntu-latest

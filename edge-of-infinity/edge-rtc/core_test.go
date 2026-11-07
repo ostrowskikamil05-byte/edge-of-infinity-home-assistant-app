@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -254,6 +255,10 @@ func TestBrowserFixture(t *testing.T) {
 	var current [][]byte
 	var vps, sps, pps []byte
 	hevc := os.Getenv("EDGE_RTC_TEST_CODEC") == "h265"
+	fps, _ := strconv.Atoi(os.Getenv("EDGE_RTC_TEST_FPS"))
+	if fps < 1 || fps > 60 {
+		fps = 10
+	}
 	for _, n := range nalus {
 		typ := n[0] & 31
 		aud := byte(9)
@@ -310,11 +315,11 @@ func TestBrowserFixture(t *testing.T) {
 	}
 	defer c.stream.Close()
 	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond)
+		ticker := time.NewTicker(time.Second / time.Duration(fps))
 		defer ticker.Stop()
 		index := 0
 		var sequence uint16
-		silence := make([]byte, 800)
+		silence := make([]byte, 8000/fps)
 		for i := range silence {
 			silence[i] = 0xD5
 		}
@@ -326,12 +331,12 @@ func TestBrowserFixture(t *testing.T) {
 				packets, e := encoder.Encode(frames[index%len(frames)])
 				if e == nil {
 					for _, p := range packets {
-						p.Timestamp = uint32(index) * 9000
+						p.Timestamp = uint32(uint64(index) * 90000 / uint64(fps))
 						c.stream.WritePacketRTP(c.direct, p)
 					}
 				}
 				sequence++
-				c.stream.WritePacketRTP(audio, &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 8, SSRC: 456, SequenceNumber: sequence, Timestamp: uint32(index) * 800}, Payload: silence})
+				c.stream.WritePacketRTP(audio, &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 8, SSRC: 456, SequenceNumber: sequence, Timestamp: uint32(index) * uint32(len(silence))}, Payload: silence})
 				index++
 			}
 		}

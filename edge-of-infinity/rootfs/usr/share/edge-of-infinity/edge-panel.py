@@ -32,9 +32,9 @@ from edge_detection import DetectionService, settings as detection_settings, zon
 DETECTION_SERVICE = None
 
 
-APP_VERSION = "0.11.2"
+APP_VERSION = "0.11.3"
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "local-zone-v112"
+UI_BUILD = "nvr-native-quality-v113"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -403,6 +403,21 @@ def refresh_hikvision_onvif_url(value: str, host: str) -> str:
     if parsed.scheme not in ("http", "https") or parsed.hostname != host or path != "/onvif/device_service":
         return f"http://{host}:80/onvif/device_service"
     return value
+
+
+def refresh_camera_http_endpoint(value: str, host: str, default_path: str = '/onvif/device_service', default_port: int = 80) -> str:
+    """Rebind the configured camera host, retaining discovered HTTP ports/paths."""
+    if not host:
+        return value or ''
+    target = urlparse(f'http://{host}')
+    default_url = f'http://{target.netloc if target.port else target.netloc + ":" + str(default_port)}{default_path}'
+    parsed = urlparse(value or default_url)
+    if parsed.scheme not in ('http', 'https'):
+        parsed = urlparse(default_url)
+    hostname = target.hostname or host
+    hostname = f'[{hostname}]' if ':' in hostname else hostname
+    port = target.port or parsed.port
+    return parsed._replace(netloc=f'{hostname}:{port}' if port else hostname, fragment='').geturl()
 
 
 def refresh_hikvision_isapi_base_url(value: str, host: str) -> str:
@@ -835,6 +850,8 @@ def normalize_camera(raw: dict, index: int) -> dict:
     if vendor == "hikvision":
         onvif_url = refresh_hikvision_onvif_url(onvif_url, host)
         isapi_base_url = refresh_hikvision_isapi_base_url(isapi_base_url, host)
+    else:
+        onvif_url = refresh_camera_http_endpoint(raw.get('onvif_url') or '', host, default_port=onvif_port)
 
     return {
         "id": camera_id,
@@ -1014,9 +1031,7 @@ def merge_existing_camera_values(raw_payload: dict) -> dict:
                 merged_camera[field] = rebind_camera_rtsp(merged_camera.get(field) or "", merged_camera.get("host") or "", merged_camera.get("username") or "", merged_camera.get("password") or "")
             old_endpoint = merged_camera.get("onvif_url") or ""
             if old_endpoint and existing_camera.get("host") != merged_camera.get("host"):
-                endpoint = urlparse(old_endpoint)
-                target = urlparse("http://" + (merged_camera.get("host") or ""))
-                merged_camera["onvif_url"] = urlunparse(endpoint._replace(netloc=f"{target.hostname}:{target.port or endpoint.port or 80}"))
+                merged_camera["onvif_url"] = refresh_camera_http_endpoint(old_endpoint, merged_camera.get('host') or '')
         merged_cameras.append(merged_camera)
 
     return {**existing, **raw_payload, "cameras": merged_cameras}
@@ -2821,18 +2836,34 @@ def recording_day_is_today(day_key: str) -> bool:
     return bool(day_key) and day_key == recording_day_key(time.time())
 
 
-def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_seconds: int = 10, day_key: str = "") -> list[dict]:
+def recording_file_candidates(directory: Path) -> tuple[list, int]:
+    """One metadata pass per request; never open video payloads for the day list."""
+    candidates, total = [], 0
+    now = time.time()
+    try:
+        with os.scandir(directory) as files:
+            for item in files:
+                if not item.name.endswith('.mp4') or not item.is_file(follow_symlinks=False):
+                    continue
+                total += 1
+                try:
+                    stat = item.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.st_size < RECORDING_FILE_MIN_PLAYABLE_BYTES or now - stat.st_mtime < MIN_RECORDING_FILE_READY_SECONDS:
+                    continue
+                path = Path(item.path)
+                candidates.append((path, stat, recording_segment_start_ts(path, stat.st_mtime)))
+    except FileNotFoundError:
+        pass
+    return candidates, total
+
+
+def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_seconds: int = 10, day_key: str = "", candidates: list | None = None, measure_durations: bool = True) -> list[dict]:
     directory = recording_base_dir(camera, index)
     if not directory.exists():
         return []
-    candidates = []
-    for path in playable_recording_files(directory):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        candidates.append((path, stat, recording_segment_start_ts(path, stat.st_mtime)))
-    candidates.sort(key=lambda item: (item[2], item[0].name))
+    candidates = sorted(candidates if candidates is not None else recording_file_candidates(directory)[0], key=lambda item: (item[2], item[0].name))
     entries = []
     offset = 0
     selected_files = candidates if safe_int(limit, 0) <= 0 else candidates[-safe_int(limit, 0):]
@@ -2849,7 +2880,13 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
         next_start_ts = next_item.get("start_ts") if next_item and next_item.get("day") == entry_day else None
         duration_seconds = recording_inferred_duration_seconds(start_ts, next_start_ts, segment_seconds)
         irregular = next_start_ts is None or next_start_ts - start_ts > max(2, min(3600, segment_seconds * 6))
-        duration_seconds = recording_duration_seconds(path, item["stat"], duration_seconds, allow_probe=irregular)
+        if measure_durations:
+            duration_seconds = recording_duration_seconds(path, item["stat"], duration_seconds, allow_probe=irregular)
+        else:
+            with RECORDING_DURATION_LOCK:
+                cached_duration = RECORDING_DURATION_CACHE.get(str(path))
+            if cached_duration and cached_duration[:2] == (item['stat'].st_mtime_ns, item['stat'].st_size):
+                duration_seconds = cached_duration[2] or duration_seconds
         day_start_ts, _day_end_ts = recording_day_bounds(entry_day)
         day_offset = max(0, min(_day_end_ts - day_start_ts - 1, start_ts - day_start_ts)) if day_start_ts else offset
         entries.append(
@@ -3494,8 +3531,14 @@ def build_recording_thumbnail_command(source: Path, target: Path, seek_seconds: 
         "-y",
         "-ss",
         str(max(0, seek_seconds)),
+        "-threads",
+        "1",
         "-i",
         str(source),
+        "-threads",
+        "1",
+        "-filter_threads",
+        "1",
         "-frames:v",
         "1",
         "-vf",
@@ -3525,8 +3568,11 @@ def recording_thumbnail_ready(target: Path, source: Path) -> bool:
         return False
 
 
-def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
+def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_seconds: int | None = None) -> Path:
     target = recording_thumbnail_path(key, filename)
+    if seek_seconds is not None:
+        stat = source.stat()
+        target = target.parent / 'scrub' / f'{source.name}.{stat.st_size}-{stat.st_mtime_ns}.{seek_seconds}.jpg'
     if recording_thumbnail_ready(target, source):
         return target
     if not recording_file_ready(source):
@@ -3562,8 +3608,8 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
         raise RuntimeError("ffmpeg_not_installed_in_addon")
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{time.time_ns()}.tmp")
-    command = build_recording_thumbnail_command(source, tmp)
-    acquired = RECORDING_THUMBNAIL_SEMAPHORE.acquire(timeout=20)
+    command = build_recording_thumbnail_command(source, tmp, seek_seconds=0.6 if seek_seconds is None else seek_seconds)
+    acquired = RECORDING_THUMBNAIL_SEMAPHORE.acquire(timeout=20 if seek_seconds is None else 0.2)
     if not acquired:
         append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_busy", {
             "key": key,
@@ -3581,7 +3627,7 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
     try:
         try:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
-            if result.returncode == 0 and not recording_thumbnail_ready(tmp, source):
+            if seek_seconds is None and result.returncode == 0 and not recording_thumbnail_ready(tmp, source):
                 command = build_recording_thumbnail_command(source, tmp, seek_seconds=0)
                 result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12, check=False)
         except subprocess.TimeoutExpired as error:
@@ -3612,6 +3658,10 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str) -> Path:
             })
             raise RuntimeError(error_text)
         tmp.replace(target)
+        if seek_seconds is not None:
+            cached = sorted(target.parent.glob('*.jpg'), key=lambda path: path.stat().st_mtime, reverse=True)
+            for stale in cached[128:]:
+                stale.unlink(missing_ok=True)
         payload = {
             "key": key,
             "source": source.name,
@@ -3953,21 +4003,24 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
         key = recording_key(camera, index)
         process = RECORDING_PROCESSES.get(key)
         directory = recording_base_dir(camera, index)
-        total_segment_count = len(list(directory.glob("*.mp4"))) if directory.exists() else 0
-        segment_count = len(playable_recording_files(directory))
+        candidates, total_segment_count = recording_file_candidates(directory)
+        segment_count = len(candidates)
         nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
         segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
         cache_limit = clamp_int(nvr.get("playback_cache_segments"), RECORDING_CACHE_MAX_SEGMENTS, 12, RECORDING_CACHE_ABSOLUTE_MAX_SEGMENTS)
-        all_entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds)
+        all_entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds, candidates=candidates, measure_durations=False)
         days = recording_day_groups(all_entries, segment_seconds, key)
         selected_day = day_selection.get(str(index)) or day_selection.get(str(camera.get("id") or "")) or (days[0]["day"] if days else "")
-        if selected_day and not any(day.get("day") == selected_day for day in days):
-            selected_day = days[0]["day"] if days else ""
-        day_entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds, day_key=selected_day) if selected_day else all_entries
+        # Keep an explicitly requested empty/deleted day visible rather than opening today.
+        day_entries = recording_file_entries(camera, index, limit=0, segment_seconds=segment_seconds, day_key=selected_day, candidates=candidates) if selected_day else all_entries
         segment_files = recording_files_from_entries(key, day_entries, segment_seconds)
         timeline_files = sorted(segment_files, key=lambda item: (item.get("start_ts") or 0, item.get("name") or ""))
         day_start_ts, day_end_ts = recording_day_bounds(selected_day)
         recorded_seconds = sum(safe_int(item.get("duration_seconds"), segment_seconds) for item in timeline_files)
+        for day in days:
+            day['duration_estimated'] = day['day'] != selected_day
+            if day['day'] == selected_day:
+                day['recorded_seconds'] = recorded_seconds
         timeline_total_seconds = day_end_ts - day_start_ts if day_start_ts else recorded_seconds
         available_start_ts = timeline_files[0].get("start_ts") if timeline_files else 0
         available_end_ts = max((safe_int(item.get("end_ts"), 0) for item in timeline_files), default=0)
@@ -4555,7 +4608,10 @@ def fetch_onvif_camera_config(camera: dict) -> dict:
 
 
 def fetch_camera_autoconfig(camera: dict) -> dict:
-    if camera.get("vendor") != "hikvision":
+    protocol = normalize_access_protocol(camera.get('access_protocol'))
+    if protocol == 'isapi' and camera.get('vendor') != 'hikvision':
+        raise ValueError('ISAPI requires a Hikvision-compatible camera. Choose ONVIF for this camera.')
+    if protocol == 'onvif' or (protocol != 'isapi' and camera.get("vendor") != "hikvision"):
         return fetch_onvif_camera_config(camera)
     endpoints = autoconfig_endpoints(camera)
     raw_sections: dict[str, dict] = {}
@@ -6479,7 +6535,8 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function selectRecordingDay(index, day, reason = 'select') {
-        if (!day || selectedRecordingDay[index] === day) return;
+        if (!day) return;
+        hideRecordingScrubPreview();
         selectedRecordingDay[index] = day;
         delete selectedRecording[index];
         delete selectedRecordingSeek[index];
@@ -7147,6 +7204,66 @@ INDEX_HTML = r"""<!doctype html>
           <input class="nvr-playback-seek" type="range" min="0" max="${Math.max(0, total - 0.1)}" step="0.1" value="${position}" data-recording-playback-seek="${index}" aria-label="Seek through all recorded video in selected day">
           <p class="nvr-playback-message" data-recording-playback-message="${index}" role="status">${recordingPlaybackClock(total)} recorded in this day</p>
         </div>`;
+      }
+
+      // One extractor request at a time; drag events replace the pending target.
+      const scrubCache = new Map();
+      let scrubDesired = null, scrubFetching = false, scrubTimer = null, scrubHideTimer = null;
+      function hideRecordingScrubPreview() {
+        scrubDesired = null; clearTimeout(scrubTimer); clearTimeout(scrubHideTimer);
+        document.querySelectorAll('[data-recording-scrub-preview]').forEach(node => node.hidden = true);
+      }
+      function showRecordingScrubPreview(slider, value, clientX) {
+        const playback = slider.hasAttribute('data-recording-playback-seek');
+        const index = playback ? slider.dataset.recordingPlaybackSeek : slider.dataset.recordingDaySeek;
+        const selection = playback ? recordingTargetForPlaybackOffset(index,value) : recordingTargetForOffset(index,value);
+        if (!selection?.target?.file) return;
+        const card = slider.closest('[data-nvr-index]'), parent = card.querySelector('[data-recording-wrap]') || card;
+        let box = parent.querySelector('[data-recording-scrub-preview]');
+        if (!box) {
+          box = document.createElement('div'); box.dataset.recordingScrubPreview = ''; box.setAttribute('role','status');
+          box.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;width:min(192px,70vw);padding:6px;border-radius:8px;background:#101820;color:white;box-shadow:0 3px 16px #0009;font-size:12px';
+          box.innerHTML = '<img alt="Podgląd nagrania" style="display:block;width:100%;aspect-ratio:16/9;object-fit:contain"><span></span>';
+          parent.append(box);
+        }
+        const file = selection.target.file, bucket = Math.floor(selection.seek / 5) * 5;
+        const url = new URL(panelPath(file.thumbnail_url), location.href); url.searchParams.set('at',bucket);
+        const rect = slider.getBoundingClientRect(), width = Math.min(192,innerWidth*.7)+12;
+        const x = clientX ?? rect.left + rect.width * Number(value)/Math.max(1,Number(slider.max));
+        box.hidden = false; box.style.left = `${Math.max(4,Math.min(innerWidth-width-4,x-width/2))}px`;
+        box.style.top = `${Math.max(4,Math.min(innerHeight-150,rect.top-145))}px`;
+        const gap = !playback && Number(selection.requested) !== Number(selection.input);
+        const label = `${recordingPlaybackClock(Number(file.timeline_offset || 0)+bucket)} · ${gap?'najbliższy fragment · ':''}podgląd co 5 s`;
+        const image = box.querySelector('img');
+        const previous = scrubDesired;
+        scrubDesired = {url:url.href,box,label};
+        box.querySelector('span').textContent = label;
+        if (scrubCache.has(url.href)) { image.src = scrubCache.get(url.href); image.hidden = false; }
+        else { image.hidden = true; box.querySelector('span').textContent = 'Ładowanie miniatury…'; }
+        if (previous?.url !== url.href || !scrubFetching) { clearTimeout(scrubTimer); scrubTimer = setTimeout(fetchRecordingScrubPreview,150); }
+        clearTimeout(scrubHideTimer); scrubHideTimer = setTimeout(hideRecordingScrubPreview,3000);
+      }
+      async function fetchRecordingScrubPreview() {
+        if (scrubFetching || !scrubDesired || scrubCache.has(scrubDesired.url)) return;
+        const wanted = scrubDesired, controller = new AbortController(); scrubFetching = true;
+        const timeout = setTimeout(()=>controller.abort(),6000);
+        try {
+          const response = await fetch(wanted.url,{signal:controller.signal});
+          if (!response.ok) throw new Error('thumbnail unavailable');
+          const blob = await response.blob();
+          if (!blob.type.startsWith('image/')) throw new Error('thumbnail unavailable');
+          const objectURL = URL.createObjectURL(blob); scrubCache.set(wanted.url,objectURL);
+          while (scrubCache.size > 64) { const key = scrubCache.keys().next().value; URL.revokeObjectURL(scrubCache.get(key)); scrubCache.delete(key); }
+          if (scrubDesired?.url === wanted.url && wanted.box.isConnected && !wanted.box.hidden) {
+            const image = wanted.box.querySelector('img'); image.src = objectURL; image.hidden = false;
+            wanted.box.querySelector('span').textContent = wanted.label;
+          }
+        } catch (_) {
+          if (scrubDesired?.url === wanted.url) wanted.box.querySelector('span').textContent = 'Miniatura chwilowo niedostępna';
+        } finally {
+          clearTimeout(timeout); scrubFetching = false;
+          if (scrubDesired && scrubDesired.url !== wanted.url) scrubTimer = setTimeout(fetchRecordingScrubPreview,150);
+        }
       }
 
       function recordingPlaybackPosition(video) {
@@ -7840,7 +7957,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="autoconfig-head">
               <div>
                 <h3>Discover camera streams</h3>
-                <p>${device.model ? `${escapeHtml(device.model)} ${escapeHtml(device.firmware || '')}` : 'Read camera stream profiles via ONVIF (Hikvision uses ISAPI).'}</p>
+                <p>${device.model ? `${escapeHtml(device.model)} ${escapeHtml(device.firmware || '')}` : 'ONVIF / ISAPI zgodnie z wybraną metodą; RTSP używa odczytu producenta. Odczyt nie zmienia jakości ani FPS kamery.'}</p>
               </div>
               <button type="button" data-autoconfig="${index}" ${state.loading ? 'disabled' : ''}>${state.loading ? 'Reading...' : 'Read camera / ONVIF'}</button>
             </div>
@@ -7981,7 +8098,13 @@ INDEX_HTML = r"""<!doctype html>
             <div class="camera-config-body">
               <fieldset class="field-section"><legend>Connection</legend><p class="field-help">Enter the local camera account, not your manufacturer's cloud login.</p><div class="form-grid"><label>Name<input name="${prefix}-name" value="${escapeHtml(text(camera.name, `Camera ${index + 1}`))}"></label><label>Vendor<select name="${prefix}-vendor">
                 ${Object.entries(CAMERA_VENDORS).map(([value, label]) => option(value, camera.vendor, label)).join('')}
-              </select></label><label>Host/IP<input name="${prefix}-host" value="${escapeHtml(camera.host || '')}"></label><label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label><label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label></div></fieldset>
+              </select></label><label>Host/IP<input name="${prefix}-host" value="${escapeHtml(camera.host || '')}"></label><label>Username<input name="${prefix}-username" value="${escapeHtml(camera.username || 'admin')}"></label><label>Password<input name="${prefix}-password" type="password" value="${escapeHtml(camera.password || '')}"></label><label>Metoda konfiguracji<select name="${prefix}-access-protocol">
+                ${option('rtsp', accessProtocol, 'RTSP · profile producenta')}
+                ${option('isapi', accessProtocol, 'ISAPI')}
+                ${option('onvif', accessProtocol, 'ONVIF')}
+                ${option('unicast', accessProtocol, 'Unicast')}
+                ${option('multicast', accessProtocol, 'Multicast')}
+              </select></label></div><p class="field-help">IP, login i hasło automatycznie budują adresy. ONVIF / ISAPI służą do odczytu profili i ustawień; obraz korzysta ze wspólnego źródła RTSP w Edge. RTSP wybiera automatyczny odczyt producenta. Połączenie z kamerą następuje po kliknięciu odczytu lub zapisaniu ustawień.</p><output data-camera-address-preview="${index}" style="display:block;overflow-wrap:anywhere;font-size:12px"></output></fieldset>
               ${cameraAutoconfig(index)}
               <fieldset class="field-section"><legend>Detekcja / Detection</legend><div class="form-grid"><label class="check-row"><input name="${prefix}-events-enabled" type="checkbox" ${camera.events_enabled ? 'checked' : ''}> Zdarzenia ONVIF: ruch, osoba, pojazd</label><label class="check-row"><input name="${prefix}-local-detection-enabled" type="checkbox" ${camera.local_detection_enabled ? 'checked' : ''}> Lokalne AI na tej kamerze</label></div><p class="field-help">Włącz także odpowiedni moduł w Settings → Detection. Typy zdarzeń i mikrofon zależą od modelu kamery.</p>${zoneEditor(camera,index)}</fieldset><fieldset class="field-section"><legend>Live & recording</legend><p class="field-help">Sub stream is lighter for live tiles. Main stream gives the best recording detail.</p><div class="form-grid"><label class="check-row"><input name="${prefix}-enabled" type="checkbox" ${camera.enabled ? 'checked' : ''}> Camera enabled</label><label class="check-row"><input name="${prefix}-record" type="checkbox" ${camera.record !== false ? 'checked' : ''}> Record continuously</label><label>Live stream<select name="${prefix}-live-stream">
                 <option value="sub" ${camera.live_stream !== 'main' ? 'selected' : ''}>sub</option>
@@ -7993,13 +8116,7 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="main" ${camera.record_stream !== 'sub' ? 'selected' : ''}>main</option>
                 <option value="sub" ${camera.record_stream === 'sub' ? 'selected' : ''}>sub</option>
               </select></label></div></fieldset>
-              <details class="settings-group camera-advanced"><summary>Advanced connection <small>Custom RTSP, ONVIF, channels and transport</small></summary><div class="form-grid"><label>Camera / NVR channel number<input name="${prefix}-camera-number" value="${escapeHtml(cameraNumber)}"></label><label>Connection<select name="${prefix}-access-protocol">
-                ${option('rtsp', accessProtocol, 'RTSP')}
-                ${option('isapi', accessProtocol, 'ISAPI')}
-                ${option('onvif', accessProtocol, 'ONVIF')}
-                ${option('unicast', accessProtocol, 'Unicast')}
-                ${option('multicast', accessProtocol, 'Multicast')}
-              </select></label><label>RTSP transport<select name="${prefix}-rtsp-transport">
+              <details class="settings-group camera-advanced"><summary>Advanced connection <small>Custom RTSP, ONVIF, channels and transport</small></summary><div class="form-grid"><label>Camera / NVR channel number<input name="${prefix}-camera-number" value="${escapeHtml(cameraNumber)}"></label><label>RTSP transport<select name="${prefix}-rtsp-transport">
                 ${option('tcp', rtspTransport, 'TCP stable')}
                 ${option('udp', rtspTransport, 'UDP low latency')}
                 ${option('auto', rtspTransport, 'Auto')}
@@ -8025,6 +8142,7 @@ INDEX_HTML = r"""<!doctype html>
         config = { ...config, cameras };
         clearZonePreviews();
         form.innerHTML = cameras.map(cameraForm).join('');
+        form.querySelectorAll('[data-camera-form]').forEach((section,index)=>updateCameraAddressPreview(section,index));
         if (cameraToExpand) {
           const card = Array.from(form.querySelectorAll('[data-camera-form]')).find((node) => node.dataset.cameraId === cameraToExpand);
           card?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -8265,6 +8383,9 @@ INDEX_HTML = r"""<!doctype html>
             const input = cameraField(section, index, `rtsp-${stream}`);
             input.value = refreshVendorRtsp(input.value.trim(), vendor, cameraField(section, index, 'host').value.trim(), cameraField(section, index, 'username').value.trim(), cameraField(section, index, 'password').value, cameraField(section, index, 'camera-number').value, stream);
           }
+          const endpoint = cameraField(section,index,'onvif');
+          endpoint.value = refreshCameraHttpEndpoint(endpoint.value,cameraField(section,index,'host').value.trim(),vendor === 'reolink' ? 8000 : 80);
+          updateCameraAddressPreview(section,index);
           return;
         }
         const host = cameraField(section, index, 'host').value.trim();
@@ -8281,6 +8402,24 @@ INDEX_HTML = r"""<!doctype html>
         const isapiInput = cameraField(section, index, 'isapi');
         onvifInput.value = refreshHikvisionOnvifUrl(onvifInput.value.trim(), host);
         isapiInput.value = refreshHikvisionIsapiBaseUrl(isapiInput.value.trim(), host);
+        updateCameraAddressPreview(section,index);
+      }
+      function refreshCameraHttpEndpoint(value,host,port) {
+        if (!host) return value || '';
+        try {
+          const target = new URL(`http://${host}`); if (!target.port) target.port=String(port); const url = new URL(value || `${target.origin}/onvif/device_service`);
+          if (!['http:','https:'].includes(url.protocol)) return `http://${host}:${port}/onvif/device_service`;
+          url.hostname = target.hostname; const explicit = new URL(`http://${host}`).port; if (explicit) url.port = explicit;
+          url.username = ''; url.password = ''; url.hash = ''; return url.href;
+        } catch (_) { return value || ''; }
+      }
+      function updateCameraAddressPreview(section,index) {
+        const output = section.querySelector('[data-camera-address-preview]');
+        if (!output) return;
+        output.textContent = ['main','sub'].map(stream => {
+          try { const url = new URL(cameraField(section,index,`rtsp-${stream}`).value); url.username='';url.password='';return `${stream}: ${url.href}`; }
+          catch (_) { return `${stream}: wybierz ONVIF i odczytaj profile lub podaj własny adres w Advanced`; }
+        }).join(' · ');
       }
 
       function cameraFormSnapshot() {
@@ -8699,10 +8838,23 @@ INDEX_HTML = r"""<!doctype html>
         monitorLiveFrames();
       }
 
-      let pendingNvrRefresh = null;
+      let nvrRequest = null;
+      let nvrRequestID = 0;
+      function recordingDayLoadMessage(message) {
+        nvrGrid.querySelectorAll('[data-nvr-index]').forEach(card => {
+          let output = card.querySelector('[data-recording-day-load]');
+          if (!output) { output = document.createElement('p'); output.dataset.recordingDayLoad = ''; output.setAttribute('role','status'); card.prepend(output); }
+          output.textContent = message; output.hidden = !message;
+        });
+      }
       async function loadRecordingStatus(options = {}) {
-        if (nvrLoading) { if (options.forceRender) pendingNvrRefresh = options; return; }
+        if (nvrLoading && !options.forceRender) return;
+        nvrRequest?.abort();
+        const controller = new AbortController(), requestID = ++nvrRequestID;
+        nvrRequest = controller;
+        const timeout = setTimeout(() => controller.abort('timeout'), 20000);
         nvrLoading = true;
+        if (options.forceRender) recordingDayLoadMessage('Ładowanie wybranego dnia…');
         try {
           const requestedDays = JSON.stringify(selectedRecordingDay);
           const dayQuery = Object.entries(selectedRecordingDay)
@@ -8710,10 +8862,10 @@ INDEX_HTML = r"""<!doctype html>
             .map(([index, day]) => `${encodeURIComponent(index)}:${encodeURIComponent(day)}`)
             .join(',');
           const statusPath = dayQuery ? `api/recording/status?days=${dayQuery}` : 'api/recording/status';
-          const response = await fetch(panelPath(statusPath), { cache: 'no-store' });
+          const response = await fetch(panelPath(statusPath), { cache: 'no-store', signal: controller.signal });
           if (!response.ok) throw new Error(`Recording status failed: ${response.status}`);
           const data = await response.json();
-          if (requestedDays !== JSON.stringify(selectedRecordingDay)) { pendingNvrRefresh = { forceRender: true, reason: 'day_selection_pending' }; return; }
+          if (requestID !== nvrRequestID || requestedDays !== JSON.stringify(selectedRecordingDay)) return;
           const shouldLogStatus = options.reason !== 'timer' || Date.now() - lastRecordingStatusLogAt > NVR_TIMER_LOG_THROTTLE_MS;
           if (shouldLogStatus) {
             lastRecordingStatusLogAt = Date.now();
@@ -8737,9 +8889,8 @@ INDEX_HTML = r"""<!doctype html>
           recordingStatus = {};
           (Array.isArray(data.cameras) ? data.cameras : []).forEach((item) => {
             recordingStatus[item.index] = item;
-            const knownDays = Array.isArray(item.days) ? item.days.map((day) => day.day).filter(Boolean) : [];
             const pinnedDay = selectedRecordingDay[item.index];
-            if (item.selected_day && (!pinnedDay || (knownDays.length && !knownDays.includes(pinnedDay)))) {
+            if (item.selected_day && !pinnedDay) {
               selectedRecordingDay[item.index] = item.selected_day;
             }
             const files = Array.isArray(item.files) ? item.files : [];
@@ -8782,9 +8933,14 @@ INDEX_HTML = r"""<!doctype html>
               });
             }
           }
+          recordingDayLoadMessage('');
+        } catch (error) {
+          if (requestID !== nvrRequestID) return;
+          recordingDayLoadMessage(controller.signal.aborted ? 'Odczyt dnia trwał zbyt długo. Kliknij dzień lub Odśwież, aby ponowić.' : `Nie udało się otworzyć dnia: ${error.message}. Kliknij dzień, aby ponowić.`);
+          debugEvent('ui_recording_status_error', {message: String(error), reason: options.reason});
         } finally {
-          nvrLoading = false;
-          if (pendingNvrRefresh) { const pending = pendingNvrRefresh; pendingNvrRefresh = null; await loadRecordingStatus(pending); }
+          clearTimeout(timeout);
+          if (requestID === nvrRequestID) { nvrLoading = false; nvrRequest = null; }
         }
       }
 
@@ -9263,7 +9419,9 @@ INDEX_HTML = r"""<!doctype html>
       edgeForm.addEventListener('input', syncConfigDraftFromForm);
       edgeForm.addEventListener('change', syncConfigDraftFromForm);
 
-      form.addEventListener('input', () => {
+      form.addEventListener('input', (event) => {
+        const connection = event.target.name?.match(/^camera-(\d+)-(host|username|password|camera-number|rtsp-main-channel|rtsp-sub-channel)$/);
+        if (connection) refreshGeneratedCameraFields(event.target.closest('[data-camera-form]'),Number(connection[1]));
         syncConfigDraftFromForm();
       });
       form.addEventListener('change', (event) => {
@@ -9335,7 +9493,17 @@ INDEX_HTML = r"""<!doctype html>
         await loadCameras();
       });
 
+      nvrGrid.addEventListener('pointermove', event => {
+        const slider = event.target.closest('[data-recording-playback-seek],[data-recording-day-seek]');
+        if (!slider || (event.pointerType === 'touch' && !event.buttons)) return;
+        const rect = slider.getBoundingClientRect();
+        const value = Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width))*Number(slider.max);
+        showRecordingScrubPreview(slider,value,event.clientX);
+      });
+      nvrGrid.addEventListener('pointerout',event => { if (event.target.matches('[data-recording-playback-seek],[data-recording-day-seek]')) hideRecordingScrubPreview(); });
+      nvrGrid.addEventListener('focusout',event => { if (event.target.matches('[data-recording-playback-seek],[data-recording-day-seek]')) hideRecordingScrubPreview(); });
       nvrGrid.addEventListener('input', (event) => {
+        if (event.target.matches('[data-recording-playback-seek],[data-recording-day-seek]')) showRecordingScrubPreview(event.target,Number(event.target.value));
         const playback = event.target.closest('[data-recording-playback-seek]');
         if (playback) {
           const index = playback.dataset.recordingPlaybackSeek;
@@ -9353,6 +9521,7 @@ INDEX_HTML = r"""<!doctype html>
         if (label) label.textContent = recordingTimelineLabel(index, Number(slider.value), Number(slider.max) + 1);
       });
       nvrGrid.addEventListener('change', (event) => {
+        if (event.target.matches('[data-recording-playback-seek],[data-recording-day-seek]')) hideRecordingScrubPreview();
         const eventSelect = event.target.closest('[data-recording-event-select]');
         if (eventSelect) {
           const section = eventSelect.closest('[data-recording-events]');
@@ -9834,7 +10003,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.serve_recording_cache(path)
             return
         if path.startswith("/recording-thumbs/") and path.endswith(".jpg"):
-            self.serve_recording_thumbnail(path)
+            self.serve_recording_thumbnail(path, parsed.query)
             return
         if path.startswith("/recordings/") and path.endswith(".mp4"):
             self.serve_recording(path)
@@ -10161,7 +10330,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 "plan": {name: value for name, value in plan.items() if name != "concat_path"},
             })
 
-    def serve_recording_thumbnail(self, request_path: str) -> None:
+    def serve_recording_thumbnail(self, request_path: str, query: str = '') -> None:
         parts = request_path.removeprefix("/recording-thumbs/").split("/", 1)
         if len(parts) != 2:
             self.send_json({"error": "recording_thumbnail_not_found"}, HTTPStatus.NOT_FOUND)
@@ -10172,7 +10341,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "recording_not_found"}, HTTPStatus.NOT_FOUND)
             return
         try:
-            thumb = ensure_recording_thumbnail(key, source, filename)
+            requested = parse_qs(query).get('at', [])
+            seek = min(86400, max(0, safe_int(requested[0], 0))) // 5 * 5 if requested else None
+            thumb = ensure_recording_thumbnail(key, source, filename, seek_seconds=seek)
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             payload = {
                 "key": key,
@@ -10182,7 +10353,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             }
             append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_request_error", payload)
             write_debug_event("recording_thumbnail_error", payload)
-            self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+            self.send_json({"error": str(error)}, HTTPStatus.TOO_MANY_REQUESTS if str(error) == 'thumbnail_generation_busy' else HTTPStatus.BAD_GATEWAY)
             return
         self.send_bytes(thumb.read_bytes(), "image/jpeg")
 

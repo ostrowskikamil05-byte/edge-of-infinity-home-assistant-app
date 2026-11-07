@@ -41,6 +41,17 @@ class CameraSupportTests(unittest.TestCase):
             self.assertIn('/onvif/device_service', result['onvif_url'])
         self.assertIn(':8000/', self.p.normalize_camera({'vendor': 'reolink', 'host': '192.0.2.8'}, 1)['onvif_url'])
 
+    def test_custom_onvif_https_port_and_path_follow_changed_camera_ip(self):
+        result = self.p.normalize_camera({'vendor':'uniview','host':'192.0.2.9','onvif_url':'https://192.0.2.8:9443/custom/device'},1)
+        self.assertEqual(result['onvif_url'],'https://192.0.2.9:9443/custom/device')
+
+    def test_explicit_protocol_controls_discovery(self):
+        with patch.object(self.p,'fetch_onvif_camera_config',return_value={'ok':True}) as onvif:
+            self.assertEqual(self.p.fetch_camera_autoconfig({'vendor':'hikvision','access_protocol':'onvif'}),{'ok':True})
+            onvif.assert_called_once()
+        with self.assertRaisesRegex(ValueError,'ISAPI requires'):
+            self.p.fetch_camera_autoconfig({'vendor':'uniview','access_protocol':'isapi'})
+
     def test_saved_non_hikvision_endpoint_updates_to_new_host(self):
         p = self.p
         old = p.normalize_config({'cameras': [{'vendor': 'uniview', 'id': 'front', 'host': '192.0.2.8', 'username': 'old', 'password': 'old'}]})

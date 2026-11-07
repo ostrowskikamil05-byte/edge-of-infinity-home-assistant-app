@@ -1,4 +1,4 @@
-/* EdgeRTC/1: H264 access units -> WebCodecs. No RTCPeerConnection, MP4 or MSE. */
+/* EdgeRTC/1: H264/H265 access units -> WebCodecs. No RTCPeerConnection, MP4 or MSE. */
 export function edgeRTCPlaybackSupport(language=globalThis.navigator?.language||'en'){
   const pl=language.startsWith('pl');
   if(!globalThis.isSecureContext)return{supported:false,code:'insecure_context',message:pl?'EdgeRTC: otwórz Home Assistant przez HTTPS, np. adresem https://…ui.nabu.casa z Home Assistant Cloud. HTTP w sieci lokalnej blokuje WebCodecs.':'EdgeRTC: open Home Assistant over HTTPS, for example your https://…ui.nabu.casa Home Assistant Cloud address. Local-network HTTP blocks WebCodecs.'};
@@ -7,7 +7,7 @@ export function edgeRTCPlaybackSupport(language=globalThis.navigator?.language||
 }
 
 export class EdgeRTCClient {
-  constructor(options){this.options=options;this.canvas=options.canvas;this.closed=false;this.playing=false;this.connectionState='connecting';this.waitKey=true;this.firstFrameMS=null;this.frames=0;this.started=performance.now();}
+  constructor(options){this.options=options;this.canvas=options.canvas;this.closed=false;this.playing=false;this.connectionState='connecting';this.waitKey=true;this.firstFrameMS=null;this.frames=0;this.started=performance.now();this.frameQueue=[];this.droppedFrames=0;this.bootstrapFrames=0;}
   async start(){
     this.language=this.options.language||this.options.hass?.locale?.language||this.options.hass?.language||globalThis.navigator?.language||'en';const support=edgeRTCPlaybackSupport(this.language);
     if(!support.supported){const error=new Error(support.message);error.code=support.code;error.retryable=false;this.close();throw error;}
@@ -22,7 +22,7 @@ export class EdgeRTCClient {
     try{
       if(typeof data==='string'){
         const msg=JSON.parse(data);if(msg.type==='error'){this.fail(`EdgeRTC: ${msg.code}`);return;}if(msg.type!=='hello'||msg.protocol!=='edgertc/1')return;
-        this.audioInfo=msg.audio;this.microphoneSupported=Boolean(msg.microphone?.supported);
+        this.bootstrapTimestamp=Number.isFinite(msg.bootstrap_timestamp_us)?msg.bootstrap_timestamp_us:null;this.audioInfo=msg.audio;this.microphoneSupported=Boolean(msg.microphone?.supported);
         const configuration={codec:msg.video.codec,optimizeForLatency:true,hardwareAcceleration:'no-preference'};
         const supported=await VideoDecoder.isConfigSupported(configuration);
         if(this.closed)return;
@@ -37,12 +37,53 @@ export class EdgeRTCClient {
       if(bytes[0]===1&&this.video?.state==='configured'){
         const key=Boolean(bytes[1]&1);if(key)this.waitKey=false;if(this.waitKey)return;
         // A slow decoder cannot accumulate seconds of old frames.
-        if(this.video.decodeQueueSize>(this.caughtUp?8:180)){this.video.reset();this.video.configure({codec:this.videoCodec||this.options.codec||this._codec,optimizeForLatency:true,hardwareAcceleration:'no-preference'});this.waitKey=true;return;}
+        if(this.video.decodeQueueSize>(this.caughtUp?8:180)){this.clearFrames();this.video.reset();this.video.configure({codec:this.videoCodec||this.options.codec||this._codec,optimizeForLatency:true,hardwareAcceleration:'no-preference'});this.waitKey=true;return;}
         this.video.decode(new EncodedVideoChunk({type:key?'key':'delta',timestamp,data:payload}));
       }else if(bytes[0]===2&&!this.muted)this.decodeAudio(payload,timestamp);
     }catch(error){this.fail(error.message||'EdgeRTC decoding failed.');}
   }
-  render(frame){if(this.closed){frame.close();return;}this.latest?.close();this.latest=frame;if(this.renderPending)return;this.renderPending=true;requestAnimationFrame(()=>{this.renderPending=false;const current=this.latest;this.latest=null;if(!current)return;if(this.closed){current.close();return;}this.width=current.displayWidth;this.height=current.displayHeight;if(this.canvas.width!==this.width||this.canvas.height!==this.height){this.canvas.width=this.width;this.canvas.height=this.height;}this.canvas.getContext('2d',{alpha:false}).drawImage(current,0,0,this.width,this.height);current.close();clearTimeout(this.connectTimer);this.playing=true;this.frames++;if(this.video.decodeQueueSize<3)this.caughtUp=true;if(this.firstFrameMS===null)this.firstFrameMS=performance.now()-this.started;this.options.onFrame?.({width:this.width,height:this.height,firstFrameMS:this.firstFrameMS,frames:this.frames});});}
+  clearFrames(){
+    if(this.renderRequest!=null)cancelAnimationFrame(this.renderRequest);
+    this.renderRequest=null;for(const item of this.frameQueue)item.frame.close();this.frameQueue=[];this.lastScheduled=null;this.lastTimestamp=null;
+  }
+  render(frame){
+    if(this.closed){frame.close();return;}
+    if(this.bootstrapTimestamp!==null&&this.bootstrapTimestamp!==undefined&&frame.timestamp<this.bootstrapTimestamp){this.bootstrapFrames++;frame.close();return;}
+    this.bootstrapTimestamp=null;
+    const now=performance.now(),timestamp=Number(frame.timestamp);
+    const interval=this.lastTimestamp==null?0:(timestamp-this.lastTimestamp)/1000;
+    if(interval>0&&interval<1000)this.frameInterval=this.frameInterval==null?interval:this.frameInterval*.9+interval*.1;
+    const due=interval>0&&interval<1000?Math.max(now,(this.lastScheduled??now)+interval):now;
+    this.lastTimestamp=timestamp;this.lastScheduled=due;
+    this.frameQueue.push({frame,due});
+    // Normal 20/30 FPS bursts are paced by camera timestamps. Bound latency
+    // when the tab/device falls behind; never synthesize or resize a frame.
+    while(this.frameQueue.length>8||this.frameQueue.length>1&&this.frameQueue[0].due<now-250){this.frameQueue.shift().frame.close();this.droppedFrames++;}
+    if(this.frameQueue.length&&this.frameQueue[this.frameQueue.length-1].due>now+250){
+      const shift=this.frameQueue[this.frameQueue.length-1].due-now;
+      for(const item of this.frameQueue)item.due-=shift;this.lastScheduled-=shift;
+    }
+    if(this.renderRequest==null)this.renderRequest=requestAnimationFrame(()=>this.drawFrame());
+  }
+  drawFrame(){
+    this.renderRequest=null;if(this.closed)return;
+    const now=performance.now();
+    while(this.frameQueue.length>1&&this.frameQueue[0].due<now-250){this.frameQueue.shift().frame.close();this.droppedFrames++;}
+    const item=this.frameQueue[0];
+    if(item&&item.due<=now+1){
+      this.frameQueue.shift();const current=item.frame;
+      try{
+        this.width=current.displayWidth;this.height=current.displayHeight;
+        if(this.canvas.width!==this.width||this.canvas.height!==this.height){this.canvas.width=this.width;this.canvas.height=this.height;}
+        this.canvas.getContext('2d',{alpha:false}).drawImage(current,0,0,this.width,this.height);
+      }finally{current.close();}
+      clearTimeout(this.connectTimer);this.playing=true;this.frames++;
+      if((this.video?.decodeQueueSize??0)<3)this.caughtUp=true;
+      if(this.firstFrameMS===null)this.firstFrameMS=now-this.started;
+      this.options.onFrame?.({width:this.width,height:this.height,firstFrameMS:this.firstFrameMS,frames:this.frames,sourceFPS:this.frameInterval?1000/this.frameInterval:0,droppedFrames:this.droppedFrames,bootstrapFrames:this.bootstrapFrames,queuedFrames:this.frameQueue.length});
+    }
+    if(this.frameQueue.length)this.renderRequest=requestAnimationFrame(()=>this.drawFrame());
+  }
   ensureAudio(){if(!this.audio){this.audio=new AudioContext({latencyHint:'interactive'});this.gain=this.audio.createGain();this.gain.connect(this.audio.destination);}this.gain.gain.value=this.muted?0:this.volume??0.6;this.audio.resume().catch(()=>{});return this.audio;}
   setAudio(volume,muted){this.volume=volume;this.muted=muted;if(!muted||this.audio)this.ensureAudio();}
   decodeAudio(payload,timestamp){
@@ -56,6 +97,6 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   playAudio(buffer){if(this.closed||this.muted)return;const now=this.audio.currentTime;this.audioTime=Math.max(now+0.04,this.audioTime||0);if(this.audioTime>now+0.25)this.audioTime=now+0.04;const source=this.audio.createBufferSource();source.buffer=buffer;source.connect(this.gain);source.start(this.audioTime);this.audioTime+=buffer.duration;}
-  async startMicrophone(){this.micTimer=setTimeout(()=>this.fail('Microphone initialization timed out.'),10000);for(const track of this.options.microphone.getTracks())track.addEventListener('ended',()=>this.fail('Microphone device disconnected.'),{once:true});const audio=this.ensureAudio();await audio.audioWorklet.addModule('/edge/edge-pcm-worklet.js?v=0.11.2');if(this.closed)return;this.micSource=audio.createMediaStreamSource(this.options.microphone);this.worklet=new AudioWorkletNode(audio,'edge-pcm');this.silence=audio.createGain();this.silence.gain.value=0;this.micSource.connect(this.worklet);this.worklet.connect(this.silence);this.silence.connect(audio.destination);this.worklet.port.onmessage=event=>{if(this.closed||this.ws.readyState!==WebSocket.OPEN)return;if(this.ws.bufferedAmount>6400){this.fail('Microphone connection is too slow.');return;}const packet=new Uint8Array(321);packet[0]=3;packet.set(new Uint8Array(event.data),1);this.ws.send(packet);};clearTimeout(this.micTimer);this.options.onMicrophone?.(true);}
-  close(){if(this.closed)return;this.closed=true;clearTimeout(this.connectTimer);clearTimeout(this.micTimer);this.options.microphone?.getTracks().forEach(track=>track.stop());this.playing=false;this.connectionState='closed';this.ws?.close();if(this.video?.state!=='closed')this.video?.close();if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.latest?.close();this.latest=null;this.worklet?.port.close();this.micSource?.disconnect();this.worklet?.disconnect();this.silence?.disconnect();this.audio?.close().catch(()=>{});}
+  async startMicrophone(){this.micTimer=setTimeout(()=>this.fail('Microphone initialization timed out.'),10000);for(const track of this.options.microphone.getTracks())track.addEventListener('ended',()=>this.fail('Microphone device disconnected.'),{once:true});const audio=this.ensureAudio();await audio.audioWorklet.addModule('/edge/edge-pcm-worklet.js?v=0.11.3');if(this.closed)return;this.micSource=audio.createMediaStreamSource(this.options.microphone);this.worklet=new AudioWorkletNode(audio,'edge-pcm');this.silence=audio.createGain();this.silence.gain.value=0;this.micSource.connect(this.worklet);this.worklet.connect(this.silence);this.silence.connect(audio.destination);this.worklet.port.onmessage=event=>{if(this.closed||this.ws.readyState!==WebSocket.OPEN)return;if(this.ws.bufferedAmount>6400){this.fail('Microphone connection is too slow.');return;}const packet=new Uint8Array(321);packet[0]=3;packet.set(new Uint8Array(event.data),1);this.ws.send(packet);};clearTimeout(this.micTimer);this.options.onMicrophone?.(true);}
+  close(){if(this.closed)return;this.closed=true;clearTimeout(this.connectTimer);clearTimeout(this.micTimer);this.options.microphone?.getTracks().forEach(track=>track.stop());this.playing=false;this.connectionState='closed';this.ws?.close();if(this.video?.state!=='closed')this.video?.close();if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.clearFrames();this.worklet?.port.close();this.micSource?.disconnect();this.worklet?.disconnect();this.silence?.disconnect();this.audio?.close().catch(()=>{});}
 }

@@ -380,6 +380,13 @@ func (s *source) attach(microphone bool) (*viewer, map[string]any, [][]byte, err
 		s.micTS = uint32(time.Since(s.started) / (time.Second / 8000))
 	}
 	hello := map[string]any{"type": "hello", "protocol": "edgertc/1", "camera_id": s.cfg.ID, "video": s.video, "audio": s.audio, "microphone": map[string]any{"active": microphone, "supported": s.backFormat != nil, "sampleRate": 8000, "format": "pcm_s16le"}}
+	// Decode the cached GOP for references, but start display at its newest frame.
+	if len(s.gop) > 0 {
+		last := s.gop[len(s.gop)-1]
+		if len(last) >= 10 {
+			hello["bootstrap_timestamp_us"] = int64(binary.BigEndian.Uint64(last[2:10]))
+		}
+	}
 	return v, hello, append([][]byte{}, s.gop...), nil
 }
 func (s *source) detach(v *viewer) {

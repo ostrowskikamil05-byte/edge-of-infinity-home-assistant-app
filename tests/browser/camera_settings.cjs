@@ -3,14 +3,21 @@ const assert=require('node:assert/strict');
 (async()=>{
  const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,args:['--no-sandbox']});
  try{
- const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ for(const width of [1440,820,390,320]) {
+ const page=await browser.newPage({viewport:{width,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(process.env.EDGE_NVR_TEST_URL || 'http://127.0.0.1:18088');
  await page.locator('[name="camera-0-vendor"]').waitFor({state:'attached'});
+ if(await page.locator('nav').isHidden()) await page.locator('#menu-toggle').click();
  await page.locator('nav [data-page-target="camera-settings"]').click();
  await page.locator('[name="camera-0-vendor"]').selectOption('reolink');
  await page.locator('[name="camera-0-host"]').fill('192.0.2.42');
  await page.locator('[name="camera-0-username"]').fill('test-user');
  await page.locator('[name="camera-0-password"]').fill('test@new:#/?');
+ assert(await page.locator('[name="camera-0-access-protocol"]').isVisible(),'method hidden in advanced settings');
+ await page.locator('[name="camera-0-access-protocol"]').selectOption('onvif');
+ const preview=await page.locator('[data-camera-address-preview="0"]').textContent();
+ assert(preview.includes('192.0.2.42'));assert(!preview.includes('test-user')&&!preview.includes('test@new'));
+ assert((await page.evaluate(()=>document.documentElement.scrollWidth))<=width+1,'camera form overflow');
  await page.locator('#save-config').click();
  await page.waitForFunction(()=>document.querySelector('#save-state')?.textContent.includes('Home Assistant add-on options updated.'));
  let saved=await page.evaluate(()=>fetch('api/config').then(r=>r.json()));
@@ -19,7 +26,8 @@ const assert=require('node:assert/strict');
  assert.equal(new URL(saved.cameras[0].onvif_url).hostname,'192.0.2.42');
  await page.reload();await page.locator('[name="camera-0-vendor"]').waitFor({state:'attached'});
  assert.equal(await page.locator('[name="camera-0-vendor"]').inputValue(),'reolink');
- await page.route('**/api/camera-autoconfig',route=>route.fulfill({json:{ok:true,camera:{...saved.cameras[0],rtsp_main:'rtsp://test-user:test@192.0.2.42:8554/discovered/main',rtsp_sub:'rtsp://test-user:test@192.0.2.42:8554/discovered/sub'},device:{},streams:{},channels:[],recommendations:[],sections:{onvif:{ok:true}}}}));
+ await page.route('**/api/camera-autoconfig',route=>{assert.equal(route.request().postDataJSON().camera.access_protocol,'onvif');return route.fulfill({json:{ok:true,camera:{...saved.cameras[0],rtsp_main:'rtsp://test-user:test@192.0.2.42:8554/discovered/main',rtsp_sub:'rtsp://test-user:test@192.0.2.42:8554/discovered/sub'},device:{},streams:{},channels:[],recommendations:[],sections:{onvif:{ok:true}}}});} );
+ if(await page.locator('nav').isHidden()) await page.locator('#menu-toggle').click();
  await page.locator('nav [data-page-target="camera-settings"]').click();
  await page.locator('[data-autoconfig="0"]').click();
  await page.waitForFunction(()=>document.querySelector('[name="camera-0-rtsp-main"]')?.value.includes('/discovered/main'));
@@ -28,6 +36,8 @@ const assert=require('node:assert/strict');
  saved=await page.evaluate(()=>fetch('api/config').then(r=>r.json()));
  url=new URL(saved.cameras[0].rtsp_main);assert.equal(url.pathname,'/discovered/main');assert.equal(url.port,'8554');assert.equal(decodeURIComponent(url.password),'test@new:#/?');
  assert.equal(errors.length,0,errors.join('\n'));
- console.log('PASS: vendor change, edited IP and reserved password, saved/reloaded Reolink profile, confirmed options-sync status and ONVIF-discovered custom paths');
+ console.log(`PASS ${width}px: vendor change, edited IP and reserved password, saved/reloaded Reolink profile, confirmed options-sync status and ONVIF-discovered custom paths`);
+ await page.close();
+ }
  }finally{await browser.close()}
 })().catch(e=>{console.error(e);process.exit(1)});
