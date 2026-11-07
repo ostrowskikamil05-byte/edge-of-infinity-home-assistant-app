@@ -71,7 +71,7 @@ class EdgeDetectionCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._event_cursor is not None:
             for event in events:
                 if event["id"] > self._event_cursor:
-                    self.hass.bus.async_fire("edge_event", {key: event[key] for key in ("id", "camera_id", "kind", "source", "timestamp", "score", "day", "day_seconds") if key in event})
+                    self.hass.bus.async_fire("edge_event", {key: event[key] for key in ("id", "camera_id", "kind", "source", "timestamp", "score", "day", "day_seconds", "zone_id") if key in event})
         if events:
             self._event_cursor = max(event["id"] for event in events)
         elif self._event_cursor is None:

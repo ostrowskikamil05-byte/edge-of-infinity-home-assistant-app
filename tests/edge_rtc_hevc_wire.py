@@ -55,11 +55,19 @@ async def main():
                     break
                 assert time.monotonic() < deadline, detection
                 await asyncio.sleep(.1)
+            async with session.get('http://127.0.0.1:18090/api/detection/preview?camera=front') as response:
+                assert response.status == 200, await response.text()
+                assert response.headers['Content-Type'].startswith('image/jpeg')
+                assert response.headers['X-Edge-Frame-Width'] == '416'
+                assert response.headers['X-Edge-Frame-Height'] == '234'
+                jpeg = await response.read()
+                import cv2, numpy as np
+                assert cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR).shape == (234, 416, 3)
             async with session.get(base + '/test/status') as response:
                 source = (await response.json())['sources'][0]
             assert source['upstream_connections'] == 1 and source['connection_attempts'] == 1, source
             assert source['microphone_packets'] >= 8, source
-            print('PASS: H265 EdgeRTC frames decode to 640x360; original HEVC recording, local CPU inference and G711 microphone share one camera connection')
+            print('PASS: H265 EdgeRTC frames decode to 640x360; original HEVC recording, local CPU inference, correctly cropped preview and G711 microphone share one camera connection')
 
 
 asyncio.run(main())

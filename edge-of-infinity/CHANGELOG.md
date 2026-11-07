@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.2
+
+- Add an opt-in rectangular local-AI zone per camera, with explicit still-image preview, mouse/touch drawing and percentage inputs. Validate bounds before saving; reject invalid saves without changing the authoritative file and keep invalid startup zones closed to detections.
+- Remove model-input letterboxing from detected boxes before testing the object’s bottom-center point against the zone. Crop preview JPEGs to the same unpadded scene, using explicit BGR padding for exact geometry. Recordings and live video retain the complete original frame.
+- Fix detection-toggle label layout and hide the preview placeholder after the frame loads.
+- Serve previews only from the shared recording-profile RTSP relay, reusing recent analysis frames. Bound preview/capture concurrency and cache at most four small frames in memory; do not store preview images on disk.
+- Filter local objects before history/state publication, label zone events with zone_id=local_zone, forward that identifier to HA, expose zone metadata and add camera/local/zone-only notification source choices. Camera ONVIF events retain their own camera-side rules.
+- Preserve running recorders and ONVIF PullPoint subscriptions when only the local zone changes. Add configuration, geometry, worker, preview-cache/privacy and HA-event tests, responsive mouse/touch editor tests, and real H265 pipeline coverage for the cropped preview with one upstream connection.
+
 ## 0.11.1
 
 - Browse the complete retained event history with server-side camera/type/day filters and stable cursor pagination. Keep the selected history page during detection-status polling; cancel superseded filter requests and bound request timeouts.

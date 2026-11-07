@@ -25,6 +25,14 @@ if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  p.DETECTION_SERVICE=DetectionService(p.HOME_DIR,fixture_soap,lambda *args:'',p.write_json)
  p.DETECTION_SERVICE.store.prune=lambda *args:None
  p.DETECTION_SERVICE.apply(config)
+ # Fixed one-frame JPEG for browser tests; no camera or network access.
+ import subprocess, time
+ preview_jpeg=subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=416x234:rate=1','-frames:v','1','-c:v','mjpeg','-threads','1','-f','image2pipe','pipe:1'],capture_output=True,check=True).stdout
+ def fixture_preview(camera_id):
+  if not any(c['id']==camera_id and c['enabled'] for c in p.load_config()['cameras']):
+   raise KeyError('camera_unavailable')
+  return preview_jpeg,416,234,time.time()
+ p.DETECTION_SERVICE.preview=fixture_preview
  p.DETECTION_SERVICE.store.add('front','person','local',datetime(2026,7,27,0,0,8).timestamp(),{'score':.91})
  p.DETECTION_SERVICE.store.add('front','vehicle','camera',datetime(2026,7,28,0,0,15).timestamp(),{})
  for index in range(210):

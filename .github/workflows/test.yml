@@ -68,8 +68,10 @@ jobs:
                       raise
                   time.sleep(.1)
           PY
+          node tests/browser/detection_zones.cjs
           node tests/browser/detection_ui.cjs
           node tests/browser/nvr_playback.cjs
+          node tests/browser/ui_dashboard.cjs
 
   detection-media:
     runs-on: ubuntu-latest
@@ -103,6 +105,7 @@ jobs:
         run: |
           export EDGE_TEST_MODEL="${RUNNER_TEMP}/nanodet.onnx" EDGE_TEST_IMAGE="${RUNNER_TEMP}/test-vehicle.png" EDGE_DETECTION_MODEL="${RUNNER_TEMP}/nanodet.onnx" EDGE_RTC_TEST_BINARY="${RUNNER_TEMP}/edge-rtc-fixture"
           python -m unittest discover -s tests -p test_detection.py
+          python -m unittest discover -s tests -p test_detection_zones.py
           go -C edge-of-infinity/edge-rtc test -c -o "${EDGE_RTC_TEST_BINARY}" .
           python tests/run_detection_media.py
 

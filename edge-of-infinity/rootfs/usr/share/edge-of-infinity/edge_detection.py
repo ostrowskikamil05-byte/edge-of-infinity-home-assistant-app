@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import threading
@@ -25,6 +26,71 @@ MODEL_PATH = Path(os.environ.get('EDGE_DETECTION_MODEL', str(Path(__file__).pare
 MODEL_SHA256 = '4b82da9944b88577175ee23a459dce2e26e6e4be573def65b1055dc2d9720186'
 EVENT_ACTION = 'http://www.onvif.org/ver10/events/wsdl/'
 WSN_ACTION = 'http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/'
+ZONE_FIELDS = ('detection_zone_enabled', 'detection_zone_left', 'detection_zone_top', 'detection_zone_right', 'detection_zone_bottom')
+
+
+def zone_settings(camera):
+    bounds, valid = [], True
+    for field, default in zip(ZONE_FIELDS[1:], (0, 0, 1, 1)):
+        try:
+            value = float(camera.get(field, default))
+            if not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError('invalid_zone')
+            bounds.append(round(value, 6))
+        except (TypeError, ValueError):
+            bounds.append(0)
+            valid = False
+    valid = valid and bounds[2] - bounds[0] >= .005 - 1e-9 and bounds[3] - bounds[1] >= .005 - 1e-9
+    return {'enabled': camera.get(ZONE_FIELDS[0]) is True, 'valid': bool(valid), 'bounds': bounds if valid else [0, 0, 0, 0]}
+
+
+def zone_objects(objects, camera):
+    """Use the object's bottom-center point in original-image coordinates."""
+    zone = zone_settings(camera)
+    if not zone['enabled']:
+        return objects
+    if not zone['valid']:
+        return []
+    left, top, right, bottom = zone['bounds']
+    return [obj for obj in objects if left - 1e-6 <= (obj['box'][0] + obj['box'][2]) / 2 <= right + 1e-6
+            and top - 1e-6 <= obj['box'][3] <= bottom + 1e-6]
+
+
+def camera_event_signature(camera):
+    return tuple(camera.get(key) for key in ('id', 'host', 'username', 'password', 'onvif_url', 'enabled', 'events_enabled'))
+
+
+class AnalysisFrame:
+    """416-pixel model input with an exact rectangle for the unpadded scene."""
+    def __init__(self, pixels, width=416, height=416):
+        if len(pixels) != 416 * 416 * 3 or not 1 <= width <= 416 or not 1 <= height <= 416:
+            raise RuntimeError('invalid_analysis_frame')
+        self.pixels, self.width, self.height = pixels, width, height
+        self.left, self.top = (416 - width) // 2, (416 - height) // 2
+
+    def scene_objects(self, objects):
+        result = []
+        for obj in objects:
+            x1, y1, x2, y2 = obj['box']
+            if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+                continue
+            box = [max(0, min(1, (x1 * 416 - self.left) / self.width)),
+                   max(0, min(1, (y1 * 416 - self.top) / self.height)),
+                   max(0, min(1, (x2 * 416 - self.left) / self.width)),
+                   max(0, min(1, (y2 * 416 - self.top) / self.height))]
+            if box[2] > box[0] and box[3] > box[1]:
+                result.append({**obj, 'box': [round(value, 6) for value in box]})
+        return result
+
+    def jpeg(self):
+        import cv2
+        import numpy as np
+        image = np.frombuffer(self.pixels, np.uint8).reshape(416, 416, 3)
+        scene = image[self.top:self.top + self.height, self.left:self.left + self.width]
+        ok, encoded = cv2.imencode('.jpg', scene, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise RuntimeError('preview_encoding_failed')
+        return encoded.tobytes()
 
 
 def settings(raw=None):
@@ -253,13 +319,14 @@ class NanoDet:
 
 def capture_frame(proxy_url):
     # One short-lived local reader at a time. Decode keyframes only on thin clients.
-    command = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-threads', '1', '-filter_threads', '1', '-skip_frame', 'nokey', '-rtsp_transport', 'tcp',
-               '-i', proxy_url, '-an', '-threads', '1', '-vf', 'scale=416:416:force_original_aspect_ratio=decrease,pad=416:416:(ow-iw)/2:(oh-ih)/2:color=black',
+    command = ['ffmpeg', '-hide_banner', '-loglevel', 'info', '-threads', '1', '-filter_threads', '1', '-skip_frame', 'nokey', '-rtsp_transport', 'tcp',
+               '-i', proxy_url, '-an', '-threads', '1', '-vf', 'scale=416:416:force_original_aspect_ratio=decrease,format=bgr24,showinfo,pad=416:416:(ow-iw)/2:(oh-ih)/2:color=black',
                '-frames:v', '1', '-pix_fmt', 'bgr24', '-f', 'rawvideo', 'pipe:1']
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=False)
-    if result.returncode or len(result.stdout) != 416 * 416 * 3:
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False)
+    geometry = re.search(rb'\[Parsed_showinfo_\d+[^\]]*\].*\bs:(\d+)x(\d+)\b', result.stderr)
+    if result.returncode or len(result.stdout) != 416 * 416 * 3 or not geometry:
         raise RuntimeError('shared_source_frame_unavailable')
-    return result.stdout
+    return AnalysisFrame(result.stdout, int(geometry[1]), int(geometry[2]))
 
 
 class DetectionService:
@@ -270,6 +337,8 @@ class DetectionService:
         self.config = {'cameras': [], 'detection': settings()}
         self.store = EventStore(self.home / 'events.sqlite')
         self.workers, self.states, self.status, self.reported = {}, {}, {}, {}
+        self.capture_lock, self.preview_lock = threading.Lock(), threading.Lock()
+        self.frames = {}
         self.model, self.model_error = None, ''
         self.analysis_ms = 0
         self.thread = threading.Thread(target=self._analysis_loop, daemon=True)
@@ -287,10 +356,15 @@ class DetectionService:
                 ident = str(camera['id'])
                 if previous.get(ident) != camera:
                     self._clear(ident, 'local')
+                    self.frames.pop(ident, None)
+                if camera_event_signature(previous.get(ident) or {}) != camera_event_signature(camera):
                     self.reported.pop((ident, 'camera'), None)
+            for ident in list(self.frames):
+                if ident not in {str(camera['id']) for camera in current.get('cameras', [])}:
+                    self.frames.pop(ident, None)
             self.config = current
             for ident, (camera, stop) in list(self.workers.items()):
-                if desired.get(ident) != camera:
+                if ident not in desired or camera_event_signature(desired[ident]) != camera_event_signature(camera):
                     stop.set()
                     del self.workers[ident]
                     self._clear(ident, 'camera')
@@ -326,6 +400,52 @@ class DetectionService:
             self.status[(str(ident), source)] = value
             if value not in ('connected', 'running'):
                 self._clear(str(ident), source)
+
+    def _proxy(self, camera, index):
+        proxy = self.proxy_url(camera, index)
+        parsed = urlparse(proxy or '')
+        if parsed.scheme != 'rtsp' or parsed.hostname != '127.0.0.1' or parsed.username is not None or parsed.password is not None or not parsed.port:
+            raise RuntimeError('shared_source_required')
+        return proxy
+
+    def _remember_frame(self, camera, frame, captured_at):
+        ident = str(camera['id'])
+        self.frames.pop(ident, None)
+        self.frames[ident] = (copy.deepcopy(camera), frame, captured_at)
+        while len(self.frames) > 4:
+            self.frames.pop(next(iter(self.frames)))
+
+    def preview(self, camera_id):
+        """One explicit, bounded preview request; reuse recent analysis frames."""
+        if not self.preview_lock.acquire(blocking=False):
+            raise RuntimeError('preview_busy')
+        try:
+            with self.lock:
+                match = next(((i, copy.deepcopy(c)) for i, c in enumerate(self.config.get('cameras', [])) if str(c['id']) == camera_id and c.get('enabled')), None)
+                cached = self.frames.get(camera_id)
+            if not match:
+                raise KeyError('camera_unavailable')
+            index, camera = match
+            if cached and cached[0] == camera and time.time() - cached[2] < 5:
+                frame, stamp = cached[1:]
+            else:
+                if not self.capture_lock.acquire(timeout=1):
+                    raise RuntimeError('preview_busy')
+                try:
+                    frame, stamp = capture_frame(self._proxy(camera, index)), time.time()
+                finally:
+                    self.capture_lock.release()
+                with self.lock:
+                    if camera not in self.config.get('cameras', []):
+                        raise RuntimeError('configuration_changed')
+                    self._remember_frame(camera, frame, stamp)
+            jpeg = frame.jpeg()
+            with self.lock:
+                if camera not in self.config.get('cameras', []):
+                    raise RuntimeError('configuration_changed')
+            return jpeg, frame.width, frame.height, stamp
+        finally:
+            self.preview_lock.release()
 
     def _camera_loop(self, camera, stopped):
         ident, delay = str(camera['id']), 5
@@ -413,13 +533,14 @@ class DetectionService:
                 self._set_status(ident, 'local', 'loading' if self.model is None else 'running')
                 if self.model is None:
                     self.model = NanoDet()
-                proxy = self.proxy_url(camera, index)
-                parsed = urlparse(proxy or '')
-                if parsed.scheme != 'rtsp' or parsed.hostname != '127.0.0.1' or parsed.username is not None or parsed.password is not None or not parsed.port:
-                    raise RuntimeError('shared_source_required')
-                pixels = capture_frame(proxy)
-                captured_at = time.time()
-                objects = self.model.infer(pixels, options['confidence'])
+                with self.capture_lock:
+                    frame = capture_frame(self._proxy(camera, index))
+                    captured_at = time.time()
+                with self.lock:
+                    if self.config != config:
+                        continue
+                    self._remember_frame(camera, frame, captured_at)
+                objects = zone_objects(frame.scene_objects(self.model.infer(frame.pixels, options['confidence'])), camera)
                 with self.lock:
                     # Discard results from settings that have been superseded during analysis.
                     if self.config != config:
@@ -429,7 +550,8 @@ class DetectionService:
                         matched = [obj for obj in objects if obj['kind'] == kind]
                         old = self.states.get((ident, 'local', kind)) or {}
                         if matched:
-                            self.record(ident, kind, 'local', True, timestamp=captured_at, score=max(obj['score'] for obj in matched), objects=matched)
+                            self.record(ident, kind, 'local', True, timestamp=captured_at, score=max(obj['score'] for obj in matched), objects=matched,
+                                        **({'zone_id': 'local_zone'} if zone_settings(camera)['enabled'] else {}))
                         elif not old.get('active') or time.time() - old.get('last_seen', 0) > options['hold_seconds']:
                             self.record(ident, kind, 'local', False)
                     self.analysis_ms = round((time.monotonic() - started) * 1000)
@@ -454,7 +576,8 @@ class DetectionService:
                     supported.update(('person', 'vehicle'))
                 rows.append({'id': ident, 'index': index, 'name': camera.get('name', ident), 'states': states, 'supported_kinds': sorted(supported),
                              'camera_status': self.status.get((ident, 'camera'), 'connecting') if camera_on else 'disabled',
-                             'local_status': self.status.get((ident, 'local'), 'loading') if local_on else 'disabled'})
+                             'local_status': self.status.get((ident, 'local'), 'loading') if local_on else 'disabled',
+                             'local_zone': zone_settings(camera)})
             return {'updated_at': now, 'cameras': rows, 'recent_events': self.store.recent(limit=200),
                     'model': 'NanoDet-m-plus-1.5x_416', 'model_installed': MODEL_PATH.is_file(), 'backend': 'CPU (1 thread)',
                     'max_fps': self.config['detection']['max_fps'], 'analysis_ms': self.analysis_ms}
