@@ -53,6 +53,7 @@ class DeviceReporter{
  unregisterSource(key){this.samplers.delete(key);}
  schedule(ms){if(!this.flushTimer)this.flushTimer=setTimeout(()=>{this.flushTimer=null;this.flush();},ms);}
  device(){
+  try{const saved=localStorage.getItem('edge-device-label');if(saved!==null)this.label=saved;}catch(_){}
   const n=navigator,c=n.connection,v=document.createElement('video');
   return {label:this.label||(/iPhone/.test(n.userAgent)?'iPhone':/iPad/.test(n.userAgent)||n.platform==='MacIntel'&&n.maxTouchPoints>1?'iPad':/Android/.test(n.userAgent)?'Android':'Computer'),
    user_agent:n.userAgent,platform:n.platform,language:n.language,secure_context:isSecureContext,

@@ -12,6 +12,9 @@ const {chromium,webkit}=require('playwright');const assert=require('node:assert/
    await page.goto(base+'/?authSig=forbidden-signature');await page.waitForFunction(()=>deviceReporter?.device_id);
    const identity=await page.evaluate(()=>({device:deviceReporter.device_id,session:deviceReporter.session_id}));ids.push(identity.device);
    await page.evaluate(label=>deviceReporter.setLabel(label),label);
+   await page.evaluate(()=>localStorage.setItem('edge-device-label','Shared device label'));
+   assert.equal(await page.evaluate(()=>deviceReporter.device().label),'Shared device label','another panel/card context left a stale device label');
+   await page.evaluate(label=>deviceReporter.setLabel(label),label);
    await page.route('**/api/version?token=forbidden-token',async route=>{await new Promise(resolve=>setTimeout(resolve,150));await route.fulfill({json:{version:'test'}});});
    await page.evaluate(async()=>{await fetch('api/version?token=forbidden-token');deviceReporter.note('test_device_error',{url:location.href,password:'forbidden-password'});});
    let data;
