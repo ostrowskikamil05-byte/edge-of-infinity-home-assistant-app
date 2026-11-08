@@ -62,6 +62,15 @@ async def main():
                 cameras=[{'id':str(index),'enabled':True,'edge_rtc':{'api':info['api'],'path':'front_main'}} for index in range(4)]
                 hass=types.SimpleNamespace(data={'edge':{'entry':{'client':client,'coordinator':types.SimpleNamespace(data={'cameras':cameras}),'entities':{str(i):row for i,row in enumerate(rows)}}}})
                 bridge=module.EdgeRTCView(hass)
+                spec=importlib.util.spec_from_file_location('edge_fixture.device_diagnostics',ASSETS.parent/'device_diagnostics.py')
+                diagnostics_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(diagnostics_module)
+                async def report_device(payload,peer):return await asyncio.to_thread(panel.DEVICE_LOGS.append,payload,peer)
+                client.report_device=report_device
+                device_bridge=diagnostics_module.EdgeDeviceDiagnosticsView(hass)
+                async def device_report(request):
+                    request['hass_user']=types.SimpleNamespace(permissions=types.SimpleNamespace(check_entity=lambda entity,policy:request.query.get('deny')!='1'))
+                    return await device_bridge.post(request)
+                async def device_logs(request):return web.json_response(panel.DEVICE_LOGS.snapshot(request.query.get('device','')))
                 async def websocket(request):
                     allowed = request.query.get('deny')!='1'
                     request['hass_user']=types.SimpleNamespace(permissions=types.SimpleNamespace(check_entity=lambda entity,policy: allowed or policy=='read'))
@@ -73,7 +82,7 @@ async def main():
                     return web.Response(text='<html><body style="margin:8px;background:#0d151e;--primary-text-color:#edf5f7;--card-background-color:#111d28"></body></html>',content_type='text/html')
                 async def asset(request):
                     name=request.match_info['name']
-                    if name not in ['edge-live-card.js','edge-rtc-client.js','edge-pcm-worklet.js']:
+                    if name not in ['edge-live-card.js','edge-rtc-client.js','edge-pcm-worklet.js','edge-device-diagnostics.js']:
                         raise web.HTTPNotFound()
                     return web.Response(body=(ASSETS/name).read_bytes(),content_type='text/javascript')
                 sys.path.insert(0, str(ROOT/'tests'))
@@ -132,7 +141,7 @@ async def main():
                         recorded_fps=sum(video_timing(row['path'])['fps']*row['duration'] for row in rows)/sum(row['duration'] for row in rows)
                         return {'state':store.get(ident)['clip_state'],'pixel_identical':original==pixels(clip),'fps':video_timing(clip)['fps'],'recorded_fps':recorded_fps}
                     return web.json_response(await asyncio.to_thread(build))
-                app=web.Application();app.router.add_get('/',index);app.router.add_get('/edge/{name}',asset);app.router.add_get('/api/edge/rtc/{entity}',websocket);app.router.add_get('/test/status',status);app.router.add_get('/test/detection',detection_status);app.router.add_get('/test/record',record);app.router.add_get('/test/alert',alert)
+                app=web.Application();app.router.add_get('/',index);app.router.add_get('/edge/{name}',asset);app.router.add_get('/api/edge/rtc/{entity}',websocket);app.router.add_post('/api/edge/client-diagnostics',device_report);app.router.add_get('/test/devices',device_logs);app.router.add_get('/test/status',status);app.router.add_get('/test/detection',detection_status);app.router.add_get('/test/record',record);app.router.add_get('/test/alert',alert)
                 runner=web.AppRunner(app);await runner.setup();site=web.TCPSite(runner,'127.0.0.1',18089);await site.start()
                 print('EdgeRTC real transport fixture ready on 18089',flush=True)
                 event=asyncio.Event();asyncio.get_running_loop().add_signal_handler(signal.SIGTERM,event.set);await event.wait();await runner.cleanup();await asyncio.to_thread(server.shutdown);server.server_close()

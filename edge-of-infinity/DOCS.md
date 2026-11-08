@@ -1,5 +1,63 @@
 # Edge of Infinity App Documentation
 
+## 0.11.11: seek recovery and codec comparison
+
+After this update, **restart Home Assistant Core**, then reopen the panel/card.
+This registers the authenticated card-diagnostics endpoint and new JavaScript.
+In **Diagnostics → Urządzenia i połączenia**, name each phone/tablet, select its
+device/session and download the JSON report plus connection map. Open Edge/the
+card on that device first; reports are collected from open sessions, not phones
+which have never loaded the app. The same browser/origin keeps its random local
+ID; a new private session, cleared storage or another HA hostname can create
+another ID. Names are user labels; a browser cannot reliably identify an exact
+iPhone model. Sessions keep monotonic durations and client/server timestamps.
+
+Reports capture resource times, playback/decoder state, queues, dropped frames,
+WebSocket/auth/first-frame stages and online/offline/JavaScript errors. Active
+sources are sampled every 20 seconds; error/loading events are batched. This is
+not a video packet capture. Limits are **24 devices × 256 KiB / seven days**;
+bounded queues report dropped entries and retry with backoff. The exported
+map distinguishes configured camera/Edge addresses, observed HA proxy peers
+and browser endpoints. It does not inspect routers or run traceroute. Safari
+may omit network/heap/timing fields; phone CPU load, free RAM and Wi-Fi signal
+remain unavailable instead of guessed. Zero DNS/TCP can mean connection reuse.
+Only camera-readable authenticated HA users can submit card telemetry, and
+passwords/signatures/ingress IDs are removed from exported URLs and logs.
+
+Update the app, then reload the Edge panel. Open **Recordings → ⋯ → Kodeki**
+to compare up to six seconds from the current saved segment. Choose original,
+H.264 or H.265 video, and AAC, no audio, A-law or μ-law. Changing video codec
+encodes only a short test copy; it can take time on a two-core t530. Normal
+recording/playback keeps original pixels and FPS and does not change camera
+settings. The G.711 tests use MOV; unsupported browsers display an error and
+record it in logs. If a recording has no audio, choose **Bez dźwięku**.
+
+The tests share one low-priority worker and the existing 64 MiB/12-file/48-hour
+compatibility cache, with at most 24 MiB for a test and a 90-second timeout.
+They use already saved media, never a second physical camera stream. A-law/μ-law
+generated from an AAC recording do not establish whether the camera supports
+these encoders natively. Closing the test window stops its player; an already
+running server preparation remains bounded by its timeout.
+
+**Logs → Playback performance / Playback / codec tests** shows direct delivery,
+remuxing, queue/preparation time, transfer bytes/time, seek-to-play time, native
+buffer/error state and dropped frames. Compare AAC with no audio to isolate an
+audio-related delay; compare H.264/HEVC test results on the same device. Direct
+delivery is used only for indexed compatible originals with normal clocks.
+
+**Hardware diagnostics → inventory** lists the detected CPU/product and GPU
+driver/render nodes. It does not imply hardware acceleration works. **Camera
+media** describes the current stream. To collect camera-reported profiles,
+run its existing ONVIF/ISAPI discovery in Settings; **Camera discovery** logs
+the model, firmware and reported video/audio profile settings. Discovery reads
+settings and does not change camera codecs. Missing profile data means unknown,
+not unsupported. Logs are bounded and credentials are redacted.
+
+EdgeRTC already keeps its upstream connected and caches a bounded keyframe
+group on the server. Diagnostics now show keep-alive and cache occupancy.
+There is still one upstream per shared source. Original HEVC bitrate/GOP and
+the network/browser can limit startup speed even with a warm server.
+
 ## 0.11.2: local AI zones
 
 After updating the app, restart Home Assistant Core so `zone_id` is forwarded

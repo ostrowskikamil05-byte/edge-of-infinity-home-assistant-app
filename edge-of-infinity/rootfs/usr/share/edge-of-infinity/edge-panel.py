@@ -31,7 +31,9 @@ from edge_detection import DetectionService, settings as detection_settings, zon
 from edge_storage import MIB, SEGMENT, managed_files, prune_cache, trim_log
 from edge_recording_media import AlertMediaService, video_timing
 from edge_recording_compat import CompatibleRecordings
-from edge_metrics import CpuSampler, cpu_load_severity
+from edge_metrics import CpuSampler, cpu_load_severity, hardware_inventory
+sys.path.insert(0,str(Path(__file__).parent/'custom_components/edge'))
+from _device_logs import DeviceLogs, safe_url
 
 DETECTION_SERVICE = None
 ALERT_SERVICE = None
@@ -92,13 +94,18 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.11.10"
+APP_VERSION = "0.11.11"
+APP_RELEASE_FEATURES=['Seek intent and bounded first-frame recovery','Direct compatible saved MP4; legacy normalization retained',
+                      'Explicit six-second H.264/H.265 and AAC/silent/A-law/μ-law test copies',
+                      'Per-device/session browser, network and live/NVR logs with redacted download and connection map',
+                      'Playback, hardware and camera-profile diagnostics; shared warm EdgeRTC source']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "alert-buffer-v1110"
+UI_BUILD = "device-seek-v1111"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
-RECORDING_COMPAT = CompatibleRecordings(DATA_DIR / 'recording-compat')
+RECORDING_COMPAT = CompatibleRecordings(DATA_DIR / 'recording-compat',log=lambda event,payload:append_jsonl_log(HOME_DIR/'playback.jsonl',event,payload))
+DEVICE_LOGS=DeviceLogs(HOME_DIR/'device-logs')
 CONFIG_PATH = Path(os.environ.get("EDGE_HOME_CONFIG", "/homeassistant/edge/edge.json"))
 ADDON_CONFIG_PATH = Path(os.environ.get("EDGE_ADDON_CONFIG", "/config/edge.json"))
 CONFIG_BACKUP_PATH = HOME_DIR / "edge.backup.json"
@@ -342,7 +349,7 @@ def redact_for_log(value):
         redacted = {}
         for key, item in value.items():
             lowered = str(key).lower()
-            if any(secret in lowered for secret in ("password", "token", "authorization", "secret")):
+            if any(secret in lowered for secret in ("password", "token", "authorization", "secret", "authsig")):
                 redacted[key] = "***"
             else:
                 redacted[key] = redact_for_log(item)
@@ -350,7 +357,10 @@ def redact_for_log(value):
     if isinstance(value, list):
         return [redact_for_log(item) for item in value]
     if isinstance(value, str):
-        return redact_rtsp(value)
+        value=redact_rtsp(value)
+        value=re.sub(r'(?i)((?:authsig|access_token|password|token|secret)=)[^&\s"#]+',r'\1***',value)
+        value=re.sub(r'(?i)("(?:authsig|access_token|password|token|secret)"\s*:\s*")[^"]*(")',r'\1***\2',value)
+        return re.sub(r'/api/(?:hassio_ingress|hassio/ingress)/[^/\s?]+','/ingress',value)
     return value
 
 
@@ -411,6 +421,7 @@ def camera_debug_profile(camera: dict, stream_name: str, probe: dict | None = No
         "camera_id": camera.get("id"),
         "name": camera.get("name"),
         "vendor": camera.get("vendor"),
+        "manufacturer":camera.get('manufacturer'),"model":camera.get('model'),"firmware":camera.get('firmware'),
         "host": camera.get("host"),
         "stream_name": stream_name,
         "rtsp": redact_rtsp(stream),
@@ -1285,6 +1296,7 @@ def system_diagnostics_payload(recordings_dir: Path) -> dict:
     cache_workers = sorted(RECORDING_CACHE_WORKERS)
     return {
         "cpu_count": cpu_count,
+        "inventory":hardware_inventory(),
         "cpu_usage": CPU_SAMPLER.sample(),
         "loadavg": loadavg,
         "load_per_core_1m": load_per_core,
@@ -1565,10 +1577,15 @@ def collect_panel_logs() -> dict:
         "server_version": SERVER_VERSION,
         "ui_build": UI_BUILD,
         "authoritative_config": str(CONFIG_PATH),
+        "release_features":APP_RELEASE_FEATURES,
         "addon_config_mirror": str(ADDON_CONFIG_PATH),
         "panel_mirror_config": str(PANEL_CONFIG_PATH),
         "config_summary": config_summary(config),
         "hardware": hardware,
+        "playback":RECORDING_COMPAT.status(),
+        "playback_log":redact_rtsp(read_text_tail(HOME_DIR/'playback.jsonl',20000)),
+        "camera_media":safe_json_file(DATA_DIR/'cameras.json'),
+        "camera_discovery_log":redact_rtsp(read_text_tail(HOME_DIR/'camera-discovery.jsonl',16000)),
         "runtime_parameters": runtime_parameters_payload(config, hardware, recordings_dir),
         "diagnostics": build_panel_diagnostics(config, hardware, tails, recording_logs,detection),
         "detection":detection,
@@ -3218,7 +3235,7 @@ def cleanup_disposable_storage(config: dict, wait_for_thumbnail: bool = False) -
                 RECORDING_THUMBNAIL_SEMAPHORE.release()
         else:
             report['thumbnails'] = {'skipped':'thumbnail_worker_busy'}
-        paths = [DEBUG_LOG_PATH, RECORDING_CACHE_LOG_PATH, RECORDING_THUMB_LOG_PATH, RECORDING_STREAM_LOG_PATH]
+        paths = [DEBUG_LOG_PATH, RECORDING_CACHE_LOG_PATH, RECORDING_THUMB_LOG_PATH, RECORDING_STREAM_LOG_PATH,HOME_DIR/'playback.jsonl',HOME_DIR/'camera-discovery.jsonl']
         if root.is_dir() and not root.is_symlink():
             paths += [path / 'ffmpeg.log' for path in root.iterdir() if path.is_dir() and not path.is_symlink()]
         with DEBUG_LOCK:
@@ -4852,7 +4869,11 @@ def fetch_onvif_camera_config(camera: dict) -> dict:
     for node in profiles_xml.iter():
         if node.tag.rsplit("}", 1)[-1] != "Profiles" or not node.get("token"):
             continue
-        profiles.append({"token": node.get("token"), "area": safe_int(onvif_value(node, "Width"), 0) * safe_int(onvif_value(node, "Height"), 0)})
+        video=next((p for p in node if local_name(p.tag)=='VideoEncoderConfiguration'),None)
+        audio=next((p for p in node if local_name(p.tag)=='AudioEncoderConfiguration'),None)
+        profiles.append({"token": node.get("token"), "area": safe_int(onvif_value(node, "Width"), 0) * safe_int(onvif_value(node, "Height"), 0),
+                         'video':{field:onvif_value(video,field) if video is not None else '' for field in ('Encoding','Width','Height','FrameRateLimit','BitrateLimit','GovLength','H264Profile')},
+                         'audio':{field:onvif_value(audio,field) if audio is not None else '' for field in ('Encoding','SampleRate','Bitrate')}})
     if not profiles:
         raise RuntimeError("Camera returned no ONVIF profiles; enable ONVIF or enter manual RTSP URLs.")
     profiles.sort(key=lambda item: item["area"], reverse=True)
@@ -4874,7 +4895,7 @@ def fetch_onvif_camera_config(camera: dict) -> dict:
                 discovered[key] = value
     except (RuntimeError, ValueError):
         pass
-    return {"ok": True, "camera": discovered, "device": device, "streams": {}, "channels": [], "sections": {"onvif": {"ok": True}}, "effective_streams": effective_streams(discovered), "recommendations": [{"severity": "notice", "stream": "all", "message": "ONVIF main/sub streams loaded into the form. Save cameras to apply them."}]}
+    return {"ok": True, "camera": discovered, "device": device, "streams": {}, "profiles":profiles,"channels": [], "sections": {"onvif": {"ok": True}}, "effective_streams": effective_streams(discovered), "recommendations": [{"severity": "notice", "stream": "all", "message": "ONVIF main/sub streams loaded into the form. Save cameras to apply them."}]}
 
 
 def fetch_camera_autoconfig(camera: dict) -> dict:
@@ -5179,6 +5200,8 @@ def refresh_status() -> dict:
             "name": camera.get("name"),
             "vendor": camera.get("vendor"),
             "host": camera.get("host"),
+            "manufacturer":camera.get('manufacturer'),"model":camera.get('model'),"firmware":camera.get('firmware'),
+            "media_observation":"Current configured stream, not a complete list of camera codec capabilities.",
             "enabled": bool(camera.get("enabled")),
             "record": bool(camera.get("record")),
             "low_latency": bool(camera.get("low_latency")),
@@ -5213,6 +5236,7 @@ def refresh_status() -> dict:
             "snapshot_path": snapshot_path,
         }
         cameras.append(camera_status)
+        write_debug_event('camera_media_detected',camera_status)
 
     with CONFIG_LOCK:
         if config != load_config():
@@ -5259,8 +5283,10 @@ def health_payload() -> dict:
 
 EDGE_RTC_PLAYER_HTML = r"""<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;height:100%;background:#080e15;color:#d9e7ee;font:13px system-ui}canvas{width:100%;height:100%;object-fit:contain}button{position:absolute;bottom:12px;right:12px;padding:10px;border:0;border-radius:8px;background:#20384b;color:white}p{position:absolute;top:8px;left:10px}</style><canvas></canvas><p>EdgeRTC · connecting…</p><button>Sound</button><script type="module">
 import{EdgeRTCClient}from'../client.js';
+import{getDeviceReporter}from'../device-diagnostics.js';
 const path=location.pathname.split('/').pop(),url=new URL('../stream/'+path,location.href);let client,timer,retries=0,muted=true;
-function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;const label='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264'),note=document.querySelector('p');if(note.textContent!==label)note.textContent=label;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
+const diagnostics=getDeviceReporter({context:{surface:'edge_panel_live',source:path},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);try{return(await fetch(new URL('../../client-diagnostics',location.href),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal})).ok;}finally{clearTimeout(timer);}}});
+function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,diagnostics,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;const label='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264'),note=document.querySelector('p');if(note.textContent!==label)note.textContent=label;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
 connect();document.querySelector('button').onclick=()=>{muted=!muted;client?.setAudio(.6,muted);document.querySelector('button').textContent=muted?'Sound':'Mute';};document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(document.hidden)client?.close();else connect();});window.addEventListener('pagehide',()=>{clearTimeout(timer);client?.close();});
 </script>"""
 
@@ -6274,6 +6300,13 @@ INDEX_HTML = r"""<!doctype html>
               <button class="primary" id="refresh-logs">Refresh logs</button>
             </div>
           </header>
+          <section class="panel"><h2>Urządzenia i połączenia</h2>
+            <div class="form-grid"><label>Nazwa tego urządzenia<input id="device-label" maxlength="64" placeholder="np. iPhone Kamila"></label>
+              <label>Logi urządzenia<select id="device-log-select"></select></label></div>
+            <button type="button" id="device-log-download">Pobierz logi urządzenia i mapę połączeń</button>
+            <p class="notice">Pomiar co 20 s i przy błędach, z podziałem na urządzenie i sesję. Safari może nie udostępniać RTT, RAM lub szczegółów żądania. Limit: 24 urządzenia × 256 KiB, do 7 dni.</p>
+            <div id="device-log-view" class="log-grid"></div>
+          </section>
           <section class="panel">
             <div id="logs-view" class="log-grid"></div>
           </section>
@@ -6623,8 +6656,12 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function debugEvent(event, payload = {}) {
+        if(/^(ui_recording_|ui_live_|ui_codec_|ui_global_|ui_page_change)/.test(event)){
+          if(deviceReporter)deviceReporter.note(event,payload);else {pendingDeviceEvents.push([event,payload]);if(pendingDeviceEvents.length>40)pendingDeviceEvents.shift();}
+        }
         const body = JSON.stringify({
           event,
+          device_id:deviceReporter?.device_id||null,session_id:deviceReporter?.session_id||null,
           panel_version: EDGE_PANEL_VERSION,
           ui_build: EDGE_UI_BUILD,
           timestamp: new Date().toISOString(),
@@ -6650,6 +6687,18 @@ INDEX_HTML = r"""<!doctype html>
           body
         }).catch(() => {});
       }
+      let deviceReporter=null,deviceReport=null;
+      const pendingDeviceEvents=[];
+      import(panelPath('api/client-diagnostics.js')).then(({getDeviceReporter})=>{
+        deviceReporter=getDeviceReporter({context:{surface:'edge_panel'},send:async payload=>{
+          const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);
+          try{return (await fetch(panelPath('api/client-diagnostics'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal})).ok;}finally{clearTimeout(timer);}
+        }});
+        document.getElementById('device-label').value=deviceReporter.label||'';
+        deviceReporter.registerSource('recordings',()=>({state:activePage==='nvr'?'visible':'closed',
+          players:activePage==='nvr'?[...nvrGrid.querySelectorAll('video[data-recording-player]')].filter(v=>v.getAttribute('src')).slice(0,8).map(recordingVideoDiagnostics):[]}));
+        for(const [event,data] of pendingDeviceEvents.splice(0))deviceReporter.note(event,data);
+      }).catch(error=>{console.warn('Edge device diagnostics module:',error.message);});
 
       function setNavCollapsed(collapsed, persist = true) {
         document.body.classList.toggle('nav-collapsed', collapsed);
@@ -6928,12 +6977,12 @@ INDEX_HTML = r"""<!doctype html>
         const seek = Math.max(0, Number(seekSeconds || 0));
         if (!url) return url;
         let clean = String(url).split('#', 1)[0];
-        // Every browser uses the same seekable, normalized MP4 container.
-        // A bounded stream-copy cache uses saved clips, never camera streams.
+        // Version the representation: a browser must not combine byte ranges
+        // from the former remux-only URL with a directly served original.
         {
           const parsed=new URL(clean,location.href);
           if (/\/recordings\/|\/api\/alerts\/\d+\/clip\.mp4$/.test(parsed.pathname)) {
-            parsed.searchParams.set('compat','1');parsed.searchParams.set('container','hvc1-clock-v4');clean=parsed.href;
+            parsed.searchParams.set('compat','1');parsed.searchParams.set('container','direct-clock-v5');clean=parsed.href;
           }
         }
         return seek?`${clean}#t=${seek.toFixed(3)}`:clean;
@@ -7180,6 +7229,31 @@ INDEX_HTML = r"""<!doctype html>
         cancelRecordingWarmup(video);delete video.dataset.recordingBuffering;
         video.dataset.recordingWantsPlay='false';video.dataset.recordingPlayPending='false';video.dataset.recordingPlayEpoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.pause();
       }
+      function recordingPlaybackRequested(video) {
+        return Boolean(video&&!video.ended&&(!video.paused||video.dataset.recordingPlayPending==='true'||video.dataset.recordingWantsPlay==='true'&&(video.dataset.recordingBuffering==='true'||video.dataset.recordingLoading==='true')));
+      }
+      const recordingProgressWatch=new WeakMap();
+      function watchRecordingProgress(video) {
+        if(activePage!=='nvr'||document.hidden||!video.isConnected||video.dataset.recordingWantsPlay!=='true'||video.ended||recordingScrubs.has(video.dataset.recordingPlayer)){recordingProgressWatch.delete(video);return;}
+        const now=performance.now(),src=video.dataset.recordingSrc||video.src,time=video.currentTime;
+        let state=recordingProgressWatch.get(video);
+        if(!state||state.src!==src){state={src,time,at:now,retries:0};recordingProgressWatch.set(video,state);return;}
+        if(Math.abs(state.time-time)>.04){state.time=time;state.at=now;return;}
+        if(now-state.at<8000)return;
+        // Try Play before a reload. A long initial download must not be
+        // repeatedly aborted; only one reload per selected segment is allowed.
+        if(state.retries===0){state.retries=1;state.at=now;debugEvent('ui_recording_progress_retry',recordingVideoDiagnostics(video));playRecording(video);return;}
+        if(now-state.at<12000)return;
+        if(state.retries===1&&Number(video.dataset.recordingRecoveryReloads||0)<1){
+          state.retries=2;state.at=now;video.dataset.recordingRecoveryReloads='1';
+          const position=video.seeking?Number(video.dataset.recordingSeek||0):time;
+          holdRecordingFrame(video);video.dataset.recordingLoading='true';video.dataset.recordingSeek=String(position);
+          debugEvent('ui_recording_progress_reload',recordingVideoDiagnostics(video));
+          video.src=mediaUrlWithTimeFragment(src,position);video.load();playRecording(video);return;
+        }
+        if(now-state.at>=12000){debugEvent('ui_recording_progress_timeout',recordingVideoDiagnostics(video));pauseRecording(video);updateRecordingPlayerControls(video,'Nagranie nie dostarcza klatek. Naciśnij Play lub przetestuj kodeki w ustawieniach odtwarzacza.');}
+      }
+      setInterval(()=>nvrGrid.querySelectorAll('video[data-recording-player]').forEach(watchRecordingProgress),2000);
 
       let recordingWarmJob=null;
       const recordingWarmPlans=new WeakMap(),recordingWarmDone=new Map();
@@ -7243,6 +7317,9 @@ INDEX_HTML = r"""<!doctype html>
         selectedRecordingTimeline[index] = target.requested;
         recordingStreamStartOffset[index] = target.target.offset;
         video.dataset.recordingSeek = String(fileSeek);
+        video.dataset.recordingSeekStarted=String(performance.now());
+        video.dataset.recordingLoading='true';video.dataset.recordingBuffering='false';video.dataset.recordingWantsPlay=String(autoplay);
+        video.dataset.recordingRecoveryReloads='0';recordingProgressWatch.delete(video);
         video.dataset.recordingStreamStart = String(target.target.offset);
         video.dataset.recordingPlaybackStart = String(target.target.playbackOffset || 0);
         video.dataset.recordingPlaybackMode = 'server_file_sequence';
@@ -7464,7 +7541,7 @@ INDEX_HTML = r"""<!doctype html>
         const target = recordingTargetForOffset(index, offset);
         if (!target) return;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
-        const wasPlaying = Boolean(video && (!video.paused||video.dataset.recordingPlayPending==='true') && !video.ended);
+        const wasPlaying = recordingPlaybackRequested(video);
         selectedRecording[index] = target.target.file.url;
         selectedRecordingSeek[index] = target.seek;
         selectedRecordingTimeline[index] = target.requested;
@@ -7729,7 +7806,7 @@ INDEX_HTML = r"""<!doctype html>
         let state=recordingScrubs.get(index);
         if(state){state.active=true;state.finishing=false;clearTimeout(state.deadline);return state;}
         const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);if(!video)return null;
-        state={index,video,slider,active:true,finishing:false,resume:(!video.paused||video.dataset.recordingPlayPending==='true')&&!video.ended,original:recordingPlaybackPosition(video),desired:Number(slider.value),applied:null,lastSeek:0};
+        state={index,video,slider,active:true,finishing:false,resume:recordingPlaybackRequested(video),original:recordingPlaybackPosition(video),desired:Number(slider.value),applied:null,lastSeek:0};
         recordingScrubs.set(index,state);clearRecordingContinuation(index);video.pause();
         markNvrInteraction('recording_scrub_start',{index});
         const wrap=video.closest('[data-recording-wrap]');wrap.dataset.scrubbing='true';showRecordingControls(wrap);
@@ -7756,6 +7833,7 @@ INDEX_HTML = r"""<!doctype html>
         if(state.applied!==state.desired){
           state.applied=state.desired;state.lastSeek=performance.now();
           seekRecordingPlayback(state.index,state.desired,true);
+          if(state.finishing&&state.resume)playRecording(video);
         }
         const expected=Number.isFinite(video.duration)?Math.min(state.desired,Number(video.dataset.recordingPlaybackStart||0)+Math.max(0,video.duration-.05)):state.desired;
         const advance=state.playStarted?Math.max(0,(performance.now()-state.playStarted)/1000)*video.playbackRate:0;
@@ -7778,6 +7856,7 @@ INDEX_HTML = r"""<!doctype html>
           updateRecordingPlayerControls(state.video,'Nie udało się wczytać wybranego momentu. Spróbuj ponownie.');
         },15000);
         flushRecordingScrub(state);
+        if(state.resume&&recordingScrubs.get(state.index)===state)playRecording(state.video);
       }
       window.addEventListener('pagehide',()=>{for(const index of recordingScrubs.keys())discardRecordingScrub(index);});
       window.addEventListener('blur',()=>{for(const state of recordingScrubs.values()){state.resume=false;if(state.active)finishRecordingScrub(state.slider);}});
@@ -7797,12 +7876,45 @@ INDEX_HTML = r"""<!doctype html>
             <output class="nvr-playback-clock" data-recording-duration="${index}">${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}</output>
 
 
-<div class="nvr-playback-extra" id="recording-extra-${index}">            <button type="button" data-recording-mute="${index}" aria-label="Mute or unmute" title="Mute">${recordingControlIcon('sound')}</button>            <button class="nvr-skip" type="button" data-recording-jump="-1" data-record-index="${index}" aria-label="Back 1 second" title="Back 1 second">−1 s</button>
+<div class="nvr-playback-extra" id="recording-extra-${index}"><button type="button" data-recording-codecs="${index}" title="Test H.264 / H.265 i dźwięku">Kodeki</button>            <button type="button" data-recording-mute="${index}" aria-label="Mute or unmute" title="Mute">${recordingControlIcon('sound')}</button>            <button class="nvr-skip" type="button" data-recording-jump="-1" data-record-index="${index}" aria-label="Back 1 second" title="Back 1 second">−1 s</button>
             <button class="nvr-skip" type="button" data-recording-jump="1" data-record-index="${index}" aria-label="Forward 1 second" title="Forward 1 second">+1 s</button>            <label class="nvr-speed-label"><select data-recording-speed="${index}" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label></div>
             <button class="nvr-player-more" type="button" data-recording-more="${index}" aria-label="Playback settings" title="Playback settings" aria-controls="recording-extra-${index}" aria-expanded="false">${recordingControlIcon('settings')}</button>
             <button type="button" data-recording-fullscreen="${index}" aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>
           </div>
         </div>`;
+      }
+
+      function openRecordingCodecTest(index) {
+        const original=nvrGrid.querySelector(`video[data-recording-player="${index}"]`),status=recordingStatus[index];
+        const file=recordingTargetForPlaybackOffset(index,recordingPlaybackPosition(original))?.target?.file;
+        if(!file||!status)return;
+        const start=original.currentTime||0;pauseRecording(original);releaseInactiveRecordingPlayers(null,true);
+        const dialog=document.createElement('dialog');dialog.style.cssText='width:min(840px,92vw);max-height:88vh;overflow:auto;background:#101820;color:white;border:1px solid #456;border-radius:12px';
+        dialog.innerHTML=`<h3>Test kodeków nagrania</h3><p>Do 6 sekund od wybranego momentu. Oryginał, rozdzielczość, FPS i ustawienia kamery pozostają bez zmian. Zmiana H.264 ↔ H.265 koduje tylko kopię testową i może potrwać na t530.</p>
+          <form style="display:flex;gap:12px;flex-wrap:wrap"><label>Obraz <select name="video"><option value="source">Oryginalny kodek · kopiowanie</option><option value="h264">H.264</option><option value="hevc">H.265 / HEVC</option></select></label>
+          <label>Dźwięk <select name="audio"><option value="aac">AAC · telefony</option><option value="none">Bez dźwięku · porównanie</option><option value="alaw">G.711 A-law · test MOV</option><option value="ulaw">G.711 μ-law · test MOV</option></select></label><button type="submit">Przygotuj test</button></form>
+          <p>A-law/μ-law są tworzone z zapisanego dźwięku. Ich odtwarzanie zależy od przeglądarki; brak obsługi zostanie zapisany w logach. To nie sprawdza wszystkich kodeków dostępnych w kamerze.</p>
+          <video controls playsinline muted preload="auto" style="width:100%;max-height:46vh;background:#000"></video><p data-codec-status role="status">Wybierz kodeki i przygotuj test.</p><pre data-codec-report style="white-space:pre-wrap;overflow-wrap:anywhere"></pre><button type="button" data-codec-close>Zamknij</button>`;
+        const video=dialog.querySelector('video'),note=dialog.querySelector('[data-codec-status]'),report=dialog.querySelector('[data-codec-report]'),form=dialog.querySelector('form');
+        let active=true,controller=null,selected=null,started=0,playAt=0;
+        const details=()=>({index,file:file.name,selected,elapsed_ms:Math.round(performance.now()-started),media:{ready_state:video.readyState,network_state:video.networkState,error_code:video.error?.code,error_message:video.error?.message,current_time:video.currentTime,width:video.videoWidth,height:video.videoHeight}});
+        form.onsubmit=async event=>{
+          event.preventDefault();if(controller)return;
+          video.pause();video.removeAttribute('src');video.load();selected={video:form.elements.video.value,audio:form.elements.audio.value};
+          started=performance.now();controller=new AbortController();form.querySelector('button').disabled=true;note.textContent='Przygotowanie krótkiej kopii testowej…';report.textContent='';
+          debugEvent('ui_codec_test_start',{index,file:file.name,selected,support:{h264:video.canPlayType('video/mp4; codecs="avc1.640028"'),hevc:video.canPlayType('video/mp4; codecs="hvc1.1.6.L120.B0"'),aac:video.canPlayType('audio/mp4; codecs="mp4a.40.2"'),g711_mov:video.canPlayType(`video/quicktime; codecs="${selected.audio}"`)}});
+          try{
+            const response=await fetch(panelPath('api/recording/test'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:status.key,name:file.name,start,...selected}),signal:controller.signal});
+            const data=await response.json();if(!response.ok)throw Error(data.error||'codec_test_failed');if(!active)return;
+            report.textContent=pretty(data.report);note.textContent='Kopia gotowa. Sprawdź Play, przewijanie i dźwięk.';playAt=performance.now();
+            video.src=panelPath(data.url);video.load();video.play().catch(error=>{if(active){note.textContent=error.name==='NotAllowedError'?'Naciśnij Play.':'Ten profil nie jest odtwarzany przez przeglądarkę.';debugEvent('ui_codec_test_play_rejected',{...details(),message:error.message});}});
+          }catch(error){if(active&&error.name!=='AbortError'){note.textContent=`Test niegotowy: ${error.message}`;debugEvent('ui_codec_test_error',{...details(),message:error.message});}}
+          finally{controller=null;if(active)form.querySelector('button').disabled=false;}
+        };
+        video.addEventListener('playing',()=>{note.textContent=`Odtwarzanie · start w ${Math.round(performance.now()-playAt)} ms. Dźwięk włącz przyciskiem głośnika.`;debugEvent('ui_codec_test_playing',details());});
+        for(const name of ['waiting','stalled','seeked','error'])video.addEventListener(name,()=>{debugEvent('ui_codec_test_'+name,details());if(name==='error')note.textContent='Przeglądarka nie odtworzyła profilu. Porównaj AAC i tryb bez dźwięku; szczegóły są w logach.';});
+        const close=()=>{active=false;controller?.abort();video.pause();video.removeAttribute('src');video.load();dialog.remove();debugEvent('ui_codec_test_close',{index});};
+        dialog.querySelector('[data-codec-close]').onclick=close;dialog.addEventListener('cancel',close);document.body.append(dialog);dialog.showModal();
       }
 
       // One extractor request at a time; drag events replace the pending target.
@@ -7897,7 +8009,7 @@ INDEX_HTML = r"""<!doctype html>
         const fps=Number(video.dataset.recordingFps||0);
         video.closest('[data-recording-wrap]')?.querySelectorAll('[data-recording-frame]').forEach(button=>button.disabled=!(fps>0));
         const toggle = nvrGrid.querySelector(`[data-recording-toggle="${index}"]`);
-        if (toggle) { const playing=scrubbing?scrubbing.resume:(!video.paused||video.dataset.recordingPlayPending==='true');const label=playing?'Pause':'Play';toggle.innerHTML=recordingControlIcon(playing?'pause':'play');toggle.title=label;toggle.setAttribute('aria-label',label);toggle.setAttribute('aria-pressed',String(playing)); }
+        if (toggle) { const playing=scrubbing?scrubbing.resume:recordingPlaybackRequested(video);const label=playing?'Pause':'Play';toggle.innerHTML=recordingControlIcon(playing?'pause':'play');toggle.title=label;toggle.setAttribute('aria-label',label);toggle.setAttribute('aria-pressed',String(playing)); }
         const mute = nvrGrid.querySelector(`[data-recording-mute="${index}"]`);
         if (mute) {mute.innerHTML=recordingControlIcon(video.muted?'muted':'sound');mute.title=video.muted?'Unmute':'Mute';mute.setAttribute('aria-label',mute.title);}
         const note = nvrGrid.querySelector(`[data-recording-playback-message="${index}"]`);
@@ -7912,7 +8024,7 @@ INDEX_HTML = r"""<!doctype html>
       function recordingVideoDiagnostics(video) {
         const buffered=[];
         try{for(let i=0;i<Math.min(4,video.buffered.length);i++)buffered.push([video.buffered.start(i),video.buffered.end(i)]);}catch(_){}
-        const current=Number(video?.currentTime||0),range=buffered.find(([a,b])=>a<=current&&current<=b);
+        const current=Number(video?.currentTime||0),range=buffered.find(([a,b])=>a<=current&&current<=b),quality=video.getVideoPlaybackQuality?.();
         const errorNames = {
           1: 'MEDIA_ERR_ABORTED',
           2: 'MEDIA_ERR_NETWORK',
@@ -7935,6 +8047,11 @@ INDEX_HTML = r"""<!doctype html>
           loading:video?.dataset.recordingLoading==='true',
           buffering:video?.dataset.recordingBuffering==='true',
           buffered_ranges:buffered,buffered_ahead_seconds:range?Math.max(0,range[1]-current):0,
+          seeking:Boolean(video.seeking),codec:video.dataset.recordingCodec||'',fps:Number(video.dataset.recordingFps||0),
+          width:video.videoWidth,height:video.videoHeight,
+          quality:quality?{total_frames:quality.totalVideoFrames,dropped_frames:quality.droppedVideoFrames,corrupted_frames:quality.corruptedVideoFrames}:null,
+          connection:navigator.connection?{type:navigator.connection.effectiveType,downlink:navigator.connection.downlink,rtt:navigator.connection.rtt}:null,
+          seek_elapsed_ms:video.dataset.recordingSeekStarted?Math.round(performance.now()-Number(video.dataset.recordingSeekStarted)):null,
           error_code: video?.error?.code || 0,
           error_name: errorNames[video?.error?.code] || '',
           error_message: video?.error?.message || '',
@@ -8060,6 +8177,11 @@ INDEX_HTML = r"""<!doctype html>
           ...(EDGE_NATIVE_RTC ? [logBlock('EdgeRTC source connections', panelLogs.runtime_config?.edge_rtc || {})] : []),
           logBlock('Hardware diagnostics', panelLogs.hardware || {}, hardwareSeverity),
           logBlock('Runtime parameters', panelLogs.runtime_parameters || {}, 'ok'),
+          logBlock('Release features',panelLogs.release_features||[]),
+          logBlock('Playback performance',panelLogs.playback||{}),
+          logBlock('Camera media · observed streams',panelLogs.camera_media||{}),
+          logBlock('Camera discovery · ONVIF / ISAPI',panelLogs.camera_discovery_log||'Run camera discovery in Settings to read its profiles.'),
+          logBlock('Playback / codec tests',panelLogs.playback_log||'No playback log yet.'),
           logBlock('Local AI',panelLogs.detection||{}),
           logBlock('Edge debug', panelLogs.edge_debug || 'No debug log yet.'),
           logBlock('Last save debug', panelLogs.last_save_debug || {}),
@@ -8090,7 +8212,28 @@ INDEX_HTML = r"""<!doctype html>
           recording_logs: Array.isArray(panelLogs.recording_logs) ? panelLogs.recording_logs.length : 0
         });
         renderLogs();
+        await loadDeviceLogs();
       }
+      async function loadDeviceLogs(){
+        const select=document.getElementById('device-log-select'),wanted=select.value||deviceReporter?.device_id||'';
+        try{
+          const response=await fetch(panelPath(`api/client-diagnostics?${new URLSearchParams({device:wanted})}`),{cache:'no-store'});
+          if(!response.ok)throw Error('Nie można odczytać logów urządzenia.');deviceReport=await response.json();
+          select.innerHTML=(deviceReport.devices||[]).map(d=>`<option value="${escapeHtml(d.device_id)}">${escapeHtml(d.label)} · ${escapeHtml(d.device_id.slice(0,8))}</option>`).join('');
+          if(wanted&&(deviceReport.devices||[]).some(d=>d.device_id===wanted))select.value=wanted;
+          if(!deviceReport.selected&&select.value&&select.value!==wanted){await loadDeviceLogs();return;}
+          const selected=deviceReport.selected?.latest||{},label=selected.device?.label||'Urządzenie',endpoint=selected.browser_endpoint||'Adres przeglądarki jeszcze niezgłoszony';
+          document.getElementById('device-log-view').innerHTML=`<div class="notice" style="overflow-wrap:anywhere">${escapeHtml(label)} (${escapeHtml(endpoint)}) → Home Assistant (HTTPS/Ingress lub karta) → Edge → kamera (RTSP). Czasy TTFB obejmują serwer i proxy; to nie jest traceroute.</div>`+
+            logBlock('Device / session / browser measurements',selected)+logBlock('Connection map · configured and observed',deviceReport.network_map||{})+
+            logBlock('Device log',deviceReport.selected?.log||'Brak raportu. Otwórz Edge na wybranym urządzeniu i odczekaj kilka sekund.');
+        }catch(error){document.getElementById('device-log-view').textContent=error.message;}
+      }
+      document.getElementById('device-label').addEventListener('change',event=>deviceReporter?.setLabel(event.target.value));
+      document.getElementById('device-log-select').addEventListener('change',loadDeviceLogs);
+      document.getElementById('device-log-download').addEventListener('click',()=>{
+        if(!deviceReport)return;const blob=new Blob([JSON.stringify({generated_at:new Date().toISOString(),device:deviceReport,server:panelLogs},null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+        a.href=url;a.download=`edge-device-${document.getElementById('device-log-select').value||'overview'}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+      });
 
       function renderEffectiveStreams(streams) {
         const order = ['main', 'sub', 'tile', 'live', 'record', 'snapshot'];
@@ -10313,6 +10456,7 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       nvrGrid.addEventListener('click', async (event) => {
+        const codecTest=event.target.closest('[data-recording-codecs]');if(codecTest){openRecordingCodecTest(codecTest.dataset.recordingCodecs);return;}
         if (handleRecordingEventClick(event)) return;
         const clickedVideo=event.target.closest('video[data-recording-player]');
         if(clickedVideo){
@@ -10331,7 +10475,7 @@ INDEX_HTML = r"""<!doctype html>
             clearRecordingContinuation(toggle.dataset.recordingToggle);
             const scrub=recordingScrubs.get(video.dataset.recordingPlayer);
             if(scrub){scrub.resume=!scrub.resume;video.dataset.recordingWantsPlay=String(scrub.resume);if(scrub.resume&&scrub.finishing)playRecording(video);else if(!scrub.resume)pauseRecording(video);if(scrub.finishing)flushRecordingScrub(scrub);updateRecordingPlayerControls(video,'');return;}
-            if (!video.paused||video.dataset.recordingPlayPending==='true') pauseRecording(video);
+            if (recordingPlaybackRequested(video)) pauseRecording(video);
             else {
               const total = Number(recordingStatus[toggle.dataset.recordingToggle]?.timeline?.playback_total_seconds || 0);
               if (video.ended && recordingPlaybackPosition(video) >= total - 0.5) seekRecordingPlayback(toggle.dataset.recordingToggle, 0);
@@ -10466,6 +10610,9 @@ INDEX_HTML = r"""<!doctype html>
       nvrGrid.addEventListener('seeked', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if (video) {
+          if(video.dataset.recordingWantsPlay!=='true')video.dataset.recordingLoading='false';
+          if(video.dataset.recordingSeekStarted)debugEvent('ui_recording_seek_ready',recordingVideoDiagnostics(video));
+          if(video.dataset.recordingWantsPlay==='true'&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.paused)playRecording(video);
           markNvrInteraction(recordingScrubs.has(video.dataset.recordingPlayer)?'timeupdate':'recording_video_seeked', recordingVideoDiagnostics(video));
           syncRecordingVideoProgress(video);
         }
@@ -10486,7 +10633,7 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('pause', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if(video&&video.paused&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.readyState>=2&&!video.seeking&&video.dataset.recordingPlayPending!=='true'&&video.dataset.recordingLoading!=='true'&&video.dataset.recordingBuffering!=='true')video.dataset.recordingWantsPlay='false';
+        if(video&&video.paused&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.readyState>=3&&!video.seeking&&video.dataset.recordingPlayPending!=='true'&&video.dataset.recordingLoading!=='true'&&video.dataset.recordingBuffering!=='true')video.dataset.recordingWantsPlay='false';
         if(video)showRecordingControls(video.closest('[data-recording-wrap]'));
         if (video) { markNvrInteraction('recording_video_pause', recordingVideoDiagnostics(video)); updateRecordingPlayerControls(video); }
       }, true);
@@ -10495,6 +10642,7 @@ INDEX_HTML = r"""<!doctype html>
         const video=event.target?.matches?.('video[data-recording-player]')?event.target:null;
         if(!video)return;
         video.dataset.recordingLoading='false';video.dataset.recordingBuffering='false';
+        if(video.dataset.recordingSeekStarted){debugEvent('ui_recording_seek_playing',recordingVideoDiagnostics(video));delete video.dataset.recordingSeekStarted;}
         updateRecordingPlayerControls(video,'Playing recordings for selected day');warmNextRecording(video);
       },true);
 
@@ -10793,6 +10941,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 self.send_json(video_timing(source))
             except (OSError,ValueError):self.send_json({'error':'recording_timing_unavailable'},HTTPStatus.NOT_FOUND)
             return
+        test_match=re.fullmatch(r'/api/recording/test/([0-9a-f]{64}[.](?:mp4|mov))',path)
+        if test_match:
+            target=RECORDING_COMPAT.directory/test_match[1]
+            if target.is_symlink() or not target.is_file():self.send_json({'error':'recording_test_expired'},HTTPStatus.NOT_FOUND);return
+            self.serve_mp4_file(target,path,target.name,'recording_codec_test_request',{},content_type='video/quicktime' if target.suffix=='.mov' else 'video/mp4')
+            return
         alert_match=re.fullmatch(r'/api/alerts/([1-9][0-9]{0,18})(?:/(image|clip[.]mp4))?',path)
         if alert_match:
             self.serve_alert(int(alert_match[1]),alert_match[2]);return
@@ -10816,8 +10970,26 @@ class EdgeHandler(BaseHTTPRequestHandler):
             self.send_json(recording_status_response(config,parse_qs(parsed.query)))
             return
         if path == "/api/logs":
-            self.send_json(collect_panel_logs())
+            self.send_json(redact_for_log(collect_panel_logs()))
             return
+        if path=='/api/client-diagnostics':
+            try:
+                device=(parse_qs(parsed.query).get('device') or [''])[0]
+                report=DEVICE_LOGS.snapshot(device)
+                if parse_qs(parsed.query).get('map')==['0']:
+                    self.send_json(redact_for_log(report));return
+                config=load_config()
+                report['network_map']={'browser_to_ha':'See selected device browser_endpoint and resource timings; proxy peer addresses are observations.',
+                    'ha_to_edge':'Ingress HTTP / WebSocket or authenticated HA card bridge; configured routing, not traceroute.',
+                    'edge_core':engine_runtime_status(),'hardware':hardware_inventory(),
+                    'cameras':[{'id':c.get('id'),'host':c.get('host'),'manufacturer':c.get('manufacturer'),'model':c.get('model'),
+                                'control_protocol':c.get('access_protocol'),'video_transport':'RTSP through shared Edge source','record_stream':c.get('record_stream'),
+                                'camera_endpoint':safe_url(camera_stream(c,c.get('record_stream') or 'main'))} for c in config.get('cameras',[])]}
+                self.send_json(redact_for_log(report))
+            except ValueError:self.send_json({'error':'invalid_device'},HTTPStatus.BAD_REQUEST)
+            return
+        if path=='/api/client-diagnostics.js' or path=='/api/edge-rtc/device-diagnostics.js':
+            self.send_bytes((Path(__file__).parent/'custom_components/edge/www/edge-device-diagnostics.js').read_bytes(),'text/javascript');return
         if path == "/api/stream/capabilities":
             self.send_json(stream_capabilities())
             return
@@ -10865,6 +11037,11 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = route_path(parsed.path)
+        test_match=re.fullmatch(r'/api/recording/test/([0-9a-f]{64}[.](?:mp4|mov))',path)
+        if test_match:
+            target=RECORDING_COMPAT.directory/test_match[1]
+            if not target.is_symlink() and target.is_file():
+                self.serve_mp4_file(target,path,target.name,'recording_codec_test_request',{},send_body=False,content_type='video/quicktime' if target.suffix=='.mov' else 'video/mp4');return
         alert_match=re.fullmatch(r'/api/alerts/([1-9][0-9]{0,18})/clip[.]mp4',path)
         if alert_match:
             self.serve_alert(int(alert_match[1]),'clip.mp4',False);return
@@ -10887,16 +11064,42 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/config":
             self.save_config()
             return
+        if parsed.path=='/api/client-diagnostics':
+            try:
+                if safe_int(self.headers.get('Content-Length'),0)>32768:self.send_json({'error':'device_report_too_large'},HTTPStatus.REQUEST_ENTITY_TOO_LARGE);return
+                accepted=DEVICE_LOGS.append(self.read_body_json(),{'panel_observed_peer':self.client_address[0],
+                    'reported_forwarded_for':self.headers.get('X-Forwarded-For','')[:250],
+                    'reported_forwarded_proto':self.headers.get('X-Forwarded-Proto','')[:20]})
+                self.send_json({'ok':accepted},HTTPStatus.OK if accepted else HTTPStatus.TOO_MANY_REQUESTS)
+            except (ValueError,TypeError):self.send_json({'error':'invalid_device_report'},HTTPStatus.BAD_REQUEST)
+            return
         if parsed.path=='/api/recording/prepare':
             try:
                 payload=self.read_body_json()
                 if not isinstance(payload,dict):raise ValueError('invalid_recording')
                 source=recording_file_for_key(str(payload.get('key') or ''),str(payload.get('name') or ''))
                 if source is None:self.send_json({'error':'recording_not_found'},HTTPStatus.NOT_FOUND);return
-                target=RECORDING_COMPAT.prepare(source)
+                target=RECORDING_COMPAT.prepare(source,allow_passthrough=True)
                 self.send_json({'ready':True,'size_bytes':target.stat().st_size})
             except (ValueError,json.JSONDecodeError):self.send_json({'error':'invalid_recording'},HTTPStatus.BAD_REQUEST)
-            except (OSError,RuntimeError,subprocess.TimeoutExpired):self.send_json({'error':'recording_prepare_busy'},HTTPStatus.SERVICE_UNAVAILABLE,{'Retry-After':'1'})
+            except (OSError,RuntimeError,subprocess.TimeoutExpired) as error:
+                append_jsonl_log(HOME_DIR/'playback.jsonl','recording_prepare_error',{'error':type(error).__name__+': '+str(error)})
+                self.send_json({'error':'recording_prepare_busy'},HTTPStatus.SERVICE_UNAVAILABLE,{'Retry-After':'1'})
+            return
+        if parsed.path=='/api/recording/test':
+            try:
+                payload=self.read_body_json()
+                if not isinstance(payload,dict):raise ValueError('invalid_recording_test')
+                source=recording_file_for_key(str(payload.get('key') or ''),str(payload.get('name') or ''))
+                if source is None:self.send_json({'error':'recording_not_found'},HTTPStatus.NOT_FOUND);return
+                target,report=RECORDING_COMPAT.test_clip(source,str(payload.get('video') or 'source'),str(payload.get('audio') or 'aac'),payload.get('start',0))
+                self.send_json({'url':'api/recording/test/'+target.name,'report':report})
+            except (ValueError,TypeError,OverflowError,json.JSONDecodeError) as error:
+                write_debug_event('recording_codec_test_invalid',{'error':str(error)})
+                self.send_json({'error':str(error) or 'invalid_recording_test'},HTTPStatus.BAD_REQUEST)
+            except (OSError,RuntimeError,subprocess.TimeoutExpired) as error:
+                write_debug_event('recording_codec_test_error',{'error':str(error)})
+                self.send_json({'error':str(error),'hint':'One short test at a time. Normal recordings are unchanged.'},HTTPStatus.SERVICE_UNAVAILABLE,{'Retry-After':'2'})
             return
         if parsed.path == '/api/storage/cleanup':
             try:
@@ -10977,6 +11180,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
             payload = self.read_body_json()
             event = payload.get("event") if isinstance(payload, dict) else ""
             event = event or (query.get("event") or ["ui_debug"])[0]
+            if str(event).startswith(('ui_recording_','ui_codec_')):
+                append_jsonl_log(HOME_DIR/'playback.jsonl',str(event),{'ui':payload})
             write_debug_event(str(event or "ui_debug"), {
                 "client": self.client_address[0],
                 "user_agent": self.headers.get("User-Agent", ""),
@@ -11048,6 +11253,10 @@ class EdgeHandler(BaseHTTPRequestHandler):
             camera = camera_from_payload(payload)
             write_debug_event("camera_autoconfig_start", {"camera": camera_debug_profile(camera, camera.get("live_stream") or "sub")})
             result = fetch_camera_autoconfig(camera)
+            append_jsonl_log(HOME_DIR/'camera-discovery.jsonl','camera_capabilities_detected',{
+                'camera_id':camera.get('id'),'device':result.get('device'),'streams':result.get('streams'),
+                'profiles':result.get('profiles'),'channels':result.get('channels'),
+                'scope':'Profiles reported by the camera; absence does not prove unsupported features.'})
             write_debug_event("camera_autoconfig_done", {
                 "camera_id": camera.get("id"),
                 "sections": result.get("sections") if isinstance(result, dict) else None,
@@ -11221,10 +11430,13 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.serve_mp4_file(target,self.path,f'alert-{ident}.mp4','alert_clip_request',{'id':ident},send_body=send_body,cache_control='private, max-age=60')
 
     def compatible_recording(self, target):
-        if parse_qs(urlparse(self.path).query).get('compat')!=['1']:return target
-        try:return RECORDING_COMPAT.prepare(target)
+        query=parse_qs(urlparse(self.path).query)
+        if query.get('compat')!=['1']:return target
+        # Older open tabs keep their previous byte representation until reload.
+        try:return RECORDING_COMPAT.prepare(target,allow_passthrough=query.get('container')==['direct-clock-v5'])
         except (OSError,RuntimeError,subprocess.TimeoutExpired) as error:
             write_debug_event('recording_compat_error',{'filename':target.name,'error':str(error)})
+            append_jsonl_log(HOME_DIR/'playback.jsonl','recording_compat_error',{'filename':target.name,'error':type(error).__name__+': '+str(error)})
             self.send_json({'error':'recording_compat_unavailable'},HTTPStatus.SERVICE_UNAVAILABLE,{'Retry-After':'1'})
             return None
 
@@ -11268,6 +11480,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         debug_payload: dict,
         send_body: bool = True,
         cache_control: str = "public, max-age=86400, immutable",
+        content_type: str = 'video/mp4',
     ) -> None:
         with target.open("rb") as handle:
             file_size = os.fstat(handle.fileno()).st_size
@@ -11299,7 +11512,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             length = end - start + 1
             safe_disposition = disposition_name.replace('"', "_")
             self.send_response(status)
-            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Type", content_type)
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(length))
             self.send_header("Content-Disposition", f'inline; filename="{safe_disposition}"')
@@ -11327,7 +11540,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 return
 
             handle.seek(start)
-            remaining = length
+            remaining = length;transfer_started=time.monotonic();disconnected=False
             while remaining > 0:
                 chunk = handle.read(min(1024 * 1024, remaining))
                 if not chunk:
@@ -11335,8 +11548,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 try:
                     self.wfile.write(chunk)
                 except (BrokenPipeError, ConnectionResetError):
+                    disconnected=True
                     break
                 remaining -= len(chunk)
+            append_jsonl_log(HOME_DIR/'playback.jsonl','recording_transfer',{'path':request_path,'range':range_header,
+                'elapsed_ms':round((time.monotonic()-transfer_started)*1000),'bytes_sent':length-remaining,'requested_bytes':length,
+                'client_closed':disconnected})
 
     def serve_recording_cache(self, request_path: str, send_body: bool = True) -> None:
         parts = request_path.removeprefix("/recording-cache/").split("/", 1)
@@ -11428,6 +11645,10 @@ def main() -> None:
         "config_path": str(CONFIG_PATH),
         "port": PORT,
     })
+    write_debug_event('release_features',{'version':APP_VERSION,'features':APP_RELEASE_FEATURES,
+                      'hardware':hardware_inventory(),'recordings_changed':False,'camera_codec_settings_changed':False,
+                      'edge_rtc':'Sources stay connected on the server; viewers share its bounded keyframe buffer.'})
+    print(f'[edge-panel] {APP_VERSION}: direct/legacy playback, bounded seek recovery, explicit 6-second codec tests and camera/hardware diagnostics. Original recordings unchanged.')
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
     try:

@@ -101,8 +101,12 @@ jobs:
           PY
           EDGE_TEST_BROWSER=webkit node tests/browser/nvr_phone_native.cjs
           EDGE_TEST_BROWSER=webkit node tests/browser/nvr_alert_playback.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_codec_test.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/device_diagnostics.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_phone_native.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_alert_playback.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_codec_test.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/device_diagnostics.cjs
 
   detection-media:
     runs-on: ubuntu-latest

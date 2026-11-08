@@ -129,3 +129,56 @@ class RecordingCompatibilityTests(unittest.TestCase):
         command=run.call_args.args[0]
         self.assertEqual(command[command.index('-c:a')+1],'aac')
         self.assertTrue(self.timing(target)['audio_clock_regular'])
+
+    def test_valid_original_bypasses_remux_and_budget_even_when_worker_is_busy(self):
+        source=self.sample();cache=self.Service(self.root/'no-copy',budget=1)
+        before=hashlib.sha256(source.read_bytes()).digest()
+        self.assertTrue(self.timing(source)['faststart'])
+        self.assertTrue(self.timing(source)['video_zero_start'])
+        with cache.lock,patch('edge_recording_compat.subprocess.run',side_effect=AssertionError('No subprocess for valid source')):
+            self.assertEqual(cache.prepare(source,allow_passthrough=True),source)
+        self.assertEqual(hashlib.sha256(source.read_bytes()).digest(),before)
+        self.assertFalse(cache.directory.exists())
+
+    def test_old_hev1_and_delayed_originals_still_require_normalization(self):
+        source=self.sample('libx265')
+        self.assertNotEqual(self.cache.prepare(source,allow_passthrough=True),source)
+        delayed=self.root/'later.mp4'
+        subprocess.run(['ffmpeg','-v','error','-itsoffset','9','-i',str(source),'-c','copy','-movflags','+faststart',str(delayed)],check=True)
+        self.assertFalse(self.timing(delayed)['video_zero_start'])
+        self.assertNotEqual(self.cache.prepare(delayed,allow_passthrough=True),delayed)
+
+    def test_regular_aac_with_a_large_audio_lead_in_is_not_mistaken_for_a_direct_file(self):
+        source=self.sample();audio=self.root/'late-audio.mp4'
+        subprocess.run(['ffmpeg','-v','error','-i',str(source),'-itsoffset','0.8','-f','lavfi','-i','sine=sample_rate=48000',
+                        '-map','0:v','-map','1:a','-c:v','copy','-c:a','aac','-t','1.5','-movflags','+faststart',str(audio)],check=True)
+        self.assertTrue(self.timing(audio)['video_zero_start']);self.assertFalse(self.timing(audio)['audio_zero_start'])
+        target=self.cache.prepare(audio,allow_passthrough=True)
+        self.assertNotEqual(target,audio);self.assertTrue(self.timing(target)['audio_zero_start'])
+
+    def test_explicit_codec_tests_cover_both_video_codecs_and_g711_audio_without_touching_original(self):
+        source=self.sample();sound=self.root/'sound.mp4'
+        subprocess.run(['ffmpeg','-v','error','-i',str(source),'-f','lavfi','-i','sine=sample_rate=48000',
+                        '-c:v','copy','-c:a','aac','-t','1.5',str(sound)],check=True)
+        original=hashlib.sha256(sound.read_bytes()).digest()
+        for video,audio,want_video,want_audio in [('source','none','h264',None),('h264','aac','h264','aac'),('hevc','aac','hevc','aac'),('source','alaw','h264','pcm_alaw'),('source','ulaw','h264','pcm_mulaw')]:
+            target,report=self.cache.test_clip(sound,video,audio,.2)
+            data=json.loads(subprocess.run(['ffprobe','-v','error','-show_streams','-of','json',str(target)],capture_output=True,text=True,check=True).stdout)
+            self.assertEqual(next(s['codec_name'] for s in data['streams'] if s['codec_type']=='video'),want_video)
+            self.assertEqual(next((s['codec_name'] for s in data['streams'] if s['codec_type']=='audio'),None),want_audio)
+            info=self.timing(target);self.assertEqual((info['width'],info['height'],info['fps']),(160,90,20))
+            self.assertLess(info['duration'],6.5);self.assertTrue(report['original_unchanged'])
+            self.assertEqual(report['video_transcoded'],video=='hevc')
+            self.assertEqual(hashlib.sha256(sound.read_bytes()).digest(),original)
+        with self.cache.lock:
+            with self.assertRaisesRegex(RuntimeError,'busy'):self.cache.test_clip(sound)
+        for kwargs in ({'video':'invalid'},{'audio':'opus'},{'start':float('nan')},{'start':-1}):
+            with self.assertRaises(ValueError):self.cache.test_clip(sound,**kwargs)
+        reused,details=self.cache.test_clip(sound,'source','ulaw',.2)
+        self.assertTrue(details['cached']);self.assertEqual(details['measured_streams'][1]['codec_name'],'pcm_mulaw')
+
+    def test_test_worker_timeout_cleans_temporary_file_and_releases_lock(self):
+        source=self.sample()
+        with patch('edge_recording_compat.subprocess.run',side_effect=subprocess.TimeoutExpired('ffmpeg',90)):
+            with self.assertRaises(subprocess.TimeoutExpired):self.cache.test_clip(source,audio='none')
+        self.assertFalse(self.cache.lock.locked());self.assertFalse((self.cache.directory/'remux.tmp').exists())

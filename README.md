@@ -119,14 +119,29 @@ can retry one transient network failure at the current position; explicit Pause
 remains final. The next segment is prepared through a JSON request from saved
 files, without starting another video decoder or camera connection.
 
-All browsers use the bounded normalized-container cache. Healthy AAC packets
+From 0.11.11, compatible indexed originals are served directly; legacy files
+use the bounded normalized-container cache. Healthy AAC packets
 are copied, while irregular audio clocks are repaired; video pixels and FPS are
 unchanged. H.265 can still take longer to decode/seek than a smaller H.264 source.
 CPU diagnostics separate measured CPU utilization from I/O wait and load average,
 and label a short startup load spike as a warning. Refresh diagnostics for the
 first measured CPU sample. Disabled playback-copy cache logs are marked historical.
 
+Version 0.11.11 adds **Recordings → ⋯ → Kodeki** for an explicit six-second
+H.264/H.265 and AAC/silent/G.711 comparison using saved files. Conversions affect
+only a bounded test copy, preserving original recordings and camera settings.
+The playback log measures preparation, transfer, buffering and seek-to-play
+time. Hardware/current-camera diagnostics and ONVIF/ISAPI profile discovery
+help distinguish format support from hardware or network delays.
+
 The Edge live card in EdgeRTC mode signs a Home Assistant WebSocket URL and
 receives the shared Edge/NVR feed through `/api/edge/rtc/…`. It does not give the
 browser a direct camera RTSP connection. The generated-camera integration test
 checks this routing and one physical upstream with multiple viewers/microphone.
+
+For individual phone/tablet reports in 0.11.11, restart Home Assistant Core,
+then use **Diagnostics → Urządzenia i połączenia** to name/select a device and
+download its session logs and connection map. Reports include browser-visible
+resource timings, capabilities, video/decoder/buffer state and EdgeRTC stages;
+unavailable phone CPU/RAM/radio/router data is identified explicitly. Logs are
+bounded to 24 devices × 256 KiB, up to seven days, with redacted credentials.
