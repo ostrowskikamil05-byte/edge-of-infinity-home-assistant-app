@@ -42,5 +42,24 @@ const path = require('node:path');
   global.EncodedVideoChunk=class{constructor(options){Object.assign(this,options);}};
   const packet=new Uint8Array(11);packet[0]=1;packet[1]=1;new DataView(packet.buffer).setBigInt64(2,1000n);
   await reset.message(packet.buffer);assert.equal(decoded.length,1);assert.equal(decoded[0].type,'key');assert.equal(reset.waitKey,false);reset.close();
+  // A UNV-sized cached GOP must drain through WebCodecs without triggering
+  // the steady-state decoder reset or presenting historical reference frames.
+  const startup=new EdgeRTCClient({canvas:{getContext:()=>({drawImage(){}})}});
+  startup.bootstrapFloorTimestamp=599000;startup.bootstrapTimestamp=599000;
+  let maximum=0,count=0;
+  startup.video=new class extends EventTarget {
+    state='configured';decodeQueueSize=0;
+    reset(){throw Error('cached GOP reset before its final frame');}
+    decode(chunk){this.decodeQueueSize++;maximum=Math.max(maximum,this.decodeQueueSize);count++;
+      setImmediate(()=>{this.decodeQueueSize--;startup.render(frame(chunk.timestamp));this.dispatchEvent(new Event('dequeue'));});}
+    close(){this.state='closed';}
+  };
+  for(let i=0;i<600;i++){
+    const unit=new Uint8Array(11);unit[0]=1;unit[1]=i===0?1:0;new DataView(unit.buffer).setBigInt64(2,BigInt(i*1000));
+    await startup.message(unit.buffer);
+  }
+  await new Promise(resolve=>setImmediate(resolve));advance(now+20);
+  assert.equal(count,600);assert(maximum<=8);assert.equal(startup.bootstrapFrames,599);assert.equal(startup.frames,1);
+  startup.video.decodeQueueSize=8;const waiting=startup.waitForBootstrapCapacity();startup.close();assert.equal(await waiting,false);
   console.log('PASS: source 4K at 20/25/30 FPS, timestamp pacing of bursts, cached GOP startup, bounded backlog and frame cleanup');
 })().catch(error=>{console.error(error);process.exit(1);});
