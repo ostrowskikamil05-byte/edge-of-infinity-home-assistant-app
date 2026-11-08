@@ -18,14 +18,31 @@ import (
 	"github.com/pion/rtp"
 )
 
+const (
+	gopPacketLimit        = 2048
+	gopByteLimit          = 16 * 1024 * 1024
+	bootstrapQueuePackets = 1024
+	viewerQueueByteLimit  = 8 * 1024 * 1024
+	liveQueuePackets      = 16
+)
+
 type viewer struct {
 	queue      chan []byte
 	done       chan struct{}
 	once       sync.Once
 	microphone bool
+	bootstrap  atomic.Bool
+	queueBytes atomic.Int64
 }
 
 func (v *viewer) close() { v.once.Do(func() { close(v.done) }) }
+
+func (v *viewer) consumed(p []byte) {
+	v.queueBytes.Add(-int64(len(p)))
+	if len(v.queue) <= liveQueuePackets {
+		v.bootstrap.Store(false)
+	}
+}
 
 type source struct {
 	cfg            sourceConfig
@@ -47,6 +64,8 @@ type source struct {
 	audio          map[string]any
 	gop            [][]byte
 	gopBytes       int
+	gopEvictions   uint64
+	gopResetReason string
 	connected      atomic.Int32
 	attempts       atomic.Uint64
 	packets        atomic.Uint64
@@ -68,7 +87,11 @@ func (s *source) status() map[string]any {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	lastRole, _ := s.relayLastRole.Load().(string)
-	return map[string]any{"keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": 16 * 1024 * 1024, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
+	span := int64(0)
+	if len(s.gop) > 1 {
+		span = (int64(binary.BigEndian.Uint64(s.gop[len(s.gop)-1][2:10])) - int64(binary.BigEndian.Uint64(s.gop[0][2:10]))) / 1000
+	}
+	return map[string]any{"keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
 }
 func (s *source) run() {
 	defer close(s.stopped)
@@ -341,22 +364,37 @@ func (s *source) broadcast(p []byte, key bool) {
 		if key {
 			s.gop = nil
 			s.gopBytes = 0
+			s.gopResetReason = ""
 		}
 		if key || len(s.gop) > 0 {
 			s.gop = append(s.gop, p)
 			s.gopBytes += len(p)
-			if s.gopBytes > 16*1024*1024 || len(s.gop) > 180 {
+			if s.gopBytes > gopByteLimit || len(s.gop) > gopPacketLimit {
+				s.gopEvictions++
+				s.gopResetReason = "packet_limit"
+				if s.gopBytes > gopByteLimit {
+					s.gopResetReason = "byte_limit"
+				}
 				s.gop = nil
 				s.gopBytes = 0
 			}
 		}
 	}
 	for v := range s.viewers {
+		if (!v.bootstrap.Load() && len(v.queue) >= liveQueuePackets) || v.queueBytes.Load()+int64(len(p)) > viewerQueueByteLimit {
+			s.drops.Add(1)
+			v.close()
+			delete(s.viewers, v)
+			continue
+		}
+		v.queueBytes.Add(int64(len(p)))
 		select {
 		case <-v.done:
+			v.queueBytes.Add(-int64(len(p)))
 			delete(s.viewers, v)
 		case v.queue <- p:
 		default:
+			v.queueBytes.Add(-int64(len(p)))
 			s.drops.Add(1)
 			v.close()
 			delete(s.viewers, v)
@@ -378,13 +416,16 @@ func (s *source) attach(microphone bool) (*viewer, map[string]any, [][]byte, err
 	if microphone && (s.backFormat == nil || s.mic != nil) {
 		return nil, nil, nil, errors.New("microphone_unavailable_or_busy")
 	}
-	v := &viewer{queue: make(chan []byte, 16), done: make(chan struct{}), microphone: microphone}
+	v := &viewer{queue: make(chan []byte, bootstrapQueuePackets), done: make(chan struct{}), microphone: microphone}
+	v.bootstrap.Store(len(s.gop) > 0)
 	s.viewers[v] = true
 	if microphone {
 		s.mic = v
 		s.micTS = uint32(time.Since(s.started) / (time.Second / 8000))
 	}
 	hello := map[string]any{"type": "hello", "protocol": "edgertc/1", "camera_id": s.cfg.ID, "video": s.video, "audio": s.audio, "microphone": map[string]any{"active": microphone, "supported": s.backFormat != nil, "sampleRate": 8000, "format": "pcm_s16le"}}
+	hello["bootstrap_packets"] = len(s.gop)
+	hello["bootstrap_bytes"] = s.gopBytes
 	// Decode the cached GOP for references, but start display at its newest frame.
 	if len(s.gop) > 0 {
 		last := s.gop[len(s.gop)-1]

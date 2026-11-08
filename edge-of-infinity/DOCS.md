@@ -1,5 +1,39 @@
 # Edge of Infinity App Documentation
 
+## 0.11.14: persistent gallery, UNV startup and organized logs
+
+Update the app and reopen the panel. Restart Home Assistant Core to load the
+bundled integration/card assets, then reopen HA on each device. The panel should
+show `0.11.14` / `gallery-live-v1114` in diagnostics.
+
+Live loads only recorder summary state initially. Three seconds later it fetches
+the recording index in the background. After the first successful load, that
+device remembers the gallery in IndexedDB and can show it before the next server
+response. Already viewed small JPEGs are remembered too. The limits are two
+metadata snapshots / 12 MiB for 24 hours and 96 JPEGs / 8 MiB for 48 hours;
+individual snapshots/JPEGs are limited to 8 MiB/512 KiB. No video body, password
+or RTSP source is stored by this cache. Recorder state still comes from the
+server. A changed server/storage/camera profile has a separate scope. Cleared,
+unavailable or full browser storage falls back to normal loading. The first
+visit and uncached days still need network transfer and decoding.
+
+EdgeRTC keeps up to 2,048 video access units within the existing 16 MiB GOP
+budget. The old 180-frame limit could discard a UNV GOP well before its next
+keyframe. Startup now drains a longer cached GOP through a bounded decoder queue
+and displays its newest frame. It does not change camera encoder settings or
+create a camera connection. Source startup, an oversized GOP, device decoding
+and the HA/Nabu Casa connection can still affect time to image. Check
+`bootstrap_ready`, `gop_cache_span_ms`, `gop_cache_evictions`,
+`gop_cache_reset_reason`, `rtc_bootstrap` and `rtc_first_frame`.
+
+In **Logs**, select a module and severity, or search for a camera/event. Events
+are ordered by time; expand a row for its payload. Raw history and device/network
+measurements are collapsed separately. Normal `waiting` and intentional viewer
+closure are informational. A canceled HA subscription is a warning rather than
+an error for an entire device; actual playback errors remain errors. Export
+still contains the complete redacted device report. Gallery events include
+`ui_gallery_restored`, `ui_gallery_saved` and `ui_gallery_storage_unavailable`.
+
 ## 0.11.13: AAC, pause recovery and ready archive catalogs
 
 Update the app and reopen the panel on each phone/computer. Recording already

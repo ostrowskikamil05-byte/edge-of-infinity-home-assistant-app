@@ -1,6 +1,22 @@
 # NVR browser regression tests
 
 Requires Python 3.12+, FFmpeg/FFprobe, Node.js and Playwright with Chromium.
+
+`nvr_gallery_cache.cjs` uses the archive fixture on port 18092 in WebKit and
+Chromium. It waits for actual IndexedDB commits, reloads with archive/JPEG
+responses blocked, checks restored visible JPEGs and native video playback, and
+verifies storage scope, credential exclusion, TTL and bounded entry counts.
+Background prefetch must not download recording bodies. `logs_organized.cjs`
+checks module/severity/search filters, collapsed event details, HTML escaping
+and the phone layout. `node tests/edge_log_view.cjs` tests classification and
+deduplication separately.
+
+For actual native startup with a long camera GOP, start `edge_rtc_fixture.py`
+with `EDGE_RTC_TEST_FPS=20 EDGE_RTC_TEST_GOP_SECONDS=24` and a freshly compiled
+`EDGE_RTC_TEST_BINARY`. Run `edge_rtc_long_gop.cjs`: it waits for at least 240
+cached access units, then checks WebCodecs image output through the actual HA
+proxy and one camera upstream, without waiting for the next keyframe. This is a
+generated warm source; it does not measure a physical camera or WAN latency.
 The multi-camera fixture also supports `nvr_codec_test.cjs` with either
 `EDGE_TEST_BROWSER=webkit` or `chromium`. It uses actual generated HEVC/H.264
 and AAC media, checks short codec-copy/convert requests, G.711 results and

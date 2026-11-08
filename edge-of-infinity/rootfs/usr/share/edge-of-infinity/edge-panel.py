@@ -96,14 +96,14 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.11.13"
-APP_RELEASE_FEATURES=['Native browser pauses retain Play intent; explicit Pause cancels recovery',
-                      'G711 voice to AAC 16 kHz/32 kbps; source AAC packet copy; original video/FPS',
-                      'Versioned direct MP4 for valid short edits; AAC clock/tail repair for legacy files',
-                      'Bounded shared archive catalog, one Live warmup and background refresh',
-                      'Cached day return; audio/sample-clock and catalog diagnostics']
+APP_VERSION = "0.11.14"
+APP_RELEASE_FEATURES=['Persistent bounded recording gallery and JPEG cache; background metadata prefetch',
+                      'UNV long-GOP startup: 2048 packets / 16 MiB with bounded viewer/decoder backpressure',
+                      'Logs grouped by module, severity, camera and time; expected cancellation is informational',
+                      'Gallery restore and EdgeRTC bootstrap occupancy/timing diagnostics',
+                      'Original recordings, camera codec/resolution/FPS and one shared upstream preserved']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "audio-catalog-v1113"
+UI_BUILD = "gallery-live-v1114"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -6027,6 +6027,14 @@ INDEX_HTML = r"""<!doctype html>
         display: grid;
         gap: 12px;
       }
+      .log-raw, .log-event {border:1px solid var(--line);border-radius:8px;overflow:hidden;min-width:0;}
+      .log-raw>summary, .log-event>summary {padding:10px 12px;cursor:pointer;display:flex;align-items:center;flex-wrap:wrap;gap:8px;overflow-wrap:anywhere;}
+      .log-event time {font-size:12px;opacity:.75;}
+      .log-event.log-error>summary {color:#fa6e7e;}
+      .log-event.log-warning>summary {color:#e4b45d;}
+      .log-event .log-output {max-height:220px;}
+      .log-data {border-color:var(--line);}
+      .log-data h2 {color:var(--muted);}
       .diagnostic-list {
         display: grid;
         gap: 8px;
@@ -6363,6 +6371,7 @@ INDEX_HTML = r"""<!doctype html>
               <button class="primary" id="refresh-logs">Refresh logs</button>
             </div>
           </header>
+          <section class="panel"><div class="form-grid"><label>Moduł<select id="log-group-filter"><option value="overview">Przegląd</option><option value="live">Podgląd na żywo · EdgeRTC</option><option value="recordings">Nagrania i galeria</option><option value="network">Urządzenia i sieć</option><option value="hardware">Sprzęt i dysk</option><option value="config">Kamery i konfiguracja</option><option value="ai">Detekcja</option><option value="all">Wszystkie moduły</option></select></label><label>Poziom zdarzeń<select id="log-level-filter"><option value="problems">Błędy i ostrzeżenia</option><option value="all">Wszystkie zdarzenia</option><option value="error">Błędy</option><option value="warning">Ostrzeżenia</option><option value="ok">Informacje</option></select></label><label>Szukaj kamery lub zdarzenia<input id="log-search" type="search" placeholder="np. UNV, bufor, AAC"></label></div><p class="field-help">Zdarzenia są uporządkowane według modułu i czasu. Zwykłe buforowanie oraz brak opcjonalnych pomiarów przeglądarki nie oznaczają błędu. Surowe dane są w rozwijanych sekcjach i w eksporcie.</p></section>
           <section class="panel"><h2>Urządzenia i połączenia</h2>
             <div class="form-grid"><label>Nazwa tego urządzenia<input id="device-label" maxlength="64" placeholder="np. iPhone Kamila"></label>
               <label>Logi urządzenia<select id="device-log-select"></select></label></div>
@@ -6401,6 +6410,8 @@ INDEX_HTML = r"""<!doctype html>
       </main>
     </div>
     <script>
+      __EDGE_GALLERY_CACHE__
+      __EDGE_LOG_VIEW__
       const grid = document.getElementById('camera-grid');
       const nvrGrid = document.getElementById('nvr-grid');
       const form = document.getElementById('config-form');
@@ -6424,6 +6435,36 @@ INDEX_HTML = r"""<!doctype html>
       let cameraAuto = {};
       let recordingStatus = {};
       let recordingStorage = null;
+      const galleryStore=new EdgeRecordingGallery((event,data)=>debugEvent(event,data));
+      let galleryScope='',gallerySaveTimer=null,gallerySavedAt=0,gallerySaveSignature='';
+      function recordingGalleryScope(){return JSON.stringify([location.origin,config.storage?.recordings_dir||'',(config.cameras||[]).map(c=>[c.id,c.record_stream||'main'])]);}
+      async function restoreRecordingGallery(){
+        const scope=galleryScope=recordingGalleryScope(),saved=await galleryStore.loadSnapshot(scope);
+        if(!saved||scope!==recordingGalleryScope()||Object.values(recordingStatus).some(row=>Array.isArray(row.files)))return;
+        let count=0;
+        for(const row of saved.cameras){if(config.cameras?.[row.index]?.id!==row.id||!Array.isArray(row.files))continue;recordingStatus[row.index]={...row,...recordingStatus[row.index]};rememberRecordingDay(recordingStatus[row.index]);count+=row.files.length;}
+        if(count){renderNvrGrid({reason:'gallery_restore'});void restoreGalleryThumbnails();debugEvent('ui_gallery_restored',{files:count,age_ms:Date.now()-saved.saved_at});}
+      }
+      function persistRecordingGallery(){
+        clearTimeout(gallerySaveTimer);
+        gallerySaveTimer=setTimeout(()=>{
+          const scope=recordingGalleryScope(),rows=Object.values(recordingStatus).filter(row=>Array.isArray(row.files));
+          const signature=scope+'|'+rows.map(row=>row.key+':'+row.selected_day+':'+row.files_revision).join('|');
+          if(!rows.length||signature===gallerySaveSignature)return;
+          const save=()=>{galleryScope=scope;gallerySaveSignature=signature;gallerySavedAt=Date.now();void galleryStore.saveSnapshot(scope,rows).then(saved=>{if(saved)debugEvent('ui_gallery_saved',{files:rows.reduce((n,row)=>n+row.files.length,0)});});};
+          if(window.requestIdleCallback)requestIdleCallback(save,{timeout:2000});else save();
+        },Math.max(500,30000-(Date.now()-gallerySavedAt)));
+      }
+      async function restoreGalleryThumbnails(){
+        if(!galleryScope)return;
+        await Promise.allSettled([...nvrGrid.querySelectorAll('img[data-recording-thumb-src]')].slice(0,12).map(async image=>{
+          const source=image.dataset.recordingThumbSrc,blob=await galleryStore.loadThumbnail(galleryScope,source);
+          if(!blob||!image.isConnected||image.dataset.recordingThumbQueued||image.dataset.recordingThumbSrc!==source)return;
+          const url=URL.createObjectURL(blob);image.loading='eager';image.dataset.recordingThumbBackend='jpeg';
+          image.onload=()=>{URL.revokeObjectURL(url);image.onload=null;image.onerror=null;thumbnailContainer(image)?.classList.add('thumb-loaded');image.removeAttribute('data-recording-thumb-src');};
+          image.onerror=()=>{URL.revokeObjectURL(url);image.onload=null;image.onerror=null;};image.src=url;
+        }));
+      }
       let selectedRecording = {};
       let selectedRecordingSeek = {};
       let selectedRecordingTimeline = {};
@@ -7199,7 +7240,10 @@ INDEX_HTML = r"""<!doctype html>
           image.loading = 'eager';
           // A small cached JPEG avoids downloading/decoding full 4K clips for
           // every film tile, especially through Nabu Casa.
-          fetch(source,{signal:AbortSignal.timeout(15000)}).then(async response=>{
+          Promise.resolve(galleryScope?galleryStore.loadThumbnail(galleryScope,source):null).then(async cached=>{
+            if(cached)return {ok:true,blob:async()=>cached};
+            return fetch(source,{signal:AbortSignal.timeout(15000)});
+          }).then(async response=>{
             if([429,425,503].includes(response.status)){
               const attempt=Number(image.dataset.thumbAttempts||0)+1;image.dataset.thumbAttempts=String(attempt);
               if(attempt>6){finish(false);return;}
@@ -7210,6 +7254,7 @@ INDEX_HTML = r"""<!doctype html>
             }
             if(!response.ok)throw new Error('thumbnail_unavailable');
             const blob=await response.blob();if(!blob.type.startsWith('image/'))throw new Error('thumbnail_unavailable');
+            if(galleryScope)void galleryStore.saveThumbnail(galleryScope,source,blob);
             ownedUrl=URL.createObjectURL(blob);expectedUrl=ownedUrl;image.dataset.recordingThumbBackend='jpeg';image.src=ownedUrl;
           }).catch(()=>{
             if(finished)return;fallback=true;image.dataset.recordingThumbBackend='browser';recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>finish(false));
@@ -7372,6 +7417,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       function playRecording(video) {
         if(!video?.isConnected||!nvrGrid.contains(video))return;
+        const status=recordingStatus[video.dataset.recordingPlayer];if(!selectedRecordingDay[video.dataset.recordingPlayer]&&status?.selected_day)selectedRecordingDay[video.dataset.recordingPlayer]=status.selected_day;
         releaseInactiveRecordingPlayers(video);restoreRecordingPlayer(video);
         if(recordingPictureUnavailable(video))return;
         if(video.error){
@@ -7624,6 +7670,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function selectRecordingAtOffset(index, offset, options = {}) {
+        if(!selectedRecordingDay[index]&&recordingStatus[index]?.selected_day)selectedRecordingDay[index]=recordingStatus[index].selected_day;
         if(!options.scrubbing)discardRecordingScrub(index);
         clearRecordingContinuation(index);
         markNvrInteraction(options.scrubbing?'timeupdate':'select_recording_offset', { index, offset });
@@ -8214,14 +8261,16 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function logSeverityFromValue(value) {
-        return logSeverityFromText(pretty(value));
+        if(value&&typeof value==='object')return EdgeLogView.valueSeverity(value);
+        const events=EdgeLogView.parse(value);if(events.length)return events.reduce((level,row)=>severityRank(row.severity)>severityRank(level)?row.severity:level,'ok');
+        return logSeverityFromText(value);
       }
 
       function logBlock(title, value, severity = '') {
-        const resolvedSeverity = ['ok', 'warning', 'error'].includes(severity) ? severity : logSeverityFromValue(value);
+        const resolvedSeverity = ['ok', 'warning', 'error','data'].includes(severity) ? severity : logSeverityFromValue(value);
         return `
           <div class="log-block log-${resolvedSeverity}">
-            <h2><span>${escapeHtml(title)}</span><span class="log-severity">${escapeHtml(resolvedSeverity.toUpperCase())}</span></h2>
+            <h2><span>${escapeHtml(title)}</span><span class="log-severity">${escapeHtml(resolvedSeverity==='data'?'DANE':resolvedSeverity.toUpperCase())}</span></h2>
             <pre class="log-output">${escapeHtml(pretty(value))}</pre>
           </div>
         `;
@@ -8245,6 +8294,18 @@ INDEX_HTML = r"""<!doctype html>
         `).join('')}</div>`;
       }
 
+      function logRaw(title,value,severity='data'){return `<details class="log-raw"><summary>${escapeHtml(title)}</summary>${logBlock(title,value,severity)}</details>`;}
+      function logCamera(row){
+        const data=row.data||{},index=Number(data.index),source=String(data.source||data.liveKey||data.key||'');
+        const camera=data.index!=null?config.cameras?.[index]:(config.cameras||[]).find(c=>source.includes(c.id)||source.toLowerCase().includes(String(c.name||'\u0000').toLowerCase()));
+        return camera?.name||source||'';
+      }
+      function renderLogEvents(value,group='all'){
+        const rows=EdgeLogView.parse(value),level=document.getElementById('log-level-filter').value,search=document.getElementById('log-search').value.trim().toLowerCase();
+        const selected=rows.filter(row=>(group==='all'||row.category===group)&&(level==='all'||level==='problems'&&row.severity!=='ok'||row.severity===level)&&(!search||`${EdgeLogView.label(row)} ${row.event} ${logCamera(row)} ${JSON.stringify(row.data)}`.toLowerCase().includes(search))).slice(0,150);
+        if(!selected.length)return '<p class="notice" data-log-empty>Brak zdarzeń dla wybranego modułu i poziomu. Wybierz „Wszystkie zdarzenia”, aby zobaczyć przebieg uruchamiania i odtwarzania.</p>';
+        return `<div class="log-grid" data-log-events>${selected.map(row=>`<details class="log-event log-${row.severity}" data-log-event="${escapeHtml(row.event)}" data-log-category="${row.category}" data-log-level="${row.severity}"><summary><time>${escapeHtml(EdgeLogView.stamp(row.time)?new Date(EdgeLogView.stamp(row.time)).toLocaleString():'—')}</time><b>${escapeHtml(EdgeLogView.label(row))}</b><span>${escapeHtml(logCamera(row))}</span><span class="log-severity">${row.severity==='ok'?'INFO':row.severity.toUpperCase()}</span></summary><pre class="log-output">${escapeHtml(pretty({event:row.event,...row.data}))}</pre></details>`).join('')}</div>`;
+      }
       function renderLogs() {
         if (!panelLogs) {
           logsView.innerHTML = '<p class="notice">Click Refresh logs to load diagnostics.</p>';
@@ -8261,39 +8322,33 @@ INDEX_HTML = r"""<!doctype html>
           'Playback cache worker',
           'Daily NVR cache window',
         ]);
-        logsView.innerHTML = [
-          renderDiagnostics(panelLogs.diagnostics || []),
-          logBlock('Runtime summary', {
+        const group=document.getElementById('log-group-filter').value;
+        const events=(panelLogs.playback_log||'')+'\n'+(panelLogs.edge_debug||'');
+        const sections=[['overview','Stan systemu',()=>renderDiagnostics(panelLogs.diagnostics || [])+logRaw('Runtime summary', {
             generated_at: panelLogs.generated_at,
             server_version: panelLogs.server_version,
             ui_build: panelLogs.ui_build,
             authoritative_config: panelLogs.authoritative_config,
             runtime_config: panelLogs.runtime_config,
             config_summary: panelLogs.config_summary
-          }, 'ok'),
-          ...(EDGE_NATIVE_RTC ? [logBlock('EdgeRTC source connections', panelLogs.runtime_config?.edge_rtc || {})] : []),
-          logBlock('Hardware diagnostics', panelLogs.hardware || {}, hardwareSeverity),
-          logBlock('Runtime parameters', panelLogs.runtime_parameters || {}, 'ok'),
-          logBlock('Release features',panelLogs.release_features||[]),
-          logBlock('Playback performance',panelLogs.playback||{}),
-          logBlock('Camera media · observed streams',panelLogs.camera_media||{}),
-          logBlock('Camera discovery · ONVIF / ISAPI',panelLogs.camera_discovery_log||'Run camera discovery in Settings to read its profiles.'),
-          logBlock('Playback / codec tests',panelLogs.playback_log||'No playback log yet.'),
-          logBlock('Local AI',panelLogs.detection||{}),
-          logBlock('Edge debug', panelLogs.edge_debug || 'No debug log yet.'),
-          logBlock('Last save debug', panelLogs.last_save_debug || {}),
-          logBlock('Last runtime sync', panelLogs.last_runtime_sync || {}),
-          logBlock('Panel config', panelLogs.panel_config || {}),
-          logBlock('Runtime edge.json', panelLogs.runtime_config_file || {}),
-          logBlock('MediaMTX runtime config', panelLogs.runtime_mediamtx_config || 'missing'),
-          logBlock('Janus streaming config', panelLogs.runtime_janus_streaming_config || 'missing'),
-          logBlock('Recording stream', panelLogs.recording_stream_log || 'empty'),
-          logBlock(panelLogs.recording_cache_enabled===false?'Recording cache · historia (wyłączony)':'Recording cache', panelLogs.recording_cache_log || 'empty', panelLogs.recording_cache_enabled===false?'ok':''),
-          logBlock('Recording thumbnails', panelLogs.recording_thumbnail_log || 'empty'),
-          logBlock('Last saved response', panelLogs.last_saved_config || {}),
-          ...recordingLogs.map((item) => logBlock(`Recording ffmpeg: ${item.path}`, item.tail || 'empty'))
-        ].join('');
+          })+logRaw('Zmiany w tej wersji',panelLogs.release_features||[])+renderLogEvents(events)],
+          ['live','Podgląd na żywo · EdgeRTC',()=>renderLogEvents(events,'live')+logRaw('EdgeRTC source connections',panelLogs.runtime_config?.edge_rtc||{})],
+          ['recordings','Nagrania · odtwarzanie, zapis i galeria',()=>renderLogEvents(events,'recordings')+logRaw('Playback performance',panelLogs.playback||{})+recordingLogs.map(item=>logRaw(`Zapis kamery: ${item.path}`,item.tail||'empty',logSeverityFromText(item.tail))).join('')+logRaw('Miniatury',panelLogs.recording_thumbnail_log||'empty')+logRaw('Recording cache · historia',panelLogs.recording_cache_log||'empty')],
+          ['network','Urządzenia i sieć',()=>renderLogEvents(events,'network')+logRaw('Runtime parameters',panelLogs.runtime_parameters||{})],
+          ['hardware','Sprzęt i dysk',()=>logBlock('Hardware diagnostics',panelLogs.hardware||{},hardwareSeverity)+renderDiagnostics(panelLogs.diagnostics||[])],
+          ['config','Kamery i konfiguracja',()=>renderLogEvents(events,'config')+logRaw('Camera media · observed streams',panelLogs.camera_media||{})+logRaw('Camera discovery · ONVIF / ISAPI',panelLogs.camera_discovery_log||'Brak odczytu profili.')+logRaw('Last save debug',panelLogs.last_save_debug||{})+logRaw('Last runtime sync',panelLogs.last_runtime_sync||{})+logRaw('Panel config',panelLogs.panel_config||{})+logRaw('Runtime edge.json',panelLogs.runtime_config_file||{})+logRaw('Last saved response',panelLogs.last_saved_config||{})],
+          ['ai','Detekcja',()=>renderLogEvents(events,'ai')+logRaw('Local AI',panelLogs.detection||{},EdgeLogView.valueSeverity(panelLogs.detection))]];
+        logsView.innerHTML=sections.filter(([id])=>group==='all'||group===id).map(([id,title,body])=>`<section data-log-group="${id}"><h2>${title}</h2>${body()}</section>`).join('');
       }
+      function renderDeviceLogs(){
+        if(!deviceReport)return;
+        const selected=deviceReport.selected?.latest||{},label=selected.device?.label||'Urządzenie',endpoint=selected.browser_endpoint||'Adres jeszcze niezgłoszony';
+        const group=document.getElementById('log-group-filter').value;
+        document.getElementById('device-log-view').innerHTML=`<div class="notice" style="overflow-wrap:anywhere">${escapeHtml(label)} (${escapeHtml(endpoint)}) → Home Assistant → Edge → kamera. Bieżące pomiary i historia zdarzeń są pokazane oddzielnie.</div>`+
+          renderLogEvents(deviceReport.selected?.log||'',group==='all'||group==='overview'?'all':group)+
+          logRaw('Device / session / browser measurements',selected)+logRaw('Connection map · configured and observed',deviceReport.network_map||{})+logRaw('Surowy dziennik urządzenia · historia',deviceReport.selected?.log||'Brak raportu.');
+      }
+      for(const id of ['log-group-filter','log-level-filter','log-search'])document.getElementById(id).addEventListener(id==='log-search'?'input':'change',()=>{renderLogs();renderDeviceLogs();});
 
       async function loadLogs() {
         logsView.innerHTML = '<p class="notice">Loading logs...</p>';
@@ -8319,10 +8374,7 @@ INDEX_HTML = r"""<!doctype html>
           select.innerHTML=(deviceReport.devices||[]).map(d=>`<option value="${escapeHtml(d.device_id)}">${escapeHtml(d.label)} · ${escapeHtml(d.device_id.slice(0,8))}</option>`).join('');
           if(wanted&&(deviceReport.devices||[]).some(d=>d.device_id===wanted))select.value=wanted;
           if(!deviceReport.selected&&select.value&&select.value!==wanted){await loadDeviceLogs();return;}
-          const selected=deviceReport.selected?.latest||{},label=selected.device?.label||'Urządzenie',endpoint=selected.browser_endpoint||'Adres przeglądarki jeszcze niezgłoszony';
-          document.getElementById('device-log-view').innerHTML=`<div class="notice" style="overflow-wrap:anywhere">${escapeHtml(label)} (${escapeHtml(endpoint)}) → Home Assistant (HTTPS/Ingress lub karta) → Edge → kamera (RTSP). Czasy TTFB obejmują serwer i proxy; to nie jest traceroute.</div>`+
-            logBlock('Device / session / browser measurements',selected)+logBlock('Connection map · configured and observed',deviceReport.network_map||{})+
-            logBlock('Device log',deviceReport.selected?.log||'Brak raportu. Otwórz Edge na wybranym urządzeniu i odczekaj kilka sekund.');
+          renderDeviceLogs();
         }catch(error){document.getElementById('device-log-view').textContent=error.message;}
       }
       document.getElementById('device-label').addEventListener('change',event=>deviceReporter?.setLabel(event.target.value));
@@ -9773,7 +9825,7 @@ INDEX_HTML = r"""<!doctype html>
             .filter(([, day]) => day)
             .map(([index, day]) => `${encodeURIComponent(index)}:${encodeURIComponent(day)}`)
             .join(',');
-          const summary=activePage!=='nvr';
+          const summary=activePage!=='nvr'&&!options.history;
           const fresh=options.reason==='manual_refresh'||options.reason==='recording_continuation_refresh'||options.reason==='detection_event'||String(options.reason||'').startsWith('alert_recording');
           const statusPath = summary?'api/recording/status?summary=1':`api/recording/status?catalog=1${fresh?'&fresh=1':''}${dayQuery?'&days='+dayQuery:''}`;
           const known=options.forceRender?'':Object.values(recordingStatus).filter(item=>item.files_revision).map(item=>`${item.index}:${item.files_revision}`).join(',');
@@ -9863,11 +9915,13 @@ INDEX_HTML = r"""<!doctype html>
             }
           }
           recordingDayLoadMessage('');
+          persistRecordingGallery();
+          if(activePage!=='nvr')void restoreGalleryThumbnails();
           if(data.index_stale&&data.index_refreshing&&activePage==='nvr')setTimeout(()=>{if(activePage==='nvr')void loadRecordingStatus({reason:'timer'});},1500);
         } catch (error) {
           if (requestID !== nvrRequestID) return;
           if(controller.signal.aborted&&controller.signal.reason!=='timeout'){debugEvent('ui_recording_status_cancelled',{reason:options.reason});return;}
-          if(activePage==='nvr'&&(!['timer','day_refresh'].includes(options.reason)||!lastNvrRenderSignature))recordingDayLoadMessage(controller.signal.aborted?'Nie udało się odczytać listy nagrań. Naciśnij Odśwież.':`Błąd listy nagrań: ${error.message}`);
+          if(activePage==='nvr'&&(options.forceRender||!(config.cameras||[]).every((_,i)=>Array.isArray(recordingStatus[i]?.files))))recordingDayLoadMessage(controller.signal.aborted?'Nie udało się odczytać listy nagrań. Naciśnij Odśwież.':`Błąd listy nagrań: ${error.message}`);
           debugEvent('ui_recording_status_error', {message: String(error), reason: options.reason});
         } finally {
           clearTimeout(timeout);
@@ -10889,8 +10943,10 @@ INDEX_HTML = r"""<!doctype html>
           path: window.location.pathname,
         });
         await loadConfig();
+        void restoreRecordingGallery();
         void loadEngineSettings();
         await Promise.all([loadPresets(), loadCameras(), loadRecordingStatus({ forceRender: true, reason: 'boot' })]);
+        setTimeout(()=>{if(activePage!=='nvr'&&!document.hidden)void loadRecordingStatus({history:true,reason:'gallery_prefetch'});},3000);
         let eventId=new URLSearchParams(location.search).get('edge_event');try{eventId=eventId||new URLSearchParams(window.top.location.search).get('edge_event');}catch(_){}if(/^[1-9][0-9]{0,18}$/.test(eventId||''))await openAlertById(eventId);
       }
 
@@ -10906,6 +10962,8 @@ INDEX_HTML = r"""<!doctype html>
 INDEX_HTML = (
     INDEX_HTML
     .replace("__EDGE_PANEL_VERSION__", APP_VERSION)
+    .replace("__EDGE_GALLERY_CACHE__", (Path(__file__).parent/'edge-recording-gallery.js').read_text())
+    .replace("__EDGE_LOG_VIEW__", (Path(__file__).parent/'edge-log-view.js').read_text())
     .replace("__EDGE_UI_BUILD__", UI_BUILD)
     .replace("__EDGE_NATIVE_RTC__", "true" if EDGE_RTC_ENABLED else "false")
     .replace("__EDGE_HA_LIVE_HELP__", "EdgeRTC sends H264 frames through authenticated Home Assistant WebSocket connections. Native live requires HTTPS and browser WebCodecs. A compatible RTSP G711 microphone uses the existing camera session. HA streaming needs no extra public media ports." if EDGE_RTC_ENABLED else 'Home Assistant streams the selected live feed through its own authenticated connection. Keep the camera reachable from Home Assistant and use H264 for broad browser support. Edge Live needs a Home Assistant WebRTC provider such as go2rtc. The microphone requires HTTPS, browser permission and camera/provider support for return audio.')
@@ -11801,7 +11859,7 @@ def main() -> None:
     write_debug_event('release_features',{'version':APP_VERSION,'features':APP_RELEASE_FEATURES,
                       'hardware':hardware_inventory(),'recordings_changed':False,'camera_codec_settings_changed':False,
                       'edge_rtc':'Sources stay connected on the server; viewers share its bounded keyframe buffer.'})
-    print(f'[edge-panel] {APP_VERSION}: voice AAC, direct short-edit MP4, native pause recovery and shared archive catalog. Original video/FPS unchanged.')
+    print(f'[edge-panel] {APP_VERSION}: persistent gallery, long-GOP EdgeRTC startup and structured diagnostics. Original video/FPS unchanged.')
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
     try:

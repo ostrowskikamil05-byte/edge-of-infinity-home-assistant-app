@@ -25,7 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const version = "0.11.13"
+const version = "0.11.14"
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -273,6 +273,9 @@ func (a *app) stream(w http.ResponseWriter, r *http.Request, path string) {
 			return
 		}
 	}
+	if len(v.queue) <= liveQueuePackets {
+		v.bootstrap.Store(false)
+	}
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -287,6 +290,7 @@ func (a *app) stream(w http.ResponseWriter, r *http.Request, path string) {
 				return
 			}
 		case p := <-v.queue:
+			v.consumed(p)
 			ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if ws.WriteMessage(websocket.BinaryMessage, p) != nil {
 				return

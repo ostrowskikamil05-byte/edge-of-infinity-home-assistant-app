@@ -49,6 +49,7 @@ jobs:
           node tests/browser/remote_live.cjs
           node tests/browser/edge_rtc_support.cjs
           node tests/edge_rtc_pacing.cjs
+          node tests/edge_log_view.cjs
       - name: Install fixture media tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Test detection settings, history and NVR seeking
@@ -129,6 +130,36 @@ jobs:
           PY
           EDGE_TEST_BROWSER=webkit node tests/browser/nvr_archive_start.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_archive_start.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_gallery_cache.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_gallery_cache.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/logs_organized.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/logs_organized.cjs
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: edge-of-infinity/edge-rtc/go.sum
+      - name: Test native long-GOP cached startup with actual WebCodecs
+        run: |
+          export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
+          export EDGE_RTC_TEST_BINARY="${RUNNER_TEMP}/edge-rtc-long-gop" EDGE_RTC_TEST_FPS=20 EDGE_RTC_TEST_GOP_SECONDS=24
+          pip install aiohttp==3.14.4
+          go -C edge-of-infinity/edge-rtc test -c -o "${EDGE_RTC_TEST_BINARY}" .
+          python tests/browser/edge_rtc_fixture.py > "${RUNNER_TEMP}/long-gop.log" 2>&1 &
+          edge_gop_fixture_pid=$!
+          trap 'kill "${edge_gop_fixture_pid}" || true' EXIT
+          python - <<'PY'
+          import time, urllib.request
+          deadline=time.monotonic()+30
+          while True:
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:18089/test/status',timeout=1).close()
+                  break
+              except OSError:
+                  if time.monotonic()>deadline:raise
+                  time.sleep(.1)
+          PY
+          node tests/browser/edge_rtc_long_gop.cjs
 
   detection-media:
     runs-on: ubuntu-latest
