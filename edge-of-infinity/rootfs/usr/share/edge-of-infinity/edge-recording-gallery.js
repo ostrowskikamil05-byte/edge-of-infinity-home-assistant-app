@@ -1,7 +1,7 @@
 /* Local metadata/JPEG cache. Never stores a recording or camera credentials. */
 (() => {
   class EdgeRecordingGallery {
-    constructor(note=()=>{}){this.note=note;this.writes=Promise.resolve();this.reported=new Set();}
+    constructor(note=()=>{}){this.note=note;this.writes=Promise.resolve();this.reported=new Set();this.queuedWrites=0;this.queuedBytes=0;}
     report(event,data={}){if(this.reported.has(event))return;this.reported.add(event);this.note(event,data);}
     open(){
       if(this.opening)return this.opening;
@@ -36,7 +36,8 @@
     }
     put(key,kind,value,bytes){
       const limit=kind==='snapshot'?8*1024*1024:512*1024;
-      if(bytes>limit)return Promise.resolve(false);
+      if(bytes>limit||this.queuedWrites>=8||this.queuedBytes+bytes>12*1024*1024)return Promise.resolve(false);
+      this.queuedWrites++;this.queuedBytes+=bytes;
       const write=async()=>{
         const db=await this.open();if(!db)return false;
         return new Promise(resolve=>{
@@ -58,7 +59,7 @@
           }catch(_){finish(false);}
         });
       };
-      this.writes=this.writes.then(write,write);return this.writes;
+      this.writes=this.writes.then(write,write).finally(()=>{this.queuedWrites--;this.queuedBytes-=bytes;});return this.writes;
     }
     async loadSnapshot(scope){
       const text=await this.read('snapshot|'+scope);if(typeof text!=='string')return null;

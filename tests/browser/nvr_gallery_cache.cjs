@@ -42,10 +42,13 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
    const oversize=await galleryStore.saveThumbnail('byte-budget','/recording-thumbs/oversize.jpg',new Blob([new Uint8Array(512*1024+1)],{type:'image/jpeg'}));
    const rows=await new Promise(resolve=>{const r=db.transaction('entries').objectStore('entries').getAll();r.onsuccess=()=>resolve(r.result);});
    const limited=rows.filter(r=>r.kind==='thumbnail');
+   const held=new EdgeRecordingGallery();let release;const gate=new Promise(resolve=>{release=resolve;});held.open=()=>gate;
+   const pending=Array.from({length:32},(_,i)=>held.put('held'+i,'thumbnail',new ArrayBuffer(512*1024),512*1024));
+   const queueBound=held.queuedWrites<=8&&held.queuedBytes<=12*1024*1024;release(null);await Promise.all(pending);
    await new Promise(resolve=>{const tx=db.transaction('entries','readwrite');const row=rows.find(r=>r.key==='snapshot|whitelist');row.updated=Date.now()-row.ttl-1;tx.objectStore('entries').put(row);tx.oncomplete=resolve;});
-   return {noSecrets,other,whitelist,count:countRows,oversize,bytes:limited.reduce((n,r)=>n+r.bytes,0),expired:await galleryStore.loadSnapshot('whitelist')};
+   return {noSecrets,other,whitelist,count:countRows,oversize,queueBound:queueBound&&held.queuedWrites===0&&held.queuedBytes===0,bytes:limited.reduce((n,r)=>n+r.bytes,0),expired:await galleryStore.loadSnapshot('whitelist')};
   });
-  assert(checks.noSecrets);assert.equal(checks.other,null);assert(!checks.whitelist.includes('DO_NOT_STORE'));assert(checks.count<=96&&checks.bytes<=8*1024*1024);assert.equal(checks.oversize,false);assert.equal(checks.expired,null);
+  assert(checks.noSecrets);assert.equal(checks.other,null);assert(!checks.whitelist.includes('DO_NOT_STORE'));assert(checks.count<=96&&checks.bytes<=8*1024*1024);assert(checks.queueBound);assert.equal(checks.oversize,false);assert.equal(checks.expired,null);
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
   console.log(`PASS ${wk?'webkit':'chromium'}: background metadata only, persistent gallery/JPEG before network, actual playback, scope/secret/expiry/storage limits`);
   await page.unrouteAll({behavior:'ignoreErrors'});await context.close();
