@@ -21,6 +21,9 @@ const assert=require('node:assert/strict');
    await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="1"]');return v===retainedAlertVideo&&!v.paused&&v.videoWidth>0&&recordingPlaybackPosition(v)>=9&&recordingPlaybackPosition(v)<12;});
    assert.equal(requests.filter(r=>r.url.includes('/api/recording/status')).length,statusCount,'same-day alert recreated/refetched the player');
    const video=page.locator('video[data-recording-player="1"]');
+   // A fast direct seek can satisfy readyState/time before its first painted
+   // picture. Wait for actual decoded pixels, not just metadata or an audio clock.
+   await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="1"]'),c=document.createElement('canvas');c.width=160;c.height=90;const g=c.getContext('2d');g.drawImage(v,0,0,160,90);return [...g.getImageData(0,0,160,90).data].filter((n,i)=>i%4!==3&&n>50).length>2000;},null,{timeout:3000});
    const picture=await video.evaluate(v=>{const c=document.createElement('canvas');c.width=160;c.height=90;const g=c.getContext('2d');g.drawImage(v,0,0,160,90);return [...g.getImageData(0,0,160,90).data].filter((n,i)=>i%4!==3&&n>50).length;});assert(picture>2000,'second-camera alert is black');
    await page.waitForFunction(()=>document.querySelector('video[data-recording-player="1"]').dataset.recordingNextReady?.includes('000014.mp4'));await video.evaluate(v=>pauseRecording(v));
    assert(requests.some(r=>r.method==='POST'&&r.url.includes('/api/recording/prepare')&&r.body?.includes('000014.mp4')),'next segment was not prepared through JSON');
