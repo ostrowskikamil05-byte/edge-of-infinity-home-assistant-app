@@ -108,6 +108,26 @@ jobs:
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_codec_test.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/device_diagnostics.cjs
 
+      - name: Test cold phone archive with twelve thousand saved files
+        run: |
+          export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
+          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_ARCHIVE_FILES=12000 EDGE_CORE_ENGINE=edge_rtc EDGE_NVR_TEST_PORT=18092 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/archive-ui.log" 2>&1 &
+          edge_archive_fixture_pid=$!
+          trap 'kill "${edge_archive_fixture_pid}" || true' EXIT
+          python - <<'PY'
+          import time, urllib.request
+          deadline=time.monotonic()+30
+          while True:
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:18092/api/version',timeout=1).close()
+                  break
+              except OSError:
+                  if time.monotonic()>deadline:raise
+                  time.sleep(.1)
+          PY
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_archive_start.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_archive_start.cjs
+
   detection-media:
     runs-on: ubuntu-latest
     steps:

@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.11.11"
+version: "0.11.12"
 slug: edge_of_infinity
 description: Local live and NVR core for Hikvision, Uniview, Reolink and ONVIF/RTSP cameras
 url: https://github.com/edge-of-infinity/home-assistant-app

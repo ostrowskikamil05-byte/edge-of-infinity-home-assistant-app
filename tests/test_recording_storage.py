@@ -27,7 +27,7 @@ class RecordingStorageTests(unittest.TestCase):
         return path
 
     def test_default_and_legacy_auto_keep_hevc_and_native_frame_rate(self):
-        for policy in ({},{'browser_playback':'auto_h264'},{'browser_playback':'copy'}):
+        for policy in ({},{'browser_playback':'auto_h264'},{'browser_playback':'copy'},{'browser_playback':'h264'}):
             with self.subTest(policy=policy):
                 normalized = self.p.normalize_config({'nvr':policy})['nvr']
                 self.assertEqual(normalized['browser_playback'],'copy')
@@ -38,7 +38,7 @@ class RecordingStorageTests(unittest.TestCase):
                 self.assertEqual(command[command.index('-c:v')+1],'copy')
                 self.assertNotIn('-r',command)
                 self.assertNotIn('-vf',command)
-        self.assertEqual(self.p.recording_mode_from_codec('hevc',{'browser_playback':'h264'}),'transcode_to_h264')
+        self.assertEqual(self.p.recording_mode_from_codec('hevc',{'browser_playback':'h264'}),'copy')
 
     def test_disabled_day_cache_never_starts_or_scans_background_video(self):
         self.assertEqual(self.p.recording_cache_budget(self.config),0)

@@ -145,3 +145,20 @@ download its session logs and connection map. Reports include browser-visible
 resource timings, capabilities, video/decoder/buffer state and EdgeRTC stages;
 unavailable phone CPU/RAM/radio/router data is identified explicitly. Logs are
 bounded to 24 devices × 256 KiB, up to seven days, with redacted credentials.
+
+## Archive loading and original recording (0.11.12)
+
+Update the app and reopen the panel. The legacy recording-wide H.264 setting
+migrates to original stream copy, with a configuration backup. Short codec tests
+remain in **Recordings → ⋯ → Kodeki**; camera settings and existing files are
+preserved. This avoids continuous 4K software encoding on small hosts.
+
+Live loads only recorder state. Opening Recordings requests the archive
+immediately, with gzip delivery and cached file metadata. Disk accounting runs
+separately in Settings. Failed background polling retains the current player.
+These changes preserve original resolution/FPS and the shared camera upstream.
+
+Long camera GOPs still affect random seeks: a UNV stream with 24 seconds between
+keyframes must decode from its preceding keyframe. An optional camera I-frame
+interval of 1–2 seconds (20–40 frames at 20 FPS) can improve seeking, with a
+possible bitrate/storage increase. Edge does not change that camera setting.
