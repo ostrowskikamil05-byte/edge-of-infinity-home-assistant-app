@@ -149,6 +149,22 @@ class EdgeClient:
             return await self._read_local_json("health.json")
         return await self._request("GET", "/health")
 
+    async def report_device(self,payload: dict,peer: dict) -> bool:
+        """Store a bounded browser report without opening a camera stream."""
+        if self.is_local:
+            from ._device_logs import DeviceLogs
+            def write():
+                for base in (Path('/config/edge'),Path('/homeassistant/edge')):
+                    if (base/'cameras.json').is_file():return DeviceLogs(base/'device-logs').append(payload,peer)
+                raise EdgeConnectionError('Local Edge diagnostics directory was not found.')
+            return await self.hass.async_add_executor_job(write) if self.hass else write()
+        headers={'Authorization':'Bearer '+self.api_key} if self.api_key else {}
+        try:
+            async with self.session.post(self.base_url+'/api/client-diagnostics',json={**payload,'ha_bridge_observation':peer},headers=headers,timeout=5) as response:
+                if response.status==429:return False
+                response.raise_for_status();return True
+        except (ClientError,TimeoutError) as error:raise EdgeConnectionError('Could not store device diagnostics') from error
+
     async def detection(self) -> dict[str, Any]:
         """Read bounded event metadata; images/credentials are never included."""
         try:

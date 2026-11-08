@@ -1,6 +1,14 @@
 # NVR browser regression tests
 
 Requires Python 3.12+, FFmpeg/FFprobe, Node.js and Playwright with Chromium.
+The multi-camera fixture also supports `nvr_codec_test.cjs` with either
+`EDGE_TEST_BROWSER=webkit` or `chromium`. It uses actual generated HEVC/H.264
+and AAC media, checks short codec-copy/convert requests, G.711 results and
+buffered-scrub/progress recovery. No video responses are mocked.
+`device_diagnostics.cjs` checks separate phone/tablet IDs and sessions, resource
+timings, redaction, device selection and downloading the report. The actual
+EdgeRTC fixture additionally verifies authenticated card telemetry and rejects
+uploads without camera read permission.
 The fixture uses temporary configuration and generated seven-second MP4s, with
 camera/network/runtime callbacks disabled. It never connects to Home Assistant.
 

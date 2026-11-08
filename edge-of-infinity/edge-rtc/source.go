@@ -68,7 +68,7 @@ func (s *source) status() map[string]any {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	lastRole, _ := s.relayLastRole.Load().(string)
-	return map[string]any{"rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
+	return map[string]any{"keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": 16 * 1024 * 1024, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
 }
 func (s *source) run() {
 	defer close(s.stopped)

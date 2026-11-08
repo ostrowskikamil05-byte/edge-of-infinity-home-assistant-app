@@ -2,6 +2,30 @@
 from pathlib import Path
 import threading
 import time
+import functools
+
+
+@functools.lru_cache(maxsize=1)
+def hardware_inventory():
+    """Read-only inventory, once per boot. No serial numbers or subprocesses."""
+    def read(path):
+        try:return Path(path).read_text().strip()[:160]
+        except OSError:return ''
+    cpu=read('/proc/cpuinfo')
+    try:
+        cpu=next(line.split(':',1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith(('model name','Hardware')))
+    except (OSError,StopIteration):cpu='unknown'
+    graphics=[]
+    for card in Path('/sys/class/drm').glob('card[0-9]*'):
+        if '-' in card.name:continue
+        device=card/'device'
+        try:driver=(device/'driver').resolve().name if (device/'driver').exists() else 'unavailable'
+        except OSError:driver='unavailable'
+        graphics.append({'card':card.name,'vendor_id':read(device/'vendor'),'device_id':read(device/'device'),'driver':driver})
+    return {'cpu_model':cpu,'manufacturer':read('/sys/class/dmi/id/sys_vendor'),
+            'product':read('/sys/class/dmi/id/product_name'),'graphics':graphics,
+            'render_nodes':[p.name for p in Path('/dev/dri').glob('renderD*')],
+            'note':'Detected devices do not establish working hardware decoding/encoding.'}
 
 
 class CpuSampler:

@@ -52,6 +52,21 @@ class CameraSupportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'ISAPI requires'):
             self.p.fetch_camera_autoconfig({'vendor':'uniview','access_protocol':'isapi'})
 
+    def test_onvif_discovery_reports_actual_profile_video_and_audio_without_stream_read(self):
+        responses=[soap('<Media><XAddr>http://192.0.2.8/media</XAddr></Media>'),
+                   soap('<Profiles token="main"><VideoEncoderConfiguration><Encoding>H265</Encoding><Resolution><Width>3840</Width><Height>2160</Height></Resolution><RateControl><FrameRateLimit>20</FrameRateLimit><BitrateLimit>8192</BitrateLimit></RateControl></VideoEncoderConfiguration><AudioEncoderConfiguration><Encoding>G711</Encoding><SampleRate>8</SampleRate><Bitrate>64</Bitrate></AudioEncoderConfiguration></Profiles>'),
+                   soap('<Uri>rtsp://192.0.2.8/main</Uri>'),soap('<Uri>rtsp://192.0.2.8/main</Uri>'),
+                   soap('<Manufacturer>UNV</Manufacturer><Model>IPC3618</Model><FirmwareVersion>test</FirmwareVersion>')]
+        cam=self.p.normalize_camera({'id':'unv','vendor':'uniview','host':'192.0.2.8','username':'admin','password':'secret','access_protocol':'onvif'},0)
+        with patch.object(self.p,'onvif_request',side_effect=responses),patch.object(self.p,'probe_rtsp_stream',side_effect=AssertionError('Discovery must not open a stream')):
+            result=self.p.fetch_onvif_camera_config(cam)
+        self.assertEqual(result['device']['model'],'IPC3618')
+        profile=result['profiles'][0]
+        self.assertEqual(profile['video']['Encoding'],'H265');self.assertEqual(profile['video']['FrameRateLimit'],'20')
+        self.assertEqual(profile['audio']['Encoding'],'G711')
+        encoded=json.dumps(self.p.redact_for_log(result))
+        self.assertNotIn('secret',encoded);self.assertIn('rtsp://admin:***@',encoded)
+
     def test_saved_non_hikvision_endpoint_updates_to_new_host(self):
         p = self.p
         old = p.normalize_config({'cameras': [{'vendor': 'uniview', 'id': 'front', 'host': '192.0.2.8', 'username': 'old', 'password': 'old'}]})

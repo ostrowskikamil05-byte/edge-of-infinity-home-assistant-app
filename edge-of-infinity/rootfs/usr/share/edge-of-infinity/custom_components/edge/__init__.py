@@ -13,6 +13,7 @@ from .coordinator import EdgeCoordinator, EdgeDetectionCoordinator
 from .frontend import async_register_card
 from .rtc import async_register_rtc
 from .events import EdgeEventImageView
+from .device_diagnostics import EdgeDeviceDiagnosticsView
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -20,6 +21,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     await async_register_card(hass)
     async_register_rtc(hass)
     hass.http.register_view(EdgeEventImageView(hass))
+    hass.http.register_view(EdgeDeviceDiagnosticsView(hass))
     return True
 
 
