@@ -35,7 +35,8 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
      }
      if(endpoint==='cameras.json')return json({cameras:[{id:'front',key:'front_0',index:0,name:'Front',vendor:'hikvision',status:'online',record_stream:'main',tile_stream:'sub',live_stream:'sub',video_codec:'h264'}]});
      if(endpoint==='api/presets')return json({presets:[]});
-     if(endpoint==='api/recording/status')return json({cameras:[]});
+     if(endpoint==='api/recording/status')return json({summary:url.searchParams.get('summary')==='1',cameras:[]});
+     if(endpoint==='api/storage/status')return json({pending:false,recordings_bytes:0,recordings_volume:{free_bytes:2*1024**3},cache_volume:{free_bytes:2*1024**3}});
      if(endpoint==='api/core/engine')return json({available:true,core_engine:fixtures[mode].engine,running_engine:fixtures[mode].engine,restart_required:false});
      if(endpoint==='api/debug'){events.push(request.postDataJSON());return json({ok:true});}
      if(endpoint==='api/client-diagnostics.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-device-diagnostics.js'),'utf8')});
@@ -56,8 +57,12 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
      await page.locator('#camera-grid .preview').dispatchEvent('click');
      await frame.waitFor();
     }else assert((await page.locator('#camera-grid .notice.warning').textContent()).includes('does not expose MediaMTX WebRTC ports'));
+    assert(requests.filter(url=>url.pathname.endsWith('/api/recording/status')).every(url=>url.searchParams.get('summary')==='1'),'Live boot requested full archive history');
+    assert(!requests.some(url=>url.pathname.endsWith('/api/storage/status')),'Live boot requested full storage accounting');
     if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();
+    const storageResponse=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/api/storage/status'));
     await page.locator('nav [data-page-target="edge-settings"]').click();
+    await storageResponse;
     await page.locator('#network-settings > summary').click();
     assert.equal(await page.locator('[name="live-mobile-public-url"]').isVisible(),!native);
     if(native)assert(await page.locator('[data-native-network-info]').isVisible());
