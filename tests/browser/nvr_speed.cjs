@@ -10,7 +10,7 @@ const assert=require('node:assert/strict');
    await page.goto(process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18088');
    await page.locator('[data-camera-form]').waitFor({state:'attached'});if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();
    await page.waitForFunction(()=>document.querySelector('video[data-recording-player]')?.readyState>=2);
-   await page.waitForFunction(()=>[...document.querySelectorAll('.recording-film-grid img')].every(image=>image.complete&&image.naturalWidth>100&&image.closest('.recording-thumb-wrap')?.classList.contains('thumb-loaded')));
+   await page.waitForFunction(()=>{const images=[...document.querySelectorAll('.recording-film-grid img')];return images.length>0&&images.every(image=>image.complete&&image.naturalWidth>100&&image.closest('.recording-thumb-wrap')?.classList.contains('thumb-loaded'));});
    assert(await page.locator('.recording-film-grid img').first().evaluate(image=>image.dataset.recordingThumbBackend==='jpeg'),'tiles fetched/decoded full 4K clips instead of small JPEGs');
    assert(requests.every(url=>url.includes('000000.mp4')),'non-playing clips were downloaded for tile thumbnails');
    const indexed=await page.evaluate(()=>{
