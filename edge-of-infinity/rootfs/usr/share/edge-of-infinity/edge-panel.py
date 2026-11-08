@@ -7,6 +7,7 @@ import json
 import base64
 import signal
 import functools
+import gzip
 import os
 import platform
 import re
@@ -94,13 +95,14 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.11.11"
-APP_RELEASE_FEATURES=['Seek intent and bounded first-frame recovery','Direct compatible saved MP4; legacy normalization retained',
-                      'Explicit six-second H.264/H.265 and AAC/silent/A-law/μ-law test copies',
-                      'Per-device/session browser, network and live/NVR logs with redacted download and connection map',
-                      'Playback, hardware and camera-profile diagnostics; shared warm EdgeRTC source']
+APP_VERSION = "0.11.12"
+APP_RELEASE_FEATURES=['Original stream-copy recording; legacy H264 policy migrated',
+                      'Fast archive index without FFprobe, storage walks or disabled-cache hashing',
+                      'Gzip index delivery; lightweight Live summary and immediate history loading',
+                      'Independent background disk statistics; failed polling preserves playback',
+                      'Index build/wire-size logs; readable credential-redacted recorder commands']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "device-seek-v1111"
+UI_BUILD = "archive-index-v1112"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -240,7 +242,7 @@ def safe_id(value: str) -> str:
 
 
 def redact_rtsp(value: str) -> str:
-    return re.sub(r"(rtsp://[^:/@]+:)[^@]+@", r"\1***@", value or "")
+    return re.sub(r"(rtsps?://[^:/@\s\"']+:)[^@\s\"']+@", r"\1***@", value or "")
 
 
 def redact_command(command: list[str]) -> list[str]:
@@ -1015,7 +1017,7 @@ def normalize_config(payload: dict) -> dict:
             "playback_cache_mb": clamp_int(nvr.get("playback_cache_mb"), 0, 0, 2048),
             "thumbnail_cache_mb": clamp_int(nvr.get("thumbnail_cache_mb"), 32, 1, 256),
             "copy_all_streams": bool(nvr.get("copy_all_streams", True)),
-            "browser_playback": "h264" if nvr.get("browser_playback") == "h264" else "copy",
+            "browser_playback": "copy",
         },
         "cameras": normalized,
         "detection": detection_settings(payload.get("detection")),
@@ -2725,22 +2727,24 @@ def recording_base_dir(camera: dict, index: int) -> Path:
     return recordings_dir / safe_id(camera.get("id") or f"camera_{index + 1}")
 
 
+def recording_timezone_signature():
+    return (time.tzname,time.timezone,time.altzone,time.daylight,os.environ.get('TZ',''))
+
+
+@functools.lru_cache(maxsize=50000)
+def recording_filename_timestamp(name,zone):
+    for pattern in (r'^(\d{8})-(\d{6})',r'^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})'):
+        match=re.search(pattern,name)
+        if not match:continue
+        stamp=''.join(match.groups())
+        try:return int(datetime(int(stamp[:4]),int(stamp[4:6]),int(stamp[6:8]),int(stamp[8:10]),int(stamp[10:12]),int(stamp[12:14])).timestamp())
+        except (OverflowError,ValueError,OSError):pass
+    return None
+
+
 def recording_segment_start_ts(path: Path, fallback_ts: float) -> int:
-    name = path.stem
-    patterns = (
-        (r"^(\d{8})-(\d{6})", "%Y%m%d%H%M%S"),
-        (r"^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})", "%Y%m%d%H%M%S"),
-    )
-    for pattern, fmt in patterns:
-        match = re.search(pattern, name)
-        if not match:
-            continue
-        stamp = "".join(match.groups())
-        try:
-            return int(time.mktime(time.strptime(stamp, fmt)))
-        except (OverflowError, ValueError):
-            continue
-    return int(fallback_ts)
+    parsed=recording_filename_timestamp(path.stem,recording_timezone_signature())
+    return int(fallback_ts) if parsed is None else parsed
 
 
 def recording_file_ready(path: Path, now: float | None = None, min_age_seconds: float | None = None) -> bool:
@@ -2781,10 +2785,10 @@ def playable_recording_files(directory: Path) -> list[Path]:
     return [path for path in directory.glob("*.mp4") if recording_file_ready(path, now)]
 
 
-def recording_thumbnail_url(key: str, path: Path) -> str:
+def recording_thumbnail_url(key: str, path: Path, stat=None) -> str:
     base = f"recording-thumbs/{key}/{path.name}.jpg"
     try:
-        stat = path.stat()
+        stat = stat or path.stat()
     except OSError:
         return base
     return f"{base}?v={stat.st_size}-{stat.st_mtime_ns}"
@@ -2898,7 +2902,7 @@ def recording_duration_seconds(path: Path, stat: os.stat_result, fallback: int, 
     elif allow_probe:
         probe = run_json(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)], timeout=4) or {}
     else:
-        return fallback
+        probe = {}
     try:
         duration = float((probe.get("format") or {}).get("duration") or 0)
         measured = max(1, round(duration)) if 0 < duration <= 86400 else 0
@@ -2922,12 +2926,18 @@ def recording_day_start_ts(day_key: str) -> int:
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day_key or "")):
         return 0
     try:
-        return int(time.mktime(time.strptime(day_key, "%Y-%m-%d")))
+        parsed=date.fromisoformat(day_key)
+        return int(datetime(parsed.year,parsed.month,parsed.day).timestamp())
     except (OverflowError, OSError, ValueError):
         return 0
 
 
 def recording_day_bounds(day_key: str) -> tuple[int, int]:
+    return recording_day_bounds_cached(day_key,recording_timezone_signature())
+
+
+@functools.lru_cache(maxsize=1024)
+def recording_day_bounds_cached(day_key,zone):
     start = recording_day_start_ts(day_key)
     if not start:
         return 0, 0
@@ -2999,9 +3009,10 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
         next_item = items[position + 1] if position + 1 < len(items) else None
         next_start_ts = next_item.get("start_ts") if next_item and next_item.get("day") == entry_day else None
         duration_seconds = recording_inferred_duration_seconds(start_ts, next_start_ts, segment_seconds)
-        irregular = next_start_ts is None or next_start_ts - start_ts > max(2, min(3600, segment_seconds * 6))
         if measure_durations:
-            duration_seconds = recording_duration_seconds(path, item["stat"], duration_seconds, allow_probe=irregular)
+            # Listing must never spawn a decoder/probe for damaged or pending
+            # historical files. Read the MP4 index, otherwise retain the estimate.
+            duration_seconds = recording_duration_seconds(path, item["stat"], duration_seconds, allow_probe=False)
         else:
             with RECORDING_DURATION_LOCK:
                 cached_duration = RECORDING_DURATION_CACHE.get(str(path))
@@ -3012,6 +3023,7 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
         entries.append(
             {
                 "path": path,
+                "stat":item['stat'],
                 "name": path.name,
                 "start_ts": start_ts,
                 "start_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(start_ts)),
@@ -3032,28 +3044,28 @@ def recording_day_groups(entries: list[dict], segment_seconds: int, key: str = "
         day = entry.get("day") or recording_day_key(safe_int(entry.get("start_ts"), 0))
         if not day:
             continue
-        group = groups.setdefault(
-            day,
-            {
+        group=groups.get(day)
+        if group is None:
+            start,end=recording_day_bounds(day)
+            group=groups[day]={
                 "day": day,
                 "file_count": 0,
                 "total_seconds": 0,
                 "recorded_seconds": 0,
-                "day_start_ts": recording_day_bounds(day)[0],
-                "day_end_ts": recording_day_bounds(day)[1],
-                "day_total_seconds": recording_day_bounds(day)[1] - recording_day_bounds(day)[0],
+                "day_start_ts": start,
+                "day_end_ts": end,
+                "day_total_seconds": end-start,
                 "oldest_at": entry.get("start_at") or "",
                 "newest_at": entry.get("start_at") or "",
                 "thumbnail_url": "",
-            },
-        )
+            }
         group["file_count"] += 1
         group["recorded_seconds"] += safe_int(entry.get("duration_seconds"), segment_seconds)
         group["total_seconds"] = group["day_total_seconds"]
         group["newest_at"] = entry.get("start_at") or group["newest_at"]
         path = entry.get("path")
         if key and not group.get("thumbnail_url") and isinstance(path, Path):
-            group["thumbnail_url"] = recording_thumbnail_url(key, path)
+            group["thumbnail_url"] = recording_thumbnail_url(key,path,entry.get('stat'))
     return sorted(groups.values(), key=lambda item: item["day"], reverse=True)
 
 
@@ -3064,7 +3076,7 @@ def recording_files_from_entries(key: str, entries: list[dict], segment_seconds:
         if not isinstance(path, Path):
             continue
         try:
-            stat = path.stat()
+            stat = entry.get('stat') or path.stat()
         except OSError:
             continue
         start_ts = safe_int(entry.get("start_ts"), int(stat.st_mtime))
@@ -3073,7 +3085,7 @@ def recording_files_from_entries(key: str, entries: list[dict], segment_seconds:
             {
                 "name": path.name,
                 "url": f"recordings/{key}/{path.name}",
-                "thumbnail_url": recording_thumbnail_url(key, path),
+                "thumbnail_url": recording_thumbnail_url(key, path,stat),
                 "size_bytes": stat.st_size,
                 "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(stat.st_mtime)),
                 "start_ts": start_ts,
@@ -3245,6 +3257,33 @@ def cleanup_disposable_storage(config: dict, wait_for_thumbnail: bool = False) -
         return report
     finally:
         STORAGE_CLEANUP_LOCK.release()
+
+
+STORAGE_SCAN_LOCK=threading.Lock()
+
+
+def storage_usage_snapshot(config,known_bytes=None,refresh=False):
+    """A player request never walks storage or runs cache maintenance."""
+    root=Path((config.get('storage') or {}).get('recordings_dir') or '/media/edge-of-infinity/recordings')
+    signature=(str(root),recording_cache_budget(config),thumbnail_cache_budget(config),int((config.get('detection') or {}).get('alert_media_mb',256))*MIB)
+    with STORAGE_USAGE_LOCK:cached=STORAGE_USAGE_CACHE.get(signature)
+    fresh=bool(cached and time.monotonic()-cached[0]<60)
+    if refresh and not fresh and STORAGE_SCAN_LOCK.acquire(blocking=False):
+        def scan():
+            started=time.monotonic()
+            try:
+                storage_usage_payload(config)
+                write_debug_event('storage_scan_done',{'elapsed_ms':round((time.monotonic()-started)*1000)})
+            except OSError as error:write_debug_event('storage_scan_error',{'error':str(error)})
+            finally:STORAGE_SCAN_LOCK.release()
+        threading.Thread(target=scan,daemon=True).start()
+    if cached:return {**cached[1],'pending':not fresh,'stale':not fresh}
+    def volume(path):
+        data=disk_usage_payload(path)
+        return {'free_bytes':data.get('free_bytes'),'total_bytes':data.get('total_bytes')}
+    return {'pending':True,'recordings_bytes':known_bytes,'recordings_volume':volume(root),'cache_volume':volume(HOME_DIR),
+            'playback_cache_limit_bytes':signature[1],'thumbnail_cache_limit_bytes':signature[2],
+            'phone_cache_limit_bytes':RECORDING_COMPAT.budget,'alert_clip_limit_bytes':signature[3],'alert_image_limit_bytes':32*MIB}
 
 
 def storage_usage_payload(config: dict) -> dict:
@@ -3443,6 +3482,13 @@ def recording_cache_status(
     cache_name: str = "",
 ) -> dict:
     budget = recording_cache_budget(load_config())
+    if budget<=0:
+        return {'enabled':False,'byte_limit':0,'disabled_reason':'disk_saving_file_sequence','ready':False,'raw_ready':False,'current':False,
+                'active_day':recording_day_is_today(cache_name),'stale_active_day':False,'building':False,'stale':False,
+                'rebuild_deferred':False,'rebuild_defer_reason':'disabled','new_source_count':0,'too_short_for_sources':False,
+                'source_count':len(entries),'source_hash':'','cache_id':'disabled','cache_name':cache_name,'url':'','file_size':0,
+                'file_count':len(entries),'total_seconds':sum(safe_int(e.get('duration_seconds'),segment_seconds) for e in entries),
+                'modified_at':'','built_at':'','log_path':str(RECORDING_CACHE_LOG_PATH)}
     signature = recording_cache_source_signature(entries, segment_seconds)
     meta_path = recording_cache_meta_path(key, cache_name)
     video_path = recording_cache_video_path(key, cache_name)
@@ -4082,12 +4128,12 @@ def recording_codec_mode(stream: str, nvr: dict) -> tuple[str, str, str, dict]:
     audio = probe.get("audio") or {}
     video_codec = str(video.get("codec_name") or "").lower()
     audio_codec = str(audio.get("codec_name") or "").lower()
-    mode = 'transcode_to_h264' if nvr.get('browser_playback') == 'h264' else 'copy'
+    mode = 'copy'
     return mode, video_codec, audio_codec, probe
 
 
 def recording_mode_from_codec(video_codec: str, nvr: dict) -> str:
-    return 'transcode_to_h264' if nvr.get('browser_playback') == 'h264' else 'copy'
+    return 'copy'
 
 
 def build_recording_command(stream: str, output_pattern: str, segment_seconds: int, mode: str, video_codec: str = '') -> list[str]:
@@ -4359,7 +4405,7 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
                 "ffprobe_present": health["ffprobe_present"],
             }
         )
-    return {"cameras": cameras, "storage": storage_usage_payload(config)}
+    return {"cameras": cameras, "storage": storage_usage_snapshot(config,known_bytes=sum(c['recording_bytes'] for c in cameras))}
 
 
 def recording_files_revision(key,day,files):
@@ -4370,6 +4416,17 @@ def recording_files_revision(key,day,files):
 
 
 def recording_status_response(config,query):
+    if query.get('summary')==['1']:
+        cleanup_recording_processes();rows=[]
+        for index,camera in enumerate(config.get('cameras',[])):
+            key=recording_key(camera,index);process=RECORDING_PROCESSES.get(key);recording=bool(process and process.poll() is None)
+            desired=camera_should_record(camera);error=recording_preflight_error(camera,camera.get('record_stream') or 'main')
+            rtsp,source=recording_source_stream(camera,index,camera.get('record_stream') or 'main')
+            rows.append({'index':index,'id':camera.get('id'),'key':key,'record_stream':camera.get('record_stream') or 'main',
+                         'record_rtsp':redact_rtsp(rtsp),'record_source':source,'record_mode':'copy',
+                         'recording':recording,'desired_recording':desired,'record_error':error,'can_record':not error,
+                         'recording_status':'recording' if recording else 'blocked' if error else 'scheduled_stopped' if desired else 'disabled'})
+        return {'summary':True,'cameras':rows}
     data=recording_status_payload(config,day_selection=parse_recording_day_query(query))
     known={}
     for value in str((query.get('known') or [''])[0]).split(','):
@@ -6220,7 +6277,7 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </header>
           <section class="panel">
-            <section class="notice" data-recording-disk-usage role="status">Odczyt zajętego miejsca…</section><div id="nvr-grid" class="grid"></div>
+            <section class="notice" data-recording-disk-usage data-storage-compact role="status" hidden></section><p id="nvr-load-state" class="notice" role="status" hidden></p><div id="nvr-grid" class="grid"></div>
           </section>
         </section>
 
@@ -8431,9 +8488,9 @@ INDEX_HTML = r"""<!doctype html>
       function nvrCard(camera, index) {
         const status = recordingStatus[index] || {};
         const isRecording = Boolean(status.recording);
-        const desiredRecording = Boolean(status.desired_recording);
+        const desiredRecording = typeof status.desired_recording==='boolean'?status.desired_recording:Boolean(camera.enabled&&camera.record);
         const recordingState = status.recording_status || (isRecording ? 'recording' : desiredRecording ? 'scheduled_stopped' : 'disabled');
-        const badgeText = isRecording
+        const badgeText = typeof status.recording!=='boolean'?'CHECKING':isRecording
           ? 'RECORDING'
           : recordingState === 'blocked'
             ? 'BLOCKED'
@@ -8526,7 +8583,7 @@ INDEX_HTML = r"""<!doctype html>
               ${recordingPlayerControls(index, timeline, targetForPoster?.playbackSeek || 0)}<section class="nvr-alert-popup" data-alert-popup="${index}" hidden></section>
               <p class="nvr-player-status" data-recording-playback-message="${index}" role="status" hidden></p>
             </div>`
-          : `<div class="recording-empty">No video yet</div>`;
+          : `<div class="recording-empty">${Array.isArray(status.files)?'Brak zamkniętych nagrań dla tego dnia':'Odczyt listy nagrań…'}</div>`;
         const recordingList = displayFiles.length
           ? `<div class="recording-film-grid">${displayFiles.map((file) => `
               <button class="recording-tile ${file.url === selected ? 'active' : ''}" type="button" data-play-recording="${escapeHtml(file.url)}" data-recording-offset="${escapeHtml(offsetForRecordingUrl(index, file.url))}" data-record-index="${index}">
@@ -8538,7 +8595,7 @@ INDEX_HTML = r"""<!doctype html>
                 <span class="recording-meta">Preview — click to watch from this time</span>
               </button>
             `).join('')}</div>`
-          : `<p class="notice">${desiredRecording ? 'Continuous video recording is scheduled. The first playable clip appears after the first' : 'Start continuous video recording. The first playable clip appears after the first'} ${escapeHtml(text(status.segment_seconds, 10))}-second segment closes.</p>`;
+          : `<p class="notice">${!Array.isArray(status.files)?'Stan rejestratora i lista zapisanych filmów są odczytywane niezależnie.':desiredRecording?'Nagrywanie jest zaplanowane. Pierwszy film pojawi się po zamknięciu fragmentu, na klatce kluczowej kamery.':'Nagrywanie jest wyłączone. Dostępne zapisane dni można odtwarzać niezależnie.'}</p>`;
         const diagnostics = recordError
           ? `<p class="section-status state-offline">${escapeHtml(recordErrorText(recordError))}</p>`
           : `<p class="section-status">${escapeHtml(text(status.record_rtsp, 'Record RTSP not ready'))}</p>`;
@@ -8925,7 +8982,7 @@ INDEX_HTML = r"""<!doctype html>
         const video = card.querySelector('video[data-recording-player]');
         const badge = card.querySelector('.rec-badge');
         if (badge) {
-          badge.textContent = status.recording ? 'RECORDING' : status.recording_status === 'blocked' ? 'BLOCKED' : status.desired_recording ? 'SCHEDULED' : 'OFF';
+          badge.textContent = typeof status.recording!=='boolean'?'CHECKING':status.recording ? 'RECORDING' : status.recording_status === 'blocked' ? 'BLOCKED' : status.desired_recording ? 'SCHEDULED' : 'OFF';
           badge.classList.toggle('off', !status.recording);
         }
         const action = card.querySelector('[data-record-action]');
@@ -9003,11 +9060,11 @@ INDEX_HTML = r"""<!doctype html>
             <div class="form-grid"><label>Limit klipów alertów (MB)<input type="number" min="32" max="4096" name="detection-alert-mb" value="${detection.alert_media_mb||256}"></label><label>Sekundy przed wykryciem<input type="number" min="0" max="10" name="detection-pre" value="${detection.pre_seconds??5}"></label><label>Sekundy po wykryciu<input type="number" min="5" max="60" name="detection-post" value="${detection.post_seconds||15}"></label></div><p class="field-help">Zdjęcia alertów mają limit 32 MB. Klipy mają osobny limit powyżej i retencję taką jak nagrania; najstarsze alerty wygasają po zapełnieniu limitu. Oryginalny zapis pozostaje niezależny. Klip pojawi się po zamknięciu części nagrania, zdjęcie lokalnego wykrycia od razu.</p>
             <details class="settings-group"><summary>Powiadomienia na telefon</summary><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-notifications" ${detection.notifications_enabled?'checked':''}> Powiadamiaj o osobie lub zwierzęciu</label><label>Telefon w Home Assistant<input name="detection-notify-service" list="edge-notify-services" placeholder="notify.mobile_app_twoj_telefon" value="${escapeHtml(detection.notify_service||'')}"><datalist id="edge-notify-services"></datalist></label><label>Przerwa między alertami (s)<input type="number" name="detection-notify-cooldown" min="5" max="3600" value="${detection.notify_cooldown||30}"></label></div><p class="field-help" data-phone-services>Wybierz usługę telefonu z aplikacją Home Assistant Companion. Zapisz ustawienia; zaktualizowana integracja Edge wysyła nowe alerty ze zdjęciem, bez dodatkowej automatyzacji YAML.</p></details>
             <details class="settings-group"><summary>Zaawansowana detekcja</summary><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-camera-events" ${detection.camera_events_enabled?'checked':''}> Zdarzenia ONVIF z kamery</label><label>Dekodowanie AI<select name="detection-decoder"><option value="auto" ${detection.decoder==='auto'||!detection.decoder?'selected':''}>Auto · GPU / ochrona CPU</option><option value="cpu" ${detection.decoder==='cpu'?'selected':''}>CPU · wszystkie klatki</option><option value="keyframes" ${detection.decoder==='keyframes'?'selected':''}>CPU · klatki kluczowe</option></select></label><label>Łączny limit analizy klatek/s<input type="number" name="detection-fps" min="0.2" max="3" step="0.2" value="${detection.max_fps||1}"></label><label>Pewność<input type="number" name="detection-confidence" min="0.1" max="0.95" step="0.05" value="${detection.confidence||.45}"></label><label>Pewność zwierzęcia<input type="number" name="detection-animal-confidence" min="0.1" max="0.95" step="0.05" value="${detection.animal_confidence||.35}"></label><label>Podtrzymanie wykrycia (s)<input type="number" name="detection-hold" min="1" max="120" value="${detection.hold_seconds||10}"></label></div></details><p class="field-help">HP t530: jedna kamera i 1 analizowana klatka/s łącznie. Rozpoznawanie nie identyfikuje tożsamości osoby; możliwości zależą od wielkości obiektu i oświetlenia.</p></section>
-          <section class="field-section settings-main" id="recording-settings"><div class="section-heading"><span class="step-number">01</span><div><h2>Recording</h2><p>How long to keep footage and how it plays in the browser.</p></div></div><div class="form-grid"><label>Keep recordings (days)<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label><label>Recording compatibility<select name="nvr-browser-playback">
+          <section class="field-section settings-main" id="recording-settings"><div class="section-heading"><span class="step-number">01</span><div><h2>Recording</h2><p>How long to keep footage and how it plays in the browser.</p></div></div><div class="form-grid"><label>Keep recordings (days)<input name="nvr-retention-days" type="number" min="1" max="365" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"></label><label>Zapis obrazu<select name="nvr-browser-playback">
 
                 <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Oryginalna jakość i kodek (zalecane)</option>
-                <option value="h264" ${nvrConfig.browser_playback === 'h264' ? 'selected' : ''}>H264 · zgodność kosztem jakości i miejsca</option>
-              </select></label></div><p class="field-help">Oryginalny H.265 pozostaje H.265, z rozdzielczością i FPS kamery. Nagranie jest już skompresowane przez kamerę. Zmniejszanie bitrate lub ponowne kodowanie może pogorszyć szczegóły. Obsługa odtwarzania H.265 zależy od przeglądarki.</p><div class="notice" data-recording-disk-usage role="status">Odczyt zajętego miejsca…</div><button type="button" data-cleanup-recording-cache>Posprzątaj cache i miniatury</button><output data-storage-cleanup-result role="status"></output><input type="hidden" name="storage-retention-days" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"><details class="settings-group"><summary>Advanced recording <small>Limity miejsca i długość fragmentów</small></summary><div class="form-grid"><label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label><label>Limit miniatur (MB)<input name="nvr-thumbnail-cache-mb" type="number" min="1" max="256" value="${nvrConfig.thumbnail_cache_mb ?? 32}"></label><label>Limit kopii do odtwarzania (MB, 0 = wyłączone)<input name="nvr-playback-cache-mb" type="number" min="0" max="2048" value="${nvrConfig.playback_cache_mb ?? 0}"></label><label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label></div><p class="field-help">Domyślnie cały dzień odtwarza się z oryginalnych fragmentów, bez pełnej kopii filmu. Miniatury mają wspólny limit miejsca, maksymalnie 2048 obrazów i wygasają po 48 godzinach bez użycia. Usunięte miniatury można wygenerować ponownie z nagrania.</p></details></section>
+
+              </select></label></div><p class="field-help">Testy H.264/H.265 i dźwięku są w menu Kodeki odtwarzacza. Zapis zachowuje kodek, rozdzielczość i FPS kamery. Nagranie jest już skompresowane przez kamerę. Zmniejszanie bitrate lub ponowne kodowanie może pogorszyć szczegóły. Obsługa odtwarzania H.265 zależy od przeglądarki.</p><div class="notice" data-recording-disk-usage role="status">Statystyki dysku są odczytywane osobno od nagrań.</div><button type="button" data-cleanup-recording-cache>Posprzątaj cache i miniatury</button><output data-storage-cleanup-result role="status"></output><input type="hidden" name="storage-retention-days" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"><details class="settings-group"><summary>Advanced recording <small>Limity miejsca i długość fragmentów</small></summary><div class="form-grid"><label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label><label>Limit miniatur (MB)<input name="nvr-thumbnail-cache-mb" type="number" min="1" max="256" value="${nvrConfig.thumbnail_cache_mb ?? 32}"></label><label>Limit kopii do odtwarzania (MB, 0 = wyłączone)<input name="nvr-playback-cache-mb" type="number" min="0" max="2048" value="${nvrConfig.playback_cache_mb ?? 0}"></label><label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label></div><p class="field-help">Domyślnie cały dzień odtwarza się z oryginalnych fragmentów, bez pełnej kopii filmu. Miniatury mają wspólny limit miejsca, maksymalnie 2048 obrazów i wygasają po 48 godzinach bez użycia. Usunięte miniatury można wygenerować ponownie z nagrania.</p></details></section>
           <details class="settings-group" id="network-settings"><summary>Network & remote access <small>${EDGE_NATIVE_RTC ? 'EdgeRTC through Home Assistant HTTPS/WSS' : 'Optional for viewing outside your home network'}</small></summary>${EDGE_NATIVE_RTC ? '<p class="notice" data-native-network-info>EdgeRTC korzysta z adresu HTTPS Home Assistanta, także przez Nabu Casa. Nie wymaga publicznego adresu MediaMTX, portów ICE ani TURN/VPS. / EdgeRTC uses the Home Assistant HTTPS/WebSocket connection; no public MediaMTX URL or extra media ports are needed.</p>' : ''}<div data-legacy-network ${EDGE_NATIVE_RTC ? 'hidden' : ''}><div class="form-grid"><label>Remote access<select name="live-remote-access-mode">
                 <option value="local_only" ${text(liveConfig.remote_access_mode, 'local_only') === 'local_only' ? 'selected' : ''}>Local only / Nabu panel only</option>
                 <option value="direct_public" ${liveConfig.remote_access_mode === 'direct_public' ? 'selected' : ''}>Direct public DDNS</option>
@@ -9630,16 +9687,32 @@ INDEX_HTML = r"""<!doctype html>
       });
       let nvrRequest = null;
       let nvrRequestID = 0;
+      let storageUsageTimer=null;
+      async function loadStorageUsage(){
+        clearTimeout(storageUsageTimer);if(activePage!=='edge-settings')return;
+        try{
+          const response=await fetch(panelPath('api/storage/status'),{cache:'no-store'});
+          if(!response.ok)throw Error(`storage_status_${response.status}`);
+          const data=await response.json();recordingStorage=data;renderRecordingStorage();
+          if(data.pending&&activePage==='edge-settings')storageUsageTimer=setTimeout(loadStorageUsage,2000);
+        }catch(error){debugEvent('ui_storage_status_error',{message:error.message});}
+      }
       function renderRecordingStorage() {
         document.querySelectorAll('[data-recording-disk-usage]').forEach(output => {
           if (!recordingStorage) return;
           const usage=recordingStorage;
           const daily=Object.values(recordingStatus).reduce((sum,item)=>sum+Number(item.bytes_per_day_estimate||0),0);
           const retention=Number(config.nvr?.retention_days||14);
+          if(output.hasAttribute('data-storage-compact')){
+            output.hidden=usage.recordings_volume?.free_bytes==null;
+            output.textContent=`Wolne miejsce: ${formatBytes(usage.recordings_volume?.free_bytes)}${daily?' · Szacunkowy zapis: '+formatBytes(daily)+'/dobę':''}`;return;
+          }
+          if(usage.pending){output.textContent=`Wolne miejsce na nagrania: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}. Szczegóły zajętości są odświeżane w tle.`;return;}
           output.textContent=`Nagrania: ${formatBytes(usage.recordings_bytes)} · Kopie odtwarzania: ${formatBytes(usage.playback_cache_bytes)} / ${formatBytes(usage.playback_cache_limit_bytes)} · Kopie zgodności: ${formatBytes(usage.phone_cache_bytes)} / ${formatBytes(usage.phone_cache_limit_bytes)} · Miniatury: ${formatBytes(usage.thumbnail_cache_bytes)} / ${formatBytes(usage.thumbnail_cache_limit_bytes)} · Klipy alertów: ${formatBytes(usage.alert_clip_bytes)} / ${formatBytes(usage.alert_clip_limit_bytes)} · Zdjęcia alertów: ${formatBytes(usage.alert_image_bytes)} / ${formatBytes(usage.alert_image_limit_bytes)}. Wolne na dysku nagrań: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}; wolne w konfiguracji HA: ${usage.cache_volume?.free_bytes==null?'—':formatBytes(usage.cache_volume.free_bytes)}.${daily?' Szacunek ciągłego nagrywania: '+formatBytes(daily)+'/dobę, '+formatBytes(daily*retention)+' na '+retention+' dni. Zależy od bitrate i sceny.':''}`;
         });
       }
       function recordingDayLoadMessage(message) {
+        const global=document.getElementById('nvr-load-state');global.textContent=message;global.hidden=!message||nvrGrid.querySelector('[data-nvr-index]')!==null;
         nvrGrid.querySelectorAll('[data-nvr-index]').forEach(card => {
           let output = card.querySelector('[data-recording-day-load]');
           if (!output) { output = document.createElement('p'); output.dataset.recordingDayLoad = ''; output.setAttribute('role','status'); card.prepend(output); }
@@ -9648,24 +9721,31 @@ INDEX_HTML = r"""<!doctype html>
       }
       async function loadRecordingStatus(options = {}) {
         if (nvrLoading && !options.forceRender) return;
-        nvrRequest?.abort();
+        nvrRequest?.abort('superseded');
         const controller = new AbortController(), requestID = ++nvrRequestID;
         nvrRequest = controller;
         const timeout = setTimeout(() => controller.abort('timeout'), 20000);
         nvrLoading = true;
-        if (options.forceRender) recordingDayLoadMessage('Ładowanie wybranego dnia…');
+        if (options.forceRender&&activePage==='nvr') recordingDayLoadMessage('Ładowanie wybranego dnia…');
         try {
           const requestedDays = JSON.stringify(selectedRecordingDay);
           const dayQuery = Object.entries(selectedRecordingDay)
             .filter(([, day]) => day)
             .map(([index, day]) => `${encodeURIComponent(index)}:${encodeURIComponent(day)}`)
             .join(',');
-          const statusPath = dayQuery ? `api/recording/status?days=${dayQuery}` : 'api/recording/status';
+          const summary=activePage!=='nvr';
+          const statusPath = summary?'api/recording/status?summary=1':dayQuery ? `api/recording/status?days=${dayQuery}` : 'api/recording/status';
           const known=options.forceRender?'':Object.values(recordingStatus).filter(item=>item.files_revision).map(item=>`${item.index}:${item.files_revision}`).join(',');
-          const response = await fetch(panelPath(statusPath+(known?(dayQuery?'&':'?')+`known=${encodeURIComponent(known)}`:'')), { cache: 'no-store', signal: controller.signal });
+          const response = await fetch(panelPath(statusPath+(!summary&&known?(dayQuery?'&':'?')+`known=${encodeURIComponent(known)}`:'')), { cache: 'no-store', signal: controller.signal });
           if (!response.ok) throw new Error(`Recording status failed: ${response.status}`);
           const data = await response.json();
           if (requestID !== nvrRequestID || requestedDays !== JSON.stringify(selectedRecordingDay)) return;
+          if(data.summary){
+            for(const item of data.cameras||[]){const old=recordingStatus[item.index];recordingStatus[item.index]={...(old?.id===item.id?old:{}),...item};}
+            updateCameraOverview();
+            if(activePage==='nvr')queueMicrotask(()=>{if(activePage==='nvr')void loadRecordingStatus({reason:'after_summary'});});
+            return;
+          }
           for(const item of data.cameras||[]){
             if(!item.files_unchanged)continue;const previous=recordingStatus[item.index];
             if(!previous||previous.files_revision!==item.files_revision||previous.key!==item.key||previous.selected_day!==item.selected_day)throw new Error('Lista nagrań zmieniła się. Odśwież wybrany dzień.');
@@ -9743,7 +9823,8 @@ INDEX_HTML = r"""<!doctype html>
           recordingDayLoadMessage('');
         } catch (error) {
           if (requestID !== nvrRequestID) return;
-          recordingDayLoadMessage(controller.signal.aborted ? 'Odczyt dnia trwał zbyt długo. Kliknij dzień lub Odśwież, aby ponowić.' : `Nie udało się otworzyć dnia: ${error.message}. Kliknij dzień, aby ponowić.`);
+          if(controller.signal.aborted&&controller.signal.reason!=='timeout'){debugEvent('ui_recording_status_cancelled',{reason:options.reason});return;}
+          if(activePage==='nvr'&&(options.reason!=='timer'||!lastNvrRenderSignature))recordingDayLoadMessage(controller.signal.aborted?'Nie udało się odczytać listy nagrań. Naciśnij Odśwież.':`Błąd listy nagrań: ${error.message}`);
           debugEvent('ui_recording_status_error', {message: String(error), reason: options.reason});
         } finally {
           clearTimeout(timeout);
@@ -10152,7 +10233,8 @@ INDEX_HTML = r"""<!doctype html>
         if(pageName!=='nvr')releaseRecordedPreviewDecoder();
         activePage = pageName;
         updateLivePlaybackVisibility();
-        if(pageName==='edge-settings')void loadPhoneServices();
+        if(pageName==='edge-settings'){void loadPhoneServices();void loadStorageUsage();}
+        else {clearTimeout(storageUsageTimer);storageUsageTimer=null;}
         document.querySelectorAll('[data-page]').forEach((page) => {
           page.hidden = page.dataset.page !== pageName;
         });
@@ -10162,7 +10244,7 @@ INDEX_HTML = r"""<!doctype html>
         debugEvent('ui_page_change', { page: pageName });
         if (detectionTimer) {clearInterval(detectionTimer);detectionTimer=null;}
         if (pageName === 'events') enterEventsPage();
-        if (pageName === 'nvr') refreshRecordingEvents();
+        if (pageName === 'nvr'){refreshRecordingEvents();void loadRecordingStatus({forceRender:!(config.cameras||[]).every((_,i)=>Array.isArray(recordingStatus[i]?.files)),reason:'enter_nvr'});}
         if (pageName === 'nvr'){scheduleRecordingThumbnailHydration();pumpRecordingThumbnails();}
         if (pageName === 'nvr') {
           const videos=nvrGrid.querySelectorAll('video[data-recording-player]');
@@ -10817,8 +10899,19 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def send_json(self, payload, status: HTTPStatus = HTTPStatus.OK, extra_headers: dict | None = None) -> None:
-        self.send_bytes(json.dumps(payload).encode("utf-8"), "application/json", status, extra_headers)
+    def send_json(self, payload, status: HTTPStatus = HTTPStatus.OK, extra_headers: dict | None = None, compress=False) -> None:
+        started=time.monotonic()
+        body=json.dumps(payload).encode('utf-8');headers=dict(extra_headers or {})
+        raw_size=len(body)
+        encodings=str(getattr(self,'headers',{}).get('Accept-Encoding',''))
+        match=re.search(r'(?:^|,)\s*gzip\s*(?:;\s*q=([0-9.]+))?\s*(?:,|$)',encodings)
+        try:accepts_gzip=bool(match and float(match[1] or 1)>0)
+        except ValueError:accepts_gzip=False
+        if compress:headers['Vary']='Accept-Encoding'
+        if compress and len(body)>16384 and accepts_gzip:
+            body=gzip.compress(body,compresslevel=1,mtime=0);headers.update({'Content-Encoding':'gzip','Vary':'Accept-Encoding'})
+        if compress:append_jsonl_log(HOME_DIR/'playback.jsonl','recording_index_encoded',{'json_bytes':raw_size,'wire_bytes':len(body),'encoding':headers.get('Content-Encoding','identity'),'encode_ms':round((time.monotonic()-started)*1000)})
+        self.send_bytes(body,'application/json',status,headers)
 
     def serve_edge_rtc_stream(self, stream_path: str) -> None:
         """Read-only binary tunnel; microphone is available only through HA ACLs."""
@@ -10967,8 +11060,13 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/recording/status":
             config = load_config()
             schedule_recording_ensure(config, "recording_status")
-            self.send_json(recording_status_response(config,parse_qs(parsed.query)))
+            started=time.monotonic();payload=recording_status_response(config,parse_qs(parsed.query))
+            append_jsonl_log(HOME_DIR/'playback.jsonl','recording_index_ready',{'elapsed_ms':round((time.monotonic()-started)*1000),'summary':bool(payload.get('summary')),
+                'files':sum(len(c.get('files',[])) for c in payload['cameras'])})
+            self.send_json(payload,compress=True)
             return
+        if path=='/api/storage/status':
+            self.send_json(storage_usage_snapshot(load_config(),refresh=True));return
         if path == "/api/logs":
             self.send_json(redact_for_log(collect_panel_logs()))
             return
@@ -11628,6 +11726,15 @@ class EdgeHandler(BaseHTTPRequestHandler):
             send_body=send_body,
         )
 
+def migrate_recording_policy():
+    with CONFIG_LOCK:
+        raw=read_json(CONFIG_PATH,None)
+        if not isinstance(raw,dict) or not isinstance(raw.get('cameras'),list) or not isinstance(raw.get('nvr'),dict) or raw['nvr'].get('browser_playback')!='h264':return False
+        backup_config();raw['nvr']['browser_playback']='copy';write_json(CONFIG_PATH,raw)
+    write_debug_event('recording_policy_migrated',{'previous':'h264','current':'copy','reason':'Codec tests must not transcode the continuous recorder','camera_settings_changed':False})
+    return True
+
+
 def main() -> None:
     global DETECTION_SERVICE, ALERT_SERVICE
     HOME_DIR.mkdir(parents=True, exist_ok=True)
@@ -11638,6 +11745,7 @@ def main() -> None:
     RECORDING_THUMB_DIR.mkdir(parents=True, exist_ok=True)
     RECORDING_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     clear_legacy_override_files()
+    migrate_recording_policy()
     write_debug_event("boot_start", {
         "server_version": EdgeHandler.server_version,
         "home_dir": str(HOME_DIR),
@@ -11648,7 +11756,7 @@ def main() -> None:
     write_debug_event('release_features',{'version':APP_VERSION,'features':APP_RELEASE_FEATURES,
                       'hardware':hardware_inventory(),'recordings_changed':False,'camera_codec_settings_changed':False,
                       'edge_rtc':'Sources stay connected on the server; viewers share its bounded keyframe buffer.'})
-    print(f'[edge-panel] {APP_VERSION}: direct/legacy playback, bounded seek recovery, explicit 6-second codec tests and camera/hardware diagnostics. Original recordings unchanged.')
+    print(f'[edge-panel] {APP_VERSION}: original recording, fast archive index/gzip and independent disk statistics. Codec tests affect short copies only.')
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
     try:

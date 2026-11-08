@@ -3,6 +3,7 @@ import sys
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from test_edge_panel_config import load_panel_module, camera
@@ -59,6 +60,12 @@ subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=160x90:ra
 for name in ['20260727-000000.mp4','20260727-000007.mp4','20260727-000014.mp4','20260728-000000.mp4','20260728-000007.mp4','20260728-000014.mp4']:
  shutil.copyfile(sample,d/name)
 sample.unlink()
+archive_count=int(os.environ.get('EDGE_TEST_ARCHIVE_FILES','0'))
+if archive_count:
+ source=d/'20260727-000000.mp4';start=p.recording_day_start_ts('2026-07-27')
+ for i in range(archive_count):
+  path=d/time.strftime('%Y%m%d-%H%M%S.mp4',time.localtime(start+i*10))
+  if not path.exists():os.link(source,path)
 if os.environ.get('EDGE_TEST_MULTI_CAMERA'):
  for i,c in enumerate(config['cameras']):
   folder=p.recording_base_dir(c,i);folder.mkdir(exist_ok=True,parents=True)

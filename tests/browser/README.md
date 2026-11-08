@@ -12,6 +12,13 @@ uploads without camera read permission.
 The fixture uses temporary configuration and generated seven-second MP4s, with
 camera/network/runtime callbacks disabled. It never connects to Home Assistant.
 
+`nvr_archive_start.cjs` additionally checks a cold 12,000-file archive on WebKit
+and Chromium: lightweight Live boot, immediate compressed history loading,
+actual video playback and uninterrupted playback after a failed background
+refresh. Start a separate fixture with `EDGE_TEST_ARCHIVE_FILES=12000` and
+`EDGE_NVR_TEST_PORT=18092`; the test defaults to that port. Files are disposable
+hardlinks to generated media, not production recordings.
+
 Install browser test dependencies outside the repository:
 
 ```sh

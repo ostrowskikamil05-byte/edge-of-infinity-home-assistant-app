@@ -70,11 +70,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.11.11")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.11.11")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.11.11")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.11.11")
-        self.assertIn("v0.11.11", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.11.12")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.11.12")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.11.12")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.11.12")
+        self.assertIn("v0.11.12", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -435,7 +435,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("device-seek-v1111", html)
+        self.assertIn("archive-index-v1112", html)
         self.assertIn("function recordingPlayerControls", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
@@ -1307,6 +1307,7 @@ class EdgePanelConfigTests(unittest.TestCase):
 
     def test_recording_cache_status_hides_short_stale_cache_when_many_segments_exist(self):
         panel = load_panel_module()
+        panel.recording_cache_budget=lambda config:64*1024*1024
         panel.MIN_RECORDING_FILE_READY_SECONDS = 0
         payload = panel.normalize_config(
             {
@@ -1380,6 +1381,7 @@ class EdgePanelConfigTests(unittest.TestCase):
 
     def test_recording_cache_status_batches_rebuilds_for_fresh_stale_cache(self):
         panel = load_panel_module()
+        panel.recording_cache_budget=lambda config:64*1024*1024
         panel.MIN_RECORDING_FILE_READY_SECONDS = 0
         payload = panel.normalize_config(
             {
@@ -1433,6 +1435,7 @@ class EdgePanelConfigTests(unittest.TestCase):
 
     def test_recording_cache_status_defers_active_day_rebuilds(self):
         panel = load_panel_module()
+        panel.recording_cache_budget=lambda config:64*1024*1024
         active_day = panel.recording_day_key(time.time())
         filename = f"{active_day.replace('-', '')}-000000.mp4"
         source = panel.HOME_DIR / "recordings" / filename
@@ -1459,6 +1462,7 @@ class EdgePanelConfigTests(unittest.TestCase):
 
     def test_recording_cache_status_hides_stale_active_day_cache_from_playback(self):
         panel = load_panel_module()
+        panel.recording_cache_budget=lambda config:64*1024*1024
         active_day = panel.recording_day_key(time.time())
         start_ts = panel.recording_day_start_ts(active_day)
         key = "hikvision_1_0"

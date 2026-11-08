@@ -1,5 +1,31 @@
 # Edge of Infinity App Documentation
 
+## 0.11.12: recording index and t530 load
+
+Update the app and reopen/refresh the Edge panel. Live now loads only recorder
+state; opening Recordings fetches the archive immediately. NVR no longer waits
+for full disk accounting or old daily-cache inspection. Large lists use gzip;
+disk totals are refreshed separately in Settings. Background-refresh failures
+keep the current recording visible and playable.
+
+The old **Recording compatibility → H264** choice encoded the continuous
+recorder, including already-H.264 cameras. This overloads a two-core t530 with
+4K HEVC input and changes recorded video quality. Version 0.11.12 backs up the
+configuration and migrates only that legacy preference to original stream-copy.
+Camera addresses/encoder settings, retention and existing videos are preserved.
+Use **Recordings → ⋯ → Kodeki** for short H.264/H.265/AAC/G.711 comparisons.
+
+Playback logs now include `recording_index_ready` (build time),
+`recording_index_encoded` (JSON/wire sizes and encoding time), and
+`recording_policy_migrated`. Current recorder commands should show `-c:v copy`.
+Existing per-device reports remain available in Diagnostics.
+
+An HEVC recording with about 24 seconds between keyframes needs earlier frames
+to decode an arbitrary later position. A warm server cannot remove those
+dependencies. For faster random seeking, consider a 1–2 second I-frame interval
+in the camera (20–40 frames at 20 FPS). This release does not change it, resolution
+or FPS. Shorter GOPs can increase bitrate/storage with variable bitrate encoding.
+
 ## 0.11.11: seek recovery and codec comparison
 
 After this update, **restart Home Assistant Core**, then reopen the panel/card.

@@ -19,6 +19,9 @@ const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).diges
    await open('edge-settings');
    assert.equal(await page.locator('[name="nvr-browser-playback"]').inputValue(),'copy');
    assert.equal(await page.locator('[name="nvr-playback-cache-mb"]').inputValue(),'0');
+   await open('nvr');
+   await page.waitForFunction(()=>document.querySelector('[data-recording-duration]')?.textContent.endsWith('/ 00:00:21'));
+   await open('edge-settings');
    const copy=path.join(fixture.recording_cache_dir,'front_0','2026-07-27','timeline.mp4');
    fs.mkdirSync(path.dirname(copy),{recursive:true});fs.writeFileSync(copy,Buffer.alloc(2*1024*1024,7));
    fs.writeFileSync(path.join(path.dirname(copy),'timeline.json'),'{}');
