@@ -14,7 +14,7 @@ const assert=require('node:assert/strict');
    const slider=page.locator('[data-recording-playback-seek]'),wrap=page.locator('[data-recording-wrap]');
    assert.equal(await wrap.locator('input[type="range"]').count(),1);
    assert.equal(await page.locator('[data-recording-day-seek]').count(),0);
-   await page.evaluate(()=>{window.originalScrubVideo=document.querySelector('video');originalScrubVideo.pause();});
+   await page.evaluate(()=>{window.originalScrubVideo=document.querySelector('video');pauseRecording(originalScrubVideo);});
    async function frameAt(position){
     try{await page.waitForFunction(position=>{const v=document.querySelector('video');const hold=document.querySelector('[data-recording-transition]');return v?.readyState>=2&&!v.seeking&&Math.abs(recordingPlaybackPosition(v)-position)<.4&&(!hold||hold.hidden);},position);}
     catch(error){console.error(name,position,await page.evaluate(()=>{const v=document.querySelector('video'),s=document.querySelector('[data-recording-playback-seek]'),state=recordingScrubs.get('0');return{position:recordingPlaybackPosition(v),value:s.value,rect:s.getBoundingClientRect().toJSON(),style:{padding:getComputedStyle(s).padding,width:getComputedStyle(s).width},hold:document.querySelector('[data-recording-transition]').hidden,seeking:v.seeking,ready:v.readyState,state:state&&{active:state.active,desired:state.desired,applied:state.applied,finishing:state.finishing}};}));throw error;}
@@ -50,7 +50,7 @@ const assert=require('node:assert/strict');
    await page.mouse.move(x(original),y());await page.mouse.down();await page.mouse.move(x(11.3),y(),{steps:8});await frameAt(11.3);
    assert(await page.locator('video').evaluate(v=>v.paused));await page.mouse.up();
    await page.waitForFunction(()=>recordingScrubs.size===0&&!document.querySelector('video').paused);
-   await page.locator('video').evaluate(v=>v.pause());
+   await page.locator('video').evaluate(v=>pauseRecording(v));
    // Real touch events drive the same range/decoder path, not synthetic inputs.
    if(width<1000){
     await setPosition(1);rect=await slider.boundingBox();const cdp=await context.newCDPSession(page);

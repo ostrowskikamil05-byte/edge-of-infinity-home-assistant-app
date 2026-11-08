@@ -27,11 +27,11 @@ class HttpDisconnectTests(unittest.TestCase):
 
     def test_new_direct_representation_is_versioned_and_old_tabs_keep_remux_bytes(self):
         handler=self.panel.EdgeHandler.__new__(self.panel.EdgeHandler);source=Path('/unused.mp4')
-        for value,direct in [('hvc1-clock-v4',False),('direct-clock-v5',True)]:
+        for value,direct,modern in [('hvc1-clock-v4',False,False),('direct-clock-v5',True,False),('aac-clock-v6',True,True)]:
             handler.path='/recordings/front/clip.mp4?compat=1&container='+value
             with patch.object(self.panel.RECORDING_COMPAT,'prepare',return_value=source) as prepare:
                 self.assertEqual(handler.compatible_recording(source),source)
-                prepare.assert_called_once_with(source,allow_passthrough=direct)
+                prepare.assert_called_once_with(source,allow_passthrough=direct,allow_small_offset=modern,legacy=not modern)
 
     def handler(self, output):
         handler = self.panel.EdgeHandler.__new__(self.panel.EdgeHandler)

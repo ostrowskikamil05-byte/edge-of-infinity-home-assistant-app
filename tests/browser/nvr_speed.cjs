@@ -37,9 +37,9 @@ const assert=require('node:assert/strict');
    // A new drag during an unfinished seek must retain the original play intent.
    await seek(16);await seek(2);await seek(10);
    await page.waitForFunction(()=>{const video=document.querySelector('video[data-recording-player]');return !recordingScrubs.size&&!video.paused&&recordingPlaybackPosition(video)>=10&&recordingPlaybackPosition(video)<13;});
-   // pause() changes paused synchronously; its event arrives later. A seek
-   // in that same task must respect Pause rather than an older play intent.
-   await video.evaluate(video=>{video.pause();const slider=document.querySelector('[data-recording-playback-seek]');slider.value='1';slider.dispatchEvent(new Event('input',{bubbles:true}));slider.dispatchEvent(new Event('change',{bubbles:true}));});
+   // Application Pause marks intent before the queued native pause event.
+   // A seek in the same task must preserve that explicit user decision.
+   await video.evaluate(video=>{pauseRecording(video);const slider=document.querySelector('[data-recording-playback-seek]');slider.value='1';slider.dispatchEvent(new Event('input',{bubbles:true}));slider.dispatchEvent(new Event('change',{bubbles:true}));});
    await page.waitForFunction(()=>!recordingScrubs.size&&document.querySelector('video[data-recording-player]').paused);
    await page.unroute('**/recordings/**000007.mp4*');
    // Chrome's AbortError + goo.gl link is expected when a load supersedes

@@ -13,6 +13,16 @@ _TIMING_LOCK = threading.Lock()
 _TIMING = {}
 
 
+def aac_encoding_options(codec='', sample_rate=0, channels=1):
+    """G.711 voice needs no 48 kHz/96 kbps expansion; keep one audio thread."""
+    try:rate=int(sample_rate or 0);count=max(1,min(2,int(channels or 1)))
+    except (TypeError,ValueError):rate=0;count=1
+    voice=codec in ('pcm_alaw','pcm_mulaw','alaw','ulaw') and rate<=16000
+    rate=16000 if voice else rate if rate in (8000,11025,12000,16000,22050,24000,32000,44100,48000) else 48000
+    bitrate=32000 if voice else 64000 if rate<=24000 else 96000
+    return ['-c:a','aac','-threads:a','1','-b:a',str(bitrate*count),'-ar',str(rate),'-ac',str(count)]
+
+
 def video_timing(path):
     """Read the video track's sample clock without decoding or spawning FFprobe."""
     path = Path(path)
@@ -45,9 +55,14 @@ def video_timing(path):
             if kind==b'mdat':media_seen=True
             if kind!=b'moov':continue
             result['faststart']=not media_seen
+            movie_scale=0
+            for child,a,b in boxes(start,end):
+                if child==b'mvhd':
+                    handle.seek(a);data=handle.read(min(32,b-a));offset=20 if data and data[0]==1 else 12
+                    movie_scale=int.from_bytes(data[offset:offset+4],'big')
             for child,track_start,track_end in boxes(start,end):
                 if child!=b'trak':continue
-                edit_time=0;empty_edit=False
+                edit_time=0;empty_edit=False;leading_seconds=0.0;old_edit_time=0;old_empty_edit=False
                 for child,a,b in boxes(track_start,track_end):
                     if child!=b'edts':continue
                     for child,c,d in boxes(a,b):
@@ -56,6 +71,18 @@ def video_timing(path):
                         entries=int.from_bytes(data[4:8],'big');width=8 if version==1 else 4
                         edit_time=int.from_bytes(data[8+width:8+width*2],'big',signed=True)
                         empty_edit=entries!=1 or edit_time<0
+                        old_edit_time,old_empty_edit=edit_time,empty_edit
+                        stride=width*2+4
+                        if entries in (1,2) and len(data)>=8+entries*stride:
+                            valid=True
+                            for i in range(entries):
+                                at=8+i*stride;length=int.from_bytes(data[at:at+width],'big');media=int.from_bytes(data[at+width:at+width*2],'big',signed=True)
+                                rate=int.from_bytes(data[at+width*2:at+stride],'big')
+                                if rate!=65536:valid=False
+                                if media==-1 and i<entries-1 and movie_scale:leading_seconds+=length/movie_scale
+                                elif media>=0 and i==entries-1:edit_time=media
+                                else:valid=False
+                            empty_edit=not valid
                 for child,media_start,media_end in boxes(track_start,track_end):
                     if child!=b'mdia':continue
                     timescale=duration=0;video=audio=False;table=None;sample_entry='';first_cts=0;sample_data=b'';sync=[]
@@ -102,7 +129,9 @@ def video_timing(path):
                         if accumulated>=half:median=delta;break
                     if audio:
                         result['audio_codec']=sample_entry
-                        result['audio_zero_start']=not empty_edit and first_cts<=edit_time
+                        result['audio_duration_seconds']=ticks/timescale if ticks else duration/timescale
+                        result['audio_start_seconds']=max(0,leading_seconds+(first_cts-edit_time)/timescale) if not empty_edit else None
+                        result['audio_zero_start']=not old_empty_edit and first_cts<=old_edit_time
                         if len(sample_data)>=44:
                             result['audio_sample_entry_channels']=int.from_bytes(sample_data[32:34],'big')
                             result['audio_sample_rate']=int.from_bytes(sample_data[40:44],'big')>>16
@@ -110,8 +139,9 @@ def video_timing(path):
                         continue
                     fps=timescale/median if median else (timescale*count/ticks if ticks else 0)
                     result.update({'fps':round(fps,6) if .1<=fps<=240 else 0.0,'duration':duration/timescale if duration else 0.0,
+                            'video_start_seconds':max(0,leading_seconds+(first_cts-edit_time)/timescale) if not empty_edit else None,
                             'width':int.from_bytes(sample_data[40:42],'big'),'height':int.from_bytes(sample_data[42:44],'big'),
-                            'video_zero_start':not empty_edit and first_cts==edit_time,
+                            'video_zero_start':not old_empty_edit and first_cts==old_edit_time,
                             'keyframe_interval_seconds':round(max((b-a for a,b in zip(sync,sync[1:])),default=count if len(sync)==1 else 1)/fps,3) if fps else None,
                             'frame_seconds':1/fps if .1<=fps<=240 else 0.0,
                             'sample_entry':sample_entry,'codec_name':{'hev1':'hevc','hvc1':'hevc','avc1':'h264','avc3':'h264'}.get(sample_entry,'')})

@@ -19,6 +19,14 @@ refresh. Start a separate fixture with `EDGE_TEST_ARCHIVE_FILES=12000` and
 `EDGE_NVR_TEST_PORT=18092`; the test defaults to that port. Files are disposable
 hardlinks to generated media, not production recordings.
 
+`nvr_aac_resume.cjs` uses the multi-camera fixture with actual 16 kHz AAC and
+short A/V edit offsets. It checks decoded PCM through a native media-element
+audio graph, automatic recovery from a native pause, cancellation by explicit
+Pause, and a cached day playing before a held archive response arrives. Run it
+with either `EDGE_TEST_BROWSER=webkit` or `chromium`. Test preparation that
+intends a user Pause calls the application control; separate cases inject
+native pauses to exercise recovery.
+
 Install browser test dependencies outside the repository:
 
 ```sh

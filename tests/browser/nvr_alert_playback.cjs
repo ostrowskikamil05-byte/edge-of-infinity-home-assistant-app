@@ -33,6 +33,11 @@ const assert=require('node:assert/strict');
    assert(await video.evaluate(v=>v.dataset.recordingWantsPlay==='true'));
    await video.evaluate(v=>v.dispatchEvent(new Event('canplay',{bubbles:true})));
    await page.waitForFunction(()=>!document.querySelector('video[data-recording-player="1"]').paused);
+   // An otherwise healthy native pause must not erase Play intent either.
+   await video.evaluate(v=>{v.dataset.recordingLoading='false';v.dataset.recordingBuffering='false';v.pause();});
+   await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="1"]');return !v.paused&&v.dataset.recordingWantsPlay==='true';});
+   await video.evaluate(v=>{v.pause();pauseRecording(v);});await page.waitForTimeout(250);
+   assert(await video.evaluate(v=>v.paused&&v.dataset.recordingWantsPlay==='false'),'queued recovery ignored an explicit Pause');
    await video.evaluate(v=>pauseRecording(v));await video.evaluate(v=>v.dispatchEvent(new Event('canplay',{bubbles:true})));
    assert(await video.evaluate(v=>v.paused&&v.dataset.recordingWantsPlay==='false'),'explicit Pause was ignored');
    // One real reload at the same time on a transient network error, then stop

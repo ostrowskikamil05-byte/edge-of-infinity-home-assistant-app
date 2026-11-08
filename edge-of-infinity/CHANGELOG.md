@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.13
+
+- Preserve Play intent across an unexpected native browser pause. Recover a healthy paused decoder with bounded retries; explicit application Pause cancels queued recovery. Ignore late metadata/Play callbacks from detached players. Hydrate a deferred phone source and issue Play immediately on day selection, without waiting for metadata from an unloaded source; avoid repeating an already applied fragment seek.
+- Encode G.711 voice as mono AAC at 16 kHz / 32 kbps per channel, with one audio thread and a sample-count clock after resampling. Copy native AAC packets during recording. Video remains original stream copy with source dimensions/FPS. This policy applies to new recordings; camera configuration and physical upstream count are unchanged.
+- Parse valid MP4 edit lists and serve fast-start originals directly when video/audio starts are within 150 ms and AAC clocks/tails are healthy. Retain original short A/V offsets. Repair irregular AAC or an excessive audio tail in the bounded compatibility copy, trimming only audio to the video duration. Version the new representation as `aac-clock-v6`; older open tabs retain their previous remux/direct representation and cache keys. Originals are never rewritten.
+- Share a bounded archive catalog across clients: one low-priority Live warmup, coalesced cold requests, up to four snapshots / 24,000 file entries, 10-second freshness and at most five-minute stale reuse while refreshing in the background. Current recorder flags are read independently. Manual refresh, recording-tail continuation and missing-alert lookups force a current index. The browser retains up to four days / 24,000 entries, opens a cached day immediately and ignores repeated selection of the current day.
+- Add catalog hit/build/error logs, native pause events, per-file audio timing/rate/clock data and mute/volume in device reports. Add actual WebKit/Chromium AAC PCM-output tests, cached-day playback with a held server response, native pause/explicit Pause checks, concurrent/stale catalog tests and G.711/AAC/video-frame preservation regressions.
+
 ## 0.11.12
 
 - Fix cold phone archive loading: Live boot requests only recorder state; opening Recordings immediately fetches history, retaining known indexes on return. Distinguish an unread index from an empty day or a disabled recorder. Superseded requests and failed background polling do not overlay a working player with false errors.
