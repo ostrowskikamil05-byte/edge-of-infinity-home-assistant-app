@@ -41,11 +41,12 @@ for (const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],['p
  assert(await page.locator('video[data-recording-player]').evaluate(v=>v.paused),'paused player resumed after refresh');
  fs.copyFileSync(`${dir}/20260728-000000.mp4`,`${dir}/20260728-000021.mp4`);
  await page.evaluate(()=>loadRecordingStatus({reason:'timer'}));
- assert((await page.locator('[data-recording-duration]').textContent()).endsWith('/ 00:00:28'));
+ await page.waitForFunction(()=>document.querySelector('[data-recording-duration]')?.textContent.endsWith('/ 00:00:28'),null,{timeout:8000});
  assert(await page.evaluate(()=>savedVideo===document.querySelector('video[data-recording-player]')),'video replaced by growing-day timer update');
  assert(await page.locator('video[data-recording-player]').evaluate(v=>v.paused),'timer resumed paused player');
  fs.unlinkSync(`${dir}/20260728-000021.mp4`);
  await page.evaluate(()=>loadRecordingStatus({reason:'timer'}));
+ await page.waitForFunction(()=>document.querySelector('[data-recording-duration]')?.textContent.endsWith('/ 00:00:21'),null,{timeout:8000});
 
  await page.locator('[data-recording-playback-seek]').fill('8');await page.locator('[data-recording-playback-seek]').dispatchEvent('change');
  await page.waitForFunction(()=>document.querySelector('video')?.dataset.recordingFileUrl.endsWith('000007.mp4'));

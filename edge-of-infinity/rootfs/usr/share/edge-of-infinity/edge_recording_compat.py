@@ -9,7 +9,7 @@ import threading
 import time
 import json
 
-from edge_recording_media import video_timing
+from edge_recording_media import video_timing,aac_encoding_options
 
 MIB=1024*1024
 MANAGED=re.compile(r'^[0-9a-f]{64}\.(?:mp4|mov)$')
@@ -57,19 +57,24 @@ class CompatibleRecordings:
             except OSError:pass
         return used,count
 
-    def prepare(self, source, allow_passthrough=False):
+    def prepare(self, source, allow_passthrough=False, allow_small_offset=False, legacy=False):
         source=Path(source)
         if source.is_symlink() or not source.is_file():raise RuntimeError('invalid_recording_source')
         stat=source.stat()
         timing=video_timing(source)
         # New recordings already have fast-start indexes, zero-based video and
         # regular AAC. Serve those bytes directly; old/irregular files still remux.
-        if allow_passthrough and timing.get('duration',0)>0 and timing.get('fps',0)>0 and timing.get('faststart') and timing.get('video_zero_start') and timing.get('audio_zero_start') and timing.get('sample_entry') in ('avc1','hvc1') and (not timing.get('audio_codec') or timing.get('audio_codec')=='mp4a' and timing.get('audio_clock_regular')):
+        audio_overhang=timing.get('audio_duration_seconds',0)-timing.get('duration',0)
+        video_start=timing.get('video_start_seconds');audio_start=timing.get('audio_start_seconds')
+        starts_ok=timing.get('video_zero_start') and timing.get('audio_zero_start')
+        if allow_small_offset:starts_ok=video_start is not None and 0<=video_start<=.15 and (not timing.get('audio_codec') or audio_start is not None and 0<=audio_start<=.15)
+        if allow_passthrough and timing.get('duration',0)>0 and timing.get('fps',0)>0 and timing.get('faststart') and starts_ok and timing.get('sample_entry') in ('avc1','hvc1') and (not timing.get('audio_codec') or timing.get('audio_codec')=='mp4a' and timing.get('audio_clock_regular') and (legacy or audio_overhang<=.25)):
             self.hit('direct',source,timing);return source
         # No full-day copies or transcodes. One original segment, copied once.
         reserve=int(stat.st_size*1.1)+MIB
         if reserve>self.budget:raise RuntimeError('recording_compat_budget')
-        signature=f'{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:hvc1-clock-v4'
+        profile='hvc1-clock-v4' if legacy else 'aac-sample-clock-v6'
+        signature=f'{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{profile}'
         name=hashlib.sha256(signature.encode()).hexdigest()+'.mp4'
         target=self.directory/name
         # Serving a cached Range/HEAD must not wait behind another remux.
@@ -101,11 +106,15 @@ class CompatibleRecordings:
                      '-c:v','copy',
                      '-bsf:v','setts=pts=PTS-STARTPTS:dts=DTS-STARTPTS',
                      '-avoid_negative_ts','disabled','-movflags','+faststart']
-            if not timing.get('audio_codec') or timing.get('audio_codec')=='mp4a' and timing.get('audio_clock_regular'):
+            if not timing.get('audio_codec') or timing.get('audio_codec')=='mp4a' and timing.get('audio_clock_regular') and (legacy or audio_overhang<=.25):
                 command+=['-c:a','copy','-bsf:a','setts=pts=PTS-STARTPTS:dts=DTS-STARTPTS']
             else:
-                command+=['-c:a','aac','-threads:a','1','-b:a','96k','-ar','48000','-ac','1',
-                          '-af','asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0']
+                command+=['-c:a','aac','-threads:a','1','-b:a','96k','-ar','48000','-ac','1'] if legacy else aac_encoding_options(timing.get('audio_codec'),timing.get('audio_sample_rate'),timing.get('audio_sample_entry_channels'))
+                filters='asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0'
+                if not legacy:
+                    filters+=',asetpts=N/SR/TB'
+                    if timing.get('duration',0)>0:filters+=f",atrim=duration={timing['duration']:.6f}"
+                command+=['-af',filters]
             if timing.get('codec_name')=='hevc':command+=['-tag:v','hvc1']
             command+=['-fs',str(reserve),'-f','mp4',str(temporary)]
             if shutil.which('nice'):command=['nice','-n','10',*command]

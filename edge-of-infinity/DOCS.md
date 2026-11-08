@@ -1,5 +1,41 @@
 # Edge of Infinity App Documentation
 
+## 0.11.13: AAC, pause recovery and ready archive catalogs
+
+Update the app and reopen the panel on each phone/computer. Recording already
+used AAC; this release reduces unnecessary audio work. Narrowband G.711 voice
+uses AAC 16 kHz / 32 kbps mono, with one encoder thread. Native AAC is copied.
+Video retains the camera codec, dimensions and FPS, using the existing shared
+Edge relay. Existing videos keep their original bytes.
+
+Normal short MP4 edit-list offsets (up to 150 ms) are retained and played
+directly. Legacy files with irregular AAC timing or an excessively long audio
+tail use a bounded repair copy; only audio is encoded/trimmed. The existing
+64 MiB / 12-file / 48-hour compatibility budget still applies. The new URL
+representation is separate from older open tabs, so their byte ranges stay
+consistent. The six-second codec comparison remains available in the player.
+
+Unexpected native pauses retain Play intent; application Pause remains final.
+Late events from a removed player cannot pause its replacement. A phone day
+selection restores the deferred media source and starts it immediately.
+
+Live prepares one archive catalog in a low-priority worker. Up to four shared
+snapshots / 24,000 file entries are retained; a catalog is fresh for 10 seconds.
+A snapshot up to five minutes old can open immediately while a worker refreshes
+it, with the active NVR checking again after 1.5 seconds. Current recorder state
+is read separately. **Odśwież** forces a current scan, as do recording-tail and
+missing-alert requests. The browser also retains up to four visited days /
+24,000 entries. These limits concern metadata, not additional video copies or
+camera channels. A cold uncached scan, media transfer and hardware decoding
+still take time; server-local files must travel through the HA/Nabu Casa route.
+
+Look for `recording_catalog_hit`, `recording_catalog_built`,
+`recording_catalog_error`, `ui_recording_native_pause`,
+`ui_recording_day_cache` and `ui_recording_media_timing` in playback/device logs.
+Reports include audio sample entry/rate/duration/clock regularity and player
+mute/volume. Tests exercise actual AAC PCM output in WebKit and Chromium;
+physical phone/WAN performance still needs verification on the installation.
+
 ## 0.11.12: recording index and t530 load
 
 Update the app and reopen/refresh the Edge panel. Live now loads only recorder

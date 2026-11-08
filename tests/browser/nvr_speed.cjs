@@ -10,7 +10,7 @@ const assert=require('node:assert/strict');
    await page.goto(process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18088');
    await page.locator('[data-camera-form]').waitFor({state:'attached'});if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();
    await page.waitForFunction(()=>document.querySelector('video[data-recording-player]')?.readyState>=2);
-   await page.waitForFunction(()=>[...document.querySelectorAll('.recording-film-grid img')].every(image=>image.complete&&image.naturalWidth>100&&image.closest('.recording-thumb-wrap')?.classList.contains('thumb-loaded')));
+   await page.waitForFunction(()=>{const images=[...document.querySelectorAll('.recording-film-grid img')];return images.length>0&&images.every(image=>image.complete&&image.naturalWidth>100&&image.closest('.recording-thumb-wrap')?.classList.contains('thumb-loaded'));});
    assert(await page.locator('.recording-film-grid img').first().evaluate(image=>image.dataset.recordingThumbBackend==='jpeg'),'tiles fetched/decoded full 4K clips instead of small JPEGs');
    assert(requests.every(url=>url.includes('000000.mp4')),'non-playing clips were downloaded for tile thumbnails');
    const indexed=await page.evaluate(()=>{
@@ -37,9 +37,9 @@ const assert=require('node:assert/strict');
    // A new drag during an unfinished seek must retain the original play intent.
    await seek(16);await seek(2);await seek(10);
    await page.waitForFunction(()=>{const video=document.querySelector('video[data-recording-player]');return !recordingScrubs.size&&!video.paused&&recordingPlaybackPosition(video)>=10&&recordingPlaybackPosition(video)<13;});
-   // pause() changes paused synchronously; its event arrives later. A seek
-   // in that same task must respect Pause rather than an older play intent.
-   await video.evaluate(video=>{video.pause();const slider=document.querySelector('[data-recording-playback-seek]');slider.value='1';slider.dispatchEvent(new Event('input',{bubbles:true}));slider.dispatchEvent(new Event('change',{bubbles:true}));});
+   // Application Pause marks intent before the queued native pause event.
+   // A seek in the same task must preserve that explicit user decision.
+   await video.evaluate(video=>{pauseRecording(video);const slider=document.querySelector('[data-recording-playback-seek]');slider.value='1';slider.dispatchEvent(new Event('input',{bubbles:true}));slider.dispatchEvent(new Event('change',{bubbles:true}));});
    await page.waitForFunction(()=>!recordingScrubs.size&&document.querySelector('video[data-recording-player]').paused);
    await page.unroute('**/recordings/**000007.mp4*');
    // Chrome's AbortError + goo.gl link is expected when a load supersedes

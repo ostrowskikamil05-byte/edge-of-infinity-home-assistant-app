@@ -1,7 +1,9 @@
 import importlib.util
+import atexit
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import time
@@ -14,6 +16,7 @@ PANEL_PATH = ROOT / "edge-of-infinity" / "rootfs" / "usr" / "share" / "edge-of-i
 
 def load_panel_module():
     temp_root = Path(tempfile.mkdtemp())
+    atexit.register(shutil.rmtree,temp_root,ignore_errors=True)
     os.environ["EDGE_HOME_DIR"] = str(temp_root / "home")
     os.environ["EDGE_DATA_DIR"] = str(temp_root / "data")
     os.environ["EDGE_HOME_CONFIG"] = str(temp_root / "home" / "edge.json")
@@ -70,11 +73,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.11.12")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.11.12")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.11.12")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.11.12")
-        self.assertIn("v0.11.12", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.11.13")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.11.13")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.11.13")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.11.13")
+        self.assertIn("v0.11.13", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -435,7 +438,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("archive-index-v1112", html)
+        self.assertIn("audio-catalog-v1113", html)
         self.assertIn("function recordingPlayerControls", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)

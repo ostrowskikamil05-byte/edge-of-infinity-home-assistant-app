@@ -30,7 +30,8 @@ if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
 from edge_detection import DetectionService, settings as detection_settings, zone_settings, ZONE_FIELDS
 from edge_storage import MIB, SEGMENT, managed_files, prune_cache, trim_log
-from edge_recording_media import AlertMediaService, video_timing
+from edge_recording_media import AlertMediaService, video_timing, aac_encoding_options
+from edge_recording_index import RecordingIndexCache
 from edge_recording_compat import CompatibleRecordings
 from edge_metrics import CpuSampler, cpu_load_severity, hardware_inventory
 sys.path.insert(0,str(Path(__file__).parent/'custom_components/edge'))
@@ -95,14 +96,14 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.11.12"
-APP_RELEASE_FEATURES=['Original stream-copy recording; legacy H264 policy migrated',
-                      'Fast archive index without FFprobe, storage walks or disabled-cache hashing',
-                      'Gzip index delivery; lightweight Live summary and immediate history loading',
-                      'Independent background disk statistics; failed polling preserves playback',
-                      'Index build/wire-size logs; readable credential-redacted recorder commands']
+APP_VERSION = "0.11.13"
+APP_RELEASE_FEATURES=['Native browser pauses retain Play intent; explicit Pause cancels recovery',
+                      'G711 voice to AAC 16 kHz/32 kbps; source AAC packet copy; original video/FPS',
+                      'Versioned direct MP4 for valid short edits; AAC clock/tail repair for legacy files',
+                      'Bounded shared archive catalog, one Live warmup and background refresh',
+                      'Cached day return; audio/sample-clock and catalog diagnostics']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "archive-index-v1112"
+UI_BUILD = "audio-catalog-v1113"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -2999,11 +3000,12 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
     selected_files = candidates if safe_int(limit, 0) <= 0 else candidates[-safe_int(limit, 0):]
     items = []
     for path, stat, start_ts in selected_files:
-        items.append({"path": path, "stat": stat, "start_ts": start_ts, "day": recording_day_key(start_ts)})
+        calendar=recording_calendar_metadata(start_ts,recording_timezone_signature())
+        items.append({"path": path, "stat": stat, "start_ts": start_ts, "day": calendar[0], "calendar":calendar})
     for position, item in enumerate(items):
         path = item["path"]
         start_ts = item["start_ts"]
-        entry_day = recording_day_key(start_ts)
+        entry_day = item['day']
         if day_key and entry_day != day_key:
             continue
         next_item = items[position + 1] if position + 1 < len(items) else None
@@ -3018,7 +3020,7 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
                 cached_duration = RECORDING_DURATION_CACHE.get(str(path))
             if cached_duration and cached_duration[:2] == (item['stat'].st_mtime_ns, item['stat'].st_size):
                 duration_seconds = cached_duration[2] or duration_seconds
-        day_start_ts, _day_end_ts = recording_day_bounds(entry_day)
+        _,start_at,day_start_ts,_day_end_ts=item['calendar']
         day_offset = max(0, min(_day_end_ts - day_start_ts - 1, start_ts - day_start_ts)) if day_start_ts else offset
         entries.append(
             {
@@ -3026,7 +3028,7 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
                 "stat":item['stat'],
                 "name": path.name,
                 "start_ts": start_ts,
-                "start_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(start_ts)),
+                "start_at": start_at,
                 "day": entry_day,
                 "offset": offset,
                 "playback_offset": offset,
@@ -3036,6 +3038,13 @@ def recording_file_entries(camera: dict, index: int, limit: int = 1000, segment_
         )
         offset += duration_seconds
     return entries
+
+
+@functools.lru_cache(maxsize=50000)
+def recording_calendar_metadata(start_ts,zone):
+    local=time.localtime(start_ts);day=time.strftime('%Y-%m-%d',local)
+    start,end=recording_day_bounds(day)
+    return day,time.strftime('%Y-%m-%dT%H:%M:%S%z',local),start,end
 
 
 def recording_day_groups(entries: list[dict], segment_seconds: int, key: str = "") -> list[dict]:
@@ -4136,7 +4145,7 @@ def recording_mode_from_codec(video_codec: str, nvr: dict) -> str:
     return 'copy'
 
 
-def build_recording_command(stream: str, output_pattern: str, segment_seconds: int, mode: str, video_codec: str = '') -> list[str]:
+def build_recording_command(stream: str, output_pattern: str, segment_seconds: int, mode: str, video_codec: str = '', audio_codec: str = '', audio_rate=0, audio_channels=1) -> list[str]:
     command = [
         "ffmpeg",
         "-hide_banner",
@@ -4182,33 +4191,18 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
             "23",
             "-pix_fmt",
             "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "96k",
-            "-ar",
-            "48000",
-            "-ac",
-            "1",
         ]
     else:
-        command += [
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "96k",
-            "-ar",
-            "48000",
-            "-ac",
-            "1",
-        ]
+        command += ['-c:v','copy']
+    if audio_codec in ('aac','mp4a'):
+        command+=['-c:a','copy']
+    else:
+        command+=aac_encoding_options(audio_codec,audio_rate,audio_channels)
+        command+=['-filter_threads','1','-af','aresample=async=1:first_pts=0,asetpts=N/SR/TB']
     if mode=='copy' and video_codec.lower() in ('hevc','h265'):
         command+=['-tag:v','hvc1']
     # Camera audio clocks can jump backwards while RTP video remains valid.
     # Keep original video timestamps; repair only the AAC sample clock.
-    command+=['-threads:a','1','-filter_threads','1','-af','aresample=async=1:first_pts=0']
     command += [
         "-f",
         "segment",
@@ -4415,6 +4409,10 @@ def recording_files_revision(key,day,files):
     return digest.hexdigest()[:32]
 
 
+RECORDING_INDEX=RecordingIndexCache(lambda config,selection:recording_status_payload(config,selection),
+    lambda event,data:append_jsonl_log(HOME_DIR/'playback.jsonl',event,data))
+
+
 def recording_status_response(config,query):
     if query.get('summary')==['1']:
         cleanup_recording_processes();rows=[]
@@ -4427,7 +4425,13 @@ def recording_status_response(config,query):
                          'recording':recording,'desired_recording':desired,'record_error':error,'can_record':not error,
                          'recording_status':'recording' if recording else 'blocked' if error else 'scheduled_stopped' if desired else 'disabled'})
         return {'summary':True,'cameras':rows}
-    data=recording_status_payload(config,day_selection=parse_recording_day_query(query))
+    selection=parse_recording_day_query(query)
+    if query.get('catalog')==['1']:
+        data=RECORDING_INDEX.get(config,selection,force=query.get('fresh')==['1'])
+        states=recording_status_response(config,{'summary':['1']})
+        for row,state in zip(data['cameras'],states['cameras']):row.update(state)
+        data['storage']=storage_usage_snapshot(config)
+    else:data=recording_status_payload(config,day_selection=selection)
     known={}
     for value in str((query.get('known') or [''])[0]).split(','):
         if re.fullmatch(r'[0-9]+:[a-f0-9]{32}',value):
@@ -4550,7 +4554,8 @@ def start_recording(camera: dict, index: int) -> dict:
     log_path = directory / "ffmpeg.log"
     output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
     mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr)
-    command = build_recording_command(stream, output_pattern, segment_seconds, mode,video_codec)
+    audio_info=probe.get('audio') or {}
+    command = build_recording_command(stream, output_pattern, segment_seconds, mode,video_codec,audio_codec,audio_info.get('sample_rate'),audio_info.get('channels'))
     log_header = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "event": "recording_start_command",
@@ -4563,6 +4568,7 @@ def start_recording(camera: dict, index: int) -> dict:
         "mode": mode,
         "video_codec": video_codec,
         "audio_codec": audio_codec,
+        "audio_output": 'copy_aac' if audio_codec in ('aac','mp4a') else 'aac_voice_16k_32k' if audio_codec in ('pcm_alaw','pcm_mulaw') and safe_int(audio_info.get('sample_rate'),0)<=16000 else 'aac',
         "command": redact_command(command),
     }
     with log_path.open("ab") as header_file:
@@ -6967,8 +6973,20 @@ INDEX_HTML = r"""<!doctype html>
         });
       }
 
+      const recordingDayCache=new Map();
+      function recordingDayCacheKey(status,day){return `${config.storage?.recordings_dir||''}|${status.key}|${day}`;}
+      function rememberRecordingDay(status){
+        if(!status.selected_day||!Array.isArray(status.files)||status.files.length>24000)return;
+        const key=recordingDayCacheKey(status,status.selected_day);
+        const saved=Object.fromEntries(['files','files_revision','selected_day','timeline','playback_cache'].map(name=>[name,status[name]]));
+        recordingDayCache.delete(key);recordingDayCache.set(key,saved);
+        let count=[...recordingDayCache.values()].reduce((sum,row)=>sum+row.files.length,0);
+        while(recordingDayCache.size>4||count>24000){const first=recordingDayCache.keys().next().value;count-=recordingDayCache.get(first).files.length;recordingDayCache.delete(first);}
+      }
       function selectRecordingDay(index, day, reason = 'select') {
         if (!day) return;
+        const status=recordingStatus[index]||{};
+        if(day===status.selected_day&&Array.isArray(status.files)&&day===selectedRecordingDay[index]){debugEvent('ui_recording_day_retained',{index,day,reason});return;}
         discardRecordingScrub(index);
         hideRecordingScrubPreview();
         selectedRecordingDay[index] = day;
@@ -6979,7 +6997,9 @@ INDEX_HTML = r"""<!doctype html>
         delete recordingStreamNonce[index];
         recordingAutoplayAfterRender[index] = true;
         debugEvent('ui_recording_day_select', { index, day, reason });
-        loadRecordingStatus({ forceRender: true, reason: `day_${reason}` }).catch((error) => {
+        const cached=recordingDayCache.get(recordingDayCacheKey(status,day));
+        if(cached){recordingStatus[index]={...status,...cached};renderNvrGrid({reason:'day_cache'});recordingDayLoadMessage('');debugEvent('ui_recording_day_cache',{index,day,files:cached.files.length});}
+        loadRecordingStatus({ forceRender: !cached, restartRequest:true, reason: cached?'day_refresh':`day_${reason}` }).catch((error) => {
           debugEvent('ui_recording_day_select_error', { index, day, reason, message: error.message });
         });
       }
@@ -7039,7 +7059,7 @@ INDEX_HTML = r"""<!doctype html>
         {
           const parsed=new URL(clean,location.href);
           if (/\/recordings\/|\/api\/alerts\/\d+\/clip\.mp4$/.test(parsed.pathname)) {
-            parsed.searchParams.set('compat','1');parsed.searchParams.set('container','direct-clock-v5');clean=parsed.href;
+            parsed.searchParams.set('compat','1');parsed.searchParams.set('container','aac-clock-v6');clean=parsed.href;
           }
         }
         return seek?`${clean}#t=${seek.toFixed(3)}`:clean;
@@ -7287,7 +7307,18 @@ INDEX_HTML = r"""<!doctype html>
         video.dataset.recordingWantsPlay='false';video.dataset.recordingPlayPending='false';video.dataset.recordingPlayEpoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.pause();
       }
       function recordingPlaybackRequested(video) {
-        return Boolean(video&&!video.ended&&(!video.paused||video.dataset.recordingPlayPending==='true'||video.dataset.recordingWantsPlay==='true'&&(video.dataset.recordingBuffering==='true'||video.dataset.recordingLoading==='true')));
+        return Boolean(video&&!video.ended&&(!video.paused||video.dataset.recordingPlayPending==='true'||video.dataset.recordingWantsPlay==='true'));
+      }
+      const recordingPauseRecovery=new WeakMap();
+      function recoverUnexpectedRecordingPause(video){
+        if(!video||!video.paused||video.ended||video.dataset.recordingWantsPlay!=='true'||recordingScrubs.has(video.dataset.recordingPlayer))return;
+        debugEvent('ui_recording_native_pause',recordingVideoDiagnostics(video));
+        if(activePage!=='nvr'||document.hidden)return;
+        if(video.readyState<3||video.seeking||video.dataset.recordingLoading==='true'||video.dataset.recordingBuffering==='true')return;
+        const now=performance.now(),previous=recordingPauseRecovery.get(video),state=previous&&now-previous.at<5000?previous:{at:now,count:0};
+        if(state.count>=2)return;state.count++;recordingPauseRecovery.set(video,state);
+        const epoch=video.dataset.recordingPlayEpoch,source=video.dataset.recordingSrc;
+        setTimeout(()=>{if(video.isConnected&&activePage==='nvr'&&!document.hidden&&!video.ended&&video.paused&&video.dataset.recordingWantsPlay==='true'&&video.dataset.recordingPlayEpoch===epoch&&video.dataset.recordingSrc===source&&!recordingScrubs.has(video.dataset.recordingPlayer))playRecording(video);},150);
       }
       const recordingProgressWatch=new WeakMap();
       function watchRecordingProgress(video) {
@@ -7340,6 +7371,7 @@ INDEX_HTML = r"""<!doctype html>
         }).catch(error=>{if(error.name!=='AbortError')recordingWarmDone.set(url,performance.now()-25000);}).finally(()=>{clearTimeout(job.timer);if(recordingWarmJob===job)recordingWarmJob=null;});
       }
       function playRecording(video) {
+        if(!video?.isConnected||!nvrGrid.contains(video))return;
         releaseInactiveRecordingPlayers(video);restoreRecordingPlayer(video);
         if(recordingPictureUnavailable(video))return;
         if(video.error){
@@ -7647,8 +7679,11 @@ INDEX_HTML = r"""<!doctype html>
           video.dataset.recordingInitialized = 'true';
           const index = video.dataset.recordingPlayer;
           const seek = Math.max(0, Number(video.dataset.recordingSeek || 0));
+          const autoplay=Boolean(recordingAutoplayAfterRender[index]);
+          if(autoplay)delete recordingAutoplayAfterRender[index];
           const applySeek = () => {
-            if (seek) {
+            if(!video.isConnected||nvrGrid.querySelector(`video[data-recording-player="${index}"]`)!==video)return;
+            if (seek&&Math.abs(video.currentTime-seek)>.01) {
               try {
                 video.currentTime = seek;
               } catch (error) {
@@ -7659,10 +7694,6 @@ INDEX_HTML = r"""<!doctype html>
                 });
               }
             }
-            if (recordingAutoplayAfterRender[index]) {
-              delete recordingAutoplayAfterRender[index];
-              playRecording(video);
-            }
           };
           updateRecordingPlayerControls(video);
           if (video.readyState >= 1) {
@@ -7670,6 +7701,7 @@ INDEX_HTML = r"""<!doctype html>
           } else {
             video.addEventListener('loadedmetadata', applySeek, { once: true });
           }
+          if(autoplay)playRecording(video);
         });
       }
 
@@ -7839,6 +7871,10 @@ INDEX_HTML = r"""<!doctype html>
           const response=await fetch(panelPath(`api/recording/timing?${new URLSearchParams({key:recordingStatus[index].key,name:file.name})}`));
           if(!response.ok)return;const data=await response.json();if(!video.isConnected||video.dataset.recordingLoadedFile!==source)return;
           video.dataset.recordingFps=String(data.fps||0);video.dataset.recordingCodec=data.codec_name||'';
+          video.dataset.recordingTimingSource=source||'';
+          video.dataset.recordingAudioCodec=data.audio_codec||'';video.dataset.recordingAudioRate=String(data.audio_sample_rate||0);
+          video.dataset.recordingAudioDuration=String(data.audio_duration_seconds||0);video.dataset.recordingAudioRegular=String(data.audio_clock_regular!==false);
+          debugEvent('ui_recording_media_timing',{index,recording:file.name,...data});
           if(!recordingPictureUnavailable(video))updateRecordingPlayerControls(video);
         }catch(_){}
       }
@@ -8100,6 +8136,10 @@ INDEX_HTML = r"""<!doctype html>
           current_time: Number(video?.currentTime || 0),
           duration: Number.isFinite(Number(video?.duration)) ? Number(video.duration) : String(video?.duration || ''),
           paused: Boolean(video?.paused),
+          muted:Boolean(video?.muted),volume:video?.volume,
+          media_timing_current:video?.dataset.recordingTimingSource===video?.dataset.recordingLoadedFile,
+          audio_sample_entry:video?.dataset.recordingAudioCodec||'',audio_sample_rate:Number(video?.dataset.recordingAudioRate||0),
+          audio_duration_seconds:Number(video?.dataset.recordingAudioDuration||0),audio_clock_regular:video?.dataset.recordingAudioRegular,
           wants_play:video?.dataset.recordingWantsPlay==='true',
           loading:video?.dataset.recordingLoading==='true',
           buffering:video?.dataset.recordingBuffering==='true',
@@ -9720,7 +9760,7 @@ INDEX_HTML = r"""<!doctype html>
         });
       }
       async function loadRecordingStatus(options = {}) {
-        if (nvrLoading && !options.forceRender) return;
+        if (nvrLoading && !options.forceRender&&!options.restartRequest) return;
         nvrRequest?.abort('superseded');
         const controller = new AbortController(), requestID = ++nvrRequestID;
         nvrRequest = controller;
@@ -9734,9 +9774,10 @@ INDEX_HTML = r"""<!doctype html>
             .map(([index, day]) => `${encodeURIComponent(index)}:${encodeURIComponent(day)}`)
             .join(',');
           const summary=activePage!=='nvr';
-          const statusPath = summary?'api/recording/status?summary=1':dayQuery ? `api/recording/status?days=${dayQuery}` : 'api/recording/status';
+          const fresh=options.reason==='manual_refresh'||options.reason==='recording_continuation_refresh'||options.reason==='detection_event'||String(options.reason||'').startsWith('alert_recording');
+          const statusPath = summary?'api/recording/status?summary=1':`api/recording/status?catalog=1${fresh?'&fresh=1':''}${dayQuery?'&days='+dayQuery:''}`;
           const known=options.forceRender?'':Object.values(recordingStatus).filter(item=>item.files_revision).map(item=>`${item.index}:${item.files_revision}`).join(',');
-          const response = await fetch(panelPath(statusPath+(!summary&&known?(dayQuery?'&':'?')+`known=${encodeURIComponent(known)}`:'')), { cache: 'no-store', signal: controller.signal });
+          const response = await fetch(panelPath(statusPath+(!summary&&known?`&known=${encodeURIComponent(known)}`:'')), { cache: 'no-store', signal: controller.signal });
           if (!response.ok) throw new Error(`Recording status failed: ${response.status}`);
           const data = await response.json();
           if (requestID !== nvrRequestID || requestedDays !== JSON.stringify(selectedRecordingDay)) return;
@@ -9775,6 +9816,7 @@ INDEX_HTML = r"""<!doctype html>
           recordingStatus = {};
           (Array.isArray(data.cameras) ? data.cameras : []).forEach((item) => {
             recordingStatus[item.index] = item;
+            rememberRecordingDay(item);
             const pinnedDay = selectedRecordingDay[item.index];
             if (item.selected_day && !pinnedDay) {
               selectedRecordingDay[item.index] = item.selected_day;
@@ -9821,10 +9863,11 @@ INDEX_HTML = r"""<!doctype html>
             }
           }
           recordingDayLoadMessage('');
+          if(data.index_stale&&data.index_refreshing&&activePage==='nvr')setTimeout(()=>{if(activePage==='nvr')void loadRecordingStatus({reason:'timer'});},1500);
         } catch (error) {
           if (requestID !== nvrRequestID) return;
           if(controller.signal.aborted&&controller.signal.reason!=='timeout'){debugEvent('ui_recording_status_cancelled',{reason:options.reason});return;}
-          if(activePage==='nvr'&&(options.reason!=='timer'||!lastNvrRenderSignature))recordingDayLoadMessage(controller.signal.aborted?'Nie udało się odczytać listy nagrań. Naciśnij Odśwież.':`Błąd listy nagrań: ${error.message}`);
+          if(activePage==='nvr'&&(!['timer','day_refresh'].includes(options.reason)||!lastNvrRenderSignature))recordingDayLoadMessage(controller.signal.aborted?'Nie udało się odczytać listy nagrań. Naciśnij Odśwież.':`Błąd listy nagrań: ${error.message}`);
           debugEvent('ui_recording_status_error', {message: String(error), reason: options.reason});
         } finally {
           clearTimeout(timeout);
@@ -10715,7 +10758,7 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('pause', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if(video&&video.paused&&!recordingScrubs.has(video.dataset.recordingPlayer)&&video.readyState>=3&&!video.seeking&&video.dataset.recordingPlayPending!=='true'&&video.dataset.recordingLoading!=='true'&&video.dataset.recordingBuffering!=='true')video.dataset.recordingWantsPlay='false';
+        if(video)recoverUnexpectedRecordingPause(video);
         if(video)showRecordingControls(video.closest('[data-recording-wrap]'));
         if (video) { markNvrInteraction('recording_video_pause', recordingVideoDiagnostics(video)); updateRecordingPlayerControls(video); }
       }, true);
@@ -11064,6 +11107,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             append_jsonl_log(HOME_DIR/'playback.jsonl','recording_index_ready',{'elapsed_ms':round((time.monotonic()-started)*1000),'summary':bool(payload.get('summary')),
                 'files':sum(len(c.get('files',[])) for c in payload['cameras'])})
             self.send_json(payload,compress=True)
+            if payload.get('summary'):RECORDING_INDEX.warm_once(config)
             return
         if path=='/api/storage/status':
             self.send_json(storage_usage_snapshot(load_config(),refresh=True));return
@@ -11177,7 +11221,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 if not isinstance(payload,dict):raise ValueError('invalid_recording')
                 source=recording_file_for_key(str(payload.get('key') or ''),str(payload.get('name') or ''))
                 if source is None:self.send_json({'error':'recording_not_found'},HTTPStatus.NOT_FOUND);return
-                target=RECORDING_COMPAT.prepare(source,allow_passthrough=True)
+                target=RECORDING_COMPAT.prepare(source,allow_passthrough=True,allow_small_offset=True)
                 self.send_json({'ready':True,'size_bytes':target.stat().st_size})
             except (ValueError,json.JSONDecodeError):self.send_json({'error':'invalid_recording'},HTTPStatus.BAD_REQUEST)
             except (OSError,RuntimeError,subprocess.TimeoutExpired) as error:
@@ -11531,7 +11575,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
         query=parse_qs(urlparse(self.path).query)
         if query.get('compat')!=['1']:return target
         # Older open tabs keep their previous byte representation until reload.
-        try:return RECORDING_COMPAT.prepare(target,allow_passthrough=query.get('container')==['direct-clock-v5'])
+        modern=query.get('container')==['aac-clock-v6']
+        try:return RECORDING_COMPAT.prepare(target,allow_passthrough=modern or query.get('container')==['direct-clock-v5'],allow_small_offset=modern,legacy=not modern)
         except (OSError,RuntimeError,subprocess.TimeoutExpired) as error:
             write_debug_event('recording_compat_error',{'filename':target.name,'error':str(error)})
             append_jsonl_log(HOME_DIR/'playback.jsonl','recording_compat_error',{'filename':target.name,'error':type(error).__name__+': '+str(error)})
@@ -11756,7 +11801,7 @@ def main() -> None:
     write_debug_event('release_features',{'version':APP_VERSION,'features':APP_RELEASE_FEATURES,
                       'hardware':hardware_inventory(),'recordings_changed':False,'camera_codec_settings_changed':False,
                       'edge_rtc':'Sources stay connected on the server; viewers share its bounded keyframe buffer.'})
-    print(f'[edge-panel] {APP_VERSION}: original recording, fast archive index/gzip and independent disk statistics. Codec tests affect short copies only.')
+    print(f'[edge-panel] {APP_VERSION}: voice AAC, direct short-edit MP4, native pause recovery and shared archive catalog. Original video/FPS unchanged.')
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
     try:

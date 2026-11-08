@@ -40,7 +40,7 @@ const assert=require('node:assert/strict');
   assert(await page.locator('video[data-recording-player="1"]').evaluate(v=>v.paused&&v.dataset.recordingWantsPlay==='false'));
   const latest=await (await page.request.get((process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18091')+'/api/logs')).json();
   assert(latest.playback.direct>0,'valid H264/AAC original was not served directly');
-  assert(await page.locator('video[data-recording-player="1"]').evaluate(v=>new URL(v.dataset.recordingSrc).searchParams.get('container')==='direct-clock-v5'));
+  assert(await page.locator('video[data-recording-player="1"]').evaluate(v=>new URL(v.dataset.recordingSrc).searchParams.get('container')==='aac-clock-v6'));
   assert.deepEqual(errors,[]);console.log(`PASS ${engine}: actual HEVC→H264/AAC/silent/G711 test clips, original dimensions/FPS, hardware/playback logs, buffered scrub resumes, bounded progress recovery respects Pause`);
   await page.unrouteAll({behavior:'ignoreErrors'});await page.close();
  }finally{await browser.close();}

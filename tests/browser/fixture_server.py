@@ -3,6 +3,7 @@ import sys
 import json
 import os
 import shutil
+import signal
 import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -71,8 +72,9 @@ if os.environ.get('EDGE_TEST_MULTI_CAMERA'):
   folder=p.recording_base_dir(c,i);folder.mkdir(exist_ok=True,parents=True)
   sample=folder/'sample.mp4'
   encoding=['-c:v','libx265','-x265-params','pools=none:frame-threads=1:log-level=error','-tag:v','hev1'] if i==0 else ['-c:v','libx264','-threads','1','-g','20']
-  subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=640x360:rate=20','-f','lavfi','-i','sine=sample_rate=48000',
-                  '-t','7',*encoding,'-c:a','aac','-movflags','+faststart',str(sample)],check=True)
+  rate='48000' if i==0 else '16000'
+  subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=640x360:rate=20','-f','lavfi','-i','sine=sample_rate='+rate,
+                  '-t','7',*encoding,'-c:a','aac','-threads:a','1','-b:a','96k' if i==0 else '32k','-output_ts_offset','0.1','-movflags','+faststart',str(sample)],check=True)
   for day in ('20260727','20260728'):
    for second in (0,7,14):shutil.copyfile(sample,folder/f'{day}-0000{second:02d}.mp4')
   sample.unlink()
@@ -82,4 +84,5 @@ if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  p.ALERT_SERVICE.prune=lambda reserve=0:{'bytes':0,'limit_bytes':256*1024*1024}
  for ident in fixture_alert_ids:p.ALERT_SERVICE.build(p.DETECTION_SERVICE.store.get(ident))
 Path(os.environ.get('EDGE_NVR_FIXTURE_INFO', '/tmp/edge-nvr-browser-fixture.json')).write_text(json.dumps({'recordings_dir': str(d), 'recording_cache_dir':str(p.RECORDING_CACHE_DIR), 'thumbnail_dir':str(p.RECORDING_THUMB_DIR)}))
+signal.signal(signal.SIGTERM,lambda *args:sys.exit(0))
 p.ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('EDGE_NVR_TEST_PORT', '18088'))),p.EdgeHandler).serve_forever()

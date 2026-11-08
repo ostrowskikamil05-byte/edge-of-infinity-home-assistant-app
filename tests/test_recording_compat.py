@@ -64,7 +64,7 @@ class RecordingCompatibilityTests(unittest.TestCase):
         self.assertNotIn('-use_wallclock_as_timestamps',command)
         self.assertEqual(command[command.index('-tag:v')+1],'hvc1')
         self.assertEqual(command[command.index('-c:v')+1],'copy')
-        self.assertEqual(command[command.index('-af')+1],'aresample=async=1:first_pts=0')
+        self.assertEqual(command[command.index('-af')+1],'aresample=async=1:first_pts=0,asetpts=N/SR/TB')
 
     def test_backward_audio_clock_is_repaired_without_nonmonotonic_dts(self):
         if not shutil.which('ffmpeg'):self.skipTest('FFmpeg required')

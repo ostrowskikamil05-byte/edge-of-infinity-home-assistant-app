@@ -15,7 +15,7 @@ const assert=require('node:assert/strict');
    await page.goto(process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18088');await page.locator('[data-camera-form]').waitFor({state:'attached'});
    const nav=async target=>{if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator(`nav [data-page-target="${target}"]`).click();};
    await nav('nvr');
-   await page.waitForFunction(()=>[...document.querySelectorAll('.recording-film-grid img')].every(image=>image.closest('.recording-thumb-wrap')?.classList.contains('thumb-loaded')));
+   await page.waitForFunction(()=>{const images=[...document.querySelectorAll('.recording-film-grid img')];return images.length>0&&images.every(image=>image.closest('.recording-thumb-wrap')?.classList.contains('thumb-loaded'));});
    assert([...attempts.values()].some(count=>count>=3),'busy JPEGs were not retried');
    assert(await page.locator('.recording-film-grid img').evaluateAll(images=>images.every(image=>image.dataset.recordingThumbBackend==='jpeg')));
    assert(recordings.every(url=>url.includes('000000.mp4')),'a busy JPEG triggered full-video preview downloads');

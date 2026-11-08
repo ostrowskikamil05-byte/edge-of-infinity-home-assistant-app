@@ -162,3 +162,20 @@ Long camera GOPs still affect random seeks: a UNV stream with 24 seconds between
 keyframes must decode from its preceding keyframe. An optional camera I-frame
 interval of 1–2 seconds (20–40 frames at 20 FPS) can improve seeking, with a
 possible bitrate/storage increase. Edge does not change that camera setting.
+
+## AAC and archive readiness (0.11.13)
+
+Update the app and reopen the panel. Unexpected native pauses retain Play
+intent; explicit Pause cancels recovery. Rapid day changes ignore old player
+callbacks and restore deferred phone sources before waiting for metadata.
+
+G.711 voice recordings use AAC 16 kHz / 32 kbps mono with one audio thread;
+native AAC packets are copied. Video keeps original dimensions, codec and FPS.
+Valid short MP4 edits play directly; legacy audio clock/tail repairs stay in
+the bounded compatibility cache. Existing recordings keep their original bytes.
+
+A bounded shared catalog prepares history once, coalesces concurrent clients
+and refreshes stale snapshots in the background. Visited days can open from the
+browser cache immediately. Manual Refresh forces a current scan. Device logs
+now expose audio timing/rate/clock state and unexpected pauses. See the
+[catalog limits and playback details](edge-of-infinity/DOCS.md#01113-aac-pause-recovery-and-ready-archive-catalogs).

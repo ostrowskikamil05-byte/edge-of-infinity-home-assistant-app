@@ -67,7 +67,7 @@ const assert=require('node:assert/strict');
    await page.locator('#event-copy-notification').click();assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),yaml);
    await page.locator('[data-event-recording="1"]').click();
    await page.waitForFunction(()=>!document.querySelector('[data-page="nvr"]').hidden&&document.querySelector('video[data-recording-player]'));
-   await page.waitForFunction(()=>{const video=document.querySelector('video[data-recording-player]');if(!video||video.readyState<2||video.seeking)return false;video.pause();return Math.abs(Number(video.dataset.recordingPlaybackStart||0)+video.currentTime-8)<1.5;});
+   await page.waitForFunction(()=>{const video=document.querySelector('video[data-recording-player]');if(!video||video.readyState<2||video.seeking)return false;pauseRecording(video);return Math.abs(Number(video.dataset.recordingPlaybackStart||0)+video.currentTime-8)<1.5;});
    await page.locator('[data-alert-point]').waitFor();
    assert.equal(await page.locator('[data-alert-point]').count(),1);
    await page.evaluate(()=>{window.eventVideo=document.querySelector('video[data-recording-player]');window.eventVideoSrc=eventVideo.src;});
