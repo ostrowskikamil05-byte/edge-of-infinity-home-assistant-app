@@ -49,7 +49,14 @@ class EdgeRTCView(HomeAssistantView):
             return web.Response(status=503)
         endpoint = route['api'].replace('http://', 'ws://', 1).replace('https://', 'wss://', 1) + '/api/stream/' + route['path'] + ('?microphone=1' if microphone else '')
         front = web.WebSocketResponse(heartbeat=20, compress=False, max_msg_size=8*1024*1024)
+        if not front.can_prepare(request).ok:return web.Response(status=400)
         await front.prepare(request)
+        async def synchronize():
+            try:
+                async with async_get_clientsession(hass).post(route['keyframe_api'],headers={'Authorization':'Bearer '+token},timeout=2) as response:
+                    await response.read()
+            except (ClientError,OSError,TimeoutError):pass
+        signal=asyncio.create_task(synchronize()) if route.get('keyframe_api') else None
         try:
             async with async_get_clientsession(hass).ws_connect(endpoint, headers={'Authorization': 'Bearer ' + token}, max_msg_size=8*1024*1024, heartbeat=20) as back:
                 async def forward(source, destination, upstream=False):
@@ -75,6 +82,9 @@ class EdgeRTCView(HomeAssistantView):
             with suppress(ConnectionError):
                 await front.send_json({'type': 'error', 'code': 'edge_rtc_unavailable'})
         finally:
+            if signal:
+                signal.cancel()
+                await asyncio.gather(signal,return_exceptions=True)
             await front.close()
         return front
 

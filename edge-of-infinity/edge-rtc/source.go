@@ -25,7 +25,7 @@ const (
 	gopByteLimit          = 16 * 1024 * 1024
 	bootstrapQueuePackets = 1024
 	viewerQueueByteLimit  = 8 * 1024 * 1024
-	liveQueuePackets      = 16
+	liveQueuePackets      = 128
 )
 
 type viewer struct {
@@ -76,6 +76,7 @@ type source struct {
 	keyframeRequests   uint64
 	keyframeErrors     uint64
 	keyframeObservedMS int64
+	keyframeNotify     chan struct{}
 	connected          atomic.Int32
 	attempts           atomic.Uint64
 	packets            atomic.Uint64
@@ -90,7 +91,7 @@ type source struct {
 
 func newSource(c sourceConfig, server *gortsplib.Server) *source {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &source{cfg: c, server: server, ctx: ctx, cancel: cancel, stopped: make(chan struct{}), viewers: map[*viewer]bool{}, started: time.Now(), rtcpSender: rand.Uint32() | 1}
+	return &source{cfg: c, server: server, ctx: ctx, cancel: cancel, stopped: make(chan struct{}), viewers: map[*viewer]bool{}, started: time.Now(), rtcpSender: rand.Uint32() | 1, keyframeNotify: make(chan struct{})}
 }
 
 // Request an I-frame over the existing transport, without changing the encoder.
@@ -123,7 +124,7 @@ func (s *source) status() map[string]any {
 	if len(s.gop) > 1 {
 		span = (int64(binary.BigEndian.Uint64(s.gop[len(s.gop)-1][2:10])) - int64(binary.BigEndian.Uint64(s.gop[0][2:10]))) / 1000
 	}
-	return map[string]any{"keyframe_requests": s.keyframeRequests, "keyframe_write_errors": s.keyframeErrors, "keyframe_observed_after_request_ms": s.keyframeObservedMS, "keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
+	return map[string]any{"keyframe_requests": s.keyframeRequests, "keyframe_write_errors": s.keyframeErrors, "keyframe_observed_after_request_ms": s.keyframeObservedMS, "keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "live_queue_packets": liveQueuePackets, "camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
 }
 func (s *source) run() {
 	defer close(s.stopped)
@@ -410,6 +411,10 @@ func (s *source) broadcast(p []byte, key bool) {
 	defer s.mu.Unlock()
 	if p[0] == 1 {
 		if key {
+			if s.keyframeNotify != nil {
+				close(s.keyframeNotify)
+			}
+			s.keyframeNotify = make(chan struct{})
 			if !s.keyframeAt.IsZero() && s.keyframeObservedMS == 0 {
 				s.keyframeObservedMS = max(1, time.Since(s.keyframeAt).Milliseconds())
 			}
@@ -486,6 +491,62 @@ func (s *source) attach(microphone bool) (*viewer, map[string]any, [][]byte, err
 	}
 	return v, hello, append([][]byte{}, s.gop...), nil
 }
+
+// Give camera feedback a short opportunity to replace a large old GOP before
+// writing it into the Cloud/TCP buffers, where it cannot be recalled later.
+func (s *source) refreshBootstrap(v *viewer, hello map[string]any, cache [][]byte, timeout time.Duration) [][]byte {
+	stamp := func(packets [][]byte) int64 {
+		if len(packets) == 0 {
+			return -1
+		}
+		return int64(binary.BigEndian.Uint64(packets[0][2:10]))
+	}
+	previous := stamp(cache)
+	refresh := func() ([][]byte, <-chan struct{}) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if len(s.gop) == 0 || stamp(s.gop) == previous {
+			return nil, s.keyframeNotify
+		}
+		for {
+			select {
+			case p := <-v.queue:
+				v.consumed(p)
+			default:
+				goto drained
+			}
+		}
+	drained:
+		v.bootstrap.Store(true)
+		fresh := append([][]byte{}, s.gop...)
+		hello["bootstrap_packets"] = len(fresh)
+		hello["bootstrap_bytes"] = s.gopBytes
+		hello["bootstrap_timestamp_us"] = int64(binary.BigEndian.Uint64(fresh[len(fresh)-1][2:10]))
+		hello["bootstrap_refreshed"] = true
+		return fresh, nil
+	}
+	fresh, notify := refresh()
+	if fresh != nil {
+		return fresh
+	}
+	var done <-chan struct{}
+	if s.ctx != nil {
+		done = s.ctx.Done()
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-notify:
+		if fresh, _ = refresh(); fresh != nil {
+			return fresh
+		}
+	case <-timer.C:
+	case <-done:
+	case <-v.done:
+	}
+	return cache
+}
+
 func (s *source) detach(v *viewer) {
 	s.mu.Lock()
 	delete(s.viewers, v)

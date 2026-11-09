@@ -34,14 +34,22 @@ const path = require('node:path');
   const late=[];for(let i=1;i<80;i++){const f=frame(1000000+i*33333);late.push(f);client.render(f);}
   assert(client.frameQueue.length<=8);assert(client.droppedFrames>0);
   client.close();assert(late.every(f=>f.closed===1));assert.equal(callbacks.size,0);
-  // An incoming I-frame is itself the recovery point. Do not throw it away
-  // when clearing a stale decoder queue and wait a whole additional GOP.
+  // Valid mobile TCP bursts must drain, preserving references. Resetting a
+  // delta at queue size 9 freezes a long-GOP camera until its next keyframe.
   const decoded=[],reset=new EdgeRTCClient({canvas:{getContext:()=>({drawImage(){}})}});
-  reset.caughtUp=true;reset.decoderConfiguration={codec:'avc1.640028',hardwareAcceleration:'prefer-hardware'};
-  reset.video={state:'configured',decodeQueueSize:20,reset(){this.decodeQueueSize=0;},configure(c){assert.equal(c,reset.decoderConfiguration);},decode(chunk){decoded.push(chunk);},close(){this.state='closed';}};
+  reset.caughtUp=true;reset.firstFrameMS=1;reset.decoderConfiguration={codec:'avc1.640028'};
+  reset.video=new class extends EventTarget {
+    state='configured';decodeQueueSize=20;
+    reset(){throw Error('valid burst reset the decoder');}configure(){}
+    decode(chunk){decoded.push(chunk);this.decodeQueueSize++;setImmediate(()=>{this.decodeQueueSize--;this.dispatchEvent(new Event('dequeue'));});}
+    close(){this.state='closed';}
+  };
   global.EncodedVideoChunk=class{constructor(options){Object.assign(this,options);}};
-  const packet=new Uint8Array(11);packet[0]=1;packet[1]=1;new DataView(packet.buffer).setBigInt64(2,1000n);
-  await reset.message(packet.buffer);assert.equal(decoded.length,1);assert.equal(decoded[0].type,'key');assert.equal(reset.waitKey,false);reset.close();
+  setImmediate(()=>{reset.video.decodeQueueSize=7;reset.video.dispatchEvent(new Event('dequeue'));});
+  for(let i=0;i<60;i++){
+    const p=new Uint8Array(11);p[0]=1;p[1]=i===0?1:0;new DataView(p.buffer).setBigInt64(2,BigInt(i*50000));await reset.message(p.buffer);
+  }
+  assert.equal(decoded.length,60);assert.deepEqual(decoded.map(c=>c.timestamp),Array.from({length:60},(_,i)=>i*50000));assert.equal(reset.waitKey,false);reset.close();
   // A UNV-sized cached GOP must drain through WebCodecs without triggering
   // the steady-state decoder reset or presenting historical reference frames.
   const startup=new EdgeRTCClient({canvas:{getContext:()=>({drawImage(){}})}});

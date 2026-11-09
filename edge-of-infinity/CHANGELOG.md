@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.12.2
+
+- Display native WebKit recording frames through an original-resolution canvas,
+  including playback, paused scrubbing and fragment changes. Keep one native
+  decoder and its AAC audio; release the canvas when leaving Recordings.
+- Inline the native panel Live document to remove an extra authenticated iframe
+  HTML request. Retain authenticated connections, diagnostics and shared assets.
+- Apply decoder backpressure instead of resetting valid delta frames during
+  mobile bursts. Allow 128 queued live packets within the existing 8 MiB cap.
+- Give camera feedback up to 600 ms to replace a large cached GOP before sending
+  it. Optionally request ONVIF synchronization on the matched recording profile,
+  with bounded workers, cached discovery and failure backoff. No encoder writes
+  or additional camera video connection; unsupported cameras retain cached startup.
+- Prepare compatible saved copies through JSON while on Live; defer history
+  prefetch until Live is ready and fetch the next video body only after the
+  current file is fully buffered or the network is idle.
+- Group keyframe control and canvas presentation diagnostics by module. Reject
+  non-WebSocket requests before preparing the HA RTC bridge.
+- Add composed-pixel checks in WebKit/Chromium, a 4K H.264/AAC case, jitter and
+  bootstrap tests, and ONVIF profile/authentication regressions.
+
 ## 0.12.1
 
 - Remove seek-hover thumbnail requests and their preview UI. Scrubbing continues in the one main native player; measured FPS sets the seek step and the existing previous/next-frame controls remain available.

@@ -4,6 +4,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestKeyframeRequestUsesExistingSessionAndCoalesces(t *testing.T) {
@@ -60,7 +61,7 @@ func TestLongGOPRemainsReadyForJoiningViewer(t *testing.T) {
 	}
 	select {
 	case <-v.done:
-		t.Fatal("cached bootstrap was closed by the 16-packet live limit")
+		t.Fatal("cached bootstrap was closed by the live limit")
 	default:
 	}
 	for len(v.queue) > 0 {
@@ -76,6 +77,74 @@ func TestLongGOPRemainsReadyForJoiningViewer(t *testing.T) {
 	case <-v.done:
 	default:
 		t.Fatal("steady-state slow-viewer protection was lost")
+	}
+}
+
+func TestLiveAudioVideoJitterDoesNotDisconnectViewer(t *testing.T) {
+	s := cachedSource(t)
+	v, _, _, err := s.attach(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.detach(v)
+	// One second at 20 video and 50 audio packets/s exceeds the old limit.
+	for i := 0; i < 70; i++ {
+		kind := byte(2)
+		if i%7 < 2 {
+			kind = 1
+		}
+		s.broadcast(frame(kind, false, int64(i)*14000, []byte{1}), false)
+	}
+	select {
+	case <-v.done:
+		t.Fatal("ordinary mobile jitter disconnected viewer")
+	default:
+	}
+	for len(v.queue) > 0 {
+		v.consumed(<-v.queue)
+	}
+	if v.queueBytes.Load() != 0 {
+		t.Fatal("drained queue retained byte budget")
+	}
+}
+
+func TestRefreshBootstrapWaitsForFreshKeyframeAndDrainsDuplicates(t *testing.T) {
+	s := cachedSource(t)
+	s.broadcast(frame(1, true, 100, []byte{1}), true)
+	v, hello, cache, err := s.attach(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.detach(v)
+	result := make(chan [][]byte, 1)
+	go func() { result <- s.refreshBootstrap(v, hello, cache, time.Second) }()
+	s.broadcast(frame(1, false, 200, []byte{2}), false)
+	s.broadcast(frame(1, true, 300, []byte{3}), true)
+	fresh := <-result
+	if len(fresh) != 1 || fresh[0][10] != 3 || hello["bootstrap_refreshed"] != true || hello["bootstrap_timestamp_us"] != int64(300) {
+		t.Fatalf("stale bootstrap retained: %v, %v", fresh, hello)
+	}
+	if len(v.queue) != 0 || v.queueBytes.Load() != 0 || !v.bootstrap.Load() {
+		t.Fatal("duplicate live packets were retained")
+	}
+	s.broadcast(frame(1, false, 400, []byte{4}), false)
+	if len(v.queue) != 1 {
+		t.Fatal("new live packets were discarded")
+	}
+}
+
+func TestRefreshBootstrapTimeoutKeepsOriginalAndQueuedFrames(t *testing.T) {
+	s := cachedSource(t)
+	s.broadcast(frame(1, true, 100, []byte{1}), true)
+	v, hello, cache, err := s.attach(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.detach(v)
+	s.broadcast(frame(1, false, 200, []byte{2}), false)
+	fresh := s.refreshBootstrap(v, hello, cache, time.Millisecond)
+	if len(fresh) != 1 || fresh[0][10] != 1 || hello["bootstrap_refreshed"] != nil || len(v.queue) != 1 {
+		t.Fatal("timeout lost usable cached or live video")
 	}
 }
 

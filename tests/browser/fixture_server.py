@@ -10,9 +10,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from test_edge_panel_config import load_panel_module, camera
 p=load_panel_module()
+inline_fixture='<p>Generated camera</p><script>window.edgeStopLive=()=>{parent.fixtureStoppedLive=(parent.fixtureStoppedLive||0)+1;parent.fixtureStopBeforeRecording=[...parent.document.querySelectorAll("video[data-recording-player]")].every(v=>!v.getAttribute("src"));};parent.postMessage({type:"edge_live_ready",path:new URL(document.baseURI).pathname.split("/").pop()},new URL(document.baseURI).origin);</script>'
+production_document=json.dumps(p.EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',p.APP_VERSION)).replace('<','\\u003c')
+p.INDEX_HTML=p.INDEX_HTML.replace(production_document,json.dumps(inline_fixture).replace('<','\\u003c'))
+
 p.MIN_RECORDING_FILE_READY_SECONDS=0
 clip_seconds=int(os.environ.get('EDGE_TEST_RECORDING_DURATION','7'))
 long_gop=os.environ.get('EDGE_TEST_RECORDING_LONG_GOP')=='1'
+native_4k=os.environ.get('EDGE_TEST_RECORDING_4K')=='1'
 sample_names=[(datetime.strptime(day,'%Y%m%d')+timedelta(seconds=second)).strftime('%Y%m%d-%H%M%S.mp4') for day in ('20260727','20260728') for second in (0,clip_seconds,2*clip_seconds)]
 fixture_cameras=[camera('front','192.0.2.10','sub')]
 if os.environ.get('EDGE_TEST_MULTI_CAMERA'):fixture_cameras.append(camera('back','192.0.2.11','main'))
@@ -76,13 +81,17 @@ if os.environ.get('EDGE_TEST_MULTI_CAMERA'):
   folder=p.recording_base_dir(c,i);folder.mkdir(exist_ok=True,parents=True)
   sample=folder/'sample.mp4'
   encoding=['-c:v','libx265','-x265-params','pools=none:frame-threads=1:log-level=error','-tag:v','hev1'] if i==0 else ['-c:v','libx264','-threads','1','-g','20']
-  if long_gop:
+  if native_4k:encoding=['-c:v','libx264','-threads','1','-preset','ultrafast','-crf','28','-level:v','5.1','-g',str(20*clip_seconds),'-sc_threshold','0']
+  if long_gop and not native_4k:
    if i==0:encoding[encoding.index('-x265-params')+1]+=f':keyint={20*clip_seconds}:min-keyint={20*clip_seconds}:scenecut=0'
    else:encoding[encoding.index('-g')+1]=str(20*clip_seconds);encoding+=['-sc_threshold','0']
-  rate='48000' if i==0 else '16000'
-  subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=640x360:rate=20','-f','lavfi','-i','sine=sample_rate='+rate,
+  rate='16000' if native_4k else ('48000' if i==0 else '16000')
+  subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i',f'testsrc2=size={"3840x2160" if native_4k and i==0 else "2560x1440" if native_4k else "640x360"}:rate=20','-f','lavfi','-i','sine=sample_rate='+rate,
                   '-t',str(clip_seconds),*encoding,'-c:a','aac','-threads:a','1','-b:a','96k' if i==0 else '32k','-output_ts_offset','0.1','-movflags','+faststart',str(sample)],check=True)
-  for name in sample_names:shutil.copyfile(sample,folder/name)
+  for name in sample_names:
+   if native_4k:
+    (folder/name).unlink(missing_ok=True);os.link(sample,folder/name)
+   else:shutil.copyfile(sample,folder/name)
   sample.unlink()
 if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  p.ALERT_SERVICE=p.AlertMediaService(p.DETECTION_SERVICE.store,p.load_config,p.alert_source_entries,p.save_alert_image,p.save_alert_fallback_image,start=False)

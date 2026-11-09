@@ -4,14 +4,45 @@
     constructor(note=()=>{},progress=()=>{}){this.note=note;this.progress=progress;this.states=new WeakMap();}
     state(video){let state=this.states.get(video);if(!state){state={epoch:0,frames:0,seen:false};this.states.set(video,state);}return state;}
     body(url){return String(url||'').split('#')[0];}
+    canvasMode(){return /AppleWebKit/i.test(navigator.userAgent)&&!/Android|Chrome\/|Chromium\/|Edg\//i.test(navigator.userAgent);}
+    display(video){
+      const s=this.state(video);if(!this.canvasMode()||!video.closest('[data-recording-wrap]'))return null;
+      if(!s.display){s.display=document.createElement('canvas');s.display.className='recording-display';s.display.setAttribute('aria-hidden','true');video.before(s.display);video.dataset.recordingCanvas='true';s.painted=0;}
+      return s.display;
+    }
+    paint(video,reason){
+      const s=this.state(video),canvas=this.display(video);
+      if(!canvas||!this.current(video)||video.seeking||video.readyState<2||!video.videoWidth||video.currentTime+.1<Number(video.dataset.recordingSeek||0))return false;
+      try{
+        if(canvas.width!==video.videoWidth||canvas.height!==video.videoHeight){canvas.width=video.videoWidth;canvas.height=video.videoHeight;}
+        const context=s.context||(s.context=canvas.getContext('2d',{alpha:false,desynchronized:true}));context.drawImage(video,0,0,canvas.width,canvas.height);
+        const first=s.paintedEpoch!==s.epoch;s.painted++;s.paintedAt=performance.now();s.paintedTime=video.currentTime;s.paintedEpoch=s.epoch;
+        if(first)this.note('ui_recording_canvas_picture',{index:video.dataset.recordingPlayer,seek_epoch:s.epoch,reason,width:canvas.width,height:canvas.height,media_time:video.currentTime});
+        return true;
+      }catch(error){if(!s.paintError){s.paintError=true;this.note('ui_recording_canvas_error',{index:video.dataset.recordingPlayer,message:error.message});}return false;}
+    }
+    resume(video){
+      const s=this.state(video);if(!this.display(video)||s.paintRequest!=null||!video.isConnected||!video.getAttribute('src'))return;
+      const epoch=s.epoch;
+      const tick=()=>{
+        s.paintRequest=null;if(epoch!==s.epoch||!video.isConnected||!video.getAttribute('src'))return;
+        // Prefer real frame callbacks. WKWebView can suppress them while its
+        // native video layer is occluded; read the same native decoder instead.
+        const age=performance.now()-(s.presentedAt||0),fps=Number(video.dataset.recordingFps)||30;
+        if(age>120&&Math.abs(video.currentTime-(s.paintedTime??-1))>=.5/fps&&performance.now()-(s.paintedAt||0)>=1000/Math.min(60,fps))this.paint(video,'native_clock');
+        if(!video.paused)s.paintRequest=requestAnimationFrame(tick);
+      };
+      s.paintRequest=requestAnimationFrame(tick);
+    }
     current(video){return Boolean(video.currentSrc)&&this.body(video.currentSrc)===this.body(video.src);}
     previewPaused(video){return video.paused&&(video.dataset.recordingWantsPlay!=='true'||video.closest('[data-recording-wrap]')?.dataset.scrubbing==='true');}
-    stop(video){const s=this.states.get(video);if(!s)return;clearTimeout(s.timer);s.timer=null;if(s.callback!=null)video.cancelVideoFrameCallback?.(s.callback);s.callback=null;s.epoch++;}
-    begin(video){this.stop(video);const s=this.state(video);s.seen=false;s.sampled=false;s.at=performance.now();s.source=this.body(video.src);s.clock=video.currentTime;s.released=false;this.watch(video);}
+    stop(video,dispose=false){const s=this.states.get(video);if(!s)return;clearTimeout(s.timer);s.timer=null;if(s.callback!=null)video.cancelVideoFrameCallback?.(s.callback);s.callback=null;if(s.paintRequest!=null)cancelAnimationFrame(s.paintRequest);s.paintRequest=null;s.epoch++;if(dispose&&s.display){s.display.width=0;s.display.height=0;s.display.remove();s.display=null;s.context=null;delete video.dataset.recordingCanvas;}}
+    begin(video){this.stop(video);const s=this.state(video);s.seen=false;s.sampled=false;s.at=performance.now();s.source=this.body(video.src);s.clock=video.currentTime;s.released=false;this.watch(video);this.resume(video);}
     settled(video,reason){
       const s=this.state(video),canvas=s.canvas;
       if(!this.current(video)||video.seeking||video.readyState<2||!video.videoWidth||video.currentTime+.1<Number(video.dataset.recordingSeek||0))return;
       s.sampled=true;s.sampledAt=performance.now();
+      this.paint(video,reason);this.resume(video);
       // A native seeked/loadeddata event provides a decoded picture, even when
       // WebKit suppresses frame callbacks behind an opaque transition overlay.
       if(canvas&&!canvas.hidden){
@@ -28,10 +59,11 @@
         const target=Number(video.dataset.recordingSeek||0);
         if(this.current(video)&&!video.seeking&&meta.mediaTime+.1>=target&&Math.abs(meta.mediaTime-video.currentTime)<1){
           const first=!s.seen;s.seen=true;s.frames++;s.mediaTime=meta.mediaTime;s.presentedAt=performance.now();
+          this.paint(video,'video_frame');
           this.progress(video);
           if(first)this.note('ui_recording_picture_ready',{index:video.dataset.recordingPlayer,seek_epoch:s.epoch,media_time:meta.mediaTime,picture_ms:Math.round(s.presentedAt-(s.at||s.presentedAt))});
           if(s.canvas&&!s.canvas.hidden)this.hide(video,s.canvas,'video_frame');
-          if(!video.paused&&video.dataset.recordingLoading!=='true'&&video.dataset.recordingBuffering!=='true'&&s.presentedAt-(s.snapshotAt||0)>750){
+          if(!s.display&&!video.paused&&video.dataset.recordingLoading!=='true'&&video.dataset.recordingBuffering!=='true'&&s.presentedAt-(s.snapshotAt||0)>750){
             try{const c=document.createElement('canvas');c.width=Math.min(960,video.videoWidth);c.height=Math.max(1,Math.round(c.width*video.videoHeight/video.videoWidth));c.getContext('2d',{alpha:false}).drawImage(video,0,0,c.width,c.height);s.snapshot=c;s.snapshotAt=s.presentedAt;s.snapshotSource=this.body(video.src);}catch(_){}
           }
         }
@@ -42,7 +74,7 @@
       if(!canvas)return;const s=this.state(video);s.canvas=canvas;
       if(canvas.dataset.valid==='true'&&(video.seeking||video.readyState<2||video.dataset.recordingLoading==='true'||video.dataset.recordingBuffering==='true')){canvas.hidden=false;return;}
       const snapshot=s.snapshot&&s.snapshotSource===this.body(video.src)?s.snapshot:null;
-      const picture=snapshot||(!video.seeking&&video.readyState>=2&&video.videoWidth?video:null)||(preview?.naturalWidth>1&&!String(preview.src).startsWith('data:image/svg')?preview:null);
+      const picture=(s.display?.width?s.display:null)||snapshot||(!video.seeking&&video.readyState>=2&&video.videoWidth?video:null)||(preview?.naturalWidth>1&&!String(preview.src).startsWith('data:image/svg')?preview:null);
       if(!picture){if(canvas.dataset.valid==='true')canvas.hidden=false;return;}
       try{
         const width=picture.videoWidth||picture.naturalWidth||picture.width,height=picture.videoHeight||picture.naturalHeight||picture.height;
@@ -73,7 +105,7 @@
       };
       s.timer=setTimeout(retry,this.previewPaused(video)?120:350);
     }
-    diagnostic(video){const s=this.states.get(video);return s?{seek_epoch:s.epoch,presented_frames:s.frames,picture_confirmed:s.seen,native_picture_sampled:Boolean(s.sampled),last_picture_time:s.mediaTime??null,last_picture_age_ms:s.presentedAt?Math.round(performance.now()-s.presentedAt):null,held_picture_visible:Boolean(s.canvas&&!s.canvas.hidden)}:{};}
+    diagnostic(video){const s=this.states.get(video);return s?{seek_epoch:s.epoch,presented_frames:s.frames,picture_confirmed:s.seen,native_picture_sampled:Boolean(s.sampled),presentation:s.display?'canvas':'native',canvas_frames:s.painted||0,canvas_width:s.display?.width||0,canvas_height:s.display?.height||0,canvas_picture_age_ms:s.paintedAt?Math.round(performance.now()-s.paintedAt):null,last_picture_time:s.mediaTime??null,last_picture_age_ms:s.presentedAt?Math.round(performance.now()-s.presentedAt):null,held_picture_visible:Boolean(s.canvas&&!s.canvas.hidden)}:{};}
   }
   globalThis.EdgeRecordingSurface=EdgeRecordingSurface;
 })();

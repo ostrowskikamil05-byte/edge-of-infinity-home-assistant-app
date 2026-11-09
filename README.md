@@ -2,13 +2,14 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.12.1** prepares the first saved clips after Live is ready, keeps a
-bounded RAM cache when returning to Live, removes seek-hover thumbnails and
-uses the main native player for frame previews. It fixes duplicate fragment
-seeking and checks decoded-picture readiness before releasing a held image.
-Live modules preload and share a private versioned cache. Original recordings,
-FPS, the persistent gallery and one camera upstream are retained.
-See [update details](edge-of-infinity/DOCS.md#0121-ready-recordings-and-in-picture-seeking).
+Version **0.12.2** adds original-resolution canvas presentation for WebKit
+recordings, avoids iframe-document requests for native panel Live, and handles
+mobile decoder/network bursts without discarding valid reference frames.
+Live prepares recording copies on the server without downloading their video
+bodies. Bounded ONVIF synchronization can request a fresh keyframe from the
+existing recording profile. Original recordings, AAC, FPS, the persistent
+gallery and one camera upstream are retained.
+See [update details](edge-of-infinity/DOCS.md#0122-mobile-picture-presentation-and-live-startup).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:
 

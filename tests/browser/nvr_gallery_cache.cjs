@@ -15,6 +15,7 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
   });
   page.on('console',m=>{if(m.text().startsWith('EDGE_FIXTURE_UNHANDLED:'))errors.push(m.text());});
   await page.addInitScript(()=>{
+   localStorage.setItem('edge-nvr-next-buffer','false');
    addEventListener('unhandledrejection',e=>console.error('EDGE_FIXTURE_UNHANDLED:'+String(e.reason)));
    window.fixtureRevokedThumbnails=new Set();const revoke=URL.revokeObjectURL.bind(URL);
    URL.revokeObjectURL=url=>{fixtureRevokedThumbnails.add(url);revoke(url);};

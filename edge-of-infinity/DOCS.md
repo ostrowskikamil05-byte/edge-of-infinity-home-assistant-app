@@ -1,5 +1,52 @@
 # Edge of Infinity App Documentation
 
+## 0.12.2: mobile picture presentation and live startup
+
+Update the app, restart Home Assistant Core for the bundled integration/card,
+then reopen the panel and dashboard. Diagnostics show `0.12.2` /
+`mobile-presentation-v122`. Existing camera settings, original recordings,
+retention, AAC policy, FPS and the persistent gallery are retained.
+
+WebKit recordings now display the native decoder's frames through a canvas at
+the video's original resolution. The same HTML video element handles audio,
+seeking and decoding; there is no second decoder, video re-encode or lower-quality
+recording. Actual frame callbacks drive the canvas, with a bounded native-clock
+fallback when WebKit suppresses them. The canvas retains the picture during a
+seek and is released when leaving Recordings. `ui_recording_canvas_picture`,
+`ui_recording_canvas_error` and surface diagnostics identify this presentation.
+
+The native panel player uses an inline iframe document, eliminating an extra
+HTML request before the authenticated stream connection. Live sources remain
+always on in EdgeRTC. Decoder backpressure preserves valid reference frames
+during network bursts instead of resetting the decoder. The steady viewer queue
+allows 128 packets within its existing 8 MiB limit; slow viewers still close.
+
+Before sending a large cached GOP, the core gives keyframe feedback up to 600 ms
+to provide a fresh GOP. The panel/card may also request ONVIF
+`SetSynchronizationPoint` on the exact profile matching the configured recording
+URI. Discovery is cached for five minutes, requests coalesce for three seconds,
+failures back off for a minute and at most two HTTP workers run. These are control
+requests, with no encoder-setting writes or additional RTSP camera session.
+`keyframe_onvif_requested` means the request succeeded, not that an I-frame was
+received; check core timings and `rtc_bootstrap.refreshed_before_send` too.
+Unsupported cameras retain cached startup. Their existing long GOP, phone
+decoding and WAN throughput can still delay the first current picture.
+
+While on Live, **Przygotowuj nagrania wcześniej** prepares compatible copies on
+the server through small JSON requests after Live is ready. It no longer downloads
+saved-video bodies to the phone in the background. The persisted gallery still
+appears immediately when available; full background history waits for Live's
+first picture. Visible recording playback can warm the next file only after
+the current file is fully buffered or its network is idle, within the existing
+two-file / 16 MiB limit. The server stores original video without transcoding it.
+
+Regression tests inspect actual composed recording pixels, including a full
+3840×2160 H.264/AAC WebKit fixture, scrubbing and native frame stepping. Native
+H.264/HEVC tests cover WebKit and Chromium. A simulated RTSP camera tests fresh
+keyframes, ignored feedback and one upstream. These are browser/fixture checks;
+the physical iPhone, UNV firmware and the user's Nabu Casa path require testing
+after updating.
+
 ## 0.12.1: ready recordings and in-picture seeking
 
 Update the app, restart Home Assistant Core and reopen the panel/card. Diagnostics
