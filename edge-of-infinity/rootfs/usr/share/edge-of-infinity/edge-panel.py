@@ -7303,12 +7303,18 @@ INDEX_HTML = r"""<!doctype html>
       const recordingThumbnailQueue = [];
       let recordingThumbnailActive = 0;
       const recordingThumbnailUrls = new Map();
-      function releaseRecordingThumbnail(image){const url=recordingThumbnailUrls.get(image);if(url){recordingThumbnailUrls.delete(image);URL.revokeObjectURL(url);}}
+      const recordingThumbnailFinishes = new WeakMap();
+      function releaseRecordingThumbnail(image,detach=false){
+        // Cancel the resource before revoking it: WebKit can otherwise retry
+        // a detached/unloading image against a Blob URL that no longer exists.
+        if(detach){image.onload=null;image.onerror=null;image.removeAttribute('srcset');image.removeAttribute('src');recordingThumbnailFinishes.get(image)?.(false);}
+        const url=recordingThumbnailUrls.get(image);if(url){recordingThumbnailUrls.delete(image);URL.revokeObjectURL(url);}
+      }
       function recordingThumbnailBlob(image,blob){releaseRecordingThumbnail(image);const url=URL.createObjectURL(blob);recordingThumbnailUrls.set(image,url);return url;}
       // WebKit may reload a decoded image after layout/scroll. Keep its Blob
       // readable for the displayed node's lifetime, rather than revoking on load.
-      new MutationObserver(()=>{for(const image of recordingThumbnailUrls.keys())if(!image.isConnected)releaseRecordingThumbnail(image);}).observe(nvrGrid,{childList:true,subtree:true});
-      window.addEventListener('pagehide',event=>{if(!event.persisted)for(const image of recordingThumbnailUrls.keys())releaseRecordingThumbnail(image);});
+      new MutationObserver(()=>{for(const image of recordingThumbnailUrls.keys())if(!image.isConnected)releaseRecordingThumbnail(image,true);}).observe(nvrGrid,{childList:true,subtree:true});
+      window.addEventListener('pagehide',event=>{if(!event.persisted)for(const image of recordingThumbnailUrls.keys())releaseRecordingThumbnail(image,true);});
       function thumbnailContainer(image) { return image.closest('.recording-thumb-wrap, .recording-day-thumb'); }
       function markRecordingThumbnailFailed(image) {
         image.onload = null;
@@ -7329,6 +7335,7 @@ INDEX_HTML = r"""<!doctype html>
           const finish = (ok) => {
             if (finished) return;
             finished = true;
+            recordingThumbnailFinishes.delete(image);
             image.onload = null; image.onerror = null;
             if(!ok)releaseRecordingThumbnail(image);
             delete image.dataset.recordingThumbQueued;
@@ -7337,6 +7344,7 @@ INDEX_HTML = r"""<!doctype html>
             recordingThumbnailActive -= 1;
             pumpRecordingThumbnails();
           };
+          recordingThumbnailFinishes.set(image,finish);
           let expectedUrl = new URL(source, window.location.href).href;
           image.onload = () => { if (image.currentSrc === expectedUrl && image.naturalWidth > 1) finish(true); };
           let fallback=false;
@@ -7351,7 +7359,7 @@ INDEX_HTML = r"""<!doctype html>
             if([429,425,503].includes(response.status)){
               const attempt=Number(image.dataset.thumbAttempts||0)+1;image.dataset.thumbAttempts=String(attempt);
               if(attempt>6){finish(false);return;}
-              finished=true;image.onload=null;image.onerror=null;recordingThumbnailActive--;
+              finished=true;recordingThumbnailFinishes.delete(image);image.onload=null;image.onerror=null;recordingThumbnailActive--;
               const wait=Math.max(Math.min(8000,500*2**(attempt-1)),Math.min(60000,Math.max(0,Number(response.headers.get('Retry-After'))||0)*1000));
               setTimeout(()=>{delete image.dataset.recordingThumbQueued;if(image.isConnected)loadRecordingThumbnail(image);},wait);
               pumpRecordingThumbnails();return;

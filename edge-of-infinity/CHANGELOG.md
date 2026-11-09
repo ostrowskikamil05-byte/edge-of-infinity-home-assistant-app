@@ -28,6 +28,8 @@
 - Separate FFmpeg startup command headers from runtime diagnostics. Retain real
   errors and timestamp warnings. Include safe codes/phases for optional ONVIF
   synchronization failures.
+- Cancel detached/unloading gallery image resources before releasing their Blob
+  URLs, preventing WebKit from retrying a revoked cached thumbnail.
 - Test actual H264/H265 pictures, AAC PCM, rapid long-GOP seeks, natural file
   boundaries, 4K, native fallback, original-file hashes, one-camera ownership and
   HEVC sources with no initial SDP parameters. Sub-200 ms startup is not guaranteed.
