@@ -25,22 +25,29 @@ class CameraKeyframes:
     def __init__(self, config, soap, log, clock=time.monotonic):
         self.config=config;self.soap=soap;self.log=log;self.clock=clock
         self.lock=threading.Lock();self.slots=threading.BoundedSemaphore(2)
-        self.busy=set();self.next={};self.profiles={}
+        self.busy=set();self.next={};self.profiles={};self.warming=set();self.pending=set()
 
-    def request(self, camera_id):
+    def request(self, camera_id, warm_only=False):
         camera=next((c for c in self.config().get('cameras',[]) if c.get('id')==camera_id and c.get('enabled')),None)
         if not camera or not camera.get('onvif_url'):return False
         with self.lock:
+            if camera_id in self.warming and not warm_only:
+                self.pending.add(camera_id);return True
             if camera_id in self.busy or self.clock()<self.next.get(camera_id,0) or not self.slots.acquire(blocking=False):return False
             self.busy.add(camera_id);self.next[camera_id]=self.clock()+3
+            if warm_only:self.warming.add(camera_id)
             while len(self.next)>32:self.next.pop(next(iter(self.next)))
         try:
-            threading.Thread(target=self.run,args=(dict(camera),),daemon=True).start()
+            threading.Thread(target=self.run,args=(dict(camera),not warm_only),daemon=True).start()
         except RuntimeError:
-            with self.lock:self.busy.discard(camera_id)
+            with self.lock:self.busy.discard(camera_id);self.warming.discard(camera_id);self.pending.discard(camera_id)
             self.slots.release()
             return False
         return True
+
+    def warm(self):
+        for camera in self.config().get('cameras',[]):
+            if camera.get('enabled') and camera.get('onvif_url'):self.request(camera['id'],warm_only=True)
 
     def resolve(self, camera):
         stream=camera.get('record_stream') if camera.get('record_stream') in ('main','sub') else 'main'
@@ -67,17 +74,21 @@ class CameraKeyframes:
             return endpoint,token
         raise RuntimeError('keyframe_recording_profile_not_found')
 
-    def run(self, camera):
+    def run(self, camera, synchronize=True):
         camera_id=camera['id'];started=self.clock();success=False
         try:
             endpoint,token=self.resolve(camera)
-            self.soap(camera,endpoint,'http://www.onvif.org/ver10/media/wsdl/SetSynchronizationPoint',f'<trt:SetSynchronizationPoint><trt:ProfileToken>{escape(token)}</trt:ProfileToken></trt:SetSynchronizationPoint>')
+            with self.lock:
+                synchronize=synchronize or camera_id in self.pending
+                self.warming.discard(camera_id);self.pending.discard(camera_id)
+            if synchronize:self.soap(camera,endpoint,'http://www.onvif.org/ver10/media/wsdl/SetSynchronizationPoint',f'<trt:SetSynchronizationPoint><trt:ProfileToken>{escape(token)}</trt:ProfileToken></trt:SetSynchronizationPoint>')
             success=True
-            self.log('keyframe_onvif_requested',{'camera_id':camera_id,'elapsed_ms':round((self.clock()-started)*1000),'encoder_settings_changed':False})
+            self.log('keyframe_onvif_requested' if synchronize else 'keyframe_onvif_profile_ready',{'camera_id':camera_id,'elapsed_ms':round((self.clock()-started)*1000),'encoder_settings_changed':False})
         except (RuntimeError,ValueError,OSError) as error:
             self.log('keyframe_onvif_unavailable',{'camera_id':camera_id,'reason':type(error).__name__,'elapsed_ms':round((self.clock()-started)*1000)})
         finally:
             with self.lock:
                 self.busy.discard(camera_id)
-                if not success:self.next[camera_id]=self.clock()+60
+                self.warming.discard(camera_id);self.pending.discard(camera_id)
+                self.next[camera_id]=self.clock()+(60 if not success else 3 if synchronize else 0)
             self.slots.release()

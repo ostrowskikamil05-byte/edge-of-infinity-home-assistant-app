@@ -61,14 +61,15 @@ class HttpDisconnectTests(unittest.TestCase):
         self.assertTrue(output.getvalue().endswith(b'{"cameras": []}'))
 
     def test_live_assets_cache_only_the_current_version_and_keep_private_scope(self):
+      for filename,marker in [('client.js',b'export class EdgeRTCClient'),('edge-pcm-worklet.js',b"registerProcessor('edge-playback'")]:
         for suffix,cached in [('',False),('?v=old',False),('?v='+self.panel.APP_VERSION,True)]:
             output=io.BytesIO();handler=self.handler(output)
-            handler.rfile=io.BytesIO(('GET /api/edge-rtc/client.js'+suffix+' HTTP/1.1\r\nHost: test\r\n\r\n').encode())
+            handler.rfile=io.BytesIO(('GET /api/edge-rtc/'+filename+suffix+' HTTP/1.1\r\nHost: test\r\n\r\n').encode())
             with patch.object(handler,'log_message'):handler.handle_one_request()
             headers,body=output.getvalue().split(b'\r\n\r\n',1)
             self.assertEqual(headers.count(b'Cache-Control:'),1)
             self.assertIn(b'private, max-age=86400, immutable' if cached else b'no-store',headers)
-            self.assertNotIn(b'public,',headers);self.assertIn(b'export class EdgeRTCClient',body)
+            self.assertNotIn(b'public,',headers);self.assertIn(marker,body)
 
     def test_other_io_failures_are_not_hidden(self):
         with self.assertRaisesRegex(OSError, 'client disconnected'):

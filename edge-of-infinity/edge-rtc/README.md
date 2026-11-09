@@ -44,14 +44,19 @@ microphone ownership are bounded. Read-only streams reject microphone frames.
 - Main/Sub compatibility paths alias the selected recording profile. The HA card
   advertises only that actual profile and NVR, so it does not promise two qualities
   from a single original source.
-- A cached GOP accelerates joining. It is bounded to 16 MiB / 180 access units.
-- Each viewer queue holds at most 16 frames; slow viewers are closed, without
+- A cached GOP accelerates joining. It is bounded to 16 MiB / 2048 access units.
+- Steady viewer queues allow 128 audio/video packets within an 8 MiB byte cap;
+  cached startup allows 1024 queued packets. Slow viewers are closed, without
   blocking recorder delivery. At most 32 native viewers attach to one source.
 - Browser decoder queues are bounded; stale decoded frames are closed.
 - Core status distinguishes current upstream connections from connection attempts.
 - Private HTTP API requires a token. The HA bridge requires entity read access,
   and entity control access for microphone capture. The token remains backend-only.
 - WS compression is disabled for already compressed video.
+- Browser camera audio uses one continuous PCM AudioWorklet with an 80 ms
+  initial jitter delay and at most 240 ms of source samples. Resampling spans
+  packet boundaries; microphone capture retains its separate processor in the
+  same module. Recording AAC and original video are independent of this output.
 
 ## Build and test
 

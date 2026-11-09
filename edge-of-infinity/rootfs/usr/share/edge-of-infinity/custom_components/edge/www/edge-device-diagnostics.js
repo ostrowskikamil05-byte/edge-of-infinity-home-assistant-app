@@ -71,7 +71,7 @@ class DeviceReporter{
   for(const [key,sampler] of this.samplers){try{this.source(key,sampler());}catch(_){}}
   if(!this.events.length&&!this.resources.length&&![...this.sources.values()].some(s=>s.state!=='closed'))return;
   const events=this.events.splice(0,12),resources=this.resources.splice(0,12),long_tasks=this.longTasks.splice(0,12);
-  let data=scrub({device_id:this.device_id,session_id:this.session_id,time_origin_ms:performance.timeOrigin,version:'0.12.2',device:this.device(),context:this.context,
+  let data=scrub({device_id:this.device_id,session_id:this.session_id,time_origin_ms:performance.timeOrigin,version:'0.12.3',device:this.device(),context:this.context,
    browser_endpoint:safeDiagnosticURL(location.href),events,resources,long_tasks,sources:Object.fromEntries(this.sources),dropped_entries:this.dropped});
   // Large error payloads must not turn diagnostics into stream traffic.
   while(new TextEncoder().encode(JSON.stringify(data)).length>24000&&(data.events.length||data.resources.length)){

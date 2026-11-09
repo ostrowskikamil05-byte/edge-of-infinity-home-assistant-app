@@ -2,6 +2,16 @@
 
 Requires Python 3.12+, FFmpeg/FFprobe, Node.js and Playwright with Chromium.
 
+`edge_rtc_audio.cjs` starts its own local HTTP server for the actual audio worklet.
+Run with WebKit and Chromium. It decodes generated PCMA/PCMU and supported AAC,
+measures Web Audio output against a continuous native tone, sends regular and
+oversized bursts, verifies bounded queues and checks that mute clears sound.
+Camera playback must not create per-packet AudioBufferSources. The standalone
+`tests/edge_rtc_audio.cjs` verifies every G711 byte against FFmpeg and exercises
+the actual continuous PCM processor at 8/16/48 kHz with mono/stereo, jitter,
+backlog and clear. `tests/recording_buffer.cjs` covers adaptive headroom, identical
+bytes, failed-download backoff and user cancellation.
+
 `nvr_ready_playback.cjs` uses the 24-second two-camera fixture on port 18093.
 It checks JSON-only server preparation while Live runs, no saved-video body
 downloads on Live, explicit Live teardown before recording startup, held main

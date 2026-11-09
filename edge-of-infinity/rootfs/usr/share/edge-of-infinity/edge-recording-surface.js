@@ -86,7 +86,7 @@
     hide(video,canvas,reason){
       if(!this.current(video)||video.seeking||video.readyState<2||video.currentTime+.1<Number(video.dataset.recordingSeek||0))return false;
       video.removeAttribute('poster');canvas.hidden=true;const s=this.state(video);clearTimeout(s.timer);s.timer=null;
-      if(!s.released){s.released=true;this.note('ui_recording_picture_released',{index:video.dataset.recordingPlayer,seek_epoch:s.epoch,reason,media_time:video.currentTime});}return true;
+      if(!s.released){s.released=true;this.note('ui_recording_picture_released',{index:video.dataset.recordingPlayer,seek_epoch:s.epoch,reason,media_time:video.currentTime,picture_ms:Math.round(performance.now()-(s.at||performance.now()))});}return true;
     }
     release(video,canvas){
       if(!canvas||canvas.hidden)return;const s=this.state(video);s.canvas=canvas;
