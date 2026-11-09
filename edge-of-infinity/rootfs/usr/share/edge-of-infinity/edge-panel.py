@@ -99,15 +99,15 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.12.2"
-APP_RELEASE_FEATURES=['Original-resolution WebKit canvas presentation using the native recording decoder and AAC audio',
-                      'Inline native Live document; valid delta frames retained during decoder backpressure',
-                      'Bounded mobile jitter queue and fresh-GOP startup before sending an old cache',
-                      'Bounded ONVIF synchronization on the matched recording profile; no encoder settings changed',
-                      'JSON-only server preparation on Live; video body warming after current-file buffering',
-                      'Original video/FPS/AAC, one camera upstream, gallery and module/camera/time/device logs preserved']
+APP_VERSION = "0.12.3"
+APP_RELEASE_FEATURES=['Continuous PCM worklet for camera audio; bounded jitter and resampling across packet boundaries',
+                      'Adaptive next-recording headroom and failed-download backoff within the existing RAM budget',
+                      'Read-only ONVIF profile discovery at startup; one shared always-on camera source',
+                      'Detection publisher startup grace without replaying retained events or hiding later outages',
+                      'Seek timing, keyframe interval and live audio buffer diagnostics',
+                      'Original-resolution WebKit recording presentation, original video/FPS/AAC and gallery preserved']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "mobile-presentation-v122"
+UI_BUILD = "continuous-audio-v123"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -7440,7 +7440,8 @@ INDEX_HTML = r"""<!doctype html>
         const url=mediaUrlWithTimeFragment(panelPath(plan.next.file.url),0),now=performance.now();
         if(Number(video.dataset.recordingStableAt||0)&&now-Number(video.dataset.recordingStableAt)>2000&&video.dataset.recordingLoading!=='true'&&video.dataset.recordingBuffering!=='true'){
           const ahead=Array.from({length:video.buffered.length},(_,i)=>[video.buffered.start(i),video.buffered.end(i)]).find(([a,b])=>a<=video.currentTime&&video.currentTime<=b);
-          if(video.networkState===1||ahead&&Number.isFinite(video.duration)&&ahead[1]>=video.duration-.1)void recordingBuffer.prime(video,url,Number(plan.next.file.size_bytes||0));
+          const lead=recordingBuffer.headroom(plan.next.file.size_bytes),covered=ahead&&ahead[1]-video.currentTime>=lead;
+          if(video.networkState===1||covered||ahead&&Number.isFinite(video.duration)&&ahead[1]>=video.duration-.1)void recordingBuffer.prime(video,url,Number(plan.next.file.size_bytes||0));
         }
         if(recordingWarmDone.has(url)&&now-recordingWarmDone.get(url)<30000)return;
         const job={video,url,controller:new AbortController()};recordingWarmJob=job;
@@ -7965,6 +7966,7 @@ INDEX_HTML = r"""<!doctype html>
           const response=await fetch(panelPath(`api/recording/timing?${new URLSearchParams({key:recordingStatus[index].key,name:file.name})}`));
           if(!response.ok)return;const data=await response.json();if(!video.isConnected||video.dataset.recordingLoadedFile!==source)return;
           video.dataset.recordingFps=String(data.fps||0);video.dataset.recordingCodec=data.codec_name||'';
+          video.dataset.recordingKeyframeInterval=String(data.keyframe_interval_seconds||0);
           const slider=nvrGrid.querySelector(`[data-recording-playback-seek="${index}"]`);if(slider&&data.fps>0)slider.step=String(1/data.fps);
           video.dataset.recordingTimingSource=source||'';
           video.dataset.recordingAudioCodec=data.audio_codec||'';video.dataset.recordingAudioRate=String(data.audio_sample_rate||0);
@@ -8037,7 +8039,7 @@ INDEX_HTML = r"""<!doctype html>
         const state=recordingScrubs.get(slider.dataset.recordingPlaybackSeek);if(!state)return;
         state.desired=cancel?state.original:Number(slider.value);state.slider.value=String(state.desired);
         state.active=false;state.finishing=true;
-        debugEvent('ui_recording_scrub_commit',{index:state.index,position:state.desired,cancel});
+        debugEvent('ui_recording_scrub_commit',{index:state.index,position:state.desired,cancel,...recordingVideoDiagnostics(state.video),keyframe_interval_seconds:Number(state.video.dataset.recordingKeyframeInterval||0),buffer:recordingBuffer.diagnostic()});
         clearTimeout(state.deadline);state.deadline=setTimeout(()=>{
           if(recordingScrubs.get(state.index)!==state)return;
           discardRecordingScrub(state.index);pauseRecording(state.video);
@@ -11115,6 +11117,9 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/edge-rtc/client.js":
             self.send_live_script("edge-rtc-client.js")
             return
+        if path == "/api/edge-rtc/edge-pcm-worklet.js":
+            self.send_live_script("edge-pcm-worklet.js")
+            return
         if path.startswith("/api/edge-rtc/stream/") and EDGE_RTC_ENABLED:
             self.serve_edge_rtc_stream(path.removeprefix("/api/edge-rtc/stream/"))
             return
@@ -11939,6 +11944,7 @@ def main() -> None:
             write_json, on_event=enqueue_alert)
         ALERT_SERVICE=AlertMediaService(DETECTION_SERVICE.store,load_config,alert_source_entries,save_alert_image,save_alert_fallback_image,write_debug_event)
         DETECTION_SERVICE.apply(config)
+        if EDGE_RTC_ENABLED:CAMERA_KEYFRAMES.warm()
     except Exception as error:
         write_debug_event("boot_refresh_status_error", {"error": str(error), "type": type(error).__name__})
         raise

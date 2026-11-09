@@ -2,14 +2,13 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.12.2** adds original-resolution canvas presentation for WebKit
-recordings, avoids iframe-document requests for native panel Live, and handles
-mobile decoder/network bursts without discarding valid reference frames.
-Live prepares recording copies on the server without downloading their video
-bodies. Bounded ONVIF synchronization can request a fresh keyframe from the
-existing recording profile. Original recordings, AAC, FPS, the persistent
-gallery and one camera upstream are retained.
-See [update details](edge-of-infinity/DOCS.md#0122-mobile-picture-presentation-and-live-startup).
+Version **0.12.3** uses continuous PCM playback for live audio, avoiding overlapping
+packets and WebKit's short-buffer resampling peaks. Bounded recording prefetch
+starts with sufficient headroom and backs off after a failed transfer. Read-only
+ONVIF discovery runs at startup, while EdgeRTC maintains its one always-on camera
+source. Original video/FPS, recording AAC, the gallery and WebKit recording
+presentation are retained.
+See [update details](edge-of-infinity/DOCS.md#0123-continuous-audio-and-bounded-recording-lookahead).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:
 

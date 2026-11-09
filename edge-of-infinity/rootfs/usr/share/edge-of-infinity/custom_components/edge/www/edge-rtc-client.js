@@ -49,7 +49,9 @@ export class EdgeRTCClient {
     bootstrap_packets:this.bootstrapPackets||0,bootstrap_frames_skipped:this.bootstrapFrames,bootstrap_wait_ms:this.bootstrapWaitMS||0,decoder_wait_ms:this.decoderWaitMS||0,message_bytes:this.pendingBytes||0,
     websocket_open_ms:this.websocketOpenAt==null?null:this.websocketOpenAt-this.started,decoder_configured_ms:this.decoderConfiguredAt==null?null:this.decoderConfiguredAt-this.started,first_video_packet_ms:this.firstVideoPacketAt==null?null:this.firstVideoPacketAt-this.started,bootstrap_decode_ms:this.decoderConfiguredAt==null||this.firstFrameMS===null?null:this.firstFrameMS-(this.decoderConfiguredAt-this.started),
     bootstrap_packets_superseded:this.bootstrapSkippedPackets||0,bootstrap_keyframe_replacements:this.bootstrapKeyReplacements||0,
-    measured_end_to_end_latency_ms:null,audio_state:this.audio?.state||'muted_or_not_started'};}
+    measured_end_to_end_latency_ms:null,audio_state:this.audio?.state||'muted_or_not_started',audio_codec:this.audioInfo?.codec,audio_rate:this.audioInfo?.sampleRate,
+    audio_queue_ms:Math.round((this.audioQueuedSeconds||0)*1000)+(this.audioStats?.queued_ms||0),audio_scheduled_ms:0,audio_presentation:'continuous_pcm_worklet',audio_output_rate:this.audio?.sampleRate,audio_output_frames:this.audioStats?.output_frames||0,
+    audio_packets:this.audioPackets||0,audio_dropped_packets:this.audioDroppedPackets||0,audio_underruns:this.audioStats?.underruns||0,audio_overruns:this.audioStats?.overruns||0,audio_dropped_frames:this.audioStats?.dropped_frames||0};}
   async message(data){
     if(this.closed)return;
     try{
@@ -154,19 +156,52 @@ export class EdgeRTCClient {
     }
     if(this.frameQueue.length)this.renderRequest=requestAnimationFrame(()=>this.drawFrame());
   }
-  ensureAudio(){if(!this.audio){this.audio=new AudioContext({latencyHint:'interactive'});this.gain=this.audio.createGain();this.gain.connect(this.audio.destination);}this.gain.gain.value=this.muted?0:this.volume??0.6;this.audio.resume().catch(()=>{});return this.audio;}
-  setAudio(volume,muted){this.volume=volume;this.muted=muted;if(!muted||this.audio)this.ensureAudio();}
+  ensureAudio(){if(!this.audio){try{this.audio=new AudioContext({latencyHint:'interactive',sampleRate:48000});}catch(_){this.audio=new AudioContext({latencyHint:'interactive'});}this.gain=this.audio.createGain();this.gain.connect(this.audio.destination);}this.gain.gain.value=this.muted?0:this.volume??0.6;this.audio.resume().catch(()=>{});return this.audio;}
+  setAudio(volume,muted){this.volume=volume;if(muted&&!this.muted){this.clearAudio();if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.audioDecoder=null;}if(!muted&&this.muted){this.audioDisabled=false;if(this.audioPlaybackFailed){this.audioPlaybackPromise=null;this.audioModulePromise=null;this.audioPlaybackFailed=false;}}this.muted=muted;if(!muted||this.audio)this.ensureAudio();if(!muted)this.startAudioPlayback();}
+  clearAudio(){this.audioPlayback?.port.postMessage({type:'clear'});this.audioPending=[];this.audioQueuedSeconds=0;this.audioStats=null;}
   decodeAudio(payload,timestamp){
     const info=this.audioInfo;if(!info||this.audioDisabled)return;const audio=this.ensureAudio();
     if(info.codec==='pcma'||info.codec==='pcmu'){
-      const buffer=audio.createBuffer(1,payload.length,8000);const out=buffer.getChannelData(0);
-      for(let i=0;i<payload.length;i++){let v=payload[i],sample;if(info.codec==='pcmu'){v=~v&255;sample=(((v&15)<<3)+132)<<((v>>4)&7);sample=(v&128)?132-sample:sample-132;}else{v^=85;sample=(v&15)<<4;const exponent=(v>>4)&7;sample+=exponent?264:8;if(exponent>1)sample<<=exponent-1;if(!(v&128))sample=-sample;}out[i]=sample/32768;}this.playAudio(buffer);return;
+      const out=new Float32Array(payload.length);
+      for(let i=0;i<payload.length;i++){let v=payload[i],sample;if(info.codec==='pcmu'){v=~v&255;sample=(((v&15)<<3)+132)<<((v>>4)&7);sample=(v&128)?132-sample:sample-132;}else{v^=85;sample=(v&15)<<4;const exponent=(v>>4)&7;sample+=exponent?264:8;if(exponent>1)sample<<=exponent-1;if(!(v&128))sample=-sample;}out[i]=sample/32768;}this.playPCM([out],8000,timestamp);return;
     }
     if(!window.AudioDecoder){if(!this.audioUnavailableLogged){this.audioUnavailableLogged=true;this.diagnostics?.note('rtc_audio_decoder_missing',{source:this.diagnosticKey,codec:info.codec});}return;}
-    if(!this.audioDecoder){this.audioDecoder=new AudioDecoder({output:data=>{if(this.closed){data.close();return;}const buffer=audio.createBuffer(data.numberOfChannels,data.numberOfFrames,data.sampleRate);for(let i=0;i<data.numberOfChannels;i++)data.copyTo(buffer.getChannelData(i),{planeIndex:i,format:'f32-planar'});data.close();this.playAudio(buffer);},error:error=>{this.diagnostics?.note('rtc_audio_error',{source:this.diagnosticKey,message:error.message,codec:info.codec});if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.audioDecoder=null;this.audioDisabled=true;}});const config={codec:info.codec,sampleRate:info.sampleRate,numberOfChannels:info.channels};if(info.config)config.description=Uint8Array.from(atob(info.config),c=>c.charCodeAt(0));this.audioDecoder.configure(config);}
+    if(!this.audioDecoder){this.audioDecoder=new AudioDecoder({output:data=>{if(this.closed){data.close();return;}const timestamp=data.timestamp,rate=data.sampleRate,channels=Array.from({length:Math.min(2,data.numberOfChannels)},(_,i)=>{const out=new Float32Array(data.numberOfFrames);data.copyTo(out,{planeIndex:i,format:'f32-planar'});return out;});data.close();this.playPCM(channels,rate,timestamp);},error:error=>{this.diagnostics?.note('rtc_audio_error',{source:this.diagnosticKey,message:error.message,codec:info.codec});if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.audioDecoder=null;this.audioDisabled=true;}});const config={codec:info.codec,sampleRate:info.sampleRate,numberOfChannels:info.channels};if(info.config)config.description=Uint8Array.from(atob(info.config),c=>c.charCodeAt(0));this.audioDecoder.configure(config);}
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
-  playAudio(buffer){if(this.closed||this.muted)return;const now=this.audio.currentTime;this.audioTime=Math.max(now+0.04,this.audioTime||0);if(this.audioTime>now+0.25)this.audioTime=now+0.04;const source=this.audio.createBufferSource();source.buffer=buffer;source.connect(this.gain);source.start(this.audioTime);this.audioTime+=buffer.duration;}
-  async startMicrophone(){this.micTimer=setTimeout(()=>this.fail('Microphone initialization timed out.'),10000);for(const track of this.options.microphone.getTracks())track.addEventListener('ended',()=>this.fail('Microphone device disconnected.'),{once:true});const audio=this.ensureAudio();await audio.audioWorklet.addModule('/edge/edge-pcm-worklet.js?v=0.12.2');if(this.closed)return;this.micSource=audio.createMediaStreamSource(this.options.microphone);this.worklet=new AudioWorkletNode(audio,'edge-pcm');this.silence=audio.createGain();this.silence.gain.value=0;this.micSource.connect(this.worklet);this.worklet.connect(this.silence);this.silence.connect(audio.destination);this.worklet.port.onmessage=event=>{if(this.closed||this.ws.readyState!==WebSocket.OPEN)return;if(this.ws.bufferedAmount>6400){this.fail('Microphone connection is too slow.');return;}const packet=new Uint8Array(321);packet[0]=3;packet.set(new Uint8Array(event.data),1);this.ws.send(packet);};clearTimeout(this.micTimer);this.options.onMicrophone?.(true);}
-  close(){if(this.closed)return;this.diagnostics?.unregisterSource(this.diagnosticKey);this.diagnostics?.source(this.diagnosticKey,{state:'closed',frames:this.frames,dropped_frames:this.droppedFrames,first_frame_ms:this.firstFrameMS});this.diagnostics?.note('rtc_client_closed',{source:this.diagnosticKey,frames:this.frames});this.closed=true;this.bootstrapWake?.(false);clearTimeout(this.connectTimer);clearTimeout(this.micTimer);this.options.microphone?.getTracks().forEach(track=>track.stop());this.playing=false;this.connectionState='closed';this.ws?.close();if(this.video?.state!=='closed')this.video?.close();if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.clearFrames();this.worklet?.port.close();this.micSource?.disconnect();this.worklet?.disconnect();this.silence?.disconnect();this.audio?.close().catch(()=>{});}
+  audioModule(){
+    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.12.3',import.meta.url).href);
+  }
+  startAudioPlayback(){
+    if(this.audioPlaybackPromise||this.closed||this.audioDisabled)return;
+    const started=performance.now();
+    this.audioPlaybackPromise=Promise.resolve().then(()=>this.audioModule()).then(()=>{
+      if(this.closed)return;
+      this.audioPlayback=new AudioWorkletNode(this.audio,'edge-playback',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});
+      this.audioPlayback.connect(this.gain);
+      this.audioPlayback.port.onmessage=event=>{
+        if(this.closed)return;const data=event.data;
+        if(data.type==='started'&&!this.audioStarted){this.audioStarted=true;this.diagnostics?.note('rtc_audio_started',{source:this.diagnosticKey,codec:this.audioInfo?.codec,output_rate:this.audio.sampleRate,module_ms:Math.round(performance.now()-started)});}
+        if(data.type==='stats'){
+          this.audioStats=data;this.audioStatsAt=performance.now();
+          const resync=data.underruns+data.overruns;
+          if(resync!==(this.audioReportedResync||0)&&performance.now()-(this.audioReportedAt||-10000)>5000){this.audioReportedAt=performance.now();this.audioReportedResync=resync;this.diagnostics?.note('rtc_audio_resync',{source:this.diagnosticKey,...this.diagnosticState()});}
+        }
+      };
+      const pending=this.audioPending||[];this.audioPending=[];this.audioQueuedSeconds=0;
+      if(!this.muted)for(const packet of pending)this.sendPCM(packet);
+    }).catch(error=>{if(this.closed)return;this.audioDisabled=true;this.audioPlaybackFailed=true;this.audioPending=[];this.audioQueuedSeconds=0;this.diagnostics?.note('rtc_audio_error',{source:this.diagnosticKey,stage:'playback_worklet',message:error.message});});
+  }
+  sendPCM(packet){this.audioPlayback.port.postMessage(packet,packet.channels.map(channel=>channel.buffer));}
+  playPCM(channels,rate,timestamp){
+    if(this.closed||this.muted||this.audioDisabled||this.audio.state!=='running')return;
+    const duration=channels[0].length/rate;if(!Number.isFinite(duration)||duration<=0||duration>.25){this.audioDroppedPackets=(this.audioDroppedPackets||0)+1;return;}
+    this.audioPackets=(this.audioPackets||0)+1;const packet={type:'pcm',channels,rate,timestamp};
+    if(this.audioPlayback){this.sendPCM(packet);return;}
+    this.audioPending??=[];this.audioPending.push(packet);this.audioQueuedSeconds=(this.audioQueuedSeconds||0)+duration;
+    while(this.audioPending.length>1&&(this.audioQueuedSeconds>.24||this.audioPending.length>48)){const old=this.audioPending.shift();this.audioQueuedSeconds-=old.channels[0].length/old.rate;this.audioDroppedPackets=(this.audioDroppedPackets||0)+1;}
+    this.startAudioPlayback();
+  }
+  async startMicrophone(){this.micTimer=setTimeout(()=>this.fail('Microphone initialization timed out.'),10000);for(const track of this.options.microphone.getTracks())track.addEventListener('ended',()=>this.fail('Microphone device disconnected.'),{once:true});const audio=this.ensureAudio();await this.audioModule();if(this.closed)return;this.micSource=audio.createMediaStreamSource(this.options.microphone);this.worklet=new AudioWorkletNode(audio,'edge-pcm');this.silence=audio.createGain();this.silence.gain.value=0;this.micSource.connect(this.worklet);this.worklet.connect(this.silence);this.silence.connect(audio.destination);this.worklet.port.onmessage=event=>{if(this.closed||this.ws.readyState!==WebSocket.OPEN)return;if(this.ws.bufferedAmount>6400){this.fail('Microphone connection is too slow.');return;}const packet=new Uint8Array(321);packet[0]=3;packet.set(new Uint8Array(event.data),1);this.ws.send(packet);};clearTimeout(this.micTimer);this.options.onMicrophone?.(true);}
+  close(){if(this.closed)return;this.diagnostics?.unregisterSource(this.diagnosticKey);this.diagnostics?.source(this.diagnosticKey,{state:'closed',frames:this.frames,dropped_frames:this.droppedFrames,first_frame_ms:this.firstFrameMS});this.diagnostics?.note('rtc_client_closed',{source:this.diagnosticKey,frames:this.frames});this.closed=true;this.bootstrapWake?.(false);clearTimeout(this.connectTimer);clearTimeout(this.micTimer);this.options.microphone?.getTracks().forEach(track=>track.stop());this.playing=false;this.connectionState='closed';this.ws?.close();if(this.video?.state!=='closed')this.video?.close();if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.clearFrames();this.clearAudio();this.audioPlayback?.disconnect();this.audioPlayback?.port.close();this.worklet?.port.close();this.micSource?.disconnect();this.worklet?.disconnect();this.silence?.disconnect();this.audio?.close().catch(()=>{});}
 }

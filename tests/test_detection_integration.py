@@ -33,6 +33,12 @@ class DetectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             events = [{'id':1, 'camera_id':'front', 'kind':'motion', 'source':'camera', 'timestamp':1}]
             client = types.SimpleNamespace(health=AsyncMock(return_value={}),cameras=AsyncMock(return_value=[]),detection=AsyncMock(side_effect=lambda:{'updated_at':time.time(),'recent_events':list(events)}))
             coordinator = module.EdgeDetectionCoordinator(hass, client, object())
+            client.detection = AsyncMock(return_value={'updated_at': time.time() - 60, 'recent_events': events})
+            self.assertEqual(await coordinator._async_update_data(),{'detection':{},'status':'starting'})
+            hass.bus.async_fire.assert_not_called()
+            coordinator._started-=46
+            with self.assertRaisesRegex(RuntimeError,'stale'):await coordinator._async_update_data()
+            client.detection = AsyncMock(side_effect=lambda:{'updated_at':time.time(),'recent_events':list(events)})
             await coordinator._async_update_data()
             hass.bus.async_fire.assert_not_called()
             events.append({'id':2, 'camera_id':'front', 'kind':'person', 'source':'local', 'timestamp':2, 'private_extra':'not forwarded'})

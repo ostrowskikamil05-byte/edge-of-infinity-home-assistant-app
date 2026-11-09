@@ -61,6 +61,8 @@ class EdgeDetectionCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._event_cursor = None
         self._entry_id = getattr(entry,'entry_id','')
         self._notify_last = {}
+        self._started = time.monotonic()
+        self._fresh_seen = False
 
     async def _notify(self,event,options):
         service=str(options.get('notify_service') or '')
@@ -94,10 +96,17 @@ class EdgeDetectionCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {"detection": {}}
         if detection:
             try:
-                if time.time() - float(detection.get("updated_at", 0)) > 15:
+                stamp=float(detection.get("updated_at",0))
+                if not math.isfinite(stamp):raise ValueError('invalid timestamp')
+                if time.time() - stamp > 15:
+                    # Core can start before the add-on's publisher. Do not
+                    # replay a retained file or announce stale initial events.
+                    if not self._fresh_seen and time.monotonic()-self._started<45:
+                        return {"detection": {}, "status": "starting"}
                     raise UpdateFailed("Edge detection status is stale")
             except (TypeError, ValueError) as error:
                 raise UpdateFailed("Invalid Edge detection status") from error
+        self._fresh_seen = True
         events = sorted((event for event in detection.get("recent_events", []) if isinstance(event, dict) and isinstance(event.get("id"), int)), key=lambda event: event["id"])
         if self._event_cursor is not None:
             for event in events:

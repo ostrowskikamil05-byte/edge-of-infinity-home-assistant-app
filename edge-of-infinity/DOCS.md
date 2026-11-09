@@ -1,5 +1,57 @@
 # Edge of Infinity App Documentation
 
+## 0.12.3: continuous audio and bounded recording lookahead
+
+Update the app, restart Home Assistant Core and reopen the panel/dashboard on
+each device. Diagnostics should show `0.12.3` / `continuous-audio-v123`.
+
+Live camera sound now uses one continuous PCM AudioWorklet. The previous output
+could schedule overlapping sources after a burst; WebKit also produced boundary
+peaks when independently resampling short G711 AudioBuffers. The new ring keeps
+at most 240 ms of source samples, waits 80 ms initially and resamples continuously
+across packet boundaries. Oversized/old bursts are discarded within that budget;
+missing samples still cannot be recovered. G711 decoding is checked against
+FFmpeg, and real WebKit/Chromium output is compared with a continuous test tone.
+Camera microphone capture uses its existing separate processor. Video, recorded
+AAC and original files are independent of the live output change.
+
+Inspect `rtc_audio_started`, `rtc_audio_resync`, `rtc_audio_error`, `audio_codec`,
+`audio_rate`, `audio_output_rate`, `audio_output_frames`, `audio_queue_ms`,
+`audio_underruns`, `audio_overruns` and `audio_dropped_frames`. A worklet load error
+leaves video running; turn sound off and on to retry it. AudioWorklet requires
+the same HTTPS/localhost context already needed by native EdgeRTC.
+
+**Przygotowuj kolejny fragment** retains its two-file / 16 MiB RAM budget and
+8 MiB per-file limit. During stable visible playback it may warm the next file
+once 4–12 seconds are buffered ahead, estimated from the previous transfer, or
+when the current file is completely buffered/network-idle. Pause, seeking,
+Save-Data and leaving Recordings retain their cancellation rules. A failed or
+timed-out warm-up waits 30 seconds before retrying, avoiding repeated background
+downloads on slow links. Ordinary native playback remains available. Live
+prepares server-side compatible copies through JSON without transferring MP4s.
+
+Continuous unlimited phone buffering would compete with Live and consume memory
+and bandwidth. Cached adjacent files can start from RAM, but an uncached seek
+still needs network bytes and decoding from the preceding keyframe. An old
+24-second GOP can therefore require many reference frames even when the file
+already exists on the server. Camera codec/GOP/FPS settings are not rewritten.
+Seek diagnostics now include the keyframe interval and time to release a picture.
+
+EdgeRTC sources remain connected with no viewers. At startup, at most two
+background HTTP workers discover matching ONVIF profiles without issuing encoder
+writes or synchronization requests. A joining viewer can request synchronization
+after that discovery; no extra video channel is opened. This removes repeated
+discovery from many first joins, but phone authentication, network transfer and
+decoding still happen. A suspended/closed iOS app cannot keep its browser decoder
+running indefinitely; an already connected server source is not an already
+decoded phone frame.
+
+Detection integration initially waits up to 45 seconds for the add-on's publisher
+without replaying its retained events. A stale publisher after a fresh response,
+or after that startup window, still reports an error. DNS/router timeouts, HAOS
+GPU-driver warnings and errors from unrelated add-ons require their own fixes;
+they are not repaired by changing the Edge player.
+
 ## 0.12.2: mobile picture presentation and live startup
 
 Update the app, restart Home Assistant Core for the bundled integration/card,

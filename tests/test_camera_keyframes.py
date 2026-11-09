@@ -63,6 +63,30 @@ class KeyframeTests(unittest.TestCase):
         self.assertEqual(identity('rtsp://user:secret@cam/c1?transportmode=unicast'),identity('rtsp://cam/c1'))
         self.assertNotEqual(identity('rtsp://cam/realmonitor?channel=1&subtype=0'),identity('rtsp://cam/realmonitor?channel=1&subtype=1'))
 
+    def test_boot_discovery_does_not_request_keyframes_or_write_encoder(self):
+        service=self.service();service.slots.acquire();service.run(self.camera,synchronize=False)
+        self.assertEqual(len(self.calls),4)
+        self.assertFalse(any('Set' in action.rsplit('/',1)[-1] for action,_ in self.calls))
+        self.assertEqual(self.events[-1][0],'keyframe_onvif_profile_ready')
+        service.slots.acquire();service.run(self.camera)
+        self.assertEqual(len(self.calls),5,'first viewer repeated boot discovery')
+        self.assertTrue(self.calls[-1][0].endswith('SetSynchronizationPoint'))
+
+    def test_viewer_join_during_discovery_coalesces_into_one_sync(self):
+        service=self.service();entered=threading.Event();release=threading.Event();done=threading.Event()
+        original=service.soap
+        def blocked(*args):
+            if args[2].endswith('GetCapabilities'):entered.set();release.wait(2)
+            return original(*args)
+        service.soap=blocked
+        original_log=service.log
+        def log(*args):original_log(*args);done.set()
+        service.log=log;service.warm();self.assertTrue(entered.wait(1))
+        self.assertTrue(service.request('front'));self.assertTrue(service.request('front'))
+        release.set();self.assertTrue(done.wait(2))
+        self.assertEqual(sum(a.endswith('SetSynchronizationPoint') for a,_ in self.calls),1)
+        self.assertEqual(len(self.calls),5)
+
     def test_endpoint_requires_private_token(self):
         panel=load_panel_module();handler=panel.EdgeHandler.__new__(panel.EdgeHandler)
         handler.path='/api/edge-rtc/keyframe/front';handler.headers={};handler.client_address=('127.0.0.1',1)

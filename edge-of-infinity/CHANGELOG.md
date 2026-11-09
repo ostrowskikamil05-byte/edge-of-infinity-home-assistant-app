@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.12.3
+
+- Replace per-packet live AudioBufferSources with one continuous PCM AudioWorklet.
+  Retain G711/AAC/Opus decoding, resample across packet boundaries, use 80 ms
+  startup buffering and bound retained source samples to 240 ms. Mute clears
+  playback; microphone capture retains its processor and shared camera session.
+- Add live audio sample-rate, queue, output-frame, underrun and overrun diagnostics.
+  Worklet failures leave video running and can be retried with the sound control.
+- Start next-file prefetch with 4–12 seconds of buffered headroom, based on the
+  previous successful transfer, instead of always waiting for the current file
+  to finish downloading. Retain the two-file / 16 MiB budget and 8 MiB file cap.
+  Failed/time-limited warming backs off for 30 seconds; explicit user cancellation
+  remains immediate. Live still transfers no saved-video bodies.
+- Discover the matching ONVIF profile in bounded background workers at EdgeRTC
+  startup. Discovery is read-only; a viewer joining during discovery coalesces
+  into one synchronization request. Existing discovery cache/backoff is retained.
+- Allow an initial 45-second detection publisher startup window, with no retained
+  event replay. Staleness after a fresh response or after that window still fails.
+- Add seek/keyframe timing, continuous PCM reference and actual browser output
+  tests, buffer/backoff tests and current-version worklet asset checks. Preserve
+  original recordings, camera settings, FPS, retention and the persistent gallery.
+
 ## 0.12.2
 
 - Display native WebKit recording frames through an original-resolution canvas,
