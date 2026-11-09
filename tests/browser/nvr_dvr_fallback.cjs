@@ -11,7 +11,7 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
   const host=page.locator('[data-dvr-host="1"]');await host.locator('[data-dvr-action="toggle"]').click();await page.waitForFunction(()=>archivePlayers.get('1')?.client?.picture&&archivePlayers.get('1').wantPlay);
   await host.locator('[data-dvr-action="sound"]').click();
   await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="1"]');return archiveFallbacks.get('1')==='audio_decoder_unavailable'&&v&&!v.paused&&v.videoWidth>0&&v.currentTime>.1;});
-  assert.equal(await page.locator('[data-dvr-host="1"]').count(),0);assert.deepEqual(errors,[]);
+  assert.equal(await page.locator('[data-dvr-host="1"]').count(),0);assert(await page.locator('video[data-recording-player="1"]').evaluate(v=>!v.muted&&Math.abs(v.volume-.6)<.01),'fallback lost the requested sound setting');assert.deepEqual(errors,[]);
   console.log(`PASS ${wk?'webkit':'chromium'}: unsupported video/audio profiles select native MP4 automatically; actual picture resumes without changing the recording`);
  }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exit(1);});

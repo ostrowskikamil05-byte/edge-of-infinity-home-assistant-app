@@ -7193,7 +7193,7 @@ INDEX_HTML = r"""<!doctype html>
               position:target?.playbackSeek||0,format:recordingPlaybackClock,targetAt:position=>recordingTargetForPlaybackOffset(index,position),fullscreen:wrap=>requestEdgeFullscreen(wrap,'nvr_edge_dvr'),
               activate:selected=>{if(phonePlayback()){for(const other of archivePlayers.values())if(other!==selected)other.suspend();nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);releaseInactiveRecordingPlayers(null,true);}},
               onTarget:target=>{selectedRecording[index]=target.target.file.url;selectedRecordingSeek[index]=target.seek;selectedRecordingTimeline[index]=target.requested;updateRecordingTileSelection(index,target.target.file.url);},
-              fallback:reason=>{archiveFallbacks.set(index,reason.code);recordingAutoplayAfterRender[index]=reason.play;debugEvent('ui_dvr_device_fallback',{index,reason:reason.code,transport:'mp4',recording_changed:false});renderNvrGrid({reason:'archive_fallback'});},
+              fallback:reason=>{archiveFallbacks.set(index,reason.code);recordingAutoplayAfterRender[index]=reason.play;debugEvent('ui_dvr_device_fallback',{index,reason:reason.code,transport:'mp4',recording_changed:false});renderNvrGrid({reason:'archive_fallback'});const native=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);if(native){native.muted=Boolean(reason.muted);native.volume=reason.volume??.6;updateRecordingPlayerControls(native);}},
               onPosition:(entry,seconds,fps)=>{selectedRecording[index]=entry.file.url;selectedRecordingSeek[index]=seconds;selectedRecordingTimeline[index]=entry.offset+seconds;updateAlertProgress(index,entry.playbackOffset+seconds);markNvrInteraction('timeupdate');}
             });archivePlayers.set(index,player);
             const autoplay=Boolean(recordingAutoplayAfterRender[index]);delete recordingAutoplayAfterRender[index];
@@ -7426,7 +7426,7 @@ INDEX_HTML = r"""<!doctype html>
           galleryPrefetchTimer=null;
           if(epoch!==galleryPrefetchEpoch||activePage!=='home'||document.hidden)return;
           const frames=[...grid.querySelectorAll('iframe.live-frame')].filter(f=>f.dataset.liveSuspended!=='true');
-          if(EDGE_NATIVE_RTC&&frames.some(f=>f.dataset.liveReady!=='true'))return;
+          if(EDGE_NATIVE_RTC&&frames.some(f=>f.dataset.liveReady!=='true'&&overviewCameras.find(c=>(c.key||`${c.id}_${c.index??0}`)===f.dataset.liveKey)?.status==='online'))return;
           if(!(config.cameras||[]).every((_,i)=>Array.isArray(recordingStatus[i]?.files)))await loadRecordingStatus({history:true,reason:'gallery_prefetch'});
         },2000);
       }

@@ -21,7 +21,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
   }
   play(){if(this.closed)return;this.seek(this.request.file,this.position,{paused:false});}
   pause(){if(this.closed)return;this.paused=true;this.playing=false;this.clearFrames();this.clearAudio();this.archiveAudio=[];clearTimeout(this.pullTimer);this.options.onState?.();}
-  nativeFallback(code,message){const play=!this.paused;this.fail(message,false);this.options.onFallback?.({code,message,play});}
+  nativeFallback(code,message){const play=!this.paused,muted=this.muted,volume=this.volume;this.fail(message,false);this.options.onFallback?.({code,message,play,muted,volume});}
   setAudio(volume,muted){super.setAudio(volume,muted);if(!muted&&this.audioInfo)void this.checkArchiveAudio();}
   async checkArchiveAudio(){
     const info=this.audioInfo;if(this.closed||this.muted||!info||info.codec==='pcma'||info.codec==='pcmu')return true;
