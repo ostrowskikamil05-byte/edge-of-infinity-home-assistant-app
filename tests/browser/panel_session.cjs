@@ -21,6 +21,7 @@ async function until(page,predicate){const deadline=Date.now()+15000;while(!pred
    if(endpoint==='api/presets')return json({presets:[]});
    if(endpoint==='api/recording/status')return json({summary:true,cameras:[]});
    if(endpoint==='api/core/engine')return json({available:true,core_engine:'edge_rtc',running_engine:'edge_rtc'});
+   if(endpoint==='api/edge-rtc/player/front_main')return route.fulfill({contentType:'text/html',body:'<body data-fixture="live">Isolated camera</body>'});
    if(endpoint==='api/client-diagnostics.js'||endpoint==='api/edge-rtc/device-diagnostics.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-device-diagnostics.js'),'utf8')});
    if(endpoint==='api/edge-rtc/client.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-rtc-client.js'),'utf8')});
    if(endpoint==='api/client-diagnostics'){const data=request.postDataJSON();assert(Buffer.byteLength(request.postData())<=24000);assert(data.events.length<=32);reports.push({at:Date.now(),data});return json({ok:true});}
@@ -36,6 +37,7 @@ async function until(page,predicate){const deadline=Date.now()+15000;while(!pred
   assert.equal(await page.locator('#camera-grid iframe').getAttribute('src'),'about:blank');
   held=true;await visibility(false);await until(page,()=>Boolean(releaseProbe));assert.equal(await page.locator('#camera-grid iframe').getAttribute('src'),'about:blank','stream resumed before session validation');
   held=false;await releaseProbe();await page.waitForFunction(()=>document.querySelector('#camera-grid iframe').dataset.liveSuspended!=='true');
+  await page.waitForFunction(()=>{const body=document.querySelector('#camera-grid iframe')?.contentDocument?.body;return body?.textContent.includes('Inline player routing fixture')||body?.dataset.fixture==='live';});
   await visibility(true);expired=true;await visibility(false);await page.locator('[data-ingress-expired]').waitFor();
   assert.equal(await page.locator('#camera-grid iframe').getAttribute('src'),'about:blank');const afterExpired=requests.length;
   await page.evaluate(async()=>{debugEvent('test_expired');await Promise.allSettled([loadCameras(),loadRecordingStatus(),deviceReporter.flush()]);});await page.waitForTimeout(300);
