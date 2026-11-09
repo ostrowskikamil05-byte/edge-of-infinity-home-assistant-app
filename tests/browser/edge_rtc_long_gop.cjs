@@ -20,6 +20,12 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
   assert(metrics.first_frame_ms<5000,'waited for the next camera keyframe');
   assert.deepEqual(await page.evaluate(()=>liveErrors),[]);assert.equal((await page.evaluate(()=>fetch('/test/status').then(r=>r.json()))).sources[0].connection_attempts,1);
   await page.evaluate(()=>longGopClient.close());
+  const idleBefore=await page.evaluate(()=>fetch('/test/status').then(r=>r.json()));
+  await page.waitForTimeout(500);
+  const idleAfter=await page.evaluate(()=>fetch('/test/status').then(r=>r.json()));
+  assert.equal(idleAfter.sources[0].viewers,0);assert.equal(idleAfter.sources[0].upstream_connections,1);
+  assert.equal(idleAfter.sources[0].connection_attempts,1);assert(idleAfter.sources[0].packets>idleBefore.sources[0].packets,'camera stopped when the last viewer left');
+  assert(idleAfter.sources[0].bootstrap_ready,'continuous source lost its prepared GOP');
   console.log(`PASS actual long-GOP RTSP -> HA proxy -> WebCodecs: ${metrics.bootstrap_packets} cached packets, first image ${Math.round(metrics.first_frame_ms)} ms, one camera upstream`);
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1);});

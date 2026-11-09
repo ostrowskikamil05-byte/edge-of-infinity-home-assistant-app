@@ -130,6 +130,8 @@ jobs:
           PY
           EDGE_TEST_BROWSER=webkit node tests/browser/nvr_seek_buffer.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_seek_buffer.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_ready_playback.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_ready_playback.cjs
 
       - name: Test cold phone archive with twelve thousand saved files
         run: |

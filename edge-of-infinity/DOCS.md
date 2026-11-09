@@ -1,5 +1,40 @@
 # Edge of Infinity App Documentation
 
+## 0.12.1: ready recordings and in-picture seeking
+
+Update the app, restart Home Assistant Core and reopen the panel/card. Diagnostics
+show `0.12.1` / `ready-native-v121`. Existing saved settings and recordings stay intact.
+
+The device option **Przygotowuj nagrania wcześniej** also prepares the first
+selected file for up to two cameras while on Live, two seconds after the active
+native Live players confirm their first picture. This downloads saved compatible
+MP4 bytes without starting an offscreen recording decoder. It never reads from
+the camera. The same two-file / 16 MiB retained budget and 8 MiB / 12-second
+in-flight limit apply. Reported Save-Data/2G skips downloads. Entering NVR cancels
+unfinished warming and can immediately attach a ready file from RAM. Returning
+to Live closes recording decoders but retains unused bytes for at most two
+minutes; other pages and disabling the option release unused data. This cache is
+per open panel, so a newly opened browser still needs its first transfer.
+
+The seek bar no longer creates hover thumbnails or a preview-video decoder.
+Dragging changes the main recording picture; the frame buttons use the measured
+file FPS. Native recording sources load without `#t` and apply the current target
+from metadata, avoiding two competing seek paths on WebKit. Native `seeked` and
+`loadeddata` pictures update a pending hold; clock progress alone cannot release
+it. A slightly transparent transition layer lets WebKit continue compositing the
+underlying video. `ui_recording_picture_sampled` identifies this native-event
+fallback separately from a confirmed video-frame callback.
+
+Both camera sources already run continuously in EdgeRTC even with no viewers.
+The panel now preloads Live modules and caches current-version scripts privately
+for a day, shared across its camera frames. Unversioned/old-version requests keep
+the no-store policy. This removes repeated script downloads; a new phone session
+still establishes its authenticated connection and decodes real camera frames.
+Old long-GOP files still require reference decoding after an uncached seek.
+No camera encoder settings, original video, AAC policy, retention or upstream
+connection count change. Logs retain module/camera/time/device filters and add
+startup warming and native-picture sampling stages.
+
 ## 0.12.0: UNV startup, seeking and playback buffers
 
 Update the app, restart Home Assistant Core for the bundled card/integration,

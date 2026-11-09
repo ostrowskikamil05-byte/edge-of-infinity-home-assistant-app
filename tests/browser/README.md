@@ -248,3 +248,5 @@ preservation and camera/local/zone-only notification YAML at four widths. The
 browser fixture never contacts a camera. The separate real HEVC pipeline test
 calls the actual preview service, checks its JPEG dimensions/cropping and confirms
 preview, analysis, recording and microphone still share one upstream connection.
+
+`nvr_ready_playback.cjs` uses the long-GOP multi-camera fixture on port 18093. Run with `EDGE_TEST_BROWSER=webkit` and `chromium`. It checks live-first preparation of at most two saved MP4s without hidden recording decoders, actual first playback with server media requests blocked, no hover thumbnails, held main-picture scrubbing, measured frame stepping, native seek readiness when frame callbacks are unavailable, and retained bytes/decoder cleanup on return to Live.
