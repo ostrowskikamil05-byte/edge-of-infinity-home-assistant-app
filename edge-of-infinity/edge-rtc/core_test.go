@@ -54,6 +54,7 @@ type fakeCamera struct {
 	mic          atomic.Uint64
 	pli          atomic.Uint64
 	idrRequested atomic.Bool
+	videoPaused  atomic.Bool
 	done         chan struct{}
 	onOpen       func()
 }
@@ -117,6 +118,9 @@ func newFake(t *testing.T, onOpen ...func()) *fakeCamera {
 			case <-c.done:
 				return
 			case <-tick.C:
+				if c.videoPaused.Load() {
+					continue
+				}
 				seq++
 				c.stream.WritePacketRTP(c.direct, &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 96, Marker: true, SequenceNumber: seq, Timestamp: uint32(seq) * 3000, SSRC: 123}, Payload: []byte{0x65, 0x88, 0x84, 0x21}})
 			}

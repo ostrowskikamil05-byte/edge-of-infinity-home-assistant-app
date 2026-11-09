@@ -2,6 +2,7 @@
 
 Home Assistant App repository for Edge of Infinity.
 
+Version **0.13.1** fixes deferred recorder startup and Uniview ONVIF stream aliases.
 Version **0.13.0** adds optional **EdgeRTC DVR** archive playback with indexed
 keyframe seeks, one persistent authenticated socket and bounded frame delivery.
 Original video/FPS and AAC stay unchanged. Native MP4 remains available and is

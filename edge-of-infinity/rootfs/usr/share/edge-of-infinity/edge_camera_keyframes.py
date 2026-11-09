@@ -16,10 +16,24 @@ def value(root, name):
     return next((n.text or '' for n in root.iter() if local(n.tag) == name), '')
 
 
-def stream_identity(uri):
+def stream_identity(uri, vendor=''):
     parsed = urlparse(uri)
     query = parse_qs(parsed.query)
-    return parsed.path.rstrip('/'), {k: v for k, v in query.items() if k.lower() in ('channel', 'subtype', 'stream', 'profile')}
+    path=parsed.path.rstrip('/')
+    # Uniview exposes the same channel through two documented RTSP routes.
+    # Preserve both channel and stream; never select a profile by resolution.
+    if vendor.lower() in ('uniview','unv'):
+        media=re.fullmatch(r'/media/video([1-3])',path)
+        unicast=re.fullmatch(r'/unicast/c([1-9][0-9]*)/s([0-2])/live',path)
+        if media:path=f'/uniview/channel/1/stream/{int(media[1])-1}'
+        elif unicast:path=f'/uniview/channel/{unicast[1]}/stream/{unicast[2]}'
+    return path, {k.lower(): v for k, v in query.items() if k.lower() in ('channel', 'subtype', 'stream', 'profile')}
+
+
+class ProfileNotFound(RuntimeError):
+    def __init__(self, details):
+        super().__init__('keyframe_recording_profile_not_found')
+        self.details=details
 
 
 class CameraKeyframes:
@@ -53,7 +67,7 @@ class CameraKeyframes:
     def resolve(self, camera):
         stream=camera.get('record_stream') if camera.get('record_stream') in ('main','sub') else 'main'
         wanted=camera.get('rtsp_'+stream) or camera.get('rtsp_main') or ''
-        fingerprint=hashlib.sha256(json.dumps([camera.get(k) for k in ('onvif_url','username','password')]+[wanted]).encode()).hexdigest()
+        fingerprint=hashlib.sha256(json.dumps([camera.get(k) for k in ('onvif_url','username','password','vendor')]+[wanted]).encode()).hexdigest()
         with self.lock:cached=self.profiles.get(fingerprint)
         if cached and self.clock()-cached[0]<300:return cached[1:]
         deadline=self.clock()+10
@@ -65,15 +79,23 @@ class CameraKeyframes:
         endpoint=(media.get('XAddr') or value(media,'XAddr')) if media is not None else ''
         if not endpoint:raise RuntimeError('keyframe_media_service_unavailable')
         profiles=call(endpoint,'http://www.onvif.org/ver10/media/wsdl/GetProfiles','<trt:GetProfiles/>')
-        for profile in [n for n in profiles.iter() if local(n.tag)=='Profiles' and n.get('token')][:8]:
+        candidates=[n for n in profiles.iter() if local(n.tag)=='Profiles' and n.get('token')]
+        uri_errors=0
+        for profile in candidates[:8]:
             token=profile.get('token')
-            uri=call(endpoint,'http://www.onvif.org/ver10/media/wsdl/GetStreamUri',f'<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>{escape(token)}</trt:ProfileToken></trt:GetStreamUri>')
-            if stream_identity(value(uri,'Uri'))!=stream_identity(wanted):continue
+            try:
+                uri=call(endpoint,'http://www.onvif.org/ver10/media/wsdl/GetStreamUri',f'<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>{escape(token)}</trt:ProfileToken></trt:GetStreamUri>')
+            except (RuntimeError,ValueError,OSError) as error:
+                if str(error)=='keyframe_discovery_timeout':raise
+                uri_errors+=1;continue
+            if urlparse(value(uri,'Uri')).scheme not in ('rtsp','rtsps'):continue
+            if stream_identity(value(uri,'Uri'),camera.get('vendor',''))!=stream_identity(wanted,camera.get('vendor','')):continue
             with self.lock:
                 self.profiles[fingerprint]=(self.clock(),endpoint,token)
                 while len(self.profiles)>32:self.profiles.pop(next(iter(self.profiles)))
             return endpoint,token
-        raise RuntimeError('keyframe_recording_profile_not_found')
+        raise ProfileNotFound({'record_stream':stream,'profile_count':len(candidates),'profiles_checked':min(8,len(candidates)),
+                               'uri_errors':uri_errors,'matching_policy':'exact_stream_or_known_uniview_alias','recording_dependency':False})
 
     def run(self, camera, synchronize=True):
         camera_id=camera['id'];started=self.clock();success=False;phase='profile_discovery'
@@ -88,7 +110,7 @@ class CameraKeyframes:
             self.log('keyframe_onvif_requested' if synchronize else 'keyframe_onvif_profile_ready',{'camera_id':camera_id,'elapsed_ms':round((self.clock()-started)*1000),'encoder_settings_changed':False})
         except (RuntimeError,ValueError,OSError) as error:
             text=str(error);code=text if re.fullmatch(r'keyframe_[a-z_]{1,80}',text) else next((name for name in ('ActionNotSupported','NotAuthorized','NoProfile','InvalidArgVal') if name in text),'onvif_request_failed')
-            self.log('keyframe_onvif_unavailable',{'camera_id':camera_id,'reason':type(error).__name__,'code':code,'phase':phase,'severity':'warning','optional_capability':True,'encoder_settings_changed':False,'elapsed_ms':round((self.clock()-started)*1000)})
+            self.log('keyframe_onvif_unavailable',{'camera_id':camera_id,'reason':type(error).__name__,'code':code,'phase':phase,'severity':'warning','optional_capability':True,'encoder_settings_changed':False,'elapsed_ms':round((self.clock()-started)*1000),**getattr(error,'details',{})})
         finally:
             with self.lock:
                 self.busy.discard(camera_id)

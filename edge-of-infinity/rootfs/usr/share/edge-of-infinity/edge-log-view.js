@@ -1,7 +1,7 @@
 /* Structured event classification; capability names are never error evidence. */
 (() => {
   function category(name){
-    if(/rtc_|ui_live_|^keyframe_/.test(name))return 'live';
+    if(/rtc_|ui_live_|^keyframe_|^rtp_/.test(name))return 'live';
     if(/recording|gallery|thumbnail|playback|codec|alert/.test(name))return 'recordings';
     if(/detection|zone|onvif_event|^ai_/.test(name))return 'ai';
     if(/config|save|preset|discovery|runtime_sync/.test(name))return 'config';
@@ -16,6 +16,8 @@
     if(data.error&&data.error!=='none')return 'error';
     if(Number(data.error_code)>0)return 'error';
     if(/error|failed|promise_rejection|timeout/.test(name))return 'error';
+    if(data.severity==='error')return 'error';
+    if(data.severity==='warning')return 'warning';
     if(/stalled|overflow|unavailable|fallback/.test(name))return 'warning';
     return 'ok';
   }
@@ -52,5 +54,7 @@
   Object.assign(labels,{ui_live_picture_ready:'Obraz live gotowy w panelu',ui_recording_startup_warm:'Wcześniejsze przygotowanie nagrania',ui_recording_picture_sampled:'Klatka z natywnego dekodera po przewinięciu',ui_recording_buffer_ready:'Fragment gotowy w pamięci'});
   Object.assign(labels,{ui_recording_canvas_picture:'Obraz nagrania wyświetlony przez canvas',ui_recording_canvas_error:'Błąd wyświetlania obrazu nagrania',keyframe_onvif_requested:'Wysłano żądanie świeżej klatki ONVIF',keyframe_onvif_unavailable:'Kamera nie udostępniła synchronizacji ONVIF'});
   Object.assign(labels,{rtc_audio_started:'Ciągły dźwięk live uruchomiony',rtc_audio_resync:'Korekta bufora dźwięku',rtc_audio_error:'Błąd dźwięku live',keyframe_onvif_profile_ready:'Profil ONVIF przygotowany na serwerze',ui_recording_buffer_unavailable:'Wyprzedzenie nagrania odłożone po nieudanym pobieraniu'});
+  Object.assign(labels,{recording_autostart_waiting:'Nagrywarka oczekuje na metadane źródła EdgeRTC'});
+  Object.assign(labels,{rtp_unknown_payload:'Pakiety RTP niezgodne z opisem strumienia',rtp_source_decode_warning:'Ostrzeżenie dekodera pakietów RTP'});
   globalThis.EdgeLogView={category,severity,parse,valueSeverity,stamp,label:row=>row.event==='promise_rejection'&&/subscription not found/i.test(row.data?.message||'')?'Wycofana subskrypcja Home Assistant':labels[row.event]||row.event};
 })();
