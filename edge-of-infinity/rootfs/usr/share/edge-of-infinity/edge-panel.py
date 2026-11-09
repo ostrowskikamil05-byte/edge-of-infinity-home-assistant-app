@@ -7344,7 +7344,7 @@ INDEX_HTML = r"""<!doctype html>
       function cancelRecordingReady(){clearTimeout(recordingReadyTimer);recordingReadyTimer=null;recordingReadyEpoch++;}
       function scheduleRecordingReady(){
         cancelRecordingReady();
-        if(!recordingBuffer.enabled||activePage!=='home'||document.hidden)return;
+        if(activePage!=='home'||document.hidden)return;
         const epoch=recordingReadyEpoch;
         recordingReadyTimer=setTimeout(async()=>{
           recordingReadyTimer=null;
@@ -7352,6 +7352,7 @@ INDEX_HTML = r"""<!doctype html>
           // Do not compete with the first live image or open a hidden decoder.
           if(EDGE_NATIVE_RTC&&frames.some(f=>f.dataset.liveReady!=='true'))return;
           if(!(config.cameras||[]).every((_,i)=>Array.isArray(recordingStatus[i]?.files)))await loadRecordingStatus({history:true,reason:'gallery_prefetch'});
+          if(!recordingBuffer.enabled)return;
           const videos=[...nvrGrid.querySelectorAll('video[data-recording-player]')].slice(0,2);
           for(const video of videos){
             if(epoch!==recordingReadyEpoch||activePage!=='home'||document.hidden)return;
