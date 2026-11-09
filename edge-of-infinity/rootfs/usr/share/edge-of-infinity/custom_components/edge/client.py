@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json as json_lib
+import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -168,10 +170,31 @@ class EdgeClient:
     async def detection(self) -> dict[str, Any]:
         """Read bounded event metadata; images/credentials are never included."""
         try:
-            payload = await self._read_local_json("detection.json") if self.is_local else await self._request("GET", "/api/detection")
+            if self.is_local:
+                payload=await self.hass.async_add_executor_job(self._read_detection_sync) if self.hass else self._read_detection_sync()
+            else:payload=await self._request("GET", "/api/detection")
         except EdgeClientError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _read_detection_sync():
+        """Fall back from an old heartbeat mirror, without changing camera config precedence."""
+        candidates=[];invalid=None;now=time.time()
+        for path in (Path('/config/edge/detection.json'),Path('/homeassistant/edge/detection.json')):
+            try:payload=json_lib.loads(path.read_text(encoding='utf-8'))
+            except OSError:continue
+            except ValueError:invalid=path;continue
+            if not isinstance(payload,dict):invalid=path;continue
+            try:stamp=float(payload.get('updated_at',0))
+            except (TypeError,ValueError):stamp=0
+            if not math.isfinite(stamp):stamp=0
+            if -15<=now-stamp<=15:return {**payload,'status_file':str(path)}
+            candidates.append((stamp,payload,path))
+        if candidates:
+            _,payload,path=max(candidates,key=lambda row:(row[0]<=now+15,row[0]));return {**payload,'status_file':str(path)}
+        if invalid:return {'updated_at':None,'status_error':'invalid_json','status_file':str(invalid)}
+        raise EdgeConnectionError('Local detection status is unavailable')
 
     async def event_image(self, camera_id: str, ident: int) -> bytes:
         if not 0 < int(ident) <= 9223372036854775807:

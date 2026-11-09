@@ -25,8 +25,8 @@ const assert=require('node:assert/strict');
    // picture. Wait for actual decoded pixels, not just metadata or an audio clock.
    await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="1"]'),c=document.createElement('canvas');c.width=160;c.height=90;const g=c.getContext('2d');g.drawImage(v,0,0,160,90);return [...g.getImageData(0,0,160,90).data].filter((n,i)=>i%4!==3&&n>50).length>2000;},null,{timeout:3000});
    const picture=await video.evaluate(v=>{const c=document.createElement('canvas');c.width=160;c.height=90;const g=c.getContext('2d');g.drawImage(v,0,0,160,90);return [...g.getImageData(0,0,160,90).data].filter((n,i)=>i%4!==3&&n>50).length;});assert(picture>2000,'second-camera alert is black');
-   await page.waitForFunction(()=>document.querySelector('video[data-recording-player="1"]').dataset.recordingNextReady?.includes('000014.mp4'));await video.evaluate(v=>pauseRecording(v));
-   assert(requests.some(r=>r.method==='POST'&&r.url.includes('/api/recording/prepare')&&r.body?.includes('000014.mp4')),'next segment was not prepared through JSON');
+   await video.evaluate(v=>pauseRecording(v));
+   assert(!requests.some(r=>r.url.includes('/api/recording/prepare')),'alert playback prepared a speculative recording');
    assert(!requests.some(r=>r.method==='GET'&&r.type==='fetch'&&r.url.includes('/recordings/')),'warmup fetched a video body');
    await page.evaluate(()=>selectRecordingAtOffset(1,9));await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="1"]');return v.readyState>=2&&!v.seeking&&Math.abs(recordingPlaybackPosition(v)-9)<.2;});await video.evaluate(v=>{playRecording(v);v.currentTime=v.duration-.1;});
    await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="1"]');return !v.paused&&v.dataset.recordingLoadedFile.includes('000014.mp4')&&v.currentTime>.1;});
@@ -56,7 +56,7 @@ const assert=require('node:assert/strict');
    assert.equal(new URL(await clip.getAttribute('src'),base).searchParams.get('compat'),'1');
    if(mobile)assert(await video.evaluate(v=>!v.getAttribute('src')),'dialog retained the inactive phone decoder');
    await page.locator('dialog button').click();assert.deepEqual(errors,[]);
-   console.log(`PASS ${engine} ${mobile?'phone':'desktop'}: second-camera alert keeps its player, saved clip plays, JSON prepares the next segment without a media download, boundary and buffering resume, explicit Pause and bounded network recovery`);
+   console.log(`PASS ${engine} ${mobile?'phone':'desktop'}: second-camera alert keeps its player, saved clip plays, no speculative preparation/media fetch, direct boundary and buffering resume, explicit Pause and bounded network recovery`);
    await page.unrouteAll({behavior:'ignoreErrors'});await page.close();await context.close();
   }
  }finally{await browser.close();}

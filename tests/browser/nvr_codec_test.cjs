@@ -5,8 +5,7 @@ const assert=require('node:assert/strict');
  const browser=await (wk?webkit:chromium).launch({headless:true,executablePath:(wk?process.env.PLAYWRIGHT_WEBKIT_EXECUTABLE_PATH:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH)||undefined,args:wk?[]:['--no-sandbox']});
  try{
   const page=await browser.newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true});page.setDefaultTimeout(30000);
-  const errors=[],events=[];page.on('pageerror',e=>errors.push(e.message));
-  page.on('request',r=>{if(r.url().includes('/api/debug'))events.push(r.url());});
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.route('**/api/edge-rtc/player/**',r=>r.fulfill({contentType:'text/html',body:'<p>Generated fixture</p>'}));
   await page.goto(process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18091');await page.locator('[data-camera-form]').first().waitFor({state:'attached'});
   if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();
@@ -28,7 +27,7 @@ const assert=require('node:assert/strict');
   await page.waitForFunction(()=>{const v=document.querySelector('dialog video');return !!v.error||(!v.paused&&v.currentTime>.1);});
   await dialog.locator('[data-codec-close]').click();assert.equal(await page.locator('dialog').count(),0);
   const logs=await (await page.request.get((process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18091')+'/api/logs')).json();
-  assert(/recording_codec_test_(done|cached)/.test(logs.playback_log));assert(logs.playback_log.includes('ui_codec_test_'));assert(logs.hardware.inventory.cpu_model);
+  assert(/recording_codec_test_(done|cached)/.test(logs.playback_log));let deviceLog;for(let i=0;i<40;i++){const id=await page.evaluate(()=>deviceReporter.device_id);deviceLog=await(await page.request.get((process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18091')+'/api/client-diagnostics?map=0&device='+id)).json();if(deviceLog.selected?.log.includes('ui_codec_test_'))break;await page.waitForTimeout(250);}assert(deviceLog.selected?.log.includes('ui_codec_test_'));assert(logs.hardware.inventory.cpu_model);
   // Reproduce a paused browser while the recording is still buffering.
   await page.evaluate(()=>{const v=document.querySelector('video[data-recording-player="1"]');restoreRecordingPlayer(v);v.dataset.recordingWantsPlay='true';v.dataset.recordingBuffering='true';v.pause();});
   const slider=page.locator('[data-recording-playback-seek="1"]');
