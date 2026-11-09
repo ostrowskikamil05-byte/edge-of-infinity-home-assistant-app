@@ -49,7 +49,7 @@ const assert=require('node:assert/strict');
   await play('1');assert((await pixels(second)).bright>2000,'H264 video is black');assert.equal(await first.getAttribute('src'),null,'previous camera retained its decoder');
   await second.evaluate(v=>pauseRecording(v));await seek('1',16);assert((await pixels(second)).bright>2000);
   await play('0');assert((await pixels(first)).bright>2000,'camera failed after codec switch back to HEVC');
-  const source=await first.getAttribute('src'),response=await context.request.get(new URL(source,page.url()).href,{headers:{Range:'bytes=-16'}});
+  const source=await first.evaluate(v=>v.dataset.recordingSrc||v.src),response=await context.request.get(new URL(source,page.url()).href,{headers:{Range:'bytes=-16'}});
   assert.equal(response.status(),206);assert.equal((await response.body()).length,16);assert.match(response.headers()['content-range'],/bytes \d+-\d+\/\d+/);
   await nav('home');assert(await page.locator('video[data-recording-player]').evaluateAll(videos=>videos.every(v=>v.paused&&!v.getAttribute('src'))));
   await page.waitForFunction(()=>[...document.querySelectorAll('#camera-grid iframe')].every(f=>f.getAttribute('src')!=='about:blank'));

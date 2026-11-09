@@ -15,4 +15,7 @@ assert.equal(rows[2].severity,'ok');assert.equal(rows[3].severity,'warning');ass
 assert.equal(rows[0].category,'live');assert.equal(rows[4].category,'recordings');
 assert.equal(view.valueSeverity(report),'ok');assert.equal(view.valueSeverity({camera:{last_error:'RTSP timeout'}}),'error');
 assert.equal(view.parse(JSON.stringify({ts:123,ui:{event:'ui_live_frame_load',payload:{index:1}}}))[0].time,123);
+const history=view.parse(JSON.stringify({ts:'2026-08-13T11:00:00+0000',key:'front_0',error:'old disk full'}),{origin:'archive',legacyEvent:'recording_cache'});
+assert.equal(history[0].event,'recording_cache_error');assert.equal(history[0].origin,'archive');assert.equal(history[0].severity,'error');assert(view.stamp(history[0].time)>0);
+assert.equal(view.stamp(1794170904000),1794170904000);assert.equal(view.stamp(1794170904),1794170904000);
 console.log('PASS: structured log groups, deduplication, time order, actual media errors and expected session cancellation');

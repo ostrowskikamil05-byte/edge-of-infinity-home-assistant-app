@@ -25,7 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const version = "0.11.14"
+const version = "0.12.0"
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -229,6 +229,10 @@ func (a *app) stream(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 	defer s.detach(v)
+	hello["keyframe_request_sent"] = false
+	if len(cache) == 0 || len(cache) >= 40 {
+		hello["keyframe_request_sent"] = s.requestKeyframe()
+	}
 	ws.SetReadLimit(1024)
 	ws.SetReadDeadline(time.Now().Add(45 * time.Second))
 	if v.microphone {

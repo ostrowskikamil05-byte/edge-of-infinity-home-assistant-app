@@ -61,5 +61,25 @@ const path = require('node:path');
   await new Promise(resolve=>setImmediate(resolve));advance(now+20);
   assert.equal(count,600);assert(maximum<=8);assert.equal(startup.bootstrapFrames,599);assert.equal(startup.frames,1);
   startup.video.decodeQueueSize=8;const waiting=startup.waitForBootstrapCapacity();startup.close();assert.equal(await waiting,false);
+  // A fresh camera IDR must preempt a blocked cached GOP, rather than waiting
+  // for every obsolete 4K reference picture to pass through the decoder.
+  const fast=new EdgeRTCClient({canvas:{getContext:()=>({drawImage(){}})}}),units=[];
+  fast.messageChain=Promise.resolve();fast.pendingMessages=fast.pendingBytes=fast.receivedBytes=0;fast.bootstrapFloorTimestamp=599000;fast.decoderConfiguration={codec:'avc1.640028'};
+  let resets=0;
+  fast.video=new class extends EventTarget{
+    state='configured';decodeQueueSize=0;
+    reset(){resets++;this.decodeQueueSize=0;}configure(){}
+    decode(chunk){units.push(chunk.timestamp);this.decodeQueueSize++;if(chunk.timestamp>=1000000)setImmediate(()=>{this.decodeQueueSize--;fast.render(frame(chunk.timestamp));this.dispatchEvent(new Event('dequeue'));});}
+    close(){this.state='closed';}
+  };
+  function unit(timestamp,key){const p=new Uint8Array(11);p[0]=1;p[1]=key?1:0;new DataView(p.buffer).setBigInt64(2,BigInt(timestamp));return p.buffer;}
+  for(let i=0;i<10;i++)fast.queueMessage(unit(i*1000,i===0));
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(fast.video.decodeQueueSize,8);
+  fast.queueMessage(unit(1000000,true));for(let i=1;i<6;i++)fast.queueMessage(unit(1000000+i*50000,false));
+  let deadline;await Promise.race([fast.messageChain,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(Error('fresh IDR did not unblock startup')),1000);})]);clearTimeout(deadline);
+  await new Promise(resolve=>setImmediate(resolve));advance(now+350);
+  assert.equal(resets,1);assert.deepEqual(units.filter(t=>t>=1000000),[1000000,1050000,1100000,1150000,1200000,1250000]);
+  assert(fast.bootstrapSkippedPackets>0);assert(fast.frames>0);assert.equal(fast.pendingMessages,0);assert.equal(fast.pendingBytes,0);
+  fast.queueMessage(unit(1500000,true));await fast.messageChain;assert.equal(resets,1,'normal live IDR reset the decoder');fast.close();
   console.log('PASS: source 4K at 20/25/30 FPS, timestamp pacing of bursts, cached GOP startup, bounded backlog and frame cleanup');
 })().catch(error=>{console.error(error);process.exit(1);});

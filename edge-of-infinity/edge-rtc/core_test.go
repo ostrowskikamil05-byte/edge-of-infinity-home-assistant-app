@@ -22,6 +22,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/gorilla/websocket"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 )
 
@@ -44,15 +45,17 @@ func eventually(t *testing.T, f func() bool) {
 }
 
 type fakeCamera struct {
-	server  *gortsplib.Server
-	stream  *gortsplib.ServerStream
-	direct  *description.Media
-	back    *description.Media
-	active  atomic.Int32
-	maximum atomic.Int32
-	mic     atomic.Uint64
-	done    chan struct{}
-	onOpen  func()
+	server       *gortsplib.Server
+	stream       *gortsplib.ServerStream
+	direct       *description.Media
+	back         *description.Media
+	active       atomic.Int32
+	maximum      atomic.Int32
+	mic          atomic.Uint64
+	pli          atomic.Uint64
+	idrRequested atomic.Bool
+	done         chan struct{}
+	onOpen       func()
 }
 
 func (c *fakeCamera) OnConnOpen(*gortsplib.ServerHandlerOnConnOpenCtx) {
@@ -74,6 +77,12 @@ func (c *fakeCamera) OnSetup(*gortsplib.ServerHandlerOnSetupCtx) (*base.Response
 	return &base.Response{StatusCode: base.StatusOK}, c.stream, nil
 }
 func (c *fakeCamera) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
+	ctx.Session.OnPacketRTCPAny(func(_ *description.Media, p rtcp.Packet) {
+		if _, ok := p.(*rtcp.PictureLossIndication); ok {
+			c.pli.Add(1)
+			c.idrRequested.Store(true)
+		}
+	})
 	ctx.Session.OnPacketRTPAny(func(m *description.Media, _ format.Format, p *rtp.Packet) {
 		if m.IsBackChannel && len(p.Payload) == 160 {
 			c.mic.Add(1)
@@ -318,6 +327,7 @@ func TestBrowserFixture(t *testing.T) {
 		ticker := time.NewTicker(time.Second / time.Duration(fps))
 		defer ticker.Stop()
 		index := 0
+		frameIndex := 0
 		var sequence uint16
 		silence := make([]byte, 8000/fps)
 		for i := range silence {
@@ -328,7 +338,10 @@ func TestBrowserFixture(t *testing.T) {
 			case <-c.done:
 				return
 			case <-ticker.C:
-				packets, e := encoder.Encode(frames[index%len(frames)])
+				if os.Getenv("EDGE_RTC_TEST_RESPOND_PLI") == "1" && c.idrRequested.Swap(false) {
+					frameIndex = 0
+				}
+				packets, e := encoder.Encode(frames[frameIndex%len(frames)])
 				if e == nil {
 					for _, p := range packets {
 						p.Timestamp = uint32(uint64(index) * 90000 / uint64(fps))
@@ -338,6 +351,7 @@ func TestBrowserFixture(t *testing.T) {
 				sequence++
 				c.stream.WritePacketRTP(audio, &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 8, SSRC: 456, SequenceNumber: sequence, Timestamp: uint32(index) * uint32(len(silence))}, Payload: silence})
 				index++
+				frameIndex++
 			}
 		}
 	}()
