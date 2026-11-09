@@ -6464,9 +6464,9 @@ INDEX_HTML = r"""<!doctype html>
         await Promise.allSettled([...nvrGrid.querySelectorAll('img[data-recording-thumb-src]')].slice(0,12).map(async image=>{
           const source=image.dataset.recordingThumbSrc,blob=await galleryStore.loadThumbnail(galleryScope,source);
           if(!blob||!image.isConnected||image.dataset.recordingThumbQueued||image.dataset.recordingThumbSrc!==source)return;
-          const url=URL.createObjectURL(blob);image.loading='eager';image.dataset.recordingThumbBackend='jpeg';
-          image.onload=()=>{URL.revokeObjectURL(url);image.onload=null;image.onerror=null;thumbnailContainer(image)?.classList.add('thumb-loaded');image.removeAttribute('data-recording-thumb-src');};
-          image.onerror=()=>{URL.revokeObjectURL(url);image.onload=null;image.onerror=null;};image.src=url;
+          const url=recordingThumbnailBlob(image,blob);image.loading='eager';image.dataset.recordingThumbBackend='jpeg';
+          image.onload=()=>{image.onload=null;image.onerror=null;thumbnailContainer(image)?.classList.add('thumb-loaded');image.removeAttribute('data-recording-thumb-src');};
+          image.onerror=()=>{releaseRecordingThumbnail(image);image.onload=null;image.onerror=null;};image.src=url;
         }));
       }
       let selectedRecording = {};
@@ -7212,6 +7212,13 @@ INDEX_HTML = r"""<!doctype html>
 
       const recordingThumbnailQueue = [];
       let recordingThumbnailActive = 0;
+      const recordingThumbnailUrls = new Map();
+      function releaseRecordingThumbnail(image){const url=recordingThumbnailUrls.get(image);if(url){recordingThumbnailUrls.delete(image);URL.revokeObjectURL(url);}}
+      function recordingThumbnailBlob(image,blob){releaseRecordingThumbnail(image);const url=URL.createObjectURL(blob);recordingThumbnailUrls.set(image,url);return url;}
+      // WebKit may reload a decoded image after layout/scroll. Keep its Blob
+      // readable for the displayed node's lifetime, rather than revoking on load.
+      new MutationObserver(()=>{for(const image of recordingThumbnailUrls.keys())if(!image.isConnected)releaseRecordingThumbnail(image);}).observe(nvrGrid,{childList:true,subtree:true});
+      window.addEventListener('pagehide',event=>{if(!event.persisted)for(const image of recordingThumbnailUrls.keys())releaseRecordingThumbnail(image);});
       function thumbnailContainer(image) { return image.closest('.recording-thumb-wrap, .recording-day-thumb'); }
       function markRecordingThumbnailFailed(image) {
         image.onload = null;
@@ -7229,12 +7236,11 @@ INDEX_HTML = r"""<!doctype html>
           if (!source) continue;
           recordingThumbnailActive += 1;
           let finished = false;
-          let ownedUrl='';
           const finish = (ok) => {
             if (finished) return;
             finished = true;
             image.onload = null; image.onerror = null;
-            if(ownedUrl)URL.revokeObjectURL(ownedUrl);
+            if(!ok)releaseRecordingThumbnail(image);
             delete image.dataset.recordingThumbQueued;
             if (ok) { thumbnailContainer(image)?.classList.remove('thumb-error'); thumbnailContainer(image)?.classList.add('thumb-loaded'); image.removeAttribute('data-recording-thumb-src'); }
             else markRecordingThumbnailFailed(image);
@@ -7244,7 +7250,7 @@ INDEX_HTML = r"""<!doctype html>
           let expectedUrl = new URL(source, window.location.href).href;
           image.onload = () => { if (image.currentSrc === expectedUrl && image.naturalWidth > 1) finish(true); };
           let fallback=false;
-          image.onerror = () => { if (image.currentSrc !== expectedUrl)return;if(fallback){finish(false);return;}fallback=true;image.dataset.recordingThumbBackend='browser';recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>finish(false)); };
+          image.onerror = () => { if (image.currentSrc !== expectedUrl)return;releaseRecordingThumbnail(image);if(fallback){finish(false);return;}fallback=true;image.dataset.recordingThumbBackend='browser';recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>finish(false)); };
           image.loading = 'eager';
           // A small cached JPEG avoids downloading/decoding full 4K clips for
           // every film tile, especially through Nabu Casa.
@@ -7262,8 +7268,9 @@ INDEX_HTML = r"""<!doctype html>
             }
             if(!response.ok)throw new Error('thumbnail_unavailable');
             const blob=await response.blob();if(!blob.type.startsWith('image/'))throw new Error('thumbnail_unavailable');
+            if(!image.isConnected){finish(false);return;}
             if(galleryScope)void galleryStore.saveThumbnail(galleryScope,source,blob);
-            ownedUrl=URL.createObjectURL(blob);expectedUrl=ownedUrl;image.dataset.recordingThumbBackend='jpeg';image.src=ownedUrl;
+            expectedUrl=recordingThumbnailBlob(image,blob);image.dataset.recordingThumbBackend='jpeg';image.src=expectedUrl;
           }).catch(()=>{
             if(finished)return;fallback=true;image.dataset.recordingThumbBackend='browser';recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>finish(false));
           });

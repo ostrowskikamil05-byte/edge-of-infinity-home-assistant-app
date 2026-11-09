@@ -14,7 +14,11 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
    if(!transport)errors.push(e.message);
   });
   page.on('console',m=>{if(m.text().startsWith('EDGE_FIXTURE_UNHANDLED:'))errors.push(m.text());});
-  await page.addInitScript(()=>addEventListener('unhandledrejection',e=>console.error('EDGE_FIXTURE_UNHANDLED:'+String(e.reason))));
+  await page.addInitScript(()=>{
+   addEventListener('unhandledrejection',e=>console.error('EDGE_FIXTURE_UNHANDLED:'+String(e.reason)));
+   window.fixtureRevokedThumbnails=new Set();const revoke=URL.revokeObjectURL.bind(URL);
+   URL.revokeObjectURL=url=>{fixtureRevokedThumbnails.add(url);revoke(url);};
+  });
   page.on('request',r=>{if(new URL(r.url()).pathname.startsWith('/recordings/'))videoRequests.push(r.url());});
   await page.route('**/api/edge-rtc/player/**',r=>r.fulfill({contentType:'text/html',body:'<p>Generated camera</p>'}));
   await page.goto(base);await page.waitForFunction(()=>recordingStatus[0]?.files?.length>0);
@@ -31,6 +35,16 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
   await page.reload();try{await page.waitForFunction(()=>recordingStatus[0]?.files?.length>0);}catch(error){console.error(await page.evaluate(async()=>({scope:recordingGalleryScope(),saved:await galleryStore.loadSnapshot(recordingGalleryScope()).then(s=>s?.cameras?.map(c=>({id:c.id,index:c.index,files:c.files.length}))),current:Object.values(recordingStatus).map(c=>({id:c.id,index:c.index,files:c.files?.length})),errors:document.querySelector('#live-grid')?.textContent})));throw error;}
   if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();
   await page.waitForFunction(()=>Boolean([...document.querySelectorAll('.recording-film-grid img')].find(i=>i.src.startsWith('blob:')&&i.naturalWidth>100)));
+  // A displayed thumbnail must remain readable when WebKit reloads it after
+  // layout/scroll; reclaim its URL when the actual node leaves the gallery.
+  const thumbnail=await page.evaluate(async()=>{
+   const image=[...document.querySelectorAll('.recording-film-grid img')].find(i=>i.src.startsWith('blob:')&&i.naturalWidth>100);
+   const url=image.src,response=await fetch(url),bytes=(await response.blob()).size;
+   const decoded=new Image();decoded.src=url;await decoded.decode();
+   window.fixtureRetainedThumbnail=image;
+   return {url,bytes,width:decoded.naturalWidth,tracked:recordingThumbnailUrls.get(image)===url};
+  });
+  assert(thumbnail.bytes>100&&thumbnail.width>100&&thumbnail.tracked,'displayed JPEG URL was revoked before its node was removed');
   assert.equal(await page.locator('[data-recording-day-load]:visible').count(),0,'failed refresh obscured a restored gallery');
   await page.locator('[data-recording-toggle="0"]').click();
   await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="0"]');return !v.paused&&v.videoWidth>0&&v.currentTime>.1;});
@@ -57,6 +71,8 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
    return {noSecrets,other,whitelist,count:countRows,oversize,queueBound:queueBound&&held.queuedWrites===0&&held.queuedBytes===0,bytes:limited.reduce((n,r)=>n+r.bytes,0),expired:await galleryStore.loadSnapshot('whitelist')};
   });
   assert(checks.noSecrets);assert.equal(checks.other,null);assert(!checks.whitelist.includes('DO_NOT_STORE'));assert(checks.count<=96&&checks.bytes<=8*1024*1024);assert(checks.queueBound);assert.equal(checks.oversize,false);assert.equal(checks.expired,null);
+  await page.evaluate(()=>fixtureRetainedThumbnail.remove());
+  await page.waitForFunction(url=>!recordingThumbnailUrls.has(fixtureRetainedThumbnail)&&fixtureRevokedThumbnails.has(url),thumbnail.url);
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
   console.log(`PASS ${wk?'webkit':'chromium'}: background metadata only, persistent gallery/JPEG before network, actual playback, scope/secret/expiry/storage limits`);
   await page.unrouteAll({behavior:'ignoreErrors'});await context.close();
