@@ -190,7 +190,7 @@ export class EdgeRTCClient {
       };
       const pending=this.audioPending||[];this.audioPending=[];this.audioQueuedSeconds=0;
       if(!this.muted)for(const packet of pending)this.sendPCM(packet);
-    }).catch(error=>{this.audioDisabled=true;this.audioPlaybackFailed=true;this.audioPending=[];this.audioQueuedSeconds=0;this.diagnostics?.note('rtc_audio_error',{source:this.diagnosticKey,stage:'playback_worklet',message:error.message});});
+    }).catch(error=>{if(this.closed)return;this.audioDisabled=true;this.audioPlaybackFailed=true;this.audioPending=[];this.audioQueuedSeconds=0;this.diagnostics?.note('rtc_audio_error',{source:this.diagnosticKey,stage:'playback_worklet',message:error.message});});
   }
   sendPCM(packet){this.audioPlayback.port.postMessage(packet,packet.channels.map(channel=>channel.buffer));}
   playPCM(channels,rate,timestamp){

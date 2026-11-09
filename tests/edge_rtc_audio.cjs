@@ -33,5 +33,8 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
  assert(p.overruns>0&&p.droppedFrames>0);assert((p.write-p.read)/8000<=.24);
  for(let i=0;i<130;i++)assert(quantum(p)<.16);
  p.port.onmessage({data:{type:'clear'}});assert.equal(p.write,0);assert.equal(p.read,0);assert.equal(quantum(p),0);
+ // Closing the panel during module fetch is intentional cancellation. A
+ // genuine failure while the player is open must still be reported.
+ for(const closed of[true,false]){const c=new EdgeRTCClient({canvas:{}}),notes=[];let reject;c.diagnostics={note:event=>notes.push(event)};c.audioModule=()=>new Promise((resolve,fail)=>{reject=fail;});c.startAudioPlayback();await Promise.resolve();c.closed=closed;reject(Error('module download failed'));await c.audioPlaybackPromise;assert.equal(notes.includes('rtc_audio_error'),!closed);assert.equal(Boolean(c.audioDisabled),!closed);}
  console.log('PASS: PCMA/PCMU match FFmpeg; continuous mono/stereo 8/16/48 kHz PCM, bounded jitter, no boundary peaks, backlog/clear cleanup');
 })().catch(error=>{console.error(error);process.exit(1);});
