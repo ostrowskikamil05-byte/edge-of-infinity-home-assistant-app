@@ -63,6 +63,35 @@ class KeyframeTests(unittest.TestCase):
         self.assertEqual(identity('rtsp://user:secret@cam/c1?transportmode=unicast'),identity('rtsp://cam/c1'))
         self.assertNotEqual(identity('rtsp://cam/realmonitor?channel=1&subtype=0'),identity('rtsp://cam/realmonitor?channel=1&subtype=1'))
 
+    def test_uniview_known_aliases_keep_channel_stream_and_explicit_profile(self):
+        identity=module.stream_identity
+        self.assertEqual(identity('rtsp://cam/media/video1','uniview'),identity('rtsp://cam/unicast/c1/s0/live','uniview'))
+        self.assertEqual(identity('rtsp://cam/media/video2','uniview'),identity('rtsp://cam/unicast/c1/s1/live','uniview'))
+        for other in ('/unicast/c1/s1/live','/unicast/c2/s0/live','/custom/main','/unicast/c1/s0/live?profile=other'):
+            self.assertNotEqual(identity('rtsp://cam/media/video1','uniview'),identity('rtsp://cam'+other,'uniview'))
+        self.assertNotEqual(identity('rtsp://cam/media/video1'),identity('rtsp://cam/unicast/c1/s0/live'))
+
+    def test_uniview_alias_resolution_skips_an_unavailable_profile_without_writes(self):
+        self.camera.update(vendor='uniview',rtsp_main='rtsp://user:secret@192.0.2.10/media/video1')
+        service=self.service();original=service.soap
+        def soap(camera,endpoint,action,body):
+            if action.endswith('GetStreamUri'):
+                self.calls.append((action,body))
+                if '>wrong<' in body:raise RuntimeError('profile URI unavailable')
+                return ET.fromstring('<Response><Uri>rtsp://192.0.2.10/unicast/c1/s0/live</Uri></Response>')
+            return original(camera,endpoint,action,body)
+        service.soap=soap;service.slots.acquire();service.run(self.camera,synchronize=False)
+        self.assertEqual(self.events[-1][0],'keyframe_onvif_profile_ready')
+        self.assertFalse(any('Set' in action.rsplit('/',1)[-1] for action,_ in self.calls))
+
+    def test_unmatched_profile_diagnostics_do_not_claim_recording_dependency(self):
+        self.camera['rtsp_main']='rtsp://user:DO_NOT_LOG@192.0.2.10/custom'
+        service=self.service();service.slots.acquire();service.run(self.camera)
+        event,payload=self.events[-1]
+        self.assertEqual(payload['code'],'keyframe_recording_profile_not_found')
+        self.assertEqual(payload['profile_count'],2);self.assertFalse(payload['recording_dependency'])
+        self.assertNotIn('DO_NOT_LOG',str(payload))
+
     def test_boot_discovery_does_not_request_keyframes_or_write_encoder(self):
         service=self.service();service.slots.acquire();service.run(self.camera,synchronize=False)
         self.assertEqual(len(self.calls),4)

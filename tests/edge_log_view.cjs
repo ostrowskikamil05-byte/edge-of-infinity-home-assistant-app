@@ -20,4 +20,7 @@ assert.equal(history[0].event,'recording_cache_error');assert.equal(history[0].o
 assert.equal(view.stamp(1794170904000),1794170904000);assert.equal(view.stamp(1794170904),1794170904000);
 assert.equal(view.category('keyframe_onvif_requested'),'live');assert.equal(view.category('ui_recording_canvas_picture'),'recordings');
 assert.equal(view.severity({event:'keyframe_onvif_unavailable'}),'warning');
+assert.equal(view.severity({event:'recording_autostart_waiting',data:{severity:'info'}}),'ok');
+assert.equal(view.severity({event:'recording_autostart_waiting',data:{severity:'warning'}}),'warning');
+assert.equal(view.category('rtp_unknown_payload'),'live');
 console.log('PASS: structured log groups, deduplication, time order, actual media errors and expected session cancellation');

@@ -100,15 +100,18 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.13.1"
 APP_RELEASE_FEATURES=['Optional EdgeRTC DVR: indexed original H264/H265/AAC, epoch seeks and one bounded persistent socket',
+                      'Deferred recorder metadata starts retry without UI polling or extra camera channels',
+                      'Known Uniview ONVIF aliases and distinct metadata waiting diagnostics',
+                      'Source-specific RTP payload diagnostics and bounded SDP refresh without parallel camera connections',
                       'Actual video previews, frame steps, gray/green alert track and same-socket file transitions',
                       'Device codec negotiation with native MP4 fallback; original video/FPS and existing AAC retained',
                       'Native Live status and recording codec decisions use the existing source registry instead of RTSP probes',
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "archive-rtc-v130"
+UI_BUILD = "source-retry-v131"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -150,6 +153,10 @@ RECORDING_RETENTION_LOOP_STARTED = False
 RECORDING_THUMBNAIL_WARMUP_INTERVAL_SECONDS = 300
 RECORDING_THUMBNAIL_WARMUP_PER_CAMERA = 4
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
+RECORDING_SOURCE_WAIT = {}
+RECORDING_SOURCE_RETRY_RUNNING = False
+RECORDING_SOURCE_RETRY_STOP = threading.Event()
+RECORDING_SOURCE_RETRY_SECONDS = 5
 RECORDING_CACHE_WORKERS: set[str] = set()
 RECORDING_CACHE_LOOP_STARTED = False
 RECORDING_THUMBNAIL_WARMUP_LOOP_STARTED = False
@@ -4162,20 +4169,35 @@ def recording_codec_mode(stream: str, nvr: dict, metadata=None) -> tuple[str, st
     return mode, video_codec, audio_codec, probe
 
 
+class RecordingSourcePending(RuntimeError):
+    def __init__(self, details):
+        super().__init__('edge_rtc_source_metadata_pending')
+        self.details=details
+
+
 def recording_registry_metadata(camera,index,stream_name,wait_seconds=4):
     """Use the already connected camera's SDP; never open another probe channel."""
     path=mediamtx_path(camera,index,stream_name);deadline=time.monotonic()+wait_seconds
     while True:
         status=edge_rtc_status()
-        source=next((row for row in status.get('sources',[]) if path in row.get('paths',[]) or row.get('camera_id')==safe_id(camera.get('id') or f'camera_{index+1}')),None)
+        sources=status.get('sources',[])
+        source=next((row for row in sources if path in row.get('paths',[])),None)
+        if source is None:source=next((row for row in sources if row.get('camera_id')==safe_id(camera.get('id') or f'camera_{index+1}')),None)
         if source and source.get('ready') and (source.get('video') or {}).get('codec_name') and source['video'].get('parameters_ready',True):
             video=dict(source['video']);video['codec_name']={'h265':'hevc'}.get(video['codec_name'],video['codec_name'])
             audio=source.get('audio') or {};codec=str(audio.get('codec') or '').lower()
             codec='aac' if codec.startswith('mp4a.40.') else {'pcma':'pcm_alaw','pcmu':'pcm_mulaw'}.get(codec,codec)
             return {'video':video,'audio':{'codec_name':codec,'sample_rate':audio.get('sampleRate'),'channels':audio.get('channels')},'metadata_source':'edge_rtc_registry','source_ready':True}
         if time.monotonic()>=deadline:
-            write_debug_event('recording_source_pending',{'camera_id':camera.get('id'),'source':'edge_rtc_registry','api_reachable':status.get('api_reachable',False),'metadata_ready':False})
-            raise RuntimeError('edge_rtc_source_metadata_pending')
+            video=(source or {}).get('video') or {}
+            phase='core_unavailable' if not status.get('api_reachable',bool(sources)) else 'source_not_registered' if source is None else 'source_disconnected' if not source.get('ready') else 'video_metadata_missing' if not video.get('codec_name') else 'parameter_sets_pending'
+            raise RecordingSourcePending({'source':'edge_rtc_registry','source_path':path,'phase':phase,
+                'api_reachable':status.get('api_reachable',bool(sources)),'source_found':source is not None,
+                'source_ready':bool((source or {}).get('ready')),'upstream_connections':(source or {}).get('upstream_connections',0),
+                'packets':(source or {}).get('packets',0),'video_codec':video.get('codec_name',''),
+                'parameters_ready':bool(video.get('parameters_ready',bool(video.get('codec_name')))),
+                'width':video.get('width',0),'height':video.get('height',0),'onvif_required':False,
+                'rtp':(source or {}).get('rtp',{})})
         time.sleep(.2)
 
 
@@ -4232,7 +4254,7 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
         ]
     else:
         command += ['-c:v','copy']
-    if video_codec.lower() in ('hevc','h265'):
+    if video_codec.lower() in ('h264','hevc','h265'):
         command[command.index('-probesize')+1]='1048576'
         command[command.index('-analyzeduration')+1]='2000000'
     if audio_codec in ('aac','mp4a'):
@@ -4373,7 +4395,7 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
         elif preflight_error:
             recording_status = "blocked"
         elif desired_recording:
-            recording_status = "scheduled_stopped"
+            recording_status = "waiting_source" if key in RECORDING_SOURCE_WAIT else "scheduled_stopped"
         else:
             recording_status = "disabled"
         video_codec = camera.get("record_video_codec") or camera.get("live_video_codec") or camera.get("video_codec") or camera.get("codec") or ""
@@ -4403,6 +4425,7 @@ def recording_status_payload(config: dict | None = None, day_selection: dict[str
                 "record_error": preflight_error,
                 "recording": is_recording,
                 "recording_status": recording_status,
+                "source_wait":{field:value for field,value in RECORDING_SOURCE_WAIT.get(key,{}).items() if not field.startswith('_')},
                 "pid": process.pid if is_recording else None,
                 "directory": str(directory),
                 "directory_exists": directory.exists(),
@@ -4464,7 +4487,8 @@ def recording_status_response(config,query):
             rows.append({'index':index,'id':camera.get('id'),'key':key,'record_stream':camera.get('record_stream') or 'main',
                          'record_rtsp':redact_rtsp(rtsp),'record_source':source,'record_mode':'copy',
                          'recording':recording,'desired_recording':desired,'record_error':error,'can_record':not error,
-                         'recording_status':'recording' if recording else 'blocked' if error else 'scheduled_stopped' if desired else 'disabled'})
+                         'recording_status':'recording' if recording else 'blocked' if error else 'waiting_source' if desired and key in RECORDING_SOURCE_WAIT else 'scheduled_stopped' if desired else 'disabled',
+                         'source_wait':{field:value for field,value in RECORDING_SOURCE_WAIT.get(key,{}).items() if not field.startswith('_')}})
         return {'summary':True,'cameras':rows}
     selection=parse_recording_day_query(query)
     if query.get('catalog')==['1']:
@@ -4509,19 +4533,36 @@ def restart_changed_recordings(previous: dict, current: dict) -> list[str]:
 
 
 @serialized_recording
-def ensure_configured_recordings(config: dict, reason: str) -> list[dict]:
+def ensure_configured_recordings(config: dict, reason: str, only_keys=None) -> list[dict]:
     cleanup_recording_processes()
+    configured={recording_key(camera,index) for index,camera in enumerate(config.get('cameras',[]))}
+    for key in list(RECORDING_SOURCE_WAIT):
+        if key not in configured:RECORDING_SOURCE_WAIT.pop(key,None)
     results = []
     for index, camera in enumerate(config.get("cameras", [])):
         key = recording_key(camera, index)
+        if only_keys is not None and key not in only_keys:continue
         process = RECORDING_PROCESSES.get(key)
         running = bool(process and process.poll() is None)
         should_record = camera_should_record(camera)
         if should_record and not running:
             try:
-                result = start_recording(camera, index)
+                result = start_recording(camera, index,metadata_wait_seconds=0) if reason=='source_retry' else start_recording(camera, index)
+                RECORDING_SOURCE_WAIT.pop(key,None)
                 results.append({"index": index, "id": camera.get("id"), "action": "started", "result": result})
+            except RecordingSourcePending as error:
+                now=time.monotonic();previous=RECORDING_SOURCE_WAIT.get(key,{})
+                state={'index':index,'id':camera.get('id'),'action':'waiting_source','status':'waiting_source',
+                       'retry_seconds':RECORDING_SOURCE_RETRY_SECONDS,**error.details}
+                state['waiting_seconds']=round(now-previous.get('_since',now),1)
+                state['severity']='warning' if state['waiting_seconds']>=30 else 'info'
+                changed=any(previous.get(field)!=state.get(field) for field in ('phase','source_ready','parameters_ready','api_reachable','severity'))
+                log=not previous or changed or now-previous.get('_logged_at',0)>=60
+                RECORDING_SOURCE_WAIT[key]={**state,'_since':previous.get('_since',now),'_logged_at':now if log else previous['_logged_at']}
+                results.append(state)
+                if log:write_debug_event('recording_autostart_waiting',{**state,'reason':reason})
             except Exception as error:  # noqa: BLE001
+                RECORDING_SOURCE_WAIT.pop(key,None)
                 error_payload = {
                     "index": index,
                     "id": camera.get("id"),
@@ -4533,17 +4574,50 @@ def ensure_configured_recordings(config: dict, reason: str) -> list[dict]:
                 results.append(error_payload)
                 write_debug_event("recording_autostart_failed", {**error_payload, "reason": reason})
         elif not should_record and running:
+            RECORDING_SOURCE_WAIT.pop(key,None)
             result = stop_recording(camera, index)
             results.append({"index": index, "id": camera.get("id"), "action": "stopped_disabled", "result": result})
         else:
+            RECORDING_SOURCE_WAIT.pop(key,None)
             results.append({
                 "index": index,
                 "id": camera.get("id"),
                 "action": "kept_running" if running else "kept_stopped",
                 "desired_recording": should_record,
             })
-    write_debug_event("recording_ensure_done", {"reason": reason, "results": results})
+    if RECORDING_SOURCE_WAIT:start_recording_source_retry()
+    if reason!='source_retry' or any(row['action']!='waiting_source' for row in results):
+        write_debug_event("recording_ensure_done", {"reason": reason, "results": results})
     return results
+
+
+def retry_pending_recordings_once():
+    with RECORDING_CONTROL_LOCK:
+        return ensure_configured_recordings(load_config(),'source_retry',only_keys=set(RECORDING_SOURCE_WAIT))
+
+
+def recording_source_retry_loop():
+    global RECORDING_SOURCE_RETRY_RUNNING
+    while True:
+        stopped=RECORDING_SOURCE_RETRY_STOP.wait(RECORDING_SOURCE_RETRY_SECONDS)
+        with RECORDING_CONTROL_LOCK:
+            if stopped or not RECORDING_SOURCE_WAIT:
+                RECORDING_SOURCE_RETRY_RUNNING=False
+                return
+            try:retry_pending_recordings_once()
+            except Exception as error:
+                write_debug_event('recording_source_retry_error',{'type':type(error).__name__})
+
+
+def start_recording_source_retry():
+    global RECORDING_SOURCE_RETRY_RUNNING
+    with RECORDING_CONTROL_LOCK:
+        if RECORDING_SOURCE_RETRY_RUNNING or RECORDING_SOURCE_RETRY_STOP.is_set():return
+        RECORDING_SOURCE_RETRY_RUNNING=True
+        try:threading.Thread(target=recording_source_retry_loop,daemon=True).start()
+        except RuntimeError:
+            RECORDING_SOURCE_RETRY_RUNNING=False
+            raise
 
 
 def schedule_recording_ensure(config: dict, reason: str) -> None:
@@ -4562,7 +4636,7 @@ def schedule_recording_ensure(config: dict, reason: str) -> None:
 
 
 @serialized_recording
-def start_recording(camera: dict, index: int) -> dict:
+def start_recording(camera: dict, index: int, metadata_wait_seconds=4) -> dict:
     cleanup_recording_processes()
     key = recording_key(camera, index)
     existing = RECORDING_PROCESSES.get(key)
@@ -4578,6 +4652,12 @@ def start_recording(camera: dict, index: int) -> dict:
         raise ValueError(recording_preflight_error(camera, record_stream) or "recording_rtsp_not_configured")
     stream, record_source = recording_source_stream(camera, index, record_stream)
 
+    config = load_config()
+    nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
+    metadata=recording_registry_metadata(camera,index,record_stream,wait_seconds=metadata_wait_seconds) if EDGE_RTC_ENABLED else None
+    mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr,metadata)
+    audio_info=probe.get('audio') or {}
+
     directory = recording_base_dir(camera, index)
     directory.mkdir(parents=True, exist_ok=True)
     probe_file = directory / ".write-test"
@@ -4587,16 +4667,11 @@ def start_recording(camera: dict, index: int) -> dict:
     except OSError as error:
         raise RuntimeError(f"recording_directory_not_writable: {directory}: {error}") from error
 
-    config = load_config()
-    nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
     segment_seconds = clamp_int(nvr.get("segment_seconds"), 10, 2, 300)
     retention_days = recording_retention_days(config)
     removed_old = cleanup_old_recordings(directory, retention_days)
     log_path = directory / "ffmpeg.log"
     output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
-    metadata=recording_registry_metadata(camera,index,record_stream) if EDGE_RTC_ENABLED else None
-    mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr,metadata)
-    audio_info=probe.get('audio') or {}
     command = build_recording_command(stream, output_pattern, segment_seconds, mode,video_codec,audio_codec,audio_info.get('sample_rate'),audio_info.get('channels'))
     log_header = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -4673,6 +4748,7 @@ def start_recording(camera: dict, index: int) -> dict:
 def stop_recording(camera: dict, index: int) -> dict:
     cleanup_recording_processes()
     key = recording_key(camera, index)
+    RECORDING_SOURCE_WAIT.pop(key,None)
     process = RECORDING_PROCESSES.pop(key, None)
     if not process or process.poll() is not None:
         return {"stopped": False, "status": "not_recording", "key": key}
@@ -6527,11 +6603,23 @@ INDEX_HTML = r"""<!doctype html>
       async function restoreGalleryThumbnails(){
         if(!galleryScope)return;
         await Promise.allSettled([...nvrGrid.querySelectorAll('img[data-recording-thumb-src]')].slice(0,12).map(async image=>{
-          const source=image.dataset.recordingThumbSrc,blob=await galleryStore.loadThumbnail(galleryScope,source);
-          if(!blob||!image.isConnected||image.dataset.recordingThumbQueued||image.dataset.recordingThumbSrc!==source)return;
-          const url=recordingThumbnailBlob(image,blob);image.loading='eager';image.dataset.recordingThumbBackend='jpeg';
-          image.onload=()=>{image.onload=null;image.onerror=null;thumbnailContainer(image)?.classList.add('thumb-loaded');image.removeAttribute('data-recording-thumb-src');};
-          image.onerror=()=>{releaseRecordingThumbnail(image);image.onload=null;image.onerror=null;};image.src=url;
+          if(image.dataset.recordingThumbQueued)return;
+          const source=image.dataset.recordingThumbSrc;image.dataset.recordingThumbQueued='true';
+          let finished=false;
+          const finish=(ok,detached=false)=>{
+            if(finished)return;finished=true;recordingThumbnailFinishes.delete(image);
+            image.onload=null;image.onerror=null;delete image.dataset.recordingThumbQueued;
+            if(ok){thumbnailContainer(image)?.classList.add('thumb-loaded');image.removeAttribute('data-recording-thumb-src');}
+            else{releaseRecordingThumbnail(image);if(!detached&&image.isConnected&&activePage==='nvr')loadRecordingThumbnail(image);}
+          };
+          recordingThumbnailFinishes.set(image,finish);
+          try{
+            const blob=await galleryStore.loadThumbnail(galleryScope,source);
+            if(finished)return;
+            if(!blob||!image.isConnected||image.dataset.recordingThumbSrc!==source){finish(false,!image.isConnected);return;}
+            const url=recordingThumbnailBlob(image,blob);image.loading='eager';image.dataset.recordingThumbBackend='jpeg';
+            image.onload=()=>finish(true);image.onerror=()=>finish(false);image.src=url;
+          }catch(_){finish(false);}
         }));
       }
       let selectedRecording = {};
@@ -7307,8 +7395,8 @@ INDEX_HTML = r"""<!doctype html>
       function releaseRecordingThumbnail(image,detach=false){
         // Cancel the resource before revoking it: WebKit can otherwise retry
         // a detached/unloading image against a Blob URL that no longer exists.
-        if(detach){image.onload=null;image.onerror=null;image.removeAttribute('srcset');image.removeAttribute('src');recordingThumbnailFinishes.get(image)?.(false);}
-        const url=recordingThumbnailUrls.get(image);if(url){recordingThumbnailUrls.delete(image);URL.revokeObjectURL(url);}
+        if(detach){image.onload=null;image.onerror=null;image.removeAttribute('srcset');image.removeAttribute('src');recordingThumbnailFinishes.get(image)?.(false,true);}
+        const url=recordingThumbnailUrls.get(image);if(url){if(image.getAttribute('src')===url)image.removeAttribute('src');recordingThumbnailUrls.delete(image);URL.revokeObjectURL(url);}
       }
       function recordingThumbnailBlob(image,blob){releaseRecordingThumbnail(image);const url=URL.createObjectURL(blob);recordingThumbnailUrls.set(image,url);return url;}
       // WebKit may reload a decoded image after layout/scroll. Keep its Blob
@@ -8661,11 +8749,13 @@ INDEX_HTML = r"""<!doctype html>
           ? 'RECORDING'
           : recordingState === 'blocked'
             ? 'BLOCKED'
+          : recordingState === 'waiting_source'
+            ? 'WAITING'
           : desiredRecording
               ? 'SCHEDULED'
               : 'OFF';
         const canRecord = status.can_record !== false;
-        const recordError = status.record_error || status.last_error || '';
+        const recordError = recordingState === 'waiting_source' ? `Oczekiwanie na źródło EdgeRTC (${status.source_wait?.phase||'metadata'}). Ponowna próba automatycznie; ONVIF nie jest wymagany.` : status.record_error || status.last_error || '';
         const files = Array.isArray(status.files) ? status.files : [];
         const days = Array.isArray(status.days) ? status.days : [];
         const currentDay = selectedRecordingDay[index] || status.selected_day || days[0]?.day || '';
@@ -8764,7 +8854,7 @@ INDEX_HTML = r"""<!doctype html>
             `).join('')}</div>`
           : `<p class="notice">${!Array.isArray(status.files)?'Stan rejestratora i lista zapisanych filmów są odczytywane niezależnie.':desiredRecording?'Nagrywanie jest zaplanowane. Pierwszy film pojawi się po zamknięciu fragmentu, na klatce kluczowej kamery.':'Nagrywanie jest wyłączone. Dostępne zapisane dni można odtwarzać niezależnie.'}</p>`;
         const diagnostics = recordError
-          ? `<p class="section-status state-offline">${escapeHtml(recordErrorText(recordError))}</p>`
+          ? `<p class="section-status ${recordingState==='waiting_source'?'':'state-offline'}">${escapeHtml(recordErrorText(recordError))}</p>`
           : `<p class="section-status">${escapeHtml(text(status.record_rtsp, 'Record RTSP not ready'))}</p>`;
         return `
           <article class="camera nvr-card" data-nvr-index="${index}" data-nvr-key="${escapeHtml(status.key || '')}" data-nvr-day="${escapeHtml(currentDay)}">
@@ -9152,7 +9242,7 @@ INDEX_HTML = r"""<!doctype html>
         const video = card.querySelector('video[data-recording-player]');
         const badge = card.querySelector('.rec-badge');
         if (badge) {
-          badge.textContent = typeof status.recording!=='boolean'?'CHECKING':status.recording ? 'RECORDING' : status.recording_status === 'blocked' ? 'BLOCKED' : status.desired_recording ? 'SCHEDULED' : 'OFF';
+          badge.textContent = typeof status.recording!=='boolean'?'CHECKING':status.recording ? 'RECORDING' : status.recording_status === 'blocked' ? 'BLOCKED' : status.recording_status === 'waiting_source' ? 'WAITING' : status.desired_recording ? 'SCHEDULED' : 'OFF';
           badge.classList.toggle('off', !status.recording);
         }
         const action = card.querySelector('[data-record-action]');
@@ -12002,7 +12092,7 @@ def main() -> None:
     write_debug_event('release_features',{'version':APP_VERSION,'features':APP_RELEASE_FEATURES,
                       'hardware':hardware_inventory(),'recordings_changed':False,'camera_codec_settings_changed':False,
                       'edge_rtc':'Sources stay connected on the server; viewers share its bounded keyframe buffer.'})
-    print(f'[edge-panel] {APP_VERSION}: indexed EdgeRTC DVR, registry-based live status, native AAC packet copy and explicit GOP actions. Original video/FPS unchanged.')
+    print(f'[edge-panel] {APP_VERSION}: automatic recorder metadata retry, Uniview ONVIF aliases, indexed EdgeRTC DVR and source AAC copy. Original video/FPS unchanged.')
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
     try:
@@ -12029,6 +12119,7 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        RECORDING_SOURCE_RETRY_STOP.set()
         if ALERT_SERVICE:
             ALERT_SERVICE.close()
         if DETECTION_SERVICE:

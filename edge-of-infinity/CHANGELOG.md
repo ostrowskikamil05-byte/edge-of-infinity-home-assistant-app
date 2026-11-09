@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.13.1
+
+- Serialize cached thumbnail restoration with visible-image loading, preventing
+  competing jobs from replacing/revoking the same pending image in WebKit.
+- Retry recorder starts waiting for shared EdgeRTC metadata independently of UI
+  polling, using one bounded worker. Skip disk retention scans and FFmpeg until
+  codec parameters are ready; retain source AAC copy and original video/FPS.
+- Report waiting phases, packet count, source readiness and retry time separately
+  from real start failures. Never attach an older FFmpeg failure to metadata
+  waiting. Persistent waiting becomes a warning after 30 seconds.
+- Allow a bounded H264 input-analysis window as already used for H265, avoiding
+  an immediate MP4 header failure when stream dimensions are not yet available.
+- Match known Uniview `/media/videoN` and `/unicast/cN/sN/live` aliases without
+  conflating camera channels, main/sub streams or explicit profile selectors.
+  Continue past a profile whose URI cannot be read. Unsupported ONVIF remains
+  optional; custom or ambiguous routes are not guessed or changed.
+- Attribute unknown RTP payloads to the source and its advertised SDP formats;
+  retain counters while limiting repeated logs. If unknown packets persist with
+  no valid video, close the old connection and fetch SDP again, at most once per
+  minute. Healthy video is not restarted and payload codecs are never guessed.
+
 ## 0.13.0
 
 - Add optional **EdgeRTC DVR** playback: one authenticated WebSocket per archive

@@ -48,6 +48,21 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
    return {url,bytes,width:decoded.naturalWidth,tracked:recordingThumbnailUrls.get(image)===url};
   });
   assert(thumbnail.bytes>100&&thumbnail.width>100&&thumbnail.tracked,'displayed JPEG URL was revoked before its node was removed');
+  // Cached restore and visible hydration can overlap before JPEG onload.
+  // Force hydration in the microtask after creating a cached URL, while the
+  // image is still pending; exactly one owner may load that node.
+  await page.evaluate(async()=>{
+   const blob=await(await fetch(fixtureRetainedThumbnail.src)).blob(),originalLoad=galleryStore.loadThumbnail.bind(galleryStore),create=URL.createObjectURL.bind(URL);
+   const holder=document.createElement('div');holder.className='recording-thumb-wrap';
+   const image=new Image();image.dataset.recordingThumbSrc='recording-thumbs/cache-race.jpg';holder.append(image);document.querySelector('.recording-film-grid').prepend(holder);
+   window.fixtureRestoreRace={holder,image,creates:0,originalLoad,create};
+   galleryStore.loadThumbnail=(scope,source)=>source==='recording-thumbs/cache-race.jpg'?Promise.resolve(blob):originalLoad(scope,source);
+   URL.createObjectURL=value=>{const url=create(value);if(value===blob){fixtureRestoreRace.creates++;queueMicrotask(()=>hydrateRecordingThumbnails());}return url;};
+   await restoreGalleryThumbnails();
+  });
+  await page.waitForFunction(()=>fixtureRestoreRace.image.naturalWidth>100&&!fixtureRestoreRace.image.dataset.recordingThumbQueued);
+  assert.equal(await page.evaluate(()=>fixtureRestoreRace.creates),1,'cache restore and hydration both loaded the same image');
+  await page.evaluate(()=>{galleryStore.loadThumbnail=fixtureRestoreRace.originalLoad;URL.createObjectURL=fixtureRestoreRace.create;fixtureRestoreRace.holder.remove();});
   assert.equal(await page.locator('[data-recording-day-load]:visible').count(),0,'failed refresh obscured a restored gallery');
   await page.locator('[data-recording-toggle="0"]').click();
   await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="0"]');return !v.paused&&v.videoWidth>0&&v.currentTime>.1;});

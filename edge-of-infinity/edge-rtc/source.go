@@ -49,6 +49,7 @@ func (v *viewer) consumed(p []byte) {
 }
 
 type source struct {
+	rtpHealth          sourceRTPHealth
 	cfg                sourceConfig
 	server             *gortsplib.Server
 	ctx                context.Context
@@ -126,7 +127,7 @@ func (s *source) status() map[string]any {
 	if len(s.gop) > 1 {
 		span = (int64(binary.BigEndian.Uint64(s.gop[len(s.gop)-1][2:10])) - int64(binary.BigEndian.Uint64(s.gop[0][2:10]))) / 1000
 	}
-	return map[string]any{"keyframe_requests": s.keyframeRequests, "keyframe_write_errors": s.keyframeErrors, "keyframe_observed_after_request_ms": s.keyframeObservedMS, "keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "live_queue_packets": liveQueuePackets, "camera_id": s.cfg.ID, "paths": s.cfg.Paths, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
+	return map[string]any{"rtp": s.rtpHealth.snapshot(time.Now()), "keyframe_requests": s.keyframeRequests, "keyframe_write_errors": s.keyframeErrors, "keyframe_observed_after_request_ms": s.keyframeObservedMS, "keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "live_queue_packets": liveQueuePackets, "camera_id": s.cfg.ID, "paths": s.cfg.Paths, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
 }
 func (s *source) run() {
 	defer close(s.stopped)
@@ -166,6 +167,7 @@ func (s *source) readOnce() error {
 	}
 	var once sync.Once
 	closeClient := func() { once.Do(func() { c.Close() }) }
+	c.OnDecodeError = func(err error) { s.handleSourceDecodeError(err, time.Now(), closeClient) }
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -269,6 +271,7 @@ func (s *source) readOnce() error {
 		s.packets.Add(1)
 		s.bytes.Add(uint64(p.MarshalSize()))
 		if media == videoMedia {
+			s.rtpHealth.videoPacket(time.Now())
 			s.videoSSRC.Store(p.SSRC)
 			first := !s.haveVideoSSRC.Swap(true)
 			if first {
@@ -285,6 +288,7 @@ func (s *source) readOnce() error {
 			handler(p)
 		}
 	})
+	s.rtpHealth.begin(forward, time.Now())
 	if _, e = c.Play(nil); e != nil {
 		return e
 	}

@@ -1,5 +1,40 @@
 # Edge of Infinity App Documentation
 
+## 0.13.1: recorder metadata retry and Uniview ONVIF
+
+After updating, restart Home Assistant Core to load the installed integration,
+then reopen Edge through the Home Assistant sidebar to renew an expired Ingress
+session. Version/build: `0.13.1` / `source-retry-v131`.
+
+`keyframe_recording_profile_not_found` means optional ONVIF synchronization could
+not match the saved recording URL to an exposed profile. It does not prove RTSP
+is unavailable and is not a recorder dependency. Known Uniview stream aliases
+are recognized; other channel/profile selectors remain distinct. No encoder
+settings or saved camera URLs change during discovery.
+
+`edge_rtc_source_metadata_pending` now defers an automatic recorder start. One
+worker retries pending cameras every five seconds using the existing source
+registry, even with the panel closed. It does not probe the camera, start FFmpeg
+with guessed codecs, or repeat retention scans while waiting. Disabling/removing
+a camera cancels its pending start. Genuine FFmpeg errors remain failures.
+
+The `recording_autostart_waiting` event identifies the phase: core unavailable,
+source absent/disconnected, video metadata missing, or parameter sets pending.
+It includes source packet count/readiness, elapsed wait and retry interval;
+waiting longer than 30 seconds is a warning. An old FFmpeg log is not attached
+to this state. Recorder input analysis is bounded for both H264 and H265, and
+source AAC is still copied without re-encoding.
+
+Source diagnostics now include `rtp.declared_formats`, `unknown_payload_types`,
+`decode_errors`, `last_video_packet_age_ms` and `description_refreshes`. Payload
+numbers such as 104/108 are dynamic; they are not hardcoded to a codec. Unknown
+packets are logged per source/type, with repetition bounded to once per 30 s.
+After at least 20 unknown packets and five seconds without valid video, the
+source may close its old connection and re-DESCRIBE on a new one. Refreshes are
+limited to once per minute across reconnects. This adds no parallel camera
+connection; healthy video does not trigger this recovery. A persistent invalid
+camera SDP remains visible in the counters and cannot be repaired by guessing.
+
 ## 0.13.0: EdgeRTC DVR, source metadata and native AAC
 
 Update the app, restart Home Assistant Core, then reopen Edge on each device.
