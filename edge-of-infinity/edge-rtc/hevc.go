@@ -9,6 +9,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	codech265 "github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/pion/rtp"
 )
 
@@ -97,11 +98,23 @@ func (s *source) makeH265Handler(c *gortsplib.Client, media *description.Media, 
 	vps, sps, pps := f.SafeParams()
 	params := hevcParameters{vps, sps, pps}
 	lastCodec := ""
+	lastReady := false
 	update := func() {
 		codec, e := hevcCodec(params.sps)
-		if e == nil && codec != lastCodec {
+		ready := len(params.vps) > 0 && len(params.sps) > 0 && len(params.pps) > 0
+		if e == nil && (codec != lastCodec || ready != lastReady) {
 			lastCodec = codec
-			s.setVideo(map[string]any{"codec": codec, "codec_name": "h265", "format": "annexb"})
+			lastReady = ready
+			video := map[string]any{"codec": codec, "codec_name": "h265", "format": "annexb", "parameters_ready": ready}
+			var parsed codech265.SPS
+			if parsed.Unmarshal(params.sps) == nil {
+				video["width"] = parsed.Width()
+				video["height"] = parsed.Height()
+				if fps := parsed.FPS(); fps > 0 && fps <= 240 {
+					video["fps"] = fps
+				}
+			}
+			s.setVideo(video)
 		}
 	}
 	update()
@@ -112,6 +125,14 @@ func (s *source) makeH265Handler(c *gortsplib.Client, media *description.Media, 
 			return
 		}
 		payload, key := params.accessUnit(au)
+		// Some cameras provide VPS/SPS/PPS only in-band. Publish them in the
+		// shared RTSP description too, so new recorders can initialize HEVC.
+		for _, nalu := range au {
+			if len(nalu) > 1 && (nalu[0]>>1)&63 >= 32 && (nalu[0]>>1)&63 <= 34 && len(params.vps) > 0 && len(params.sps) > 0 && len(params.pps) > 0 {
+				f.SafeSetParams(params.vps, params.sps, params.pps)
+				break
+			}
+		}
 		update()
 		if lastCodec == "" || len(params.vps) == 0 || len(params.pps) == 0 {
 			return

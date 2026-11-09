@@ -19,7 +19,8 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
    localStorage.setItem('edge-nvr-next-buffer','false');
    addEventListener('unhandledrejection',e=>console.error('EDGE_FIXTURE_UNHANDLED:'+String(e.reason)));
    window.fixtureRevokedThumbnails=new Set();const revoke=URL.revokeObjectURL.bind(URL);
-   URL.revokeObjectURL=url=>{fixtureRevokedThumbnails.add(url);revoke(url);};
+   window.fixtureThumbnailRevokeViolations=[];
+   URL.revokeObjectURL=url=>{if([...document.images,window.fixtureRetainedThumbnail].some(i=>i?.src===url)){fixtureThumbnailRevokeViolations.push(url);console.error('EDGE_FIXTURE_UNHANDLED:thumbnail_released_while_referenced');}fixtureRevokedThumbnails.add(url);revoke(url);};
   });
   page.on('request',r=>{if(new URL(r.url()).pathname.startsWith('/recordings/'))videoRequests.push(r.url());});
   await page.route('**/api/edge-rtc/player/**',r=>r.fulfill({contentType:'text/html',body:'<p>Generated camera</p>'}));
@@ -75,6 +76,7 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
   assert(checks.noSecrets);assert.equal(checks.other,null);assert(!checks.whitelist.includes('DO_NOT_STORE'));assert(checks.count<=96&&checks.bytes<=8*1024*1024);assert(checks.queueBound);assert.equal(checks.oversize,false);assert.equal(checks.expired,null);
   await page.evaluate(()=>fixtureRetainedThumbnail.remove());
   await page.waitForFunction(url=>!recordingThumbnailUrls.has(fixtureRetainedThumbnail)&&fixtureRevokedThumbnails.has(url),thumbnail.url);
+  assert.deepEqual(await page.evaluate(()=>fixtureThumbnailRevokeViolations),[],'a displayed image still references a revoked Blob URL');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
   console.log(`PASS ${wk?'webkit':'chromium'}: background metadata only, persistent gallery/JPEG before network, actual playback, scope/secret/expiry/storage limits`);
   await page.unrouteAll({behavior:'ignoreErrors'});await context.close();

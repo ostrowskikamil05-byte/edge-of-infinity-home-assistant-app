@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.13.0
+
+- Add optional **EdgeRTC DVR** playback: one authenticated WebSocket per archive
+  viewer, MP4 sample-table indexing, preceding-keyframe seeks and bounded pull
+  batches. Read original H264/H265 and AAC; do not re-encode video, download a
+  full day or open a camera connection. Keep MP4 as the default compatibility mode.
+- Include a single in-picture seek track, gray/green alert markers, frame steps,
+  pause, sound, playback speed, full screen and same-socket file transitions.
+  Obsolete seek responses are discarded by request epoch. Pause stops media pulls.
+- Check actual browser video/audio support and fall back to native MP4 for an
+  incompatible file/profile. Preserve its recording and codec; do not change the
+  camera's format to suit an individual phone. Use AVC configuration records for
+  reordered H264 pictures in WebKit.
+- Fix false UNV offline/live failures caused by short RTSP probes. Native camera
+  status now uses the already connected EdgeRTC registry, including its actual
+  audio codec and SPS dimensions; warming metadata remains a connecting state.
+- Record known source AAC with packet copy. Read its codec from the existing
+  registry instead of probing another RTSP reader or guessing an encoder at boot.
+  Convert G711 to voice-rate AAC once when needed. Keep original video/FPS.
+- Publish in-band H264/H265 parameters in the shared RTSP description. Wait
+  briefly for live metadata on the same socket; request keyframes over the
+  existing session and log source metadata wait time.
+- Add explicit, verified GOP 1 s / 2 s camera actions through Hikvision ISAPI or
+  supported ONVIF encoder profiles. Preserve the other profile fields. Existing
+  archives keep their original GOP; no background re-encoding is added.
+- Separate FFmpeg startup command headers from runtime diagnostics. Retain real
+  errors and timestamp warnings. Include safe codes/phases for optional ONVIF
+  synchronization failures.
+- Cancel detached/unloading gallery image resources before releasing their Blob
+  URLs, preventing WebKit from retrying a revoked cached thumbnail.
+- Test actual H264/H265 pictures, AAC PCM, rapid long-GOP seeks, natural file
+  boundaries, 4K, native fallback, original-file hashes, one-camera ownership and
+  HEVC sources with no initial SDP parameters. Sub-200 ms startup is not guaranteed.
+
 ## 0.12.4
 
 - Remove speculative saved-video downloads, server prepare requests, the two-file

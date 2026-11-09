@@ -70,9 +70,12 @@ const assert=require('node:assert/strict');
    await setPosition(3.5);
    assert(await page.evaluate(()=>{const f=document.fullscreenElement||document.querySelector('.edge-soft-fullscreen'),s=document.querySelector('[data-recording-playback-seek]');return f.contains(s); }));
    await page.evaluate(()=>document.fullscreenElement?document.exitFullscreen():exitSoftFullscreen('test'));
+   await page.waitForFunction(()=>!document.fullscreenElement&&!document.querySelector('.edge-soft-fullscreen'));
+   await slider.scrollIntoViewIfNeeded();
    // A superseded slow clip load must settle on the last dragged position.
    await page.route('**/recordings/**000007.mp4*',async route=>{await new Promise(resolve=>setTimeout(resolve,1500));try{await route.continue();}catch(_){} });
    rect=await slider.boundingBox();await page.mouse.move(x(3.5),y());await page.mouse.down();
+   assert(await page.evaluate(()=>recordingScrubs.get('0')?.active),'post-fullscreen drag did not reach the visible slider');
    await page.mouse.move(x(8),y());await page.waitForTimeout(50);await page.mouse.move(x(16),y());await page.mouse.move(x(3),y());await page.mouse.up();
    await frameAt(3);await page.waitForFunction(()=>recordingScrubs.size===0);
    assert(await page.locator('video').evaluate(v=>v.paused));

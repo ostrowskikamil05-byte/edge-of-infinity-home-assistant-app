@@ -3,11 +3,12 @@ module github.com/ostrowskikamil05-byte/edge-of-infinity-home-assistant-app/edge
 go 1.24.0
 
 require (
+	github.com/abema/go-mp4 v1.4.1
 	github.com/bluenviron/gortsplib/v5 v5.0.0
 	github.com/bluenviron/mediacommon/v2 v2.4.3
 	github.com/gorilla/websocket v1.5.3
-	github.com/pion/rtp v1.8.23
 	github.com/pion/rtcp v1.2.15
+	github.com/pion/rtp v1.8.23
 )
 
 require (

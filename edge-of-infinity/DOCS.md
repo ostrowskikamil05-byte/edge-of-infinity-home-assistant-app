@@ -1,5 +1,72 @@
 # Edge of Infinity App Documentation
 
+## 0.13.0: EdgeRTC DVR, source metadata and native AAC
+
+Update the app, restart Home Assistant Core, then reopen Edge on each device.
+The version/build are `0.13.0` / `archive-rtc-v130`.
+
+In Recordings, select **EdgeRTC DVR · beta** in **Odtwarzacz archiwum**. MP4
+remains the default. EdgeRTC DVR requires HTTPS/localhost and WebCodecs, like
+native Live. It reuses Edge's authenticated WebSocket connection path through HA
+Ingress/Nabu Casa; no WebRTC, UDP media port, MSE or public camera URL is added.
+It is a TCP transport and remains subject to network loss/retransmission latency.
+
+The server indexes MP4 clocks, sync samples and byte offsets. A seek reads the
+preceding random-access sample and the reference pictures needed for the target.
+H264 uses the original AVC samples/configuration; H265 uses Annex B with its
+parameter sets. The client hides preroll pictures and rejects older seek epochs.
+Successive files use the same socket. Pause stops pulls; hidden pages close the
+archive decoder/socket. The last displayed picture stays visible while seeking.
+The existing daily catalog, retention and original files remain authoritative.
+
+The in-picture track has the existing gray/green intrusion markers. It supports
+frame steps, drag previews in the video, sound, 0.5×/1×/2× and full screen. The
+phone releases its other recording decoder before acquiring a new one. The
+initial selected camera can prepare a paused picture; other cameras start when
+selected. There is no speculative two-file cache or full-day video download.
+
+Limits: four server archive sessions; at most 100000 samples per track, four
+tracks and an 8 MiB MP4 metadata box. Each pull requests at most eight packets
+(server maximum 16), normally bounded by 2 MiB; one access unit is capped at
+8 MiB. Client compressed data and decoded queues are bounded. Metadata is reused
+within the current file/session. Unsupported containers/profiles use native MP4.
+These are per-viewer limits; archives add no camera session.
+
+Codec negotiation is per device. An unavailable/rejected VideoDecoder or AAC
+AudioDecoder selects native MP4 for that camera, with a diagnostic reason. This
+does not change the recording format. Current camera AAC is copied, rather than
+encoded again. G711 camera audio is encoded to compatible AAC once in the
+recorder. Legacy files with invalid clocks can still require compatibility repair.
+
+Native Live status now comes from the registry which already owns the camera.
+A failed short RTSP probe can no longer replace that evidence with a generic
+"Check IP, credentials, port 554" error. The registry also supplies recorder
+codec decisions and SPS dimensions. A genuinely unavailable core/source remains
+visible as connecting; this is not evidence that a physical camera was tested.
+In-band VPS/SPS/PPS are published to local RTSP readers. Live can wait briefly
+on the same socket for metadata, and diagnostics include `source_metadata_wait_ms`.
+
+Under each camera's configuration/discovery section, **Ustaw GOP 1 s / 2 s**
+changes only the saved recording profile's GOP, followed by a readback. Hikvision
+uses ISAPI; ONVIF requires the camera to expose GovLength and the selected encoder.
+Unsupported vendor/media profiles report a clear failure. Discovery remains
+read-only. At 20 FPS, 1 s / 2 s mean 20 / 40 frames; at 30 FPS, 30 / 60 frames.
+Shorter GOP can increase bitrate or take more of a fixed bitrate budget. It
+affects future pictures only: a recorder copying video cannot insert I-frames
+into existing files without re-encoding them.
+
+Inspect per-device `dvr_seek_requested`, `dvr_index_ready`, `dvr_seek_picture`
+and `ui_dvr_device_fallback` for actual seek latency, preroll, bytes, codec and
+index reuse. Server logs identify seek epochs/files and bounded read errors.
+FFmpeg command headers are retained as information, separately from its runtime
+errors/warnings. Optional ONVIF synchronization failures carry a safe code/phase.
+
+Local generated fixtures at 20 FPS showed selected long-GOP seeks in tens to
+hundreds of milliseconds, including actual 4K pictures and AAC on WebKit/Chromium.
+They are not a guarantee for an HP t530, a particular camera, a physical iPhone,
+Nabu Casa/5G or all positions in an old long-GOP archive. GOP, disk, transfer,
+reference decoding and browser scheduling still determine the measured result.
+
 ## 0.12.4: direct recordings, ingress and live cadence
 
 Update the app, restart Home Assistant Core and reopen Edge from the Home

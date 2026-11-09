@@ -13,8 +13,9 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
     {mode:'native',host:'edge-test.ui.nabu.casa',prefix:'/api/hassio_ingress/test-session/',publicUrl:''},
     {mode:'native',host:'edge.example.test',prefix:'/',publicUrl:'http://192.0.2.50:8889'},
     {mode:'legacy',host:'edge-test.ui.nabu.casa',prefix:'/api/hassio_ingress/test-session/',publicUrl:''},
+    ...(width===390?[{mode:'native',host:'edge-test.ui.nabu.casa',prefix:'/api/hassio_ingress/test-session/',publicUrl:'',checking:true}]:[]),
    ]){
-    const {mode,host,prefix,publicUrl}=scenario;
+    const {mode,host,prefix,publicUrl,checking}=scenario;
     const context=await browser.newContext({viewport:{width,height:1000}});
     const page=await context.newPage();const errors=[],requests=[],events=[];
     page.setDefaultTimeout(10000);page.on('pageerror',error=>errors.push(error.message));
@@ -33,7 +34,7 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
       if(request.method()==='POST')config=request.postDataJSON();
       return route.fulfill({contentType:'application/json',headers:{'X-Edge-Options-Sync':'synced'},body:JSON.stringify(config)});
      }
-     if(endpoint==='cameras.json')return json({cameras:[{id:'front',key:'front_0',index:0,name:'Front',vendor:'hikvision',status:'online',record_stream:'main',tile_stream:'sub',live_stream:'sub',video_codec:'h264'}]});
+     if(endpoint==='cameras.json')return json({cameras:[{id:'front',key:'front_0',index:0,name:'Front',vendor:'hikvision',status:checking?'checking':'online',record_stream:'main',tile_stream:'sub',live_stream:'sub',video_codec:'h264'}]});
      if(endpoint==='api/presets')return json({presets:[]});
      if(endpoint==='api/recording/status')return json({summary:url.searchParams.get('summary')==='1',cameras:[]});
      if(endpoint==='api/storage/status')return json({pending:false,recordings_bytes:0,recordings_volume:{free_bytes:2*1024**3},cache_volume:{free_bytes:2*1024**3}});
@@ -65,6 +66,10 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
     }else assert((await page.locator('#camera-grid .notice.warning').textContent()).includes('does not expose MediaMTX WebRTC ports'));
     assert(requests.filter(url=>url.pathname.endsWith('/api/recording/status')).every(url=>url.searchParams.get('summary')==='1'),'Live boot requested full archive history');
     assert(!requests.some(url=>url.pathname.endsWith('/api/storage/status')),'Live boot requested full storage accounting');
+    if(checking){
+     await page.waitForRequest(request=>{const u=new URL(request.url());return u.pathname.endsWith('/api/recording/status')&&u.searchParams.get('catalog')==='1';});
+     assert(await page.locator('#camera-grid iframe').count(),'warming camera was not started automatically');
+    }
     if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();
     const storageResponse=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/api/storage/status'));
     await page.locator('nav [data-page-target="edge-settings"]').click();
@@ -80,7 +85,7 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
     assert.equal(config.live.mobile_webrtc_public_url,publicUrl);
     assert.equal(config.live.mobile_webrtc_turn_password,'fixture-turn-value','hidden legacy setting was lost');
     assert.equal(config.storage.retention_days,21);
-    if(native){await page.waitForFunction(()=>deviceReporter?.events.some(e=>e.event==='ui_live_toggle'));const toggle=await page.evaluate(()=>deviceReporter.events.filter(e=>e.event==='ui_live_toggle'));assert(toggle.length>=2);assert(toggle.every(e=>e.data.reason==='edge_rtc'&&e.data.can_embed));}
+    if(native){const toggle=[...events,...await page.evaluate(()=>deviceReporter?.events||[])].filter(e=>e.event==='ui_live_toggle');assert(toggle.length>=2);assert(toggle.every(e=>e.data.reason==='edge_rtc'&&e.data.can_embed));}
     assert(requests.every(url=>url.port===''),'extra media port requested');
     assert.deepEqual(errors,[]);
     console.log(`PASS ${mode} ${host} ${width}px: notice, live routing, ingress, settings visibility and saved legacy values`);

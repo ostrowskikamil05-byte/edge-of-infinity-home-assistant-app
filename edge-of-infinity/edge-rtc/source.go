@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/g711"
+	codech264 "github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 )
@@ -124,7 +126,7 @@ func (s *source) status() map[string]any {
 	if len(s.gop) > 1 {
 		span = (int64(binary.BigEndian.Uint64(s.gop[len(s.gop)-1][2:10])) - int64(binary.BigEndian.Uint64(s.gop[0][2:10]))) / 1000
 	}
-	return map[string]any{"keyframe_requests": s.keyframeRequests, "keyframe_write_errors": s.keyframeErrors, "keyframe_observed_after_request_ms": s.keyframeObservedMS, "keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "live_queue_packets": liveQueuePackets, "camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
+	return map[string]any{"keyframe_requests": s.keyframeRequests, "keyframe_write_errors": s.keyframeErrors, "keyframe_observed_after_request_ms": s.keyframeObservedMS, "keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "live_queue_packets": liveQueuePackets, "camera_id": s.cfg.ID, "paths": s.cfg.Paths, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
 }
 func (s *source) run() {
 	defer close(s.stopped)
@@ -268,7 +270,15 @@ func (s *source) readOnce() error {
 		s.bytes.Add(uint64(p.MarshalSize()))
 		if media == videoMedia {
 			s.videoSSRC.Store(p.SSRC)
-			s.haveVideoSSRC.Store(true)
+			first := !s.haveVideoSSRC.Swap(true)
+			if first {
+				s.mu.RLock()
+				missing := s.video == nil
+				s.mu.RUnlock()
+				if missing {
+					go s.requestKeyframe()
+				}
+			}
 		}
 		stream.WritePacketRTP(media, p)
 		if handler := handlers[f]; handler != nil {
@@ -305,6 +315,18 @@ func (s *source) setVideo(v map[string]any) {
 	s.video = v
 }
 func (s *source) setAudio(v map[string]any) { s.mu.Lock(); s.audio = v; s.mu.Unlock() }
+func h264VideoMetadata(codec string, sps []byte) map[string]any {
+	video := map[string]any{"codec": codec, "codec_name": "h264", "format": "annexb", "parameters_ready": true}
+	var parsed codech264.SPS
+	if parsed.Unmarshal(sps) == nil {
+		video["width"] = parsed.Width()
+		video["height"] = parsed.Height()
+		if fps := parsed.FPS(); fps > 0 && fps <= 240 {
+			video["fps"] = fps
+		}
+	}
+	return video
+}
 func (s *source) makeHandler(c *gortsplib.Client, media *description.Media, f format.Format) func(*rtp.Packet) {
 	pts := func(p *rtp.Packet) int64 {
 		v, ok := c.PacketPTS(media, p)
@@ -323,11 +345,11 @@ func (s *source) makeHandler(c *gortsplib.Client, media *description.Media, f fo
 			return nil
 		}
 		sps, pps := f.SafeParams()
-		codec := "avc1.42e01f"
-		if len(sps) >= 4 {
+		codec := ""
+		if len(sps) >= 4 && len(pps) > 0 {
 			codec = "avc1." + hex.EncodeToString(sps[1:4])
+			s.setVideo(h264VideoMetadata(codec, sps))
 		}
-		s.setVideo(map[string]any{"codec": codec, "codec_name": "h264", "format": "annexb"})
 		return func(p *rtp.Packet) {
 			// Initialize timestamp tracking on the first fragment, not only the last.
 			stamp := pts(p)
@@ -345,6 +367,19 @@ func (s *source) makeHandler(c *gortsplib.Client, media *description.Media, f fo
 				}
 				if len(n) > 0 && n[0]&31 == 8 {
 					pps = append([]byte{}, n...)
+				}
+			}
+			for _, n := range aus {
+				if len(n) > 0 && (n[0]&31 == 7 || n[0]&31 == 8) && len(sps) > 0 && len(pps) > 0 {
+					f.SafeSetParams(sps, pps)
+					break
+				}
+			}
+			if len(sps) >= 4 && len(pps) > 0 {
+				current := "avc1." + hex.EncodeToString(sps[1:4])
+				if current != codec {
+					codec = current
+					s.setVideo(h264VideoMetadata(codec, sps))
 				}
 			}
 			payload := []byte{}
@@ -393,7 +428,7 @@ func (s *source) makeHandler(c *gortsplib.Client, media *description.Media, f fo
 		if e != nil {
 			return nil
 		}
-		s.setAudio(map[string]any{"codec": "mp4a.40.2", "sampleRate": f.ClockRate(), "channels": f.Config.ChannelCount, "config": base64.StdEncoding.EncodeToString(asc)})
+		s.setAudio(map[string]any{"codec": fmt.Sprintf("mp4a.40.%d", f.Config.Type), "sampleRate": f.ClockRate(), "channels": f.Config.ChannelCount, "config": base64.StdEncoding.EncodeToString(asc)})
 		return func(p *rtp.Packet) {
 			aus, e := decoder.Decode(p)
 			if e != nil {

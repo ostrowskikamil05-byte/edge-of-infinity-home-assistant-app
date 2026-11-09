@@ -1,6 +1,7 @@
 """Bounded ONVIF synchronization requests; never changes an encoder profile."""
 import hashlib
 import json
+import re
 import threading
 import time
 from urllib.parse import urlparse, parse_qs
@@ -75,17 +76,19 @@ class CameraKeyframes:
         raise RuntimeError('keyframe_recording_profile_not_found')
 
     def run(self, camera, synchronize=True):
-        camera_id=camera['id'];started=self.clock();success=False
+        camera_id=camera['id'];started=self.clock();success=False;phase='profile_discovery'
         try:
             endpoint,token=self.resolve(camera)
             with self.lock:
                 synchronize=synchronize or camera_id in self.pending
                 self.warming.discard(camera_id);self.pending.discard(camera_id)
+            phase='synchronization_point'
             if synchronize:self.soap(camera,endpoint,'http://www.onvif.org/ver10/media/wsdl/SetSynchronizationPoint',f'<trt:SetSynchronizationPoint><trt:ProfileToken>{escape(token)}</trt:ProfileToken></trt:SetSynchronizationPoint>')
             success=True
             self.log('keyframe_onvif_requested' if synchronize else 'keyframe_onvif_profile_ready',{'camera_id':camera_id,'elapsed_ms':round((self.clock()-started)*1000),'encoder_settings_changed':False})
         except (RuntimeError,ValueError,OSError) as error:
-            self.log('keyframe_onvif_unavailable',{'camera_id':camera_id,'reason':type(error).__name__,'elapsed_ms':round((self.clock()-started)*1000)})
+            text=str(error);code=text if re.fullmatch(r'keyframe_[a-z_]{1,80}',text) else next((name for name in ('ActionNotSupported','NotAuthorized','NoProfile','InvalidArgVal') if name in text),'onvif_request_failed')
+            self.log('keyframe_onvif_unavailable',{'camera_id':camera_id,'reason':type(error).__name__,'code':code,'phase':phase,'severity':'warning','optional_capability':True,'encoder_settings_changed':False,'elapsed_ms':round((self.clock()-started)*1000)})
         finally:
             with self.lock:
                 self.busy.discard(camera_id)

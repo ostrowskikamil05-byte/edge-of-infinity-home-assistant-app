@@ -264,3 +264,12 @@ calls the actual preview service, checks its JPEG dimensions/cropping and confir
 preview, analysis, recording and microphone still share one upstream connection.
 
 `nvr_ready_playback.cjs` uses the long-GOP multi-camera fixture on port 18093. Run with `EDGE_TEST_BROWSER=webkit` and `chromium`. It checks live-first preparation of at most two saved MP4s without hidden recording decoders, actual first playback with server media requests blocked, no hover thumbnails, held main-picture scrubbing, measured frame stepping, native seek readiness when frame callbacks are unavailable, and retained bytes/decoder cleanup on return to Live.
+
+`nvr_edge_dvr.cjs` runs against `EDGE_TEST_ARCHIVE_RTC_BINARY` fixtures (port
+18095 by default). It uses real MP4 indexes, the panel WebSocket tunnel and
+WebCodecs; verifies decoded pictures/AAC PCM, obsolete seeks, frame steps,
+natural boundaries on one socket, paused traffic, original hashes and native
+MP4 return. `EDGE_TEST_DVR_CAMERA=0` selects HEVC in the normal fixture;
+`EDGE_TEST_DVR_WIDTH/HEIGHT` validate full-resolution 4K fixtures.
+`nvr_dvr_fallback.cjs` simulates missing video/audio profiles and verifies an
+actual playing native MP4 picture after automatic device fallback.

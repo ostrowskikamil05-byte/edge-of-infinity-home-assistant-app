@@ -38,7 +38,9 @@ def build_config(config, home, rtsp_port=8556, api_port=9997):
         for path in (camera_id + '_main', camera_id + '_sub'):
             if path not in row['paths']:
                 row['paths'].append(path)
-    return {'rtsp': ':' + str(rtsp_port), 'http': ':' + str(api_port), 'token': private_token(home), 'sources': list(sources.values())}
+    archives={re.sub(r'[^A-Za-z0-9_.-]','_',c.get('id') or f'camera_{i+1}')+'_'+str(i):re.sub(r'[^A-Za-z0-9_.-]','_',c.get('id') or f'camera_{i+1}') for i,c in enumerate(config.get('cameras',[]))}
+    return {'rtsp': ':' + str(rtsp_port), 'http': ':' + str(api_port), 'token': private_token(home), 'sources': list(sources.values()),
+            'recordings': str((config.get('storage') or {}).get('recordings_dir') or '/media/edge-of-infinity/recordings'), 'archives': archives}
 
 
 def write_config(config, home, output, rtsp_port=8556, api_port=9997):
