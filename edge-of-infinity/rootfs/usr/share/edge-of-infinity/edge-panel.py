@@ -6603,11 +6603,23 @@ INDEX_HTML = r"""<!doctype html>
       async function restoreGalleryThumbnails(){
         if(!galleryScope)return;
         await Promise.allSettled([...nvrGrid.querySelectorAll('img[data-recording-thumb-src]')].slice(0,12).map(async image=>{
-          const source=image.dataset.recordingThumbSrc,blob=await galleryStore.loadThumbnail(galleryScope,source);
-          if(!blob||!image.isConnected||image.dataset.recordingThumbQueued||image.dataset.recordingThumbSrc!==source)return;
-          const url=recordingThumbnailBlob(image,blob);image.loading='eager';image.dataset.recordingThumbBackend='jpeg';
-          image.onload=()=>{image.onload=null;image.onerror=null;thumbnailContainer(image)?.classList.add('thumb-loaded');image.removeAttribute('data-recording-thumb-src');};
-          image.onerror=()=>{releaseRecordingThumbnail(image);image.onload=null;image.onerror=null;};image.src=url;
+          if(image.dataset.recordingThumbQueued)return;
+          const source=image.dataset.recordingThumbSrc;image.dataset.recordingThumbQueued='true';
+          let finished=false;
+          const finish=(ok,detached=false)=>{
+            if(finished)return;finished=true;recordingThumbnailFinishes.delete(image);
+            image.onload=null;image.onerror=null;delete image.dataset.recordingThumbQueued;
+            if(ok){thumbnailContainer(image)?.classList.add('thumb-loaded');image.removeAttribute('data-recording-thumb-src');}
+            else{releaseRecordingThumbnail(image);if(!detached&&image.isConnected&&activePage==='nvr')loadRecordingThumbnail(image);}
+          };
+          recordingThumbnailFinishes.set(image,finish);
+          try{
+            const blob=await galleryStore.loadThumbnail(galleryScope,source);
+            if(finished)return;
+            if(!blob||!image.isConnected||image.dataset.recordingThumbSrc!==source){finish(false,!image.isConnected);return;}
+            const url=recordingThumbnailBlob(image,blob);image.loading='eager';image.dataset.recordingThumbBackend='jpeg';
+            image.onload=()=>finish(true);image.onerror=()=>finish(false);image.src=url;
+          }catch(_){finish(false);}
         }));
       }
       let selectedRecording = {};
@@ -7383,8 +7395,8 @@ INDEX_HTML = r"""<!doctype html>
       function releaseRecordingThumbnail(image,detach=false){
         // Cancel the resource before revoking it: WebKit can otherwise retry
         // a detached/unloading image against a Blob URL that no longer exists.
-        if(detach){image.onload=null;image.onerror=null;image.removeAttribute('srcset');image.removeAttribute('src');recordingThumbnailFinishes.get(image)?.(false);}
-        const url=recordingThumbnailUrls.get(image);if(url){recordingThumbnailUrls.delete(image);URL.revokeObjectURL(url);}
+        if(detach){image.onload=null;image.onerror=null;image.removeAttribute('srcset');image.removeAttribute('src');recordingThumbnailFinishes.get(image)?.(false,true);}
+        const url=recordingThumbnailUrls.get(image);if(url){if(image.getAttribute('src')===url)image.removeAttribute('src');recordingThumbnailUrls.delete(image);URL.revokeObjectURL(url);}
       }
       function recordingThumbnailBlob(image,blob){releaseRecordingThumbnail(image);const url=URL.createObjectURL(blob);recordingThumbnailUrls.set(image,url);return url;}
       // WebKit may reload a decoded image after layout/scroll. Keep its Blob

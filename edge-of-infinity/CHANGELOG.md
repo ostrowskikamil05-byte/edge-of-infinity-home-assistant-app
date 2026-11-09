@@ -2,6 +2,8 @@
 
 ## 0.13.1
 
+- Serialize cached thumbnail restoration with visible-image loading, preventing
+  competing jobs from replacing/revoking the same pending image in WebKit.
 - Retry recorder starts waiting for shared EdgeRTC metadata independently of UI
   polling, using one bounded worker. Skip disk retention scans and FFmpeg until
   codec parameters are ready; retain source AAC copy and original video/FPS.
