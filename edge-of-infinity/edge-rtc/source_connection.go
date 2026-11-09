@@ -27,6 +27,7 @@ type sourceConnection struct {
 	started                   time.Time
 	backchannel               bool
 	formats                   []map[string]any
+	optionalAudioFiltered     []map[string]any
 	lastError                 map[string]any
 	lastLog                   time.Time
 	lastLogCode, lastLogPhase string
@@ -38,6 +39,7 @@ func (h *sourceConnection) begin(attempt uint64, microphone bool) {
 	h.phase, h.method, h.state, h.status = "parse_url", "", "connecting", 0
 	h.attempt, h.started, h.backchannel = attempt, time.Now(), microphone
 	h.formats = nil
+	h.optionalAudioFiltered = nil
 }
 func (h *sourceConnection) stage(phase string) {
 	h.mu.Lock()
@@ -56,6 +58,17 @@ func (h *sourceConnection) response(r *base.Response) {
 	if h.method == "DESCRIBE" && r.StatusCode == base.StatusOK {
 		h.formats = sdpFormatOverview(r.Body)
 	}
+}
+func (h *sourceConnection) isSDPResponse(r *base.Response) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.method == "DESCRIBE" && r.StatusCode == base.StatusOK && len(r.Header["Content-Type"]) == 1 &&
+		strings.TrimSpace(strings.SplitN(r.Header["Content-Type"][0], ";", 2)[0]) == "application/sdp"
+}
+func (h *sourceConnection) filteredOptionalAudio(changes []map[string]any) {
+	h.mu.Lock()
+	h.optionalAudioFiltered = changes
+	h.mu.Unlock()
 }
 func (h *sourceConnection) withoutBackchannel() { h.mu.Lock(); h.backchannel = false; h.mu.Unlock() }
 func (h *sourceConnection) ready() {
@@ -76,10 +89,12 @@ func sdpFormatOverview(body []byte) []map[string]any {
 	}
 	var formats []map[string]any
 	configs := map[string]string{}
-	media := ""
+	media, index := "", 0
+	directions := map[int]string{}
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "m=") {
+			index++
 			fields := strings.Fields(line[2:])
 			media = "other"
 			if len(fields) > 0 {
@@ -89,6 +104,10 @@ func sdpFormatOverview(body []byte) []map[string]any {
 				}
 			}
 			continue
+		}
+		switch line {
+		case "a=sendonly", "a=recvonly", "a=sendrecv", "a=inactive":
+			directions[index] = strings.TrimPrefix(line, "a=")
 		}
 		if strings.HasPrefix(line, "a=rtpmap:") && len(formats) < 32 {
 			fields := strings.Fields(strings.TrimPrefix(line, "a=rtpmap:"))
@@ -107,7 +126,7 @@ func sdpFormatOverview(body []byte) []map[string]any {
 			if err != nil || rate < 1 || rate > 1000000 {
 				continue
 			}
-			row := map[string]any{"media": media, "payload_type": pt, "codec": codec[0], "clock_rate": rate}
+			row := map[string]any{"media": media, "media_index": index, "payload_type": pt, "codec": codec[0], "clock_rate": rate}
 			if len(codec) == 3 {
 				if n, err := strconv.Atoi(codec[2]); err == nil && n > 0 && n < 64 {
 					row["channels"] = n
@@ -129,12 +148,15 @@ func sdpFormatOverview(body []byte) []map[string]any {
 				if len(pair) != 2 || !strings.EqualFold(pair[0], "config") || !audioConfigHex.MatchString(pair[1]) {
 					continue
 				}
-				configs[media+":"+strconv.Itoa(pt)] = pair[1]
+				configs[strconv.Itoa(index)+":"+strconv.Itoa(pt)] = pair[1]
 			}
 		}
 	}
 	for _, row := range formats {
-		if config := configs[fmt.Sprint(row["media"])+":"+fmt.Sprint(row["payload_type"])]; config != "" {
+		if direction := directions[row["media_index"].(int)]; direction != "" {
+			row["direction"] = direction
+		}
+		if config := configs[fmt.Sprint(row["media_index"])+":"+fmt.Sprint(row["payload_type"])]; config != "" {
 			row["audio_specific_config_hex"] = config
 		}
 	}
@@ -238,7 +260,8 @@ func (h *sourceConnection) snapshot() map[string]any {
 		lastError = h.lastError
 	}
 	return map[string]any{"state": h.state, "phase": h.phase, "rtsp_method": h.method, "rtsp_status": h.status,
-		"attempt": h.attempt, "backchannel_requested": h.backchannel, "failure_count": h.failures, "last_error": lastError, "sdp_formats": h.formats}
+		"attempt": h.attempt, "backchannel_requested": h.backchannel, "failure_count": h.failures, "last_error": lastError, "sdp_formats": h.formats,
+		"optional_audio_filtered": h.optionalAudioFiltered}
 }
 func (s *source) reportConnectionError(err error) {
 	var terminated liberrors.ErrClientTerminated

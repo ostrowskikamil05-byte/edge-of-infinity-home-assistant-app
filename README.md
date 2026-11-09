@@ -2,6 +2,8 @@
 
 Home Assistant App repository for Edge of Infinity.
 
+Version **0.13.3** restores camera connection when optional ONVIF talk AAC is
+malformed, preserving forward H.265/AAC and valid G711 talk on one connection.
 Version **0.13.2** reports exact RTSP connection failures and advertised codecs,
 and handles rejected optional microphone negotiation on the same connection.
 Version **0.13.0** adds optional **EdgeRTC DVR** archive playback with indexed

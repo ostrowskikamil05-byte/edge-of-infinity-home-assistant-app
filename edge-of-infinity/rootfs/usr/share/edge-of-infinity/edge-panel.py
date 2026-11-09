@@ -100,8 +100,9 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.13.2"
-APP_RELEASE_FEATURES=['Optional EdgeRTC DVR: indexed original H264/H265/AAC, epoch seeks and one bounded persistent socket',
+APP_VERSION = "0.13.3"
+APP_RELEASE_FEATURES=['UNV malformed optional talk AAC compatibility; valid forward H265/AAC and G711 mic share one connection',
+                      'Optional EdgeRTC DVR: indexed original H264/H265/AAC, epoch seeks and one bounded persistent socket',
                       'RTSP connection phases, response codes and safe advertised codec diagnostics',
                       'Same-connection optional microphone fallback and explicit missing-recorder diagnostics',
                       'Deferred recorder metadata starts retry without UI polling or extra camera channels',
@@ -113,7 +114,7 @@ APP_RELEASE_FEATURES=['Optional EdgeRTC DVR: indexed original H264/H265/AAC, epo
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "rtsp-connect-v132"
+UI_BUILD = "unv-sdp-v133"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -12108,7 +12109,7 @@ def main() -> None:
     write_debug_event('release_features',{'version':APP_VERSION,'features':APP_RELEASE_FEATURES,
                       'hardware':hardware_inventory(),'recordings_changed':False,'camera_codec_settings_changed':False,
                       'edge_rtc':'Sources stay connected on the server; viewers share its bounded keyframe buffer.'})
-    print(f'[edge-panel] {APP_VERSION}: RTSP negotiation diagnostics, same-connection microphone fallback, metadata retry and source AAC copy. Original video/FPS unchanged.')
+    print(f'[edge-panel] {APP_VERSION}: UNV optional talk AAC SDP compatibility, per-media codec diagnostics, metadata retry and source AAC copy. Original video/FPS unchanged.')
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
     try:
