@@ -38,14 +38,14 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
      if(endpoint==='api/recording/status')return json({summary:url.searchParams.get('summary')==='1',cameras:[]});
      if(endpoint==='api/storage/status')return json({pending:false,recordings_bytes:0,recordings_volume:{free_bytes:2*1024**3},cache_volume:{free_bytes:2*1024**3}});
      if(endpoint==='api/core/engine')return json({available:true,core_engine:fixtures[mode].engine,running_engine:fixtures[mode].engine,restart_required:false});
-     if(endpoint==='api/debug'){events.push(request.postDataJSON());return json({ok:true});}
+     if(endpoint==='api/debug')throw Error('per-event debug HTTP must not be used');
      if(endpoint==='api/client-diagnostics.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-device-diagnostics.js'),'utf8')});
      if(endpoint==='api/edge-rtc/client.js'||endpoint==='api/edge-rtc/device-diagnostics.js'){
       assert.equal(mode,'native');assert.equal(url.searchParams.get('v'),fixtures[mode].version,'preload URL is not versioned');
       const asset=endpoint.endsWith('/client.js')?'edge-rtc-client.js':'edge-device-diagnostics.js';
       return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www',asset),'utf8')});
      }
-     if(endpoint==='api/client-diagnostics')return json({ok:true});
+     if(endpoint==='api/client-diagnostics'){events.push(...(request.postDataJSON().events||[]));return json({ok:true});}
      if(endpoint.startsWith('api/edge-rtc/player/'))return route.fulfill({contentType:'text/html',body:'<!doctype html><p>Native player routing fixture</p>'});
      throw new Error('Unexpected fixture request: '+endpoint);
     });
@@ -80,7 +80,7 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
     assert.equal(config.live.mobile_webrtc_public_url,publicUrl);
     assert.equal(config.live.mobile_webrtc_turn_password,'fixture-turn-value','hidden legacy setting was lost');
     assert.equal(config.storage.retention_days,21);
-    if(native){const toggle=events.filter(e=>e.event==='ui_live_toggle');assert(toggle.length>=2);assert(toggle.every(e=>e.payload.reason==='edge_rtc'&&e.payload.can_embed));}
+    if(native){await page.waitForFunction(()=>deviceReporter?.events.some(e=>e.event==='ui_live_toggle'));const toggle=await page.evaluate(()=>deviceReporter.events.filter(e=>e.event==='ui_live_toggle'));assert(toggle.length>=2);assert(toggle.every(e=>e.data.reason==='edge_rtc'&&e.data.can_embed));}
     assert(requests.every(url=>url.port===''),'extra media port requested');
     assert.deepEqual(errors,[]);
     console.log(`PASS ${mode} ${host} ${width}px: notice, live routing, ingress, settings visibility and saved legacy values`);

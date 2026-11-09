@@ -97,13 +97,13 @@ class EdgeDetectionCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if detection:
             try:
                 stamp=float(detection.get("updated_at",0))
-                if not math.isfinite(stamp):raise ValueError('invalid timestamp')
+                if not math.isfinite(stamp) or stamp>time.time()+15:raise ValueError('invalid timestamp')
                 if time.time() - stamp > 15:
                     # Core can start before the add-on's publisher. Do not
                     # replay a retained file or announce stale initial events.
                     if not self._fresh_seen and time.monotonic()-self._started<45:
                         return {"detection": {}, "status": "starting"}
-                    raise UpdateFailed("Edge detection status is stale")
+                    raise UpdateFailed(f"Edge detection status is stale (age {max(0,round(time.time()-stamp))} s; {detection.get('status_file','API')})")
             except (TypeError, ValueError) as error:
                 raise UpdateFailed("Invalid Edge detection status") from error
         self._fresh_seen = True

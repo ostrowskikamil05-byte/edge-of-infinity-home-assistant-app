@@ -99,15 +99,15 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.12.3"
-APP_RELEASE_FEATURES=['Continuous PCM worklet for camera audio; bounded jitter and resampling across packet boundaries',
-                      'Adaptive next-recording headroom and failed-download backoff within the existing RAM budget',
-                      'Read-only ONVIF profile discovery at startup; one shared always-on camera source',
-                      'Detection publisher startup grace without replaying retained events or hiding later outages',
-                      'Seek timing, keyframe interval and live audio buffer diagnostics',
-                      'Original-resolution WebKit recording presentation, original video/FPS/AAC and gallery preserved']
+APP_VERSION = "0.12.4"
+APP_RELEASE_FEATURES=['Direct saved-video playback; speculative preparation, prefetch controls and the Blob/RAM cache removed',
+                      'All panel UI diagnostics use bounded device batches; no per-event debug HTTP posts',
+                      'Normalized ingress paths, session validation before resume and expired-session request stop',
+                      'Source-paced short Live bursts with at most eight queued frames and 250 ms pending span',
+                      'Fresh detection heartbeat fallback without changing camera configuration precedence',
+                      'Continuous live PCM, original-resolution recording pictures, original video/FPS/AAC and gallery retained']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "continuous-audio-v123"
+UI_BUILD = "direct-ingress-v124"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -5355,7 +5355,7 @@ EDGE_RTC_PLAYER_HTML = r"""<!doctype html><meta name="viewport" content="width=d
 import{EdgeRTCClient}from'../client.js?v=__EDGE_PANEL_VERSION__';
 import{getDeviceReporter}from'../device-diagnostics.js?v=__EDGE_PANEL_VERSION__';
 const playerBase=new URL(document.baseURI),path=playerBase.pathname.split('/').pop(),url=new URL('../stream/'+path,playerBase);let client,timer,retries=0,muted=true;
-const diagnostics=getDeviceReporter({context:{surface:'edge_panel_live',source:path},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);try{return(await fetch(new URL('../../client-diagnostics',playerBase),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal})).ok;}finally{clearTimeout(timer);}}});
+const diagnostics=getDeviceReporter({context:{surface:'edge_panel_live',source:path},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),12000);try{const response=await fetch(new URL('../../client-diagnostics',playerBase),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});if([401,403].includes(response.status)){diagnostics.setPaused?.(true);window.edgeStopLive?.();parent.postMessage({type:'edge_ingress_expired',path},playerBase.origin);}return response.ok;}finally{clearTimeout(timer);}}});
 function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,diagnostics,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;if(f.frames===1)parent.postMessage({type:'edge_live_ready',path},playerBase.origin);const label='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264'),note=document.querySelector('p');if(note.textContent!==label)note.textContent=label;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
 window.edgeStopLive=()=>{clearTimeout(timer);client?.close();};
 connect();document.querySelector('button').onclick=()=>{muted=!muted;client?.setAudio(.6,muted);document.querySelector('button').textContent=muted?'Sound':'Mute';};document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(document.hidden)window.edgeStopLive();else connect();});window.addEventListener('pagehide',()=>window.edgeStopLive());
@@ -5369,6 +5369,7 @@ INDEX_HTML = r"""<!doctype html>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="edge-panel-version" content="__EDGE_PANEL_VERSION__">
     <meta name="edge-ui-build" content="__EDGE_UI_BUILD__">
+    <script>{const p=location.pathname.replace(/\/{2,}/g,'/').replace(/\/index\.html$/,'/'),b=document.createElement('base');b.href=location.origin+(p.endsWith('/')?p:p+'/');document.head.prepend(b);}</script>
     __EDGE_LIVE_PRELOAD__
     <title>Edge of Infinity</title>
     <style>
@@ -6424,7 +6425,6 @@ INDEX_HTML = r"""<!doctype html>
       __EDGE_GALLERY_CACHE__
       __EDGE_LOG_VIEW__
       __EDGE_RECORDING_SURFACE__
-      __EDGE_RECORDING_BUFFER__
       const grid = document.getElementById('camera-grid');
       const nvrGrid = document.getElementById('nvr-grid');
       const form = document.getElementById('config-form');
@@ -6508,12 +6508,25 @@ INDEX_HTML = r"""<!doctype html>
       const NVR_TIMER_LOG_THROTTLE_MS = 30000;
       const liveFrameTimers = new Map();
 
-      const panelBase = window.location.pathname.endsWith('/')
-        ? window.location.pathname
-        : `${window.location.pathname}/`;
-
-      function panelPath(path) {
-        return `${panelBase}${String(path).replace(/^\/+/, '')}`;
+      const panelBase = new URL(document.baseURI).pathname;
+      let ingressSessionExpired=false,liveSessionReady=true;
+      const usesIngress=/\/api\/(?:hassio_ingress|hassio\/ingress)\//.test(panelBase);
+      function panelPath(path){return `${panelBase}${String(path).replace(/^\/+/,'')}`;}
+      function expireIngressSession(){
+        if(ingressSessionExpired)return;ingressSessionExpired=true;liveSessionReady=false;
+        deviceReporter?.setPaused?.(true);cancelGalleryPrefetch();updateLivePlaybackVisibility();
+        nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);
+        releaseInactiveRecordingPlayers(null,true);
+        const notice=document.createElement('aside');notice.dataset.ingressExpired='';notice.setAttribute('role','alert');
+        notice.style.cssText='position:fixed;inset:auto 12px 12px;z-index:2147483647;background:#142536;color:white;padding:16px;border-radius:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap';
+        notice.append(document.createTextNode('Sesja Home Assistanta wygasła. Otwórz ponownie panel dodatku.'));
+        const button=document.createElement('button');button.textContent='Odśwież Home Assistant';button.onclick=()=>{try{window.top.location.reload();}catch(_){location.reload();}};notice.append(button);document.body.append(notice);
+      }
+      async function panelFetch(url,options){
+        if(ingressSessionExpired)throw Error('ingress_session_expired');
+        const response=await window.fetch(url,options);
+        if(usesIngress&&[401,403].includes(response.status))expireIngressSession();
+        return response;
       }
 
       function directPanelPath(path) {
@@ -6774,44 +6787,17 @@ INDEX_HTML = r"""<!doctype html>
         `;
       }
 
-      function debugEvent(event, payload = {}) {
-        if(/^(ui_recording_|ui_live_|ui_codec_|ui_global_|ui_page_change)/.test(event)){
-          if(deviceReporter)deviceReporter.note(event,payload);else {pendingDeviceEvents.push([event,payload]);if(pendingDeviceEvents.length>40)pendingDeviceEvents.shift();}
-        }
-        const body = JSON.stringify({
-          event,
-          device_id:deviceReporter?.device_id||null,session_id:deviceReporter?.session_id||null,
-          panel_version: EDGE_PANEL_VERSION,
-          ui_build: EDGE_UI_BUILD,
-          timestamp: new Date().toISOString(),
-          page: document.querySelector('[data-page]:not([hidden])')?.dataset?.page || 'unknown',
-          location: window.location.pathname,
-          client: {
-            protocol: window.location.protocol,
-            host: window.location.hostname,
-            href: window.location.href,
-            user_agent: navigator.userAgent,
-            viewport: `${window.innerWidth}x${window.innerHeight}`,
-          },
-          payload
-        });
-        const query = new URLSearchParams({
-          event,
-          panel_version: EDGE_PANEL_VERSION,
-          ui_build: EDGE_UI_BUILD,
-        });
-        fetch(panelPath(`api/debug?${query.toString()}`), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body
-        }).catch(() => {});
+      function debugEvent(event,payload={}){
+        const data={...payload,page:payload.page||document.querySelector('[data-page]:not([hidden])')?.dataset?.page||'unknown'};
+        if(deviceReporter)deviceReporter.note(event,data);
+        else{pendingDeviceEvents.push([event,data]);if(pendingDeviceEvents.length>128)pendingDeviceEvents.shift();}
       }
       let deviceReporter=null,deviceReport=null;
       const pendingDeviceEvents=[];
       import(panelPath('api/client-diagnostics.js')).then(({getDeviceReporter})=>{
-        deviceReporter=getDeviceReporter({context:{surface:'edge_panel'},send:async payload=>{
-          const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);
-          try{return (await fetch(panelPath('api/client-diagnostics'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal})).ok;}finally{clearTimeout(timer);}
+        deviceReporter=getDeviceReporter({context:{surface:'edge_panel',panel_version:EDGE_PANEL_VERSION,ui_build:EDGE_UI_BUILD},send:async payload=>{
+          const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),12000);
+          try{return (await panelFetch(panelPath('api/client-diagnostics'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal})).ok;}finally{clearTimeout(timer);}
         }});
         document.getElementById('device-label').value=deviceReporter.label||'';
         deviceReporter.registerSource('recordings',()=>({state:activePage==='nvr'?'visible':'closed',
@@ -7134,7 +7120,7 @@ INDEX_HTML = r"""<!doctype html>
             if(other.readyState>=1)other.dataset.recordingSeek=String(other.currentTime);
             other.dataset.recordingSuspendedSrc=mediaUrlWithTimeFragment(other.dataset.recordingSrc||other.getAttribute('src'),other.dataset.recordingSeek);
             if(other.dataset.recordingPoster)other.poster=other.dataset.recordingPoster;
-            other.removeAttribute('src');other.load();recordingBuffer.release(other);
+            other.removeAttribute('src');other.load();
           }
           const held=other.closest('[data-recording-wrap]')?.querySelector('[data-recording-transition]');
           if(held){held.hidden=true;held.width=0;held.height=0;delete held.dataset.valid;}
@@ -7145,11 +7131,11 @@ INDEX_HTML = r"""<!doctype html>
         const source=video.dataset.recordingSuspendedSrc;
         if(!source)return;
         if(video.dataset.recordingPoster&&!video.getAttribute('poster'))video.poster=video.dataset.recordingPoster;
-        delete video.dataset.recordingSuspendedSrc;video.preload='auto';video.src=recordingBuffer.attach(video,source).split('#')[0];video.load();recordingSurface.begin(video);
+        delete video.dataset.recordingSuspendedSrc;video.preload='auto';video.src=source.split('#')[0];video.load();recordingSurface.begin(video);
       }
       function disposeRecordingPlayer(video){
         if(!video)return;pauseRecording(video);recordingSurface.stop(video,true);
-        video.removeAttribute('src');video.load();recordingBuffer.release(video);
+        video.removeAttribute('src');video.load();
       }
 
       function recordingDefaultTarget(files, status = {}) {
@@ -7338,36 +7324,19 @@ INDEX_HTML = r"""<!doctype html>
         });
       }
 
-      const recordingBuffer=new EdgeRecordingBuffer((event,data)=>debugEvent(event,data));
-      try{recordingBuffer.enabled=localStorage.getItem('edge-nvr-next-buffer')!=='false';}catch(_){}
-      let recordingReadyTimer=null,recordingReadyEpoch=0;
-      function cancelRecordingReady(){clearTimeout(recordingReadyTimer);recordingReadyTimer=null;recordingReadyEpoch++;}
-      function scheduleRecordingReady(){
-        cancelRecordingReady();
-        if(activePage!=='home'||document.hidden)return;
-        const epoch=recordingReadyEpoch;
-        recordingReadyTimer=setTimeout(async()=>{
-          recordingReadyTimer=null;
+      let galleryPrefetchTimer=null,galleryPrefetchEpoch=0;
+      function cancelGalleryPrefetch(){clearTimeout(galleryPrefetchTimer);galleryPrefetchTimer=null;galleryPrefetchEpoch++;}
+      function scheduleGalleryPrefetch(){
+        cancelGalleryPrefetch();if(activePage!=='home'||document.hidden)return;
+        const epoch=galleryPrefetchEpoch;
+        galleryPrefetchTimer=setTimeout(async()=>{
+          galleryPrefetchTimer=null;
+          if(epoch!==galleryPrefetchEpoch||activePage!=='home'||document.hidden)return;
           const frames=[...grid.querySelectorAll('iframe.live-frame')].filter(f=>f.dataset.liveSuspended!=='true');
-          // Do not compete with the first live image or open a hidden decoder.
           if(EDGE_NATIVE_RTC&&frames.some(f=>f.dataset.liveReady!=='true'))return;
           if(!(config.cameras||[]).every((_,i)=>Array.isArray(recordingStatus[i]?.files)))await loadRecordingStatus({history:true,reason:'gallery_prefetch'});
-          if(!recordingBuffer.enabled)return;
-          const videos=[...nvrGrid.querySelectorAll('video[data-recording-player]')].slice(0,2);
-          for(const video of videos){
-            if(epoch!==recordingReadyEpoch||activePage!=='home'||document.hidden)return;
-            const status=recordingStatus[video.dataset.recordingPlayer],file=status?.files?.find(f=>f.url===video.dataset.recordingLoadedFile);
-            if(!file)continue;
-            // Prepare the server copy without transferring whole MP4s over
-            // the same mobile/Cloud connection as the live streams.
-            try{
-              const response=await fetch(panelPath('api/recording/prepare'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:status.key,name:file.name}),signal:AbortSignal.timeout(12000)});
-              const data=await response.json();debugEvent('ui_recording_startup_warm',{index:video.dataset.recordingPlayer,ready:response.ok&&data.ready,transfer:'metadata_only',...recordingBuffer.diagnostic()});
-            }catch(error){if(error.name!=='AbortError')debugEvent('ui_recording_startup_prepare_unavailable',{index:video.dataset.recordingPlayer,reason:error.name});}
-          }
         },2000);
       }
-      setInterval(()=>recordingBuffer.prune(),30000);
       const recordingSurface=new EdgeRecordingSurface((event,data)=>debugEvent(event,data),video=>{
         if(!video.paused&&(video.dataset.recordingLoading==='true'||video.dataset.recordingBuffering==='true')){
           video.dataset.recordingLoading='false';video.dataset.recordingBuffering='false';updateRecordingPlayerControls(video,'');
@@ -7382,7 +7351,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function pauseRecording(video) {
         const scrub=recordingScrubs.get(video.dataset.recordingPlayer);if(scrub)scrub.resume=false;
-        cancelRecordingWarmup(video);delete video.dataset.recordingBuffering;
+        delete video.dataset.recordingBuffering;
         video.dataset.recordingWantsPlay='false';video.dataset.recordingPlayPending='false';video.dataset.recordingPlayEpoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.pause();
       }
       function recordingPlaybackRequested(video) {
@@ -7416,45 +7385,12 @@ INDEX_HTML = r"""<!doctype html>
           const position=video.seeking?Number(video.dataset.recordingSeek||0):time;
           holdRecordingFrame(video);video.dataset.recordingLoading='true';video.dataset.recordingSeek=String(position);
           debugEvent('ui_recording_progress_reload',recordingVideoDiagnostics(video));
-          video.src=recordingBuffer.attach(video,mediaUrlWithTimeFragment(src,position)).split('#')[0];video.load();recordingSurface.begin(video);playRecording(video);return;
+          video.src=mediaUrlWithTimeFragment(src,position).split('#')[0];video.load();recordingSurface.begin(video);playRecording(video);return;
         }
         if(now-state.at>=12000){debugEvent('ui_recording_progress_timeout',recordingVideoDiagnostics(video));pauseRecording(video);updateRecordingPlayerControls(video,'Nagranie nie dostarcza klatek. Naciśnij Play lub przetestuj kodeki w ustawieniach odtwarzacza.');}
       }
       setInterval(()=>nvrGrid.querySelectorAll('video[data-recording-player]').forEach(watchRecordingProgress),2000);
 
-      let recordingWarmJob=null;
-      const recordingWarmPlans=new WeakMap(),recordingWarmDone=new Map();
-      function cancelRecordingWarmup(video) {
-        recordingBuffer.cancel(video);
-        if(recordingWarmJob?.video===video){recordingWarmJob.controller.abort();recordingWarmJob=null;}
-      }
-      function warmNextRecording(video) {
-        if(activePage!=='nvr'||document.hidden||video.paused||video.readyState<2||recordingScrubs.has(video.dataset.recordingPlayer)||recordingWarmJob)return;
-        const status=recordingStatus[video.dataset.recordingPlayer]||{},timeline=recordingTimeline(status.files||[],status),source=video.dataset.recordingLoadedFile;
-        let plan=recordingWarmPlans.get(video);
-        if(!plan||plan.source!==source||plan.timeline!==timeline){
-          const current=timeline.entries.findIndex(entry=>entry.file.url===source),entry=timeline.entries[current],next=timeline.entries[current+1];
-          plan={source,timeline,next:current>=0?next:null,current:entry};recordingWarmPlans.set(video,plan);
-        }
-        if(!plan.next||Number(plan.next.file.size_bytes||0)+Number(plan.current?.file.size_bytes||0)>56*1024*1024)return;
-        const url=mediaUrlWithTimeFragment(panelPath(plan.next.file.url),0),now=performance.now();
-        if(Number(video.dataset.recordingStableAt||0)&&now-Number(video.dataset.recordingStableAt)>2000&&video.dataset.recordingLoading!=='true'&&video.dataset.recordingBuffering!=='true'){
-          const ahead=Array.from({length:video.buffered.length},(_,i)=>[video.buffered.start(i),video.buffered.end(i)]).find(([a,b])=>a<=video.currentTime&&video.currentTime<=b);
-          const lead=recordingBuffer.headroom(plan.next.file.size_bytes),covered=ahead&&ahead[1]-video.currentTime>=lead;
-          if(video.networkState===1||covered||ahead&&Number.isFinite(video.duration)&&ahead[1]>=video.duration-.1)void recordingBuffer.prime(video,url,Number(plan.next.file.size_bytes||0));
-        }
-        if(recordingWarmDone.has(url)&&now-recordingWarmDone.get(url)<30000)return;
-        const job={video,url,controller:new AbortController()};recordingWarmJob=job;
-        // Prepare a saved segment through JSON, without a speculative video
-        // download, decoder or physical camera read. One bounded worker.
-        job.timer=setTimeout(()=>job.controller.abort(),15000);
-        fetch(panelPath('api/recording/prepare'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:status.key,name:plan.next.file.name}),cache:'no-store',signal:job.controller.signal}).then(async response=>{
-          const data=await response.json(),ready=response.ok&&data.ready;
-          recordingWarmDone.set(url,performance.now()-(ready?0:25000));
-          if(ready)video.dataset.recordingNextReady=plan.next.file.url;
-          while(recordingWarmDone.size>16)recordingWarmDone.delete(recordingWarmDone.keys().next().value);
-        }).catch(error=>{if(error.name!=='AbortError')recordingWarmDone.set(url,performance.now()-25000);}).finally(()=>{clearTimeout(job.timer);if(recordingWarmJob===job)recordingWarmJob=null;});
-      }
       function playRecording(video) {
         if(!video?.isConnected||!nvrGrid.contains(video))return;
         const status=recordingStatus[video.dataset.recordingPlayer];if(!selectedRecordingDay[video.dataset.recordingPlayer]&&status?.selected_day)selectedRecordingDay[video.dataset.recordingPlayer]=status.selected_day;
@@ -7462,7 +7398,7 @@ INDEX_HTML = r"""<!doctype html>
         if(recordingPictureUnavailable(video))return;
         if(video.error){
           const position=video.currentTime||Number(video.dataset.recordingSeek||0);
-          video.dataset.recordingSeek=String(position);video.src=recordingBuffer.attach(video,mediaUrlWithTimeFragment(video.dataset.recordingSrc||video.src,position)).split('#')[0];video.load();recordingSurface.begin(video);
+          video.dataset.recordingSeek=String(position);video.src=mediaUrlWithTimeFragment(video.dataset.recordingSrc||video.src,position).split('#')[0];video.load();recordingSurface.begin(video);
         }
         video.dataset.recordingWantsPlay='true';video.dataset.recordingPlayPending='true';
         const epoch=String(Number(video.dataset.recordingPlayEpoch||0)+1);video.dataset.recordingPlayEpoch=epoch;
@@ -7479,7 +7415,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!target?.target?.file?.url) return false;
         const video = nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
         if (!video) return false;
-        cancelRecordingWarmup(video);
+
         releaseInactiveRecordingPlayers(video);delete video.dataset.recordingSuspendedSrc;
         const fileUrl = target.target.file.url;
         const nextPath = panelPath(fileUrl);
@@ -7521,8 +7457,8 @@ INDEX_HTML = r"""<!doctype html>
         video.removeAttribute("poster");
         video.dataset.recordingLoading='true';video.dataset.recordingNetworkRetries='0';video.dataset.recordingWantsPlay=String(autoplay);video.dataset.recordingPlayPending='false';
         video.dataset.recordingLoadedFile = fileUrl;
-        cancelRecordingWarmup(video);delete video.dataset.recordingStableAt;
-        video.src = recordingBuffer.attach(video,nextSrc).split('#')[0];
+        delete video.dataset.recordingStableAt;
+        video.src = nextSrc.split('#')[0];
         video.dataset.recordingSrc = nextSrc;
         video.load();recordingSurface.begin(video);
         if (autoplay) {
@@ -7963,7 +7899,7 @@ INDEX_HTML = r"""<!doctype html>
         const index=video.dataset.recordingPlayer,file=recordingTargetForPlaybackOffset(index,recordingPlaybackPosition(video))?.target?.file;
         if(!file)return;const source=video.dataset.recordingLoadedFile;
         try{
-          const response=await fetch(panelPath(`api/recording/timing?${new URLSearchParams({key:recordingStatus[index].key,name:file.name})}`));
+          const response=await panelFetch(panelPath(`api/recording/timing?${new URLSearchParams({key:recordingStatus[index].key,name:file.name})}`));
           if(!response.ok)return;const data=await response.json();if(!video.isConnected||video.dataset.recordingLoadedFile!==source)return;
           video.dataset.recordingFps=String(data.fps||0);video.dataset.recordingCodec=data.codec_name||'';
           video.dataset.recordingKeyframeInterval=String(data.keyframe_interval_seconds||0);
@@ -7997,7 +7933,7 @@ INDEX_HTML = r"""<!doctype html>
         if(state){state.active=true;state.finishing=false;clearTimeout(state.deadline);return state;}
         const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);if(!video)return null;
         state={index,video,slider,active:true,finishing:false,resume:recordingPlaybackRequested(video),original:recordingPlaybackPosition(video),desired:Number(slider.value),applied:null,lastSeek:0};
-        recordingScrubs.set(index,state);clearRecordingContinuation(index);cancelRecordingWarmup(video);video.pause();
+        recordingScrubs.set(index,state);clearRecordingContinuation(index);video.pause();
         markNvrInteraction('recording_scrub_start',{index});
         const wrap=video.closest('[data-recording-wrap]');wrap.dataset.scrubbing='true';showRecordingControls(wrap);
         return state;
@@ -8039,7 +7975,7 @@ INDEX_HTML = r"""<!doctype html>
         const state=recordingScrubs.get(slider.dataset.recordingPlaybackSeek);if(!state)return;
         state.desired=cancel?state.original:Number(slider.value);state.slider.value=String(state.desired);
         state.active=false;state.finishing=true;
-        debugEvent('ui_recording_scrub_commit',{index:state.index,position:state.desired,cancel,...recordingVideoDiagnostics(state.video),keyframe_interval_seconds:Number(state.video.dataset.recordingKeyframeInterval||0),buffer:recordingBuffer.diagnostic()});
+        debugEvent('ui_recording_scrub_commit',{index:state.index,position:state.desired,cancel,...recordingVideoDiagnostics(state.video),keyframe_interval_seconds:Number(state.video.dataset.recordingKeyframeInterval||0),prefetch:false});
         clearTimeout(state.deadline);state.deadline=setTimeout(()=>{
           if(recordingScrubs.get(state.index)!==state)return;
           discardRecordingScrub(state.index);pauseRecording(state.video);
@@ -8066,7 +8002,7 @@ INDEX_HTML = r"""<!doctype html>
             <output class="nvr-playback-clock" data-recording-duration="${index}">${recordingPlaybackClock(position)} / ${recordingPlaybackClock(total)}</output>
 
 
-<div class="nvr-playback-extra" id="recording-extra-${index}"><label class="check-row" title="Przygotowuje pierwsze filmy po starcie live oraz kolejny fragment podczas oglądania. Może wcześniej pobrać dane; pamięć ma limit 16 MB."><input type="checkbox" data-recording-buffer-toggle ${recordingBuffer.enabled?'checked':''}> Przygotowuj nagrania wcześniej</label><button type="button" data-recording-codecs="${index}" title="Test H.264 / H.265 i dźwięku">Kodeki</button>            <button type="button" data-recording-mute="${index}" aria-label="Mute or unmute" title="Mute">${recordingControlIcon('sound')}</button>            <button class="nvr-skip" type="button" data-recording-jump="-1" data-record-index="${index}" aria-label="Back 1 second" title="Back 1 second">−1 s</button>
+<div class="nvr-playback-extra" id="recording-extra-${index}"><button type="button" data-recording-codecs="${index}" title="Test H.264 / H.265 i dźwięku">Kodeki</button>            <button type="button" data-recording-mute="${index}" aria-label="Mute or unmute" title="Mute">${recordingControlIcon('sound')}</button>            <button class="nvr-skip" type="button" data-recording-jump="-1" data-record-index="${index}" aria-label="Back 1 second" title="Back 1 second">−1 s</button>
             <button class="nvr-skip" type="button" data-recording-jump="1" data-record-index="${index}" aria-label="Forward 1 second" title="Forward 1 second">+1 s</button>            <label class="nvr-speed-label"><select data-recording-speed="${index}" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label></div>
             <button class="nvr-player-more" type="button" data-recording-more="${index}" aria-label="Playback settings" title="Playback settings" aria-controls="recording-extra-${index}" aria-expanded="false">${recordingControlIcon('settings')}</button>
             <button type="button" data-recording-fullscreen="${index}" aria-label="Fullscreen" title="Fullscreen">${fullscreenIcon()}</button>
@@ -8094,7 +8030,7 @@ INDEX_HTML = r"""<!doctype html>
           started=performance.now();controller=new AbortController();form.querySelector('button').disabled=true;note.textContent='Przygotowanie krótkiej kopii testowej…';report.textContent='';
           debugEvent('ui_codec_test_start',{index,file:file.name,selected,support:{h264:video.canPlayType('video/mp4; codecs="avc1.640028"'),hevc:video.canPlayType('video/mp4; codecs="hvc1.1.6.L120.B0"'),aac:video.canPlayType('audio/mp4; codecs="mp4a.40.2"'),g711_mov:video.canPlayType(`video/quicktime; codecs="${selected.audio}"`)}});
           try{
-            const response=await fetch(panelPath('api/recording/test'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:status.key,name:file.name,start,...selected}),signal:controller.signal});
+            const response=await panelFetch(panelPath('api/recording/test'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:status.key,name:file.name,start,...selected}),signal:controller.signal});
             const data=await response.json();if(!response.ok)throw Error(data.error||'codec_test_failed');if(!active)return;
             report.textContent=pretty(data.report);note.textContent='Kopia gotowa. Sprawdź Play, przewijanie i dźwięk.';playAt=performance.now();
             video.src=panelPath(data.url);video.load();video.play().catch(error=>{if(active){note.textContent=error.name==='NotAllowedError'?'Naciśnij Play.':'Ten profil nie jest odtwarzany przez przeglądarkę.';debugEvent('ui_codec_test_play_rejected',{...details(),message:error.message});}});
@@ -8165,7 +8101,7 @@ INDEX_HTML = r"""<!doctype html>
         };
         return {
           ...recordingSurface.diagnostic(video),
-          media_source:recordingBuffer.leases.has(video)?'memory_buffer':'server',media_buffer:recordingBuffer.diagnostic(),
+          media_source:'server',speculative_prefetch:false,
           logical_src:video?.dataset.recordingSrc||'',
           index: video?.dataset?.recordingPlayer,
           src: video?.currentSrc || video?.querySelector?.('source')?.src || video?.getAttribute?.('src') || '',
@@ -8365,7 +8301,7 @@ INDEX_HTML = r"""<!doctype html>
 
       async function loadLogs() {
         logsView.innerHTML = '<p class="notice">Loading logs...</p>';
-        const response = await fetch(panelPath('api/logs'), { cache: 'no-store' });
+        const response = await panelFetch(panelPath('api/logs'), { cache: 'no-store' });
         panelLogs = await response.json();
         if (!response.ok) {
           logsView.innerHTML = `<p class="notice">${escapeHtml(panelLogs.error || 'Could not load logs.')}</p>`;
@@ -8382,7 +8318,7 @@ INDEX_HTML = r"""<!doctype html>
       async function loadDeviceLogs(){
         const select=document.getElementById('device-log-select'),wanted=select.value||deviceReporter?.device_id||'';
         try{
-          const response=await fetch(panelPath(`api/client-diagnostics?${new URLSearchParams({device:wanted})}`),{cache:'no-store'});
+          const response=await panelFetch(panelPath(`api/client-diagnostics?${new URLSearchParams({device:wanted})}`),{cache:'no-store'});
           if(!response.ok)throw Error('Nie można odczytać logów urządzenia.');deviceReport=await response.json();
           select.innerHTML=(deviceReport.devices||[]).map(d=>`<option value="${escapeHtml(d.device_id)}">${escapeHtml(d.label)} · ${escapeHtml(d.device_id.slice(0,8))}</option>`).join('');
           if(wanted&&(deviceReport.devices||[]).some(d=>d.device_id===wanted))select.value=wanted;
@@ -8553,7 +8489,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function updateLivePlaybackVisibility() {
-        const visible=activePage==='home'&&!document.hidden;
+        const visible=activePage==='home'&&!document.hidden&&liveSessionReady&&!ingressSessionExpired;
         grid.querySelectorAll('iframe.live-frame').forEach(frame=>{
           if(!visible&&frame.dataset.liveSuspended!=='true'){
             // Release the phone's Live decoder synchronously before NVR can
@@ -8569,15 +8505,25 @@ INDEX_HTML = r"""<!doctype html>
         });
       }
       window.addEventListener('message',event=>{
-        if(event.origin!==location.origin||event.data?.type!=='edge_live_ready')return;
+        if(event.origin!==location.origin||!['edge_live_ready','edge_ingress_expired'].includes(event.data?.type))return;
         const frame=[...grid.querySelectorAll('iframe.live-frame')].find(f=>f.contentWindow===event.source&&f.dataset.livePath===event.data.path);
         if(!frame||frame.dataset.liveSuspended==='true')return;
-        frame.dataset.liveReady='true';debugEvent('ui_live_picture_ready',{liveKey:frame.dataset.liveKey,path:event.data.path});scheduleRecordingReady();
+        if(event.data.type==='edge_ingress_expired'){if(usesIngress)expireIngressSession();return;}
+        frame.dataset.liveReady='true';debugEvent('ui_live_picture_ready',{liveKey:frame.dataset.liveKey,path:event.data.path});scheduleGalleryPrefetch();
       });
+      let sessionResume=null;
+      async function resumeVisiblePanel(){
+        if(ingressSessionExpired||document.hidden||sessionResume)return;
+        sessionResume=checkPanelVersion();try{await sessionResume;}finally{sessionResume=null;}
+        if(ingressSessionExpired||document.hidden)return;
+        liveSessionReady=true;updateLivePlaybackVisibility();deviceReporter?.setPaused?.(false);
+      }
       document.addEventListener('visibilitychange',()=>{
-        updateLivePlaybackVisibility();
-        if(document.hidden)nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);
+        if(document.hidden){liveSessionReady=false;cancelGalleryPrefetch();updateLivePlaybackVisibility();nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);}
+        else void resumeVisiblePanel();
       });
+      window.addEventListener('pagehide',()=>{liveSessionReady=false;updateLivePlaybackVisibility();});
+      window.addEventListener('pageshow',event=>{if(event.persisted)void resumeVisiblePanel();});
 
       function addCameraTile() {
         return `
@@ -8800,7 +8746,7 @@ INDEX_HTML = r"""<!doctype html>
         const status = document.getElementById('ha-entity-status');
         status.textContent = 'Looking for registered camera entities…';
         try {
-          const response = await fetch(panelPath('api/home-assistant/dashboard'), { cache: 'no-store' });
+          const response = await panelFetch(panelPath('api/home-assistant/dashboard'), { cache: 'no-store' });
           if (!response.ok) throw new Error('Could not read Home Assistant camera entities.');
           haDashboard = await response.json();
           const select = document.getElementById('ha-camera-select');
@@ -8966,7 +8912,7 @@ INDEX_HTML = r"""<!doctype html>
         const controller=new AbortController();zonePreviewRequests.set(id,controller);
         const timer=setTimeout(()=>controller.abort(),13000);button.disabled=true;message.textContent='Pobieranie jednej klatki ze wspólnego strumienia…';
         try {
-          const response=await fetch(panelPath(`api/detection/preview?${new URLSearchParams({camera:id||''})}`),{cache:'no-store',signal:controller.signal});
+          const response=await panelFetch(panelPath(`api/detection/preview?${new URLSearchParams({camera:id||''})}`),{cache:'no-store',signal:controller.signal});
           if(!response.ok||!response.headers.get('Content-Type')?.startsWith('image/jpeg'))throw new Error(response.status===429?'Analiza jest zajęta. Spróbuj za chwilę.':'Brak podglądu. Najpierw zapisz aktywną kamerę i sprawdź jej strumień nagrywania.');
           const blob=await response.blob();if(!editor.isConnected||controller.signal.aborted)return;
           const image=editor.querySelector('[data-zone-image]'),stage=editor.querySelector('[data-zone-stage]');
@@ -9151,7 +9097,7 @@ INDEX_HTML = r"""<!doctype html>
         lastNvrRenderSignature = recordingStatusSignature();
         // Initialize only new players; existing nodes keep their source, position and pause state.
         applyRecordingSeek();
-        scheduleRecordingReady();
+        scheduleGalleryPrefetch();
         scheduleRecordingThumbnailHydration();
         refreshRecordingEvents();
       }
@@ -9218,7 +9164,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       async function loadPresets() {
-        const response = await fetch(panelPath('api/presets'), { cache: 'no-store' });
+        const response = await panelFetch(panelPath('api/presets'), { cache: 'no-store' });
         const data = await response.json();
         presets = Array.isArray(data.presets) ? data.presets : [];
         renderPresets();
@@ -9672,7 +9618,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       async function loadConfig() {
-        const response = await fetch(panelPath('api/config'), { cache: 'no-store' });
+        const response = await panelFetch(panelPath('api/config'), { cache: 'no-store' });
         if (!response.ok) { const data = await response.json(); throw new Error(data.error || 'Could not load configuration.'); }
         config = await response.json();
         debugEvent('ui_config_loaded', { summary: saveSummary(config) });
@@ -9692,7 +9638,7 @@ INDEX_HTML = r"""<!doctype html>
         const controller = new AbortController();
         const timer = window.setTimeout(() => controller.abort(), timeoutMs);
         try {
-          const response = await fetch(panelPath(path), { ...options, signal: controller.signal });
+          const response = await panelFetch(panelPath(path), { ...options, signal: controller.signal });
           const data = await response.json();
           return { response, data };
         } catch (error) {
@@ -9757,7 +9703,7 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       async function loadCameras() {
-        const response = await fetch(panelPath('cameras.json'), { cache: 'no-store' });
+        const response = await panelFetch(panelPath('cameras.json'), { cache: 'no-store' });
         const data = await response.json();
         const cameras = Array.isArray(data.cameras) ? data.cameras : [];
         overviewCameras = cameras;
@@ -9795,7 +9741,7 @@ INDEX_HTML = r"""<!doctype html>
         const button=event.target.closest('[data-cleanup-recording-cache]');if(!button)return;
         const output=edgeForm.querySelector('[data-storage-cleanup-result]');button.disabled=true;output.textContent='Sprzątanie plików pomocniczych…';
         try{
-          const response=await fetch(panelPath('api/storage/cleanup'),{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          const response=await panelFetch(panelPath('api/storage/cleanup'),{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
           const data=await response.json();if(!response.ok)throw new Error(data.error||'Błąd sprzątania');
           recordingStorage=data.storage;renderRecordingStorage();
           const cleanup=data.cleanup||{},freed=Number(cleanup.playback?.freed_bytes||0)+Number(cleanup.thumbnails?.freed_bytes||0)+Number(cleanup.log_freed_bytes||0);
@@ -9808,7 +9754,7 @@ INDEX_HTML = r"""<!doctype html>
       async function loadStorageUsage(){
         clearTimeout(storageUsageTimer);if(activePage!=='edge-settings')return;
         try{
-          const response=await fetch(panelPath('api/storage/status'),{cache:'no-store'});
+          const response=await panelFetch(panelPath('api/storage/status'),{cache:'no-store'});
           if(!response.ok)throw Error(`storage_status_${response.status}`);
           const data=await response.json();recordingStorage=data;renderRecordingStorage();
           if(data.pending&&activePage==='edge-settings')storageUsageTimer=setTimeout(loadStorageUsage,2000);
@@ -9854,7 +9800,7 @@ INDEX_HTML = r"""<!doctype html>
           const fresh=options.reason==='manual_refresh'||options.reason==='recording_continuation_refresh'||options.reason==='detection_event'||String(options.reason||'').startsWith('alert_recording');
           const statusPath = summary?'api/recording/status?summary=1':`api/recording/status?catalog=1${fresh?'&fresh=1':''}${dayQuery?'&days='+dayQuery:''}`;
           const known=options.forceRender?'':Object.values(recordingStatus).filter(item=>item.files_revision).map(item=>`${item.index}:${item.files_revision}`).join(',');
-          const response = await fetch(panelPath(statusPath+(!summary&&known?`&known=${encodeURIComponent(known)}`:'')), { cache: 'no-store', signal: controller.signal });
+          const response = await panelFetch(panelPath(statusPath+(!summary&&known?`&known=${encodeURIComponent(known)}`:'')), { cache: 'no-store', signal: controller.signal });
           if (!response.ok) throw new Error(`Recording status failed: ${response.status}`);
           const data = await response.json();
           if (requestID !== nvrRequestID || requestedDays !== JSON.stringify(selectedRecordingDay)) return;
@@ -9986,7 +9932,7 @@ INDEX_HTML = r"""<!doctype html>
         cameraAuto[index] = { loading: true };
         renderConfig();
         try {
-          const response = await fetch(panelPath('api/camera-autoconfig'), {
+          const response = await panelFetch(panelPath('api/camera-autoconfig'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ index, camera })
@@ -10011,7 +9957,7 @@ INDEX_HTML = r"""<!doctype html>
         cameraAuto[index] = { data: previous, message: `Saving ${streamName} stream...` };
         renderConfig();
         try {
-          const response = await fetch(panelPath('api/camera-stream-config'), {
+          const response = await panelFetch(panelPath('api/camera-stream-config'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ index, camera, stream: streamName, settings: streamSettingsFromEditor(editor) })
@@ -10021,7 +9967,7 @@ INDEX_HTML = r"""<!doctype html>
           const next = previous || { streams: {}, device: {}, sections: {} };
           next.streams = { ...(next.streams || {}), [streamName]: data.stream };
           cameraAuto[index] = { data: next, message: `${streamName} stream saved.` };
-          await fetch(panelPath('api/refresh'), { method: 'POST' });
+          await panelFetch(panelPath('api/refresh'), { method: 'POST' });
           await loadCameras();
         } catch (error) {
           cameraAuto[index] = { data: previous, error: error.message };
@@ -10043,7 +9989,7 @@ INDEX_HTML = r"""<!doctype html>
         else signal?.addEventListener('abort', abort, {once:true});
         const timer = setTimeout(abort, 10000);
         try {
-          const response = await fetch(panelPath(path), {cache:'no-store', signal:controller.signal});
+          const response = await panelFetch(panelPath(path), {cache:'no-store', signal:controller.signal});
           if (!response.ok) throw new Error('Nie udało się odczytać zdarzeń. Spróbuj ponownie.');
           return await response.json();
         } finally {
@@ -10350,9 +10296,9 @@ INDEX_HTML = r"""<!doctype html>
       });
 
       function showPage(pageName) {
-        cancelRecordingReady();recordingBuffer.cancel();
+        cancelGalleryPrefetch();
         if(pageName!=='nvr'){for(const state of recordingScrubs.values())discardRecordingScrub(state.index);nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);}
-        if(pageName!=='nvr'){releaseInactiveRecordingPlayers(null,true);if(pageName!=='home'||!recordingBuffer.enabled)recordingBuffer.clear();else recordingBuffer.prune();}
+        if(pageName!=='nvr')releaseInactiveRecordingPlayers(null,true);
         if(pageName!=='nvr')releaseRecordedPreviewDecoder();
         activePage = pageName;
         updateLivePlaybackVisibility();
@@ -10375,7 +10321,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         if (pageName === 'ha-dashboard') loadDashboardEntities();
         if (pageName === 'home') loadCameras().catch((error) => debugEvent('ui_cameras_refresh_error', { message: error.message }));
-        if (pageName === 'home') scheduleRecordingReady();
+        if (pageName === 'home') scheduleGalleryPrefetch();
         if (pageName === 'logs') {
           loadLogs().catch((error) => {
             logsView.innerHTML = `<p class="notice">${escapeHtml(error.message)}</p>`;
@@ -10430,7 +10376,7 @@ INDEX_HTML = r"""<!doctype html>
 
       document.getElementById('refresh').addEventListener('click', async () => {
         debugEvent('ui_refresh_status_click');
-        await fetch(panelPath('api/refresh'), { method: 'POST' });
+        await panelFetch(panelPath('api/refresh'), { method: 'POST' });
         await loadCameras();
       });
 
@@ -10732,7 +10678,7 @@ INDEX_HTML = r"""<!doctype html>
         const action = actionTarget?.dataset?.recordAction;
         index = actionTarget?.dataset?.recordIndex;
         if (index === undefined || !action) return;
-        const response = await fetch(panelPath(`api/recording/${action}`), {
+        const response = await panelFetch(panelPath(`api/recording/${action}`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ index: Number(index) })
@@ -10787,20 +10733,12 @@ INDEX_HTML = r"""<!doctype html>
         moveRecordingDay(index, dx > 0 ? 'older' : 'newer', 'swipe');
       }, true);
 
-      nvrGrid.addEventListener('change',event=>{
-        if(!event.target.matches('[data-recording-buffer-toggle]'))return;
-        recordingBuffer.enabled=event.target.checked;
-        if(!recordingBuffer.enabled){cancelRecordingReady();recordingBuffer.cancel();recordingBuffer.discardUnused();}else scheduleRecordingReady();
-        try{localStorage.setItem('edge-nvr-next-buffer',String(recordingBuffer.enabled));}catch(_){}
-        nvrGrid.querySelectorAll('[data-recording-buffer-toggle]').forEach(input=>input.checked=recordingBuffer.enabled);
-        debugEvent('ui_recording_buffer_setting',recordingBuffer.diagnostic());
-      });
       nvrGrid.addEventListener('timeupdate', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
         if (video) {
           nvrInteractionUntil = Math.max(nvrInteractionUntil, Date.now() + 5000);
           syncRecordingVideoProgress(video);
-          warmNextRecording(video);
+
         }
       }, true);
 
@@ -10850,7 +10788,7 @@ INDEX_HTML = r"""<!doctype html>
         if(!video.dataset.recordingStableAt){video.dataset.recordingStableAt=String(performance.now());video.dataset.recordingStableClock=String(video.currentTime);}
         video.dataset.recordingLoading='false';video.dataset.recordingBuffering='false';
         if(video.dataset.recordingSeekStarted){debugEvent('ui_recording_seek_playing',recordingVideoDiagnostics(video));delete video.dataset.recordingSeekStarted;}
-        updateRecordingPlayerControls(video,'Playing recordings for selected day');warmNextRecording(video);
+        updateRecordingPlayerControls(video,'Playing recordings for selected day');
       },true);
 
       nvrGrid.addEventListener('ratechange', (event) => {
@@ -10882,9 +10820,8 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('waiting', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
-        if(video)recordingBuffer.cancel(video);
         if (video) debugEvent('ui_recording_video_waiting', recordingVideoDiagnostics(video));
-        if(video&&video.dataset.recordingWantsPlay==='true'){video.dataset.recordingBuffering='true';holdRecordingFrame(video);updateRecordingPlayerControls(video,'Buforowanie nagrania…');}
+        if(video&&video.dataset.recordingWantsPlay==='true'){video.dataset.recordingBuffering='true';holdRecordingFrame(video);updateRecordingPlayerControls(video,'Ładowanie fragmentu nagrania…');}
       }, true);
 
       nvrGrid.addEventListener('stalled', (event) => {
@@ -10898,7 +10835,7 @@ INDEX_HTML = r"""<!doctype html>
         if (video) debugEvent('ui_recording_video_error', recordingVideoDiagnostics(video));
         if(video?.error?.code===2&&video.dataset.recordingWantsPlay==='true'&&Number(video.dataset.recordingNetworkRetries||0)<1&&activePage==='nvr'&&!document.hidden){
           video.dataset.recordingNetworkRetries=String(Number(video.dataset.recordingNetworkRetries||0)+1);
-          video.dataset.recordingLoading='true';holdRecordingFrame(video);cancelRecordingWarmup(video);
+          video.dataset.recordingLoading='true';holdRecordingFrame(video);
           playRecording(video);updateRecordingPlayerControls(video,'Ponowne łączenie z nagraniem…');return;
         }
         if(video&&video.error){
@@ -10954,7 +10891,7 @@ INDEX_HTML = r"""<!doctype html>
       async function checkPanelVersion() {
         if(document.hidden)return;
         try{
-          const response=await fetch(panelPath('api/version'),{cache:'no-store',signal:AbortSignal.timeout(4000)});
+          const response=await panelFetch(panelPath('api/version'),{cache:'no-store',signal:AbortSignal.timeout(4000)});
           if(!response.ok)return;const current=await response.json();
           if(current.version===EDGE_PANEL_VERSION&&current.ui_build===EDGE_UI_BUILD)return;
           let notice=document.querySelector('[data-panel-update]');
@@ -10962,7 +10899,7 @@ INDEX_HTML = r"""<!doctype html>
           notice.replaceChildren(document.createTextNode(`Dostępny panel ${current.version}. Odśwież kartę, aby wczytać poprawki.`));const button=document.createElement('button');button.textContent='Odśwież panel';button.onclick=()=>location.reload();notice.append(button);
         }catch(_){}
       }
-      document.addEventListener('visibilitychange',()=>{if(!document.hidden)void checkPanelVersion();});setInterval(checkPanelVersion,60000);
+      setInterval(checkPanelVersion,60000);
 
       async function boot() {
         void checkPanelVersion();
@@ -10975,7 +10912,7 @@ INDEX_HTML = r"""<!doctype html>
         void restoreRecordingGallery();
         void loadEngineSettings();
         await Promise.all([loadPresets(), loadCameras(), loadRecordingStatus({ forceRender: true, reason: 'boot' })]);
-        setTimeout(()=>{if(activePage==='home'&&!document.hidden)scheduleRecordingReady();},3000);
+        setTimeout(()=>{if(activePage==='home'&&!document.hidden)scheduleGalleryPrefetch();},3000);
         let eventId=new URLSearchParams(location.search).get('edge_event');try{eventId=eventId||new URLSearchParams(window.top.location.search).get('edge_event');}catch(_){}if(/^[1-9][0-9]{0,18}$/.test(eventId||''))await openAlertById(eventId);
       }
 
@@ -10990,11 +10927,10 @@ INDEX_HTML = r"""<!doctype html>
 
 INDEX_HTML = (
     INDEX_HTML
-    .replace("__EDGE_LIVE_PRELOAD__", '<link rel="modulepreload" href="api/edge-rtc/client.js?v=__EDGE_PANEL_VERSION__"><link rel="modulepreload" href="api/edge-rtc/device-diagnostics.js?v=__EDGE_PANEL_VERSION__">' if EDGE_RTC_ENABLED else '')
+    .replace("__EDGE_LIVE_PRELOAD__", '<script>{for(const name of ["client.js","device-diagnostics.js"]){const link=document.createElement("link");link.rel="modulepreload";link.href=new URL("api/edge-rtc/"+name+"?v=__EDGE_PANEL_VERSION__",document.baseURI).href;document.head.append(link);}}</script>' if EDGE_RTC_ENABLED else '')
     .replace("__EDGE_NATIVE_PLAYER_DOCUMENT__", json.dumps(EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',APP_VERSION)).replace('<', '\\u003c'))
     .replace("__EDGE_PANEL_VERSION__", APP_VERSION)
     .replace("__EDGE_GALLERY_CACHE__", (Path(__file__).parent/'edge-recording-gallery.js').read_text())
-    .replace("__EDGE_RECORDING_BUFFER__", (Path(__file__).parent/'edge-recording-buffer.js').read_text())
     .replace("__EDGE_RECORDING_SURFACE__", (Path(__file__).parent/'edge-recording-surface.js').read_text())
     .replace("__EDGE_LOG_VIEW__", (Path(__file__).parent/'edge-log-view.js').read_text())
     .replace("__EDGE_UI_BUILD__", UI_BUILD)

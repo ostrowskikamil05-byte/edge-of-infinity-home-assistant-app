@@ -44,7 +44,7 @@ export class EdgeRTCClient {
   fail(message,retryable=true){if(this.closed)return;this.diagnostics?.note('rtc_error',{source:this.diagnosticKey,message,retryable});this.options.onError?.(message,{retryable});this.close();}
   diagnosticState(){return {state:this.closed?'closed':this.playing?'playing':this.connectionState,codec:this._codec,width:this.width,height:this.height,
     first_frame_ms:this.firstFrameMS,frames:this.frames,dropped_frames:this.droppedFrames,source_fps:this.frameInterval?1000/this.frameInterval:null,
-    decode_queue:this.video?.decodeQueueSize,render_queue:this.frameQueue.length,message_queue:this.pendingMessages,received_bytes:this.receivedBytes,
+    decode_queue:this.video?.decodeQueueSize,render_queue:this.frameQueue.length,render_ahead_ms:Math.max(0,(this.frameQueue.at(-1)?.due||0)-performance.now()),render_limit_ms:250,message_queue:this.pendingMessages,received_bytes:this.receivedBytes,
     last_packet_age_ms:this.lastPacketAt?performance.now()-this.lastPacketAt:null,websocket_outgoing_buffer_bytes:this.ws?.bufferedAmount,
     bootstrap_packets:this.bootstrapPackets||0,bootstrap_frames_skipped:this.bootstrapFrames,bootstrap_wait_ms:this.bootstrapWaitMS||0,decoder_wait_ms:this.decoderWaitMS||0,message_bytes:this.pendingBytes||0,
     websocket_open_ms:this.websocketOpenAt==null?null:this.websocketOpenAt-this.started,decoder_configured_ms:this.decoderConfiguredAt==null?null:this.decoderConfiguredAt-this.started,first_video_packet_ms:this.firstVideoPacketAt==null?null:this.firstVideoPacketAt-this.started,bootstrap_decode_ms:this.decoderConfiguredAt==null||this.firstFrameMS===null?null:this.firstFrameMS-(this.decoderConfiguredAt-this.started),
@@ -124,9 +124,12 @@ export class EdgeRTCClient {
     this.frameQueue.push({frame,due});
     // Normal 20/30 FPS bursts are paced by camera timestamps. Bound latency
     // when the tab/device falls behind; never synthesize or resize a frame.
-    while(this.frameQueue.length>6||this.frameQueue.length>1&&this.frameQueue[0].due<now-120){this.frameQueue.shift().frame.close();this.droppedFrames++;}
-    if(this.frameQueue.length&&this.frameQueue[this.frameQueue.length-1].due>now+120){
-      const shift=this.frameQueue[this.frameQueue.length-1].due-now;
+    while(this.frameQueue.length>8||this.frameQueue.length>1&&(this.frameQueue.at(-1).due-this.frameQueue[0].due>251||this.frameQueue[0].due<now-250)){this.frameQueue.shift().frame.close();this.droppedFrames++;}
+    if(this.frameQueue.length&&this.frameQueue.at(-1).due>now+251){
+      // Rebase the retained window without compressing its frame intervals.
+      // Four 20 FPS pictures span 150 ms: moving the newest one to "now"
+      // used to play the whole burst at display refresh speed, then freeze.
+      const shift=this.frameQueue[0].due-now;
       for(const item of this.frameQueue)item.due-=shift;this.lastScheduled-=shift;
     }
     if(this.renderRequest==null)this.renderRequest=requestAnimationFrame(()=>this.drawFrame());
@@ -135,7 +138,7 @@ export class EdgeRTCClient {
     this.renderRequest=null;if(this.closed)return;
     const now=performance.now();
     while(this.frameQueue.length&&this.firstFrameMS===null&&this.bootstrapFloorTimestamp!=null&&this.frameQueue[0].frame.timestamp<this.bootstrapFloorTimestamp){this.frameQueue.shift().frame.close();this.bootstrapFrames++;}
-    while(this.frameQueue.length>1&&this.frameQueue[0].due<now-120){this.frameQueue.shift().frame.close();this.droppedFrames++;}
+    while(this.frameQueue.length>1&&this.frameQueue[0].due<now-250){this.frameQueue.shift().frame.close();this.droppedFrames++;}
     const item=this.frameQueue[0];
     if(item&&item.due<=now+1){
       this.frameQueue.shift();const current=item.frame;
@@ -170,7 +173,7 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   audioModule(){
-    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.12.3',import.meta.url).href);
+    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.12.4',import.meta.url).href);
   }
   startAudioPlayback(){
     if(this.audioPlaybackPromise||this.closed||this.audioDisabled)return;

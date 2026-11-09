@@ -1,15 +1,14 @@
-// Live prepares saved copies through JSON only; actual composed WebKit pixels are checked.
+// No speculative saved-video preparation; actual composed WebKit pixels are checked.
 const {chromium,webkit}=require('playwright');const assert=require('node:assert/strict');
 (async()=>{
  const wk=process.env.EDGE_TEST_BROWSER==='webkit',index=wk?0:1,base=process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18093';
  const browser=await(wk?webkit:chromium).launch({headless:true,executablePath:(wk?process.env.PLAYWRIGHT_WEBKIT_EXECUTABLE_PATH:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH)||undefined,args:wk?[]:['--no-sandbox']});
  try{
   const context=await browser.newContext({viewport:{width:430,height:799},isMobile:true,hasTouch:true,userAgent:wk?'Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/HomeAssistant':'Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/156 Mobile Safari/537.36'});
-  const page=await context.newPage();page.setDefaultTimeout(30000);const errors=[],hoverRequests=[],prepared=new Set(),liveVideoRequests=[];
-  page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(new URL(r.url()).pathname.includes('/recordings/')&&r.frame()===page.mainFrame())liveVideoRequests.push({url:r.url(),at:Date.now()});});page.on('response',r=>{if(new URL(r.url()).pathname.endsWith('/api/recording/prepare'))void r.json().then(data=>{if(data.ready)prepared.add(r.request().postDataJSON().key);}).catch(()=>{});});page.on('request',r=>{const u=new URL(r.url());if(u.pathname.includes('/recording-thumbs/')&&u.searchParams.has('at'))hoverRequests.push(r.url());});
+  const page=await context.newPage();page.setDefaultTimeout(30000);const errors=[],hoverRequests=[],prepareRequests=[],liveVideoRequests=[];
+  page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(new URL(r.url()).pathname.includes('/recordings/')&&r.frame()===page.mainFrame())liveVideoRequests.push({url:r.url(),at:Date.now()});});page.on('request',r=>{if(new URL(r.url()).pathname.endsWith('/api/recording/prepare'))prepareRequests.push(r.url());});page.on('request',r=>{const u=new URL(r.url());if(u.pathname.includes('/recording-thumbs/')&&u.searchParams.has('at'))hoverRequests.push(r.url());});
   await page.goto(base);await page.waitForFunction(()=>recordingStatus[0]?.files?.length>0);
-  const deadline=Date.now()+30000;while(prepared.size<2){assert(Date.now()<deadline,'server copies were not prepared');await page.waitForTimeout(50);}
-  assert.equal(await page.evaluate(()=>recordingBuffer.entries.size),0,'Live downloaded recording bodies into RAM');
+  assert.equal(await page.evaluate(()=>typeof EdgeRecordingBuffer),'undefined');assert.deepEqual(prepareRequests,[],'Live prepared saved video in the background');
   assert.deepEqual(liveVideoRequests,[],'saved video competed with Live');
   assert(await page.evaluate(()=>[...document.querySelectorAll('video[data-recording-player]')].every(v=>!v.getAttribute('src'))),'Live opened an offscreen recording decoder');
   if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();
@@ -50,8 +49,8 @@ const {chromium,webkit}=require('playwright');const assert=require('node:assert/
   if(wk)assert(await video.evaluate(v=>{const s=recordingSurface.diagnostic(v);return s.presentation==='canvas'&&s.canvas_width===v.videoWidth&&s.canvas_height===v.videoHeight&&s.canvas_frames>0;}),'WebKit did not display original-resolution canvas frames');
   if(process.env.EDGE_NVR_SCREENSHOT_DIR)await video.screenshot({path:`${process.env.EDGE_NVR_SCREENSHOT_DIR}/ready-${wk?'webkit':'chromium'}.png`});
   if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="home"]').click();
-  assert(await video.evaluate(v=>!v.getAttribute('src')),'returning to Live kept a recording decoder');await page.waitForTimeout(500);assert(await page.evaluate(()=>!recordingBuffer.job),'Live resumed a saved-video body download');
-  assert.deepEqual(errors,[]);console.log(`PASS ${wk?'webkit':'chromium'}: JSON-only server preparation on Live, actual composed recording pixels, no hidden recording decoder or hover thumbnails, held main-picture scrub and native frame stepping`);
+  assert(await video.evaluate(v=>!v.getAttribute('src')),'returning to Live kept a recording decoder');await page.waitForTimeout(500);assert.deepEqual(prepareRequests,[],'saved-video preparation resumed');
+  assert.deepEqual(errors,[]);console.log(`PASS ${wk?'webkit':'chromium'}: direct recording playback without speculative preparation, actual composed recording pixels, no hidden recording decoder or hover thumbnails, held main-picture scrub and native frame stepping`);
   await page.unrouteAll({behavior:'ignoreErrors'});await context.close();
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1);});

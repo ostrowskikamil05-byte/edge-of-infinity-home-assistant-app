@@ -24,6 +24,7 @@ class DeviceReporter{
   let local,session;try{local=localStorage;session=sessionStorage;}catch(_){}
   this.device_id=id(local,'edge-device-id');this.session_id=id(session,'edge-session-id');
   this.events=[];this.resources=[];this.longTasks=[];this.sources=new Map();this.samplers=new Map();this.dropped=0;this.started=performance.now();this.configure(options);
+  this.pageActive=true;this.paused=false;this.nextFlush=0;
   try{this.label=localStorage.getItem('edge-device-label')||'';}catch(_){}
   this.note('device_session_start',{navigation:performance.getEntriesByType('navigation').map(e=>({type:e.type,dom_ms:e.domContentLoadedEventEnd,load_ms:e.loadEventEnd,ttfb_ms:e.responseStart-e.requestStart}))});
   if(globalThis.PerformanceObserver){
@@ -44,14 +45,17 @@ class DeviceReporter{
   addEventListener('error',event=>this.note('javascript_error',{message:event.message,source:event.filename?safeDiagnosticURL(event.filename):null,line:event.lineno}));
   addEventListener('unhandledrejection',event=>this.note('promise_rejection',{message:event.reason?.message||String(event.reason)}));
   this.expected=performance.now()+20000;this.timer=setInterval(()=>{this.loopLag=Math.max(0,performance.now()-this.expected);this.expected=performance.now()+20000;if(!document.hidden)this.flush();},20000);
+  addEventListener('pagehide',()=>{this.pageActive=false;clearTimeout(this.flushTimer);this.flushTimer=null;});
+  addEventListener('pageshow',()=>{this.pageActive=true;if(!document.hidden)this.schedule(1500);});
  }
  configure(options){if(options.send)this.send=options.send;if(options.context)this.context=options.context;}
  setLabel(value){this.label=String(value||'').slice(0,64);try{localStorage.setItem('edge-device-label',this.label);}catch(_){}this.note('device_label_changed',{label:this.label});}
- note(event,data={}){this.events.push({event:String(event).slice(0,100),at_ms:Math.round(performance.now()),time:new Date().toISOString(),data:scrub(data)});if(this.events.length>64){this.events.shift();this.dropped++;}this.schedule(1500);}
+ note(event,data={}){this.events.push({event:String(event).slice(0,100),at_ms:Math.round(performance.now()),time:new Date().toISOString(),data:scrub(data)});if(this.events.length>128){this.events.shift();this.dropped++;}this.schedule(1500);}
  source(key,state){this.sources.set(String(key).slice(0,100),{...scrub(state),sampled_at_ms:Math.round(performance.now())});while(this.sources.size>8)this.sources.delete(this.sources.keys().next().value);}
  registerSource(key,sampler){this.samplers.set(key,sampler);while(this.samplers.size>8)this.samplers.delete(this.samplers.keys().next().value);}
  unregisterSource(key){this.samplers.delete(key);}
- schedule(ms){if(!this.flushTimer)this.flushTimer=setTimeout(()=>{this.flushTimer=null;this.flush();},ms);}
+ setPaused(paused){this.paused=Boolean(paused);if(this.paused){clearTimeout(this.flushTimer);this.flushTimer=null;}else this.schedule(1500);}
+ schedule(ms){if(this.paused||!this.pageActive||document.hidden)return;if(!this.flushTimer)this.flushTimer=setTimeout(()=>{this.flushTimer=null;this.flush();},Math.max(ms,(this.nextFlush||0)-Date.now(),(this.retryAfter||0)-Date.now()));}
  device(){
   try{const saved=localStorage.getItem('edge-device-label');if(saved!==null)this.label=saved;}catch(_){}
   const n=navigator,c=n.connection,v=document.createElement('video');
@@ -67,20 +71,21 @@ class DeviceReporter{
    unavailable:'Phone CPU load, free RAM, Wi-Fi signal and router hops are not exposed by browsers. Device model is a user label, not inferred hardware.'};
  }
  async flush(){
-  if(this.busy||!this.send||!navigator.onLine||Date.now()<(this.retryAfter||0))return;
+  if(this.busy||this.paused||!this.pageActive||document.hidden||!this.send||!navigator.onLine)return;
+  if(Date.now()<Math.max(this.nextFlush||0,this.retryAfter||0)){this.schedule(0);return;}
   for(const [key,sampler] of this.samplers){try{this.source(key,sampler());}catch(_){}}
   if(!this.events.length&&!this.resources.length&&![...this.sources.values()].some(s=>s.state!=='closed'))return;
-  const events=this.events.splice(0,12),resources=this.resources.splice(0,12),long_tasks=this.longTasks.splice(0,12);
-  let data=scrub({device_id:this.device_id,session_id:this.session_id,time_origin_ms:performance.timeOrigin,version:'0.12.3',device:this.device(),context:this.context,
+  const events=this.events.splice(0,32),resources=this.resources.splice(0,12),long_tasks=this.longTasks.splice(0,12);
+  let data=scrub({device_id:this.device_id,session_id:this.session_id,time_origin_ms:performance.timeOrigin,version:'0.12.4',device:this.device(),context:this.context,
    browser_endpoint:safeDiagnosticURL(location.href),events,resources,long_tasks,sources:Object.fromEntries(this.sources),dropped_entries:this.dropped});
   // Large error payloads must not turn diagnostics into stream traffic.
   while(new TextEncoder().encode(JSON.stringify(data)).length>24000&&(data.events.length||data.resources.length)){
    if(data.events.length>2)data.events.shift();else if(data.resources.length)data.resources.shift();else data.events.shift();this.dropped++;
   }
   data.dropped_entries=this.dropped;
-  this.busy=true;
+  this.busy=true;this.nextFlush=Date.now()+5000;
   try{const accepted=await this.send(data);if(accepted===false)throw Error('diagnostics_not_accepted');this.lastSuccess=Date.now();this.failures=0;this.retryAfter=0;}
-  catch(_){this.events=[...events,...this.events].slice(-64);this.resources=[...resources,...this.resources].slice(-24);this.failures=Math.min(6,(this.failures||0)+1);const delay=Math.min(120000,2500*2**this.failures);this.retryAfter=Date.now()+delay;this.schedule(delay);}
+  catch(_){this.events=[...events,...this.events].slice(-128);this.resources=[...resources,...this.resources].slice(-24);this.failures=Math.min(6,(this.failures||0)+1);const delay=Math.min(120000,2500*2**this.failures);this.retryAfter=Date.now()+delay;this.schedule(delay);}
   finally{this.busy=false;if(this.events.length||this.resources.length)this.schedule(600);}
  }
 }

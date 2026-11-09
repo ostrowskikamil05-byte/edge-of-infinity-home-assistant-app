@@ -13,19 +13,19 @@ const path = require('node:path');
     for (;now<=until;now+=1000/120) {const pending=[...callbacks.values()];callbacks.clear();pending.forEach(cb=>cb(now));}
   }
   function frame(timestamp) {return {timestamp,displayWidth:3840,displayHeight:2160,closed:0,close(){assert.equal(this.closed++,0,'frame closed twice');}};}
-  for (const fps of [20,25,30]) {
+  for (const fps of [20,25,30]) { for(const burstSize of [1,3,4,5,6]) {
     now=0;callbacks.clear();const drawn=[],frames=[];
     const client=new EdgeRTCClient({canvas:{getContext:()=>({drawImage:f=>drawn.push(f.timestamp)})}});
     for(let burst=0;burst<10;burst++) {
-      for(let i=0;i<3;i++){const f=frame((burst*3+i)*1e6/fps);frames.push(f);client.render(f);}
-      advance((burst+1)*3000/fps);
+      for(let i=0;i<burstSize;i++){const f=frame((burst*burstSize+i)*1e6/fps);frames.push(f);client.render(f);}
+      advance((burst+1)*burstSize*1000/fps);
     }
-    advance(30000/fps+100);
-    assert.equal(drawn.length,30,`${fps} FPS: original frames lost`);
+    advance(10000*burstSize/fps+100);
+    assert.equal(drawn.length,10*burstSize,`${fps} FPS / burst ${burstSize}: original frames lost`);
     assert.deepEqual(drawn,frames.map(f=>f.timestamp));assert(frames.every(f=>f.closed===1));
     assert.equal(client.canvas.width,3840);assert.equal(client.canvas.height,2160);
     assert.equal(client.droppedFrames,0);client.close();
-  }
+  }}
   now=0;callbacks.clear();let draws=0;
   const client=new EdgeRTCClient({canvas:{getContext:()=>({drawImage:()=>draws++})}});
   client.bootstrapTimestamp=1000000;

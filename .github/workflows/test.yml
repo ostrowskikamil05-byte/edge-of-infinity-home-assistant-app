@@ -48,15 +48,16 @@ jobs:
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
           node tests/browser/remote_live.cjs
           node tests/browser/edge_rtc_support.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/panel_session.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/panel_session.cjs
           node tests/edge_rtc_pacing.cjs
           node tests/edge_log_view.cjs
       - name: Install fixture media tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - name: Test continuous live audio and recording buffer limits
+      - name: Test continuous live audio
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
           node tests/edge_rtc_audio.cjs
-          node tests/recording_buffer.cjs
           EDGE_TEST_BROWSER=webkit node tests/browser/edge_rtc_audio.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/edge_rtc_audio.cjs
       - name: Test detection settings, history and NVR seeking
@@ -118,7 +119,7 @@ jobs:
           EDGE_TEST_BROWSER=chromium node tests/browser/device_diagnostics.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_aac_resume.cjs
 
-      - name: Test latest seek and RAM transitions with long-GOP recordings
+      - name: Test latest seek and direct transitions with long-GOP recordings
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
           EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1 EDGE_NVR_TEST_PORT=18093 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/seek-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/seek-ui.log" 2>&1 &
@@ -135,8 +136,8 @@ jobs:
                   if time.monotonic()>deadline:raise
                   time.sleep(.1)
           PY
-          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_seek_buffer.cjs
-          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_seek_buffer.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_seek_direct.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_seek_direct.cjs
           EDGE_TEST_BROWSER=webkit node tests/browser/nvr_ready_playback.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_ready_playback.cjs
 

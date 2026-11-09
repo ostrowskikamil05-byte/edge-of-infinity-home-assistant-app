@@ -4,9 +4,10 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
 (async()=>{
  const wk=process.env.EDGE_TEST_BROWSER==='webkit',base=process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18092';
  const browser=await(wk?webkit:chromium).launch({headless:true,executablePath:(wk?process.env.PLAYWRIGHT_WEBKIT_EXECUTABLE_PATH:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH)||undefined,args:wk?[]:['--no-sandbox']});
+ let diagnosticPage;
  try{
-  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
-  const page=await context.newPage();page.setDefaultTimeout(30000);const errors=[],videoRequests=[];
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true,userAgent:wk?'Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/HomeAssistant':'Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/156 Mobile Safari/537.36'});
+  const page=await context.newPage();diagnosticPage=page;page.setDefaultTimeout(30000);const errors=[],videoRequests=[];
   page.on('pageerror',e=>{
    // WebKit also emits handled fetch console diagnostics as pageerror while
    // the old document unloads. Their "name" is not a JS exception type.
@@ -77,5 +78,5 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
   console.log(`PASS ${wk?'webkit':'chromium'}: background metadata only, persistent gallery/JPEG before network, actual playback, scope/secret/expiry/storage limits`);
   await page.unrouteAll({behavior:'ignoreErrors'});await context.close();
- }catch(error){console.error('Gallery test failed',error);throw error;}finally{await browser.close();}
+ }catch(error){console.error('Gallery test failed',error);try{console.error('Native gallery state',await diagnosticPage.evaluate(()=>({video:recordingVideoDiagnostics(document.querySelector('video[data-recording-player]')),activePage,phone:phonePlayback()})));}catch(_){}throw error;}finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1);});

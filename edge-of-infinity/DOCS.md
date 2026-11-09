@@ -1,5 +1,53 @@
 # Edge of Infinity App Documentation
 
+## 0.12.4: direct recordings, ingress and live cadence
+
+Update the app, restart Home Assistant Core and reopen Edge from the Home
+Assistant sidebar on each device. Diagnostics: `0.12.4` / `direct-ingress-v124`.
+Reopening through HA also lets HA renew an expired Ingress session.
+
+The recording prefetch switch, speculative MP4 downloads, background
+`api/recording/prepare` requests and application RAM/Blob cache are removed.
+Old device preferences cannot re-enable them. Selected recordings use native
+HTTP range playback; the browser retains its ordinary playback buffer and may
+reuse HTTP cache bytes. The metadata/JPEG gallery, original files, quality/FPS,
+retention and on-demand compatibility remuxes for phones are retained. Removing
+speculation does not remove network transfer or reference decoding for an
+uncached seek. Native waiting continues to be measured and shown as loading;
+the last confirmed picture remains visible during transitions.
+
+The previous panel sent each UI event through `api/debug` and again in device
+diagnostics. New UI events use only device batches, with one in-flight request,
+at least five seconds between sends and at most 32 events / 24 KB per report.
+Capture remains bounded to 128 queued events. Hidden/departed pages do not send;
+device, source, timing and error reports remain available in Logs and exports.
+The legacy debug endpoint remains for older clients, so close old panel tabs
+after updating.
+
+An early normalized base and dynamically created preload links remove duplicate
+slashes from Ingress asset/API paths. On return from a hidden page, the panel
+checks the session before reconnecting its camera frames. An Ingress 401/403
+pauses telemetry, closes viewers and stops further API requests, with a notice
+to reopen HA. A camera-frame report of the same failure is accepted only from
+the matching owned iframe. HA session validation is preserved. An already expired
+initial page, underlying HA/router failures or a browser-aborted request can
+still generate Supervisor messages; the add-on cannot renew HA credentials itself.
+
+Live no longer compresses a four-frame 20 FPS burst into rapid display updates
+followed by a gap. It keeps the camera timestamp intervals for ordinary bursts,
+within eight decoded frames and 250 ms of pending display time. Larger backlogs
+still drop old frames; no frame generation, downscaling or transcoding is added.
+Inspect `render_queue`, `render_ahead_ms`, `render_limit_ms`, `decode_queue`,
+`message_queue`, dropped frames and the existing transport timings. Continuous
+PCM sound and the one persistent camera connection are retained.
+
+For local detection status, a fresh heartbeat in the alternate HA mount can
+replace a stale/corrupt first mirror. Camera configuration still uses its existing
+authoritative precedence. Stale/invalid heartbeats remain errors; stale errors
+now include age and source path. Restart Core to load this reader. Other
+integrations' missing entities, HAOS audio/driver warnings and router DNS errors
+need their own configuration or host diagnosis.
+
 ## 0.12.3: continuous audio and bounded recording lookahead
 
 Update the app, restart Home Assistant Core and reopen the panel/dashboard on

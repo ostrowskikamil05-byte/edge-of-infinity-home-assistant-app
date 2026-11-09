@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.12.4
+
+- Remove speculative saved-video downloads, server prepare requests, the two-file
+  RAM/Blob cache and its UI preference. Retain the persistent metadata/JPEG gallery,
+  native MP4 ranges, on-demand phone compatibility and original recording files.
+- Send panel UI events once through bounded device diagnostics: one request in
+  flight, at least five seconds between reports, up to 32 events / 24 KB per
+  report. Suppress sends on hidden/departed pages and pause on expired Ingress.
+- Normalize the document base before creating preload links, avoiding doubled
+  Ingress slashes even during speculative HTML scanning. Check the session before
+  resuming Live and show a reload notice after 401/403; preserve HA authentication.
+- Preserve source frame intervals for short Live bursts. Retain at most eight
+  decoded frames within 250 ms instead of compressing four 20 FPS frames into a
+  display-refresh burst. No generated frames, codec changes or extra upstream.
+- Prefer a fresh detection heartbeat mirror over a stale shadow file, without
+  changing camera configuration precedence. Keep genuine stale/invalid status
+  failures and include the status age/source in stale errors.
+- Add WebKit/Chromium session and request-volume checks, direct-recording
+  transitions, heartbeat fallback and 1–6-frame pacing burst coverage. Retain
+  continuous PCM audio, full-resolution recording display, FPS and retention.
+
 ## 0.12.3
 
 - Replace per-packet live AudioBufferSources with one continuous PCM AudioWorklet.
