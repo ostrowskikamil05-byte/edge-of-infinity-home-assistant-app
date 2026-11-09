@@ -133,6 +133,25 @@ jobs:
           EDGE_TEST_BROWSER=webkit node tests/browser/nvr_ready_playback.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_ready_playback.cjs
 
+      - name: Test composed 4K WebKit recording picture
+        run: |
+          export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
+          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1 EDGE_TEST_RECORDING_4K=1 EDGE_NVR_TEST_PORT=18094 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/4k-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/4k-ui.log" 2>&1 &
+          edge_4k_fixture_pid=$!
+          trap 'kill "${edge_4k_fixture_pid}" || true' EXIT
+          python - <<'PY'
+          import time, urllib.request
+          deadline=time.monotonic()+120
+          while True:
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:18094/api/version',timeout=1).close()
+                  break
+              except OSError:
+                  if time.monotonic()>deadline:raise
+                  time.sleep(.1)
+          PY
+          EDGE_TEST_BROWSER=webkit EDGE_NVR_TEST_URL=http://127.0.0.1:18094 node tests/browser/nvr_ready_playback.cjs
+
       - name: Test cold phone archive with twelve thousand saved files
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"

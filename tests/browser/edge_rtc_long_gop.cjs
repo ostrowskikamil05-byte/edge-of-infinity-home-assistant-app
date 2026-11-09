@@ -12,8 +12,9 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
   });
   await page.waitForFunction(()=>longGopClient.frames>=10);
   const metrics=await page.evaluate(()=>longGopClient.diagnosticState());
-  assert(metrics.bootstrap_packets>=240,JSON.stringify(metrics));
+  if(process.env.EDGE_RTC_TEST_RESPOND_PLI!=='1')assert(metrics.bootstrap_packets>=240,JSON.stringify(metrics));
   if(process.env.EDGE_RTC_TEST_RESPOND_PLI==='1'){
+   assert(metrics.bootstrap_packets<40,'fresh keyframe was queued behind the old Cloud bootstrap');
    const status=await page.evaluate(()=>fetch('/test/status').then(r=>r.json()));
    assert(status.sources[0].keyframe_requests>=1);assert(status.sources[0].keyframe_observed_after_request_ms>0&&status.sources[0].keyframe_observed_after_request_ms<2000,'camera did not deliver the requested I-frame');
   }else assert(metrics.bootstrap_frames_skipped>=180);
@@ -26,6 +27,16 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
   assert.equal(idleAfter.sources[0].viewers,0);assert.equal(idleAfter.sources[0].upstream_connections,1);
   assert.equal(idleAfter.sources[0].connection_attempts,1);assert(idleAfter.sources[0].packets>idleBefore.sources[0].packets,'camera stopped when the last viewer left');
   assert(idleAfter.sources[0].bootstrap_ready,'continuous source lost its prepared GOP');
+  // A blocked iframe HTML request must not delay the inline native player.
+  const panel=await browser.newPage();let documentRequests=0;
+  await panel.route('**/api/edge-rtc/player/**',route=>{documentRequests++;return route.abort('failed');});
+  await panel.goto('http://127.0.0.1:18090');await panel.locator('[data-add-camera-tile]').waitFor({state:'attached'});
+  await panel.evaluate(()=>{const f=document.createElement('iframe');f.className='live-frame';f.dataset.livePath='front_main';f.dataset.liveKey='inline';f.dataset.liveUrl=new URL('/api/edge-rtc/player/front_main',location.href).href;f.srcdoc=inlineLiveDocument(f.dataset.liveUrl);f.src=f.dataset.liveUrl;document.querySelector('#camera-grid').append(f);});
+  try{await panel.waitForFunction(()=>document.querySelector('#camera-grid iframe')?.dataset.liveReady==='true');}catch(error){console.error('INLINE PLAYER',await panel.evaluate(()=>[...document.querySelectorAll('iframe')].map(f=>({src:f.src,inline:Boolean(f.srcdoc),text:f.contentDocument?.body?.textContent,base:f.contentDocument?.baseURI}))));throw error;}
+  assert.equal(documentRequests,0,'inline player fetched a separate document');
+  assert(await panel.locator('iframe').evaluate(f=>f.contentDocument.querySelector('canvas').width===640));
+  assert.equal((await page.evaluate(()=>fetch('/test/status').then(r=>r.json()))).sources[0].connection_attempts,1);
+  await panel.close();
   console.log(`PASS actual long-GOP RTSP -> HA proxy -> WebCodecs: ${metrics.bootstrap_packets} cached packets, first image ${Math.round(metrics.first_frame_ms)} ms, one camera upstream`);
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1);});

@@ -18,4 +18,6 @@ assert.equal(view.parse(JSON.stringify({ts:123,ui:{event:'ui_live_frame_load',pa
 const history=view.parse(JSON.stringify({ts:'2026-08-13T11:00:00+0000',key:'front_0',error:'old disk full'}),{origin:'archive',legacyEvent:'recording_cache'});
 assert.equal(history[0].event,'recording_cache_error');assert.equal(history[0].origin,'archive');assert.equal(history[0].severity,'error');assert(view.stamp(history[0].time)>0);
 assert.equal(view.stamp(1794170904000),1794170904000);assert.equal(view.stamp(1794170904),1794170904000);
+assert.equal(view.category('keyframe_onvif_requested'),'live');assert.equal(view.category('ui_recording_canvas_picture'),'recordings');
+assert.equal(view.severity({event:'keyframe_onvif_unavailable'}),'warning');
 console.log('PASS: structured log groups, deduplication, time order, actual media errors and expected session cancellation');

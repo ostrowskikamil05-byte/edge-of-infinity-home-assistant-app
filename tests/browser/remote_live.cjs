@@ -56,6 +56,7 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
     if(native){
      assert.equal(await page.locator('#camera-grid .notice.warning').count(),0);
      const frame=page.locator('#camera-grid iframe');await frame.waitFor();
+     assert((await frame.getAttribute('srcdoc')).includes('Inline player routing fixture'),'native player still waits for a separate iframe document');
      assert.equal(new URL(await frame.getAttribute('src'),page.url()).href,`https://${host}${prefix}api/edge-rtc/player/front_main`);
      await page.locator('#camera-grid .preview').dispatchEvent('click');
      await page.waitForFunction(()=>document.querySelectorAll('#camera-grid iframe').length===0);

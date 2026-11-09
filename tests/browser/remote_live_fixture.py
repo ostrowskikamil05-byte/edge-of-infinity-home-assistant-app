@@ -11,6 +11,8 @@ fixtures = {}
 for mode, engine in [('native', 'edge_rtc'), ('legacy', 'mediamtx_janus')]:
     os.environ['EDGE_CORE_ENGINE'] = engine
     panel = load_panel_module()
+    document=json.dumps(panel.EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',panel.APP_VERSION)).replace('<','\\u003c')
+    panel.INDEX_HTML=panel.INDEX_HTML.replace(document,json.dumps('<p>Inline player routing fixture</p>').replace('<','\\u003c'))
     fixtures[mode] = {
         'html': panel.INDEX_HTML,
         'config': panel.normalize_config({'cameras': [camera('front', '192.0.2.10', 'sub')]}),

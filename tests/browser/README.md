@@ -2,6 +2,15 @@
 
 Requires Python 3.12+, FFmpeg/FFprobe, Node.js and Playwright with Chromium.
 
+`nvr_ready_playback.cjs` uses the 24-second two-camera fixture on port 18093.
+It checks JSON-only server preparation while Live runs, no saved-video body
+downloads on Live, explicit Live teardown before recording startup, held main
+picture scrubbing and native frame stepping. It samples the composed screenshot
+as well as decoder pixels. In WebKit it hides the native video layer to ensure
+the original-resolution display canvas supplies the visible picture. Run the
+same test with `EDGE_TEST_RECORDING_4K=1` and port 18094 to exercise H.264/AAC
+3840×2160/2560×1440 recordings; point `EDGE_NVR_TEST_URL` at that port.
+
 `nvr_seek_buffer.cjs` uses a separate two-camera fixture on port 18093 with
 `EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1`. It tests actual
 native H.264/HEVC frames, a pending seek superseded before it finishes, Play
@@ -15,6 +24,12 @@ emits a fresh IDR on that same session. Set the compiled `EDGE_RTC_TEST_BINARY`
 and the existing browser environment variables. Node unit tests separately
 block the old decoder queue and prove the new IDR unblocks it without waiting
 for obsolete references. A rendered first-image time is a fixture measurement.
+
+The native panel case also loads the production inline player with its HTTP
+document route blocked, checks a rendered picture and confirms one upstream.
+Go tests cover fresh-GOP queue replacement, timeout fallback, and a one-second
+audio/video jitter burst. The pacing unit test drains valid steady-state delta
+frames through a blocked decoder without resetting references.
 
 `nvr_gallery_cache.cjs` uses the archive fixture on port 18092 in WebKit and
 Chromium. It waits for actual IndexedDB commits, reloads with archive/JPEG

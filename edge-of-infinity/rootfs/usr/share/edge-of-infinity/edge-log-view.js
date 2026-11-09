@@ -1,7 +1,7 @@
 /* Structured event classification; capability names are never error evidence. */
 (() => {
   function category(name){
-    if(/rtc_|ui_live_/.test(name))return 'live';
+    if(/rtc_|ui_live_|^keyframe_/.test(name))return 'live';
     if(/recording|gallery|thumbnail|playback|codec|alert/.test(name))return 'recordings';
     if(/detection|zone|onvif_event|^ai_/.test(name))return 'ai';
     if(/config|save|preset|discovery|runtime_sync/.test(name))return 'config';
@@ -50,5 +50,6 @@
   }
   const labels={rtc_bootstrap_replaced:'Start ze świeżej klatki kluczowej',ui_recording_picture_ready:'Potwierdzona klatka obrazu',ui_recording_picture_released:'Nowy obraz po przewinięciu',ui_recording_buffer_ready:'Następny fragment gotowy w pamięci',ui_recording_buffer_hit:'Odtwarzanie z pamięci urządzenia',recording_http_cache_hit:'Ponowne użycie danych nagrania',recording_cache_error:'Błąd kopii dziennej w archiwum',rtc_connect_start:'Łączenie z kamerą',rtc_websocket_open:'Połączenie EdgeRTC otwarte',rtc_decoder_configured:'Dekoder obrazu gotowy',rtc_bootstrap:'Start z bufora kamery',rtc_first_frame:'Pierwsza klatka na żywo',rtc_client_closed:'Podgląd zamknięty',rtc_websocket_close:'Zakończenie połączenia',ui_recording_video_waiting:'Buforowanie nagrania',ui_recording_video_stalled:'Przerwa w dostarczaniu danych',ui_recording_seek_playing:'Odtwarzanie po przewinięciu',ui_recording_media_timing:'Format i zegar nagrania',ui_gallery_restored:'Galeria z pamięci urządzenia',ui_gallery_saved:'Galeria zapisana lokalnie',recording_catalog_hit:'Gotowy indeks nagrań',recording_catalog_built:'Indeks nagrań odświeżony',ui_recording_native_pause:'Pauza przeglądarki',promise_rejection:'Zdarzenie sesji przeglądarki'};
   Object.assign(labels,{ui_live_picture_ready:'Obraz live gotowy w panelu',ui_recording_startup_warm:'Wcześniejsze przygotowanie nagrania',ui_recording_picture_sampled:'Klatka z natywnego dekodera po przewinięciu',ui_recording_buffer_ready:'Fragment gotowy w pamięci'});
+  Object.assign(labels,{ui_recording_canvas_picture:'Obraz nagrania wyświetlony przez canvas',ui_recording_canvas_error:'Błąd wyświetlania obrazu nagrania',keyframe_onvif_requested:'Wysłano żądanie świeżej klatki ONVIF',keyframe_onvif_unavailable:'Kamera nie udostępniła synchronizacji ONVIF'});
   globalThis.EdgeLogView={category,severity,parse,valueSeverity,stamp,label:row=>row.event==='promise_rejection'&&/subscription not found/i.test(row.data?.message||'')?'Wycofana subskrypcja Home Assistant':labels[row.event]||row.event};
 })();

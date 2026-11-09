@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import hashlib
+import hmac
 import threading
 import tempfile
 import time
@@ -35,6 +36,7 @@ from edge_recording_media import AlertMediaService, video_timing, aac_encoding_o
 from edge_recording_index import RecordingIndexCache
 from edge_recording_compat import CompatibleRecordings
 from edge_metrics import CpuSampler, cpu_load_severity, hardware_inventory
+from edge_camera_keyframes import CameraKeyframes
 sys.path.insert(0,str(Path(__file__).parent/'custom_components/edge'))
 from _device_logs import DeviceLogs, safe_url
 
@@ -97,15 +99,15 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.12.1"
-APP_RELEASE_FEATURES=['Continuously running shared camera sources; preloaded, private version-cached Live modules',
-                      'First saved clips warm only after Live is ready; one bounded download, no offscreen recording decoder',
-                      'In-picture native scrubbing and measured frame steps; hover thumbnails removed',
-                      'One metadata seek path without time fragments; decoded native pictures guard transition release',
-                      'Two-file / 16 MiB RAM cache retained briefly on Live; Save-Data and a per-device switch',
-                      'Original video/FPS/AAC, one camera upstream, gallery and camera/time/device log filters preserved']
+APP_VERSION = "0.12.2"
+APP_RELEASE_FEATURES=['Original-resolution WebKit canvas presentation using the native recording decoder and AAC audio',
+                      'Inline native Live document; valid delta frames retained during decoder backpressure',
+                      'Bounded mobile jitter queue and fresh-GOP startup before sending an old cache',
+                      'Bounded ONVIF synchronization on the matched recording profile; no encoder settings changed',
+                      'JSON-only server preparation on Live; video body warming after current-file buffering',
+                      'Original video/FPS/AAC, one camera upstream, gallery and module/camera/time/device logs preserved']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "ready-native-v121"
+UI_BUILD = "mobile-presentation-v122"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -2044,7 +2046,7 @@ def home_assistant_restream_payload(config: dict) -> dict:
         streams["nvr"] = streams.get(recording) or streams.get("main") or ""
         row = {"camera_id": camera.get("id"), "streams": streams}
         if EDGE_RTC_ENABLED and available:
-            row["edge_rtc"] = {"api": f"http://{_HA_RESTREAM_HOST}:{MEDIAMTX_API_PORT}", "path": mediamtx_path(camera, index, recording), "profile": recording}
+            row["edge_rtc"] = {"api": f"http://{_HA_RESTREAM_HOST}:{MEDIAMTX_API_PORT}", "path": mediamtx_path(camera, index, recording), "profile": recording,"keyframe_api":f"http://{_HA_RESTREAM_HOST}:{PORT}/api/edge-rtc/keyframe/{safe_id(camera.get('id','camera'))}"}
         cameras.append(row)
     return {"available": available, "cameras": cameras, "source": "edge_rtc" if EDGE_RTC_ENABLED else "edge_nvr", "version": APP_VERSION}
 
@@ -4880,7 +4882,7 @@ def autoconfig_endpoints(camera: dict) -> dict[str, str]:
     }
 
 
-def onvif_request(camera: dict, endpoint: str, action: str, body: str, reference_headers: str = "") -> ET.Element:
+def onvif_request(camera: dict, endpoint: str, action: str, body: str, reference_headers: str = "", timeout: float = 8) -> ET.Element:
     import urllib.request
     import uuid
     endpoint_url = urlparse(endpoint)
@@ -4904,7 +4906,7 @@ def onvif_request(camera: dict, endpoint: str, action: str, body: str, reference
             raise ValueError("ONVIF redirects are not allowed.")
     opener = urllib.request.build_opener(urllib.request.HTTPDigestAuthHandler(passwords), NoRedirect())
     try:
-        with opener.open(request, timeout=8) as response:
+        with opener.open(request, timeout=timeout) as response:
             payload = response.read(2_000_001)
         if len(payload) > 2_000_000:
             raise RuntimeError("ONVIF response is too large.")
@@ -4918,6 +4920,9 @@ def onvif_request(camera: dict, endpoint: str, action: str, body: str, reference
 
 def onvif_value(root: ET.Element, name: str) -> str:
     return next((element.text or "" for element in root.iter() if element.tag.rsplit("}", 1)[-1] == name), "")
+
+
+CAMERA_KEYFRAMES=CameraKeyframes(load_config,lambda *args:onvif_request(*args,timeout=2),write_debug_event)
 
 
 def fetch_onvif_camera_config(camera: dict) -> dict:
@@ -5349,9 +5354,9 @@ def health_payload() -> dict:
 EDGE_RTC_PLAYER_HTML = r"""<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;height:100%;background:#080e15;color:#d9e7ee;font:13px system-ui}canvas{width:100%;height:100%;object-fit:contain}button{position:absolute;bottom:12px;right:12px;padding:10px;border:0;border-radius:8px;background:#20384b;color:white}p{position:absolute;top:8px;left:10px}</style><canvas></canvas><p>EdgeRTC · connecting…</p><button>Sound</button><script type="module">
 import{EdgeRTCClient}from'../client.js?v=__EDGE_PANEL_VERSION__';
 import{getDeviceReporter}from'../device-diagnostics.js?v=__EDGE_PANEL_VERSION__';
-const path=location.pathname.split('/').pop(),url=new URL('../stream/'+path,location.href);let client,timer,retries=0,muted=true;
-const diagnostics=getDeviceReporter({context:{surface:'edge_panel_live',source:path},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);try{return(await fetch(new URL('../../client-diagnostics',location.href),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal})).ok;}finally{clearTimeout(timer);}}});
-function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,diagnostics,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;if(f.frames===1)parent.postMessage({type:'edge_live_ready',path},location.origin);const label='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264'),note=document.querySelector('p');if(note.textContent!==label)note.textContent=label;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
+const playerBase=new URL(document.baseURI),path=playerBase.pathname.split('/').pop(),url=new URL('../stream/'+path,playerBase);let client,timer,retries=0,muted=true;
+const diagnostics=getDeviceReporter({context:{surface:'edge_panel_live',source:path},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);try{return(await fetch(new URL('../../client-diagnostics',playerBase),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal})).ok;}finally{clearTimeout(timer);}}});
+function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,diagnostics,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;if(f.frames===1)parent.postMessage({type:'edge_live_ready',path},playerBase.origin);const label='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264'),note=document.querySelector('p');if(note.textContent!==label)note.textContent=label;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
 window.edgeStopLive=()=>{clearTimeout(timer);client?.close();};
 connect();document.querySelector('button').onclick=()=>{muted=!muted;client?.setAudio(.6,muted);document.querySelector('button').textContent=muted?'Sound':'Mute';};document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(document.hidden)window.edgeStopLive();else connect();});window.addEventListener('pagehide',()=>window.edgeStopLive());
 </script>"""
@@ -5779,6 +5784,8 @@ INDEX_HTML = r"""<!doctype html>
       }
       .recording-player-wrap:fullscreen .nvr-playback-controls, .recording-player-wrap.edge-soft-fullscreen .nvr-playback-controls { width: 100%; }
       .recording-player-wrap { aspect-ratio:16/9; container-type:inline-size; container-name:nvrplayer; background:#05080a; }
+      .recording-display { position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#05080a;pointer-events:none; }
+      .recording-player-wrap .recording-player[data-recording-canvas="true"] { opacity:.001;position:absolute;inset:0;z-index:1; }
       .recording-player-wrap .recording-player { height:100%; aspect-ratio:auto; border:0; }
       .recording-player-wrap .nvr-playback-controls { position:absolute; inset:auto 0 0; z-index:3; width:100%; box-sizing:border-box; padding:20px 10px max(6px,env(safe-area-inset-bottom)); gap:2px; background:linear-gradient(transparent,rgba(0,0,0,.92)); transition:opacity .16s; }
       .recording-player-wrap[data-controls-visible="false"] .nvr-playback-controls { opacity:0; pointer-events:none; }
@@ -6431,6 +6438,8 @@ INDEX_HTML = r"""<!doctype html>
       const EDGE_PANEL_VERSION = '__EDGE_PANEL_VERSION__';
       const EDGE_UI_BUILD = '__EDGE_UI_BUILD__';
       const EDGE_NATIVE_RTC = __EDGE_NATIVE_RTC__;
+      const EDGE_NATIVE_PLAYER_DOCUMENT = __EDGE_NATIVE_PLAYER_DOCUMENT__;
+      function inlineLiveDocument(url){return `<base href="${escapeHtml(new URL(url,location.href).href)}">`+EDGE_NATIVE_PLAYER_DOCUMENT;}
       const CAMERA_VENDORS = __EDGE_CAMERA_VENDORS__;
       const CAMERA_TEMPLATES = __EDGE_CAMERA_TEMPLATES__;
       let config = { cameras: [] };
@@ -7120,7 +7129,7 @@ INDEX_HTML = r"""<!doctype html>
         if(!force&&!phonePlayback())return;
         nvrGrid.querySelectorAll('video[data-recording-player]').forEach(other=>{
           if(other===selected)return;
-          pauseRecording(other);recordingSurface.stop(other);
+          pauseRecording(other);recordingSurface.stop(other,true);
           if(other.getAttribute('src')){
             if(other.readyState>=1)other.dataset.recordingSeek=String(other.currentTime);
             other.dataset.recordingSuspendedSrc=mediaUrlWithTimeFragment(other.dataset.recordingSrc||other.getAttribute('src'),other.dataset.recordingSeek);
@@ -7139,7 +7148,7 @@ INDEX_HTML = r"""<!doctype html>
         delete video.dataset.recordingSuspendedSrc;video.preload='auto';video.src=recordingBuffer.attach(video,source).split('#')[0];video.load();recordingSurface.begin(video);
       }
       function disposeRecordingPlayer(video){
-        if(!video)return;pauseRecording(video);recordingSurface.stop(video);
+        if(!video)return;pauseRecording(video);recordingSurface.stop(video,true);
         video.removeAttribute('src');video.load();recordingBuffer.release(video);
       }
 
@@ -7342,15 +7351,18 @@ INDEX_HTML = r"""<!doctype html>
           const frames=[...grid.querySelectorAll('iframe.live-frame')].filter(f=>f.dataset.liveSuspended!=='true');
           // Do not compete with the first live image or open a hidden decoder.
           if(EDGE_NATIVE_RTC&&frames.some(f=>f.dataset.liveReady!=='true'))return;
+          if(!(config.cameras||[]).every((_,i)=>Array.isArray(recordingStatus[i]?.files)))await loadRecordingStatus({history:true,reason:'gallery_prefetch'});
           const videos=[...nvrGrid.querySelectorAll('video[data-recording-player]')].slice(0,2);
           for(const video of videos){
             if(epoch!==recordingReadyEpoch||activePage!=='home'||document.hidden)return;
             const status=recordingStatus[video.dataset.recordingPlayer],file=status?.files?.find(f=>f.url===video.dataset.recordingLoadedFile);
             if(!file)continue;
-            const url=mediaUrlWithTimeFragment(panelPath(file.url),0);
-            if(recordingBuffer.entries.has(recordingBuffer.key(url)))continue;
-            const ready=await recordingBuffer.prime(video,url,Number(file.size_bytes||0));
-            debugEvent('ui_recording_startup_warm',{index:video.dataset.recordingPlayer,ready,...recordingBuffer.diagnostic()});
+            // Prepare the server copy without transferring whole MP4s over
+            // the same mobile/Cloud connection as the live streams.
+            try{
+              const response=await fetch(panelPath('api/recording/prepare'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:status.key,name:file.name}),signal:AbortSignal.timeout(12000)});
+              const data=await response.json();debugEvent('ui_recording_startup_warm',{index:video.dataset.recordingPlayer,ready:response.ok&&data.ready,transfer:'metadata_only',...recordingBuffer.diagnostic()});
+            }catch(error){if(error.name!=='AbortError')debugEvent('ui_recording_startup_prepare_unavailable',{index:video.dataset.recordingPlayer,reason:error.name});}
           }
         },2000);
       }
@@ -7427,8 +7439,7 @@ INDEX_HTML = r"""<!doctype html>
         const url=mediaUrlWithTimeFragment(panelPath(plan.next.file.url),0),now=performance.now();
         if(Number(video.dataset.recordingStableAt||0)&&now-Number(video.dataset.recordingStableAt)>2000&&video.dataset.recordingLoading!=='true'&&video.dataset.recordingBuffering!=='true'){
           const ahead=Array.from({length:video.buffered.length},(_,i)=>[video.buffered.start(i),video.buffered.end(i)]).find(([a,b])=>a<=video.currentTime&&video.currentTime<=b);
-          const picture=recordingSurface.diagnostic(video),flow=picture.picture_confirmed&&picture.last_picture_age_ms<250&&video.currentTime-Number(video.dataset.recordingStableClock||0)>1;
-          if(ahead&&ahead[1]-video.currentTime>=2||video.networkState===1||flow)void recordingBuffer.prime(video,url,Number(plan.next.file.size_bytes||0));
+          if(video.networkState===1||ahead&&Number.isFinite(video.duration)&&ahead[1]>=video.duration-.1)void recordingBuffer.prime(video,url,Number(plan.next.file.size_bytes||0));
         }
         if(recordingWarmDone.has(url)&&now-recordingWarmDone.get(url)<30000)return;
         const job={video,url,controller:new AbortController()};recordingWarmJob=job;
@@ -8457,7 +8468,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         const preview = live[liveKey]
           ? (plan.canEmbed
-            ? `<iframe class="live-frame" src="${escapeHtml(activePage==='home'&&!document.hidden?mediamtxUrl:'about:blank')}" ${activePage==='home'&&!document.hidden?'':'data-live-suspended="true"'} data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} ${EDGE_NATIVE_RTC ? 'EdgeRTC' : 'WebRTC'} live" loading="eager" allow="autoplay; fullscreen; encrypted-media" allowfullscreen onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
+            ? `<iframe class="live-frame" src="${escapeHtml(activePage==='home'&&!document.hidden?mediamtxUrl:'about:blank')}" ${EDGE_NATIVE_RTC&&activePage==='home'&&!document.hidden?`srcdoc="${escapeHtml(inlineLiveDocument(mediamtxUrl))}"`:''} ${activePage==='home'&&!document.hidden?'':'data-live-suspended="true"'} data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} ${EDGE_NATIVE_RTC ? 'EdgeRTC' : 'WebRTC'} live" loading="eager" allow="autoplay; fullscreen; encrypted-media" allowfullscreen onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
             : liveBlockedPreview(plan))
           : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         const fullscreenButton = live[liveKey] && plan.canEmbed
@@ -8545,9 +8556,11 @@ INDEX_HTML = r"""<!doctype html>
             // Release the phone's Live decoder synchronously before NVR can
             // acquire one; iframe navigation/unload alone is asynchronous.
             if(EDGE_NATIVE_RTC)try{frame.contentWindow.edgeStopLive?.();}catch(_){}
+            frame.removeAttribute('srcdoc');
             frame.dataset.liveSuspended='true';delete frame.dataset.liveReady;frame.src='about:blank';
             clearTimeout(liveFrameTimers.get(frame.dataset.liveKey));liveFrameTimers.delete(frame.dataset.liveKey);
           }else if(visible&&frame.dataset.liveSuspended==='true'){
+            if(EDGE_NATIVE_RTC)frame.srcdoc=inlineLiveDocument(frame.dataset.liveUrl);
             delete frame.dataset.liveSuspended;frame.src=frame.dataset.liveUrl;
           }
         });
@@ -10813,6 +10826,7 @@ INDEX_HTML = r"""<!doctype html>
 
       nvrGrid.addEventListener('play', (event) => {
         const video = event.target?.matches?.('video[data-recording-player]') ? event.target : null;
+        if(video)recordingSurface.resume(video);
         if(video&&recordingScrubs.has(video.dataset.recordingPlayer)){const scrub=recordingScrubs.get(video.dataset.recordingPlayer);if(scrub.active){video.pause();return;}scrub.resume=true;scrub.playStarted=performance.now();}
         if(video&&video.paused)return;
         if(video){video.dataset.recordingWantsPlay='true';video.dataset.recordingPlayPending='false';video.dataset.recordingStableAt=String(performance.now());video.dataset.recordingStableClock=String(video.currentTime);}
@@ -10958,7 +10972,7 @@ INDEX_HTML = r"""<!doctype html>
         void restoreRecordingGallery();
         void loadEngineSettings();
         await Promise.all([loadPresets(), loadCameras(), loadRecordingStatus({ forceRender: true, reason: 'boot' })]);
-        setTimeout(()=>{if(activePage!=='nvr'&&!document.hidden)void loadRecordingStatus({history:true,reason:'gallery_prefetch'});},3000);
+        setTimeout(()=>{if(activePage==='home'&&!document.hidden)scheduleRecordingReady();},3000);
         let eventId=new URLSearchParams(location.search).get('edge_event');try{eventId=eventId||new URLSearchParams(window.top.location.search).get('edge_event');}catch(_){}if(/^[1-9][0-9]{0,18}$/.test(eventId||''))await openAlertById(eventId);
       }
 
@@ -10974,6 +10988,7 @@ INDEX_HTML = r"""<!doctype html>
 INDEX_HTML = (
     INDEX_HTML
     .replace("__EDGE_LIVE_PRELOAD__", '<link rel="modulepreload" href="api/edge-rtc/client.js?v=__EDGE_PANEL_VERSION__"><link rel="modulepreload" href="api/edge-rtc/device-diagnostics.js?v=__EDGE_PANEL_VERSION__">' if EDGE_RTC_ENABLED else '')
+    .replace("__EDGE_NATIVE_PLAYER_DOCUMENT__", json.dumps(EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',APP_VERSION)).replace('<', '\\u003c'))
     .replace("__EDGE_PANEL_VERSION__", APP_VERSION)
     .replace("__EDGE_GALLERY_CACHE__", (Path(__file__).parent/'edge-recording-gallery.js').read_text())
     .replace("__EDGE_RECORDING_BUFFER__", (Path(__file__).parent/'edge-recording-buffer.js').read_text())
@@ -11044,6 +11059,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
         upgraded = False
         try:
             token = (HOME_DIR / "edge-rtc-token").read_text().strip()
+            camera=next((c for c in load_config().get('cameras',[]) if c.get('enabled') and stream_path in (safe_id(c.get('id','camera'))+'_main',safe_id(c.get('id','camera'))+'_sub')),None)
+            if camera:CAMERA_KEYFRAMES.request(camera['id'])
             backend = socket.create_connection(("127.0.0.1", MEDIAMTX_API_PORT), timeout=5)
             key = self.headers.get("Sec-WebSocket-Key", "")
             if not re.fullmatch(r"[A-Za-z0-9+/=]{20,32}", key):
@@ -11280,6 +11297,14 @@ class EdgeHandler(BaseHTTPRequestHandler):
         _post_path = route_path(parsed.path)
         parsed = parsed._replace(path=_post_path)
         write_debug_event("api_post", {"path": parsed.path, "query": parse_qs(parsed.query), "client": self.client_address[0]})
+        if parsed.path.startswith('/api/edge-rtc/keyframe/'):
+            try:token=(HOME_DIR/'edge-rtc-token').read_text().strip()
+            except OSError:token=''
+            if not token or not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+token):
+                self.send_json({'error':'unauthorized'},HTTPStatus.FORBIDDEN);return
+            camera_id=parsed.path.removeprefix('/api/edge-rtc/keyframe/')
+            accepted=bool(re.fullmatch(r'[A-Za-z0-9_.-]{1,64}',camera_id)) and CAMERA_KEYFRAMES.request(camera_id)
+            self.send_json({'accepted':accepted},HTTPStatus.ACCEPTED);return
         if parsed.path == "/api/config":
             self.save_config()
             return
