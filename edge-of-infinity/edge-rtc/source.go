@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -49,6 +50,7 @@ func (v *viewer) consumed(p []byte) {
 }
 
 type source struct {
+	connection         sourceConnection
 	rtpHealth          sourceRTPHealth
 	cfg                sourceConfig
 	server             *gortsplib.Server
@@ -127,7 +129,7 @@ func (s *source) status() map[string]any {
 	if len(s.gop) > 1 {
 		span = (int64(binary.BigEndian.Uint64(s.gop[len(s.gop)-1][2:10])) - int64(binary.BigEndian.Uint64(s.gop[0][2:10]))) / 1000
 	}
-	return map[string]any{"rtp": s.rtpHealth.snapshot(time.Now()), "keyframe_requests": s.keyframeRequests, "keyframe_write_errors": s.keyframeErrors, "keyframe_observed_after_request_ms": s.keyframeObservedMS, "keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "live_queue_packets": liveQueuePackets, "camera_id": s.cfg.ID, "paths": s.cfg.Paths, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
+	return map[string]any{"connection": s.connection.snapshot(), "rtp": s.rtpHealth.snapshot(time.Now()), "keyframe_requests": s.keyframeRequests, "keyframe_write_errors": s.keyframeErrors, "keyframe_observed_after_request_ms": s.keyframeObservedMS, "keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "live_queue_packets": liveQueuePackets, "camera_id": s.cfg.ID, "paths": s.cfg.Paths, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
 }
 func (s *source) run() {
 	defer close(s.stopped)
@@ -154,20 +156,24 @@ func (s *source) run() {
 		}
 	}
 }
-func (s *source) readOnce() error {
+func (s *source) readOnce() (result error) {
+	s.connection.begin(s.attempts.Add(1), s.cfg.Microphone)
+	defer func() { s.reportConnectionError(result) }()
 	u, e := base.ParseURL(s.cfg.URL)
 	if e != nil {
 		return e
 	}
 	protocol := gortsplib.ProtocolTCP
 	c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host, Protocol: &protocol, ReadTimeout: 8 * time.Second, WriteTimeout: 5 * time.Second, RequestBackChannels: s.cfg.Microphone}
-	s.attempts.Add(1)
+	s.connection.stage("client_start")
 	if e = c.Start(); e != nil {
 		return e
 	}
 	var once sync.Once
 	closeClient := func() { once.Do(func() { c.Close() }) }
 	c.OnDecodeError = func(err error) { s.handleSourceDecodeError(err, time.Now(), closeClient) }
+	c.OnRequest = s.connection.request
+	c.OnResponse = s.connection.response
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -178,9 +184,12 @@ func (s *source) readOnce() error {
 	}()
 	defer close(done)
 	defer closeClient()
+	s.connection.stage("describe")
 	desc, response, e := c.Describe(u)
-	if e != nil && response != nil && response.StatusCode == 551 && c.RequestBackChannels {
+	if e != nil && response != nil && (response.StatusCode == 400 || response.StatusCode == 501 || response.StatusCode == 551) && c.RequestBackChannels {
 		c.RequestBackChannels = false
+		s.connection.withoutBackchannel()
+		log.Printf("rtsp_optional_backchannel_rejected camera_id=%s status=%d; retrying DESCRIBE on the same connection", s.cfg.ID, response.StatusCode)
 		desc, _, e = c.Describe(u)
 	}
 	if e != nil {
@@ -193,7 +202,7 @@ func (s *source) readOnce() error {
 	handlers := map[format.Format]func(*rtp.Packet){}
 	for _, media := range desc.Medias {
 		if media.IsBackChannel {
-			if s.cfg.Microphone {
+			if c.RequestBackChannels {
 				for _, f := range media.Formats {
 					if g, ok := f.(*format.G711); ok && g.ClockRate() == 8000 && g.ChannelCount == 1 {
 						back = media
@@ -204,6 +213,7 @@ func (s *source) readOnce() error {
 			}
 			continue
 		}
+		s.connection.stage("setup_" + string(media.Type))
 		if _, e = c.Setup(desc.BaseURL, media, 0, 0); e != nil {
 			return e
 		}
@@ -219,12 +229,14 @@ func (s *source) readOnce() error {
 		return errors.New("no media")
 	}
 	if back != nil {
+		s.connection.stage("setup_backchannel")
 		if _, e = c.Setup(desc.BaseURL, back, 0, 0); e != nil {
 			back = nil
 			backFormat = nil
 		}
 	}
 	stream := &gortsplib.ServerStream{Server: s.server, Desc: forward}
+	s.connection.stage("relay_initialize")
 	if e = stream.Initialize(); e != nil {
 		return e
 	}
@@ -289,9 +301,11 @@ func (s *source) readOnce() error {
 		}
 	})
 	s.rtpHealth.begin(forward, time.Now())
+	s.connection.stage("play")
 	if _, e = c.Play(nil); e != nil {
 		return e
 	}
+	s.connection.ready()
 	return c.Wait()
 }
 func frame(kind byte, key bool, stamp int64, payload []byte) []byte {

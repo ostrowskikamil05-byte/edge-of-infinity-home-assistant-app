@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.2
+
+- Retain and report camera connection failures previously discarded by the
+  source retry loop: phase, RTSP method/status, attempt, duration and safe code.
+- Capture bounded video/audio SDP codec declarations before parsing them, so an
+  unsupported AAC/profile description is visible even when no RTP arrives.
+  SDP control URLs, authentication headers and camera passwords are excluded.
+- Retry DESCRIBE without the optional microphone requirement when the camera
+  rejects it with 400/501/551, on the same connection. Authentication failures
+  remain errors; the microphone is reported unavailable when rejected.
+- Show per-camera RTSP failures and missing configured recorders explicitly in
+  diagnostics, using the same runtime snapshot as the exported engine status.
+- Include connection evidence in deferred recorder reports. Keep camera settings,
+  original video/FPS, source AAC copying and the single camera connection policy.
+
 ## 0.13.1
 
 - Serialize cached thumbnail restoration with visible-image loading, preventing

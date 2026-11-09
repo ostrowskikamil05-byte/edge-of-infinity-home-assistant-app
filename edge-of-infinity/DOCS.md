@@ -1,5 +1,35 @@
 # Edge of Infinity App Documentation
 
+## 0.13.2: RTSP negotiation and source errors
+
+Update the app, restart Home Assistant Core, then reopen Edge through HA.
+Version/build: `0.13.2` / `rtsp-connect-v132`.
+
+When a source has many attempts, zero packets, no active upstream and no RTP
+decode errors, its failure occurs before usable media reception. This evidence
+does not identify authentication, SDP parsing, SETUP or PLAY by itself. Previous
+releases discarded the error returned by the RTSP source attempt.
+
+Each source now exposes `connection` with the current phase, method/status,
+attempt, failure count, safe `last_error` and bounded `sdp_formats` declarations.
+`rtsp_source_error` logs identify the camera and failure without repeating the
+same reason more often than every 30 seconds. Recorder waiting reports include
+the same connection evidence. Diagnostics show a missing configured recorder as
+a warning and a failed RTSP camera as an error, even if another camera records.
+
+Codes distinguish authentication/access denial, missing stream, busy camera,
+unsupported transport, network refusal/timeout, invalid SDP and other negotiation
+failures. An invalid SDP includes a sanitized parser detail and advertised codecs,
+clock rates, channel counts and bounded AAC configuration hex when available.
+Camera URLs, passwords and auth headers are not logged.
+
+If a camera rejects optional microphone negotiation with 400/501/551, Edge
+retries DESCRIBE on the same connection without that requirement. Forward video
+and audio retain their profile; the rejected microphone stays unavailable.
+This is a compatibility fallback, not proof that microphone negotiation caused
+an individual camera's failure. Unsupported SDP and authentication still require
+their precise error to choose a remedy. No camera encoder settings are changed.
+
 ## 0.13.1: recorder metadata retry and Uniview ONVIF
 
 After updating, restart Home Assistant Core to load the installed integration,
