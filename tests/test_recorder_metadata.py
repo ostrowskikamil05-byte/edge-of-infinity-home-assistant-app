@@ -7,6 +7,20 @@ from test_edge_panel_config import camera,load_panel_module
 
 
 class RecorderMetadataTests(unittest.TestCase):
+    def test_missing_desired_recorder_and_rtsp_rejection_are_visible_in_diagnostics(self):
+        p=load_panel_module();config=p.normalize_config({'cameras':[camera('unv','192.0.2.10','main'),camera('hik','192.0.2.11','main')]})
+        failed={'code':'sdp_invalid','phase':'describe','rtsp_method':'DESCRIBE','rtsp_status':200}
+        runtime={'edge_rtc':{'sources':[{'camera_id':'unv','ready':False,'upstream_connections':0,'packets':0,'connection':{'last_error':failed}}]}}
+        rows=p.build_panel_diagnostics(config,{'active_recorders':[{'key':'hik_1'}]}, {},[],runtime=runtime)
+        recorders=next(row for row in rows if row['title']=='NVR recorders')
+        self.assertEqual(recorders['severity'],'warning');self.assertEqual(recorders['payload']['missing_recorders'],['unv_0'])
+        connection=next(row for row in rows if row['title'].startswith('RTSP'))
+        self.assertEqual(connection['severity'],'error');self.assertIn('sdp_invalid',connection['detail']);self.assertIn('DESCRIBE',connection['detail'])
+        with patch.object(p,'engine_runtime_status',return_value=runtime) as snapshot:
+            exported=p.collect_panel_logs();snapshot.assert_called_once()
+        self.assertIs(exported['runtime_config'],runtime)
+        self.assertTrue(any(row['title'].startswith('RTSP') and 'sdp_invalid' in row['detail'] for row in exported['diagnostics']))
+
     def test_live_status_uses_shared_registry_and_not_a_timing_sensitive_rtsp_probe(self):
         p=load_panel_module();p.EDGE_RTC_ENABLED=True
         config=p.normalize_config({'cameras':[camera('unv','192.0.2.15','main')]});p.commit_panel_config(config)

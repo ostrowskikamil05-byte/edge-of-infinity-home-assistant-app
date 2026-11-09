@@ -1,5 +1,5 @@
 /* EdgeRTC archive: persistent socket, indexed seeks, bounded pull-based delivery. */
-import {EdgeRTCClient} from './client.js?v=0.13.1';
+import {EdgeRTCClient} from './client.js?v=0.13.2';
 
 export class EdgeDVRClient extends EdgeRTCClient {
   constructor(options){super(options);this.epoch=0;this.paused=true;this.speed=1;this.position=0;this.duration=0;this.archiveAudio=[];}

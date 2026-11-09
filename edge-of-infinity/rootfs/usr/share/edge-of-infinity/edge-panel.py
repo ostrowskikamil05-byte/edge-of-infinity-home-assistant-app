@@ -100,8 +100,10 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.13.1"
+APP_VERSION = "0.13.2"
 APP_RELEASE_FEATURES=['Optional EdgeRTC DVR: indexed original H264/H265/AAC, epoch seeks and one bounded persistent socket',
+                      'RTSP connection phases, response codes and safe advertised codec diagnostics',
+                      'Same-connection optional microphone fallback and explicit missing-recorder diagnostics',
                       'Deferred recorder metadata starts retry without UI polling or extra camera channels',
                       'Known Uniview ONVIF aliases and distinct metadata waiting diagnostics',
                       'Source-specific RTP payload diagnostics and bounded SDP refresh without parallel camera connections',
@@ -111,7 +113,7 @@ APP_RELEASE_FEATURES=['Optional EdgeRTC DVR: indexed original H264/H265/AAC, epo
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "source-retry-v131"
+UI_BUILD = "rtsp-connect-v132"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -1460,7 +1462,7 @@ def runtime_parameters_payload(config: dict, hardware: dict, recordings_dir: Pat
     )
 
 
-def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording_logs: list[dict], detection: dict | None = None) -> list[dict]:
+def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording_logs: list[dict], detection: dict | None = None, runtime=None) -> list[dict]:
     diagnostics = []
     ffmpeg_path = hardware.get("ffmpeg_path") or ""
     ffprobe_path = hardware.get("ffprobe_path") or ""
@@ -1532,7 +1534,20 @@ def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording
             diagnostics.append(diagnostic_item("warning", title, f"Could not read disk usage: {disk.get('error')}", disk))
 
     active_recorders = hardware.get("active_recorders") if isinstance(hardware.get("active_recorders"), list) else []
-    diagnostics.append(diagnostic_item("ok", "NVR recorders", f"{len(active_recorders)} active recorder process(es).", {"active_recorders": active_recorders}))
+    expected={recording_key(camera,index) for index,camera in enumerate(config.get('cameras',[])) if camera_should_record(camera)}
+    missing=sorted(expected-{row.get('key') for row in active_recorders})
+    diagnostics.append(diagnostic_item("warning" if missing else "ok", "NVR recorders", f"{len(active_recorders)} active recorder process(es); {len(expected)} configured."+(f" Missing: {', '.join(missing)}." if missing else ''), {"active_recorders": active_recorders,'missing_recorders':missing,'expected_recorders':len(expected)}))
+    cameras={safe_id(camera.get('id') or f'camera_{index+1}'):camera for index,camera in enumerate(config.get('cameras',[]))}
+    for source in ((runtime or {}).get('edge_rtc') or {}).get('sources',[]):
+        camera=cameras.get(source.get('camera_id')) or {};connection=source.get('connection') or {};failure=connection.get('last_error') or {}
+        title=f"RTSP · {camera.get('name') or source.get('camera_id')}"
+        if not source.get('upstream_connections') and failure:
+            detail=f"{failure.get('code','rtsp_negotiation_failed')}; etap {failure.get('phase','unknown')}; metoda {failure.get('rtsp_method') or '—'}; RTSP {failure.get('rtsp_status') or 'brak odpowiedzi'}."
+            diagnostics.append(diagnostic_item('error',title,detail,{'camera_id':source.get('camera_id'),'connection':connection,'packets':source.get('packets',0)}))
+        elif source.get('ready') and (source.get('video') or {}).get('parameters_ready',False):
+            diagnostics.append(diagnostic_item('ok',title,'Wspólne źródło odbiera obraz.',{'camera_id':source.get('camera_id'),'connection':connection}))
+        else:
+            diagnostics.append(diagnostic_item('warning',title,'Oczekiwanie na połączenie lub parametry obrazu.',{'camera_id':source.get('camera_id'),'connection':connection,'packets':source.get('packets',0)}))
     cache_workers = hardware.get("recording_cache_workers") if isinstance(hardware.get("recording_cache_workers"), list) else []
     cache_limit = safe_int(hardware.get("recording_cache_worker_limit"), 1)
     cache_backlog = safe_int(hardware.get("recording_cache_backlog"), len(cache_workers))
@@ -1591,6 +1606,7 @@ def collect_panel_logs() -> dict:
     }
     hardware = system_diagnostics_payload(recordings_dir)
     detection=DETECTION_SERVICE.snapshot() if DETECTION_SERVICE else {}
+    runtime=engine_runtime_status()
 
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -1607,7 +1623,7 @@ def collect_panel_logs() -> dict:
         "camera_media":safe_json_file(DATA_DIR/'cameras.json'),
         "camera_discovery_log":redact_rtsp(read_text_tail(HOME_DIR/'camera-discovery.jsonl',16000)),
         "runtime_parameters": runtime_parameters_payload(config, hardware, recordings_dir),
-        "diagnostics": build_panel_diagnostics(config, hardware, tails, recording_logs,detection),
+        "diagnostics": build_panel_diagnostics(config, hardware, tails, recording_logs,detection,runtime),
         "detection":detection,
         "edge_debug": tails["Edge debug"],
         "last_save_debug": safe_json_file(HOME_DIR / "last-save-debug.json"),
@@ -1616,7 +1632,7 @@ def collect_panel_logs() -> dict:
         "addon_config_file": safe_json_file(ADDON_CONFIG_PATH),
         "panel_config": safe_json_file(PANEL_CONFIG_PATH),
         "runtime_config_file": safe_json_file(CONFIG_PATH),
-        "runtime_config": engine_runtime_status(),
+        "runtime_config": runtime,
         "runtime_mediamtx_config": redact_rtsp(read_text_tail(MEDIAMTX_CONFIG_PATH, 20000)),
         "runtime_janus_streaming_config": redact_rtsp(read_text_tail(JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg", 20000)),
         "recording_stream_log": tails["Recording stream"],
@@ -4197,7 +4213,7 @@ def recording_registry_metadata(camera,index,stream_name,wait_seconds=4):
                 'packets':(source or {}).get('packets',0),'video_codec':video.get('codec_name',''),
                 'parameters_ready':bool(video.get('parameters_ready',bool(video.get('codec_name')))),
                 'width':video.get('width',0),'height':video.get('height',0),'onvif_required':False,
-                'rtp':(source or {}).get('rtp',{})})
+                'rtp':(source or {}).get('rtp',{}),'connection':(source or {}).get('connection',{})})
         time.sleep(.2)
 
 
@@ -12092,7 +12108,7 @@ def main() -> None:
     write_debug_event('release_features',{'version':APP_VERSION,'features':APP_RELEASE_FEATURES,
                       'hardware':hardware_inventory(),'recordings_changed':False,'camera_codec_settings_changed':False,
                       'edge_rtc':'Sources stay connected on the server; viewers share its bounded keyframe buffer.'})
-    print(f'[edge-panel] {APP_VERSION}: automatic recorder metadata retry, Uniview ONVIF aliases, indexed EdgeRTC DVR and source AAC copy. Original video/FPS unchanged.')
+    print(f'[edge-panel] {APP_VERSION}: RTSP negotiation diagnostics, same-connection microphone fallback, metadata retry and source AAC copy. Original video/FPS unchanged.')
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
     try:

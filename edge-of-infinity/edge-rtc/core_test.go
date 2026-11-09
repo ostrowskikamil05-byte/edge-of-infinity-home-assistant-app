@@ -45,18 +45,21 @@ func eventually(t *testing.T, f func() bool) {
 }
 
 type fakeCamera struct {
-	server       *gortsplib.Server
-	stream       *gortsplib.ServerStream
-	direct       *description.Media
-	back         *description.Media
-	active       atomic.Int32
-	maximum      atomic.Int32
-	mic          atomic.Uint64
-	pli          atomic.Uint64
-	idrRequested atomic.Bool
-	videoPaused  atomic.Bool
-	done         chan struct{}
-	onOpen       func()
+	server            *gortsplib.Server
+	stream            *gortsplib.ServerStream
+	direct            *description.Media
+	back              *description.Media
+	active            atomic.Int32
+	maximum           atomic.Int32
+	mic               atomic.Uint64
+	pli               atomic.Uint64
+	idrRequested      atomic.Bool
+	videoPaused       atomic.Bool
+	describeStatus    atomic.Int32
+	rejectBackchannel atomic.Bool
+	describeCalls     atomic.Uint32
+	done              chan struct{}
+	onOpen            func()
 }
 
 func (c *fakeCamera) OnConnOpen(*gortsplib.ServerHandlerOnConnOpenCtx) {
@@ -71,7 +74,14 @@ func (c *fakeCamera) OnConnOpen(*gortsplib.ServerHandlerOnConnOpenCtx) {
 	}
 }
 func (c *fakeCamera) OnConnClose(*gortsplib.ServerHandlerOnConnCloseCtx) { c.active.Add(-1) }
-func (c *fakeCamera) OnDescribe(*gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
+func (c *fakeCamera) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
+	c.describeCalls.Add(1)
+	if code := c.describeStatus.Load(); code != 0 {
+		return &base.Response{StatusCode: base.StatusCode(code)}, nil, nil
+	}
+	if c.rejectBackchannel.Load() && len(ctx.Request.Header["Require"]) > 0 {
+		return &base.Response{StatusCode: base.StatusNotImplemented}, nil, nil
+	}
 	return &base.Response{StatusCode: base.StatusOK}, c.stream, nil
 }
 func (c *fakeCamera) OnSetup(*gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
