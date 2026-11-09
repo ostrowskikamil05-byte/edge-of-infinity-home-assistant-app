@@ -2,10 +2,13 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.12.0** adds fresh-keyframe startup on the shared EdgeRTC session,
-latest-seek cancellation, confirmed-picture transitions, a bounded next-segment
-RAM buffer and camera/time/source log filters. It retains the persistent gallery,
-original video/FPS and one camera upstream. See [update details](edge-of-infinity/DOCS.md#0120-unv-startup-seeking-and-playback-buffers).
+Version **0.12.1** prepares the first saved clips after Live is ready, keeps a
+bounded RAM cache when returning to Live, removes seek-hover thumbnails and
+uses the main native player for frame previews. It fixes duplicate fragment
+seeking and checks decoded-picture readiness before releasing a held image.
+Live modules preload and share a private versioned cache. Original recordings,
+FPS, the persistent gallery and one camera upstream are retained.
+See [update details](edge-of-infinity/DOCS.md#0121-ready-recordings-and-in-picture-seeking).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:
 

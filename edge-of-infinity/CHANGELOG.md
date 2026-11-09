@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.1
+
+- Remove seek-hover thumbnail requests and their preview UI. Scrubbing continues in the one main native player; measured FPS sets the seek step and the existing previous/next-frame controls remain available.
+- Load native recording sources without a time fragment, then apply the latest requested position after metadata. Sample decoded pictures from native seeked/loadeddata events before using a transition fallback; clock progress alone no longer releases a hold. Keep the pending overlay slightly transparent so WebKit can continue compositing the video underneath.
+- After native Live confirms its first picture, optionally prepare the first selected saved file for up to two cameras. Use the existing two-file / 16 MiB RAM budget, one at-most-8-MiB transfer, 12-second timeout and reported Save-Data/2G guard. No recording decoder runs on Live. Returning to Live releases decoders while retaining unused bytes for up to two minutes; other pages/disabled warming release them. Entering NVR cancels pending startup warming and uses a ready Blob directly.
+- Preload native Live scripts and privately cache only URLs carrying the current app version. Each camera iframe reuses the same script bytes. Unversioned and old-version URLs remain no-store. Explicitly close the panel's Live decoder before opening NVR, rather than waiting for asynchronous iframe unload. EdgeRTC camera sources continue running with zero viewers through the existing single upstream.
+- Add real WebKit/Chromium tests for warming after Live, network-blocked first playback, absence of hover requests, main-picture dragging, frame stepping, callback-suppressed native seek readiness and decoder cleanup. Add cache-version/scope regression coverage and startup/native-picture diagnostic stages. Preserve recordings, source quality/FPS, AAC, retention and existing gallery/log behavior.
+
 ## 0.12.0
 
 - Ask for a fresh video keyframe through RTCP PLI on the existing RTSP session when a joining viewer faces a long/empty GOP cache. Coalesce requests per camera for three seconds; expose request/write-error counts and the time until a subsequently observed keyframe. A camera may ignore feedback. The cached-GOP fallback stays available. Prioritize a newer IDR before the browser's first picture, wake blocked bootstrap work, reset obsolete references once and skip superseded queued access units. Normal live frames, codec, dimensions/FPS, microphone routing and one physical upstream remain unchanged.

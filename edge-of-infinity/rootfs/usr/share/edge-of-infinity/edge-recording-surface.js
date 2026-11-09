@@ -7,7 +7,18 @@
     current(video){return Boolean(video.currentSrc)&&this.body(video.currentSrc)===this.body(video.src);}
     previewPaused(video){return video.paused&&(video.dataset.recordingWantsPlay!=='true'||video.closest('[data-recording-wrap]')?.dataset.scrubbing==='true');}
     stop(video){const s=this.states.get(video);if(!s)return;clearTimeout(s.timer);s.timer=null;if(s.callback!=null)video.cancelVideoFrameCallback?.(s.callback);s.callback=null;s.epoch++;}
-    begin(video){this.stop(video);const s=this.state(video);s.seen=false;s.at=performance.now();s.source=this.body(video.src);s.clock=video.currentTime;s.released=false;this.watch(video);}
+    begin(video){this.stop(video);const s=this.state(video);s.seen=false;s.sampled=false;s.at=performance.now();s.source=this.body(video.src);s.clock=video.currentTime;s.released=false;this.watch(video);}
+    settled(video,reason){
+      const s=this.state(video),canvas=s.canvas;
+      if(!this.current(video)||video.seeking||video.readyState<2||!video.videoWidth||video.currentTime+.1<Number(video.dataset.recordingSeek||0))return;
+      s.sampled=true;s.sampledAt=performance.now();
+      // A native seeked/loadeddata event provides a decoded picture, even when
+      // WebKit suppresses frame callbacks behind an opaque transition overlay.
+      if(canvas&&!canvas.hidden){
+        try{const c=document.createElement('canvas');c.width=Math.min(960,video.videoWidth);c.height=Math.max(1,Math.round(c.width*video.videoHeight/video.videoWidth));c.getContext('2d',{alpha:false}).drawImage(video,0,0,c.width,c.height);canvas.width=c.width;canvas.height=c.height;canvas.getContext('2d',{alpha:false}).drawImage(c,0,0);canvas.dataset.valid='true';}catch(_){s.sampled=false;return;}
+      }
+      this.note('ui_recording_picture_sampled',{index:video.dataset.recordingPlayer,seek_epoch:s.epoch,reason,media_time:video.currentTime});
+    }
     watch(video){
       const s=this.state(video);if(s.callback!=null||!video.requestVideoFrameCallback||!video.isConnected||!video.getAttribute('src'))return;
       const epoch=s.epoch;
@@ -55,14 +66,14 @@
         // Paused WebKit pictures can be occluded by the held canvas. For
         // playing video require actual clock progress before this fallback.
         const paused=this.previewPaused(video);
-        if(this.current(video)&&!video.seeking&&video.readyState>=2&&(paused||video.readyState>=3&&video.currentTime-clock>.12)){
+        if(s.sampled&&this.current(video)&&!video.seeking&&video.readyState>=2&&(paused||video.readyState>=3&&video.currentTime-clock>.12)){
           if(this.hide(video,canvas,paused?'paused_seek_ready':'clock_progress_fallback'))return;
         }
         if(performance.now()-started<6000)s.timer=setTimeout(retry,100);
       };
       s.timer=setTimeout(retry,this.previewPaused(video)?120:350);
     }
-    diagnostic(video){const s=this.states.get(video);return s?{seek_epoch:s.epoch,presented_frames:s.frames,picture_confirmed:s.seen,last_picture_time:s.mediaTime??null,last_picture_age_ms:s.presentedAt?Math.round(performance.now()-s.presentedAt):null,held_picture_visible:Boolean(s.canvas&&!s.canvas.hidden)}:{};}
+    diagnostic(video){const s=this.states.get(video);return s?{seek_epoch:s.epoch,presented_frames:s.frames,picture_confirmed:s.seen,native_picture_sampled:Boolean(s.sampled),last_picture_time:s.mediaTime??null,last_picture_age_ms:s.presentedAt?Math.round(performance.now()-s.presentedAt):null,held_picture_visible:Boolean(s.canvas&&!s.canvas.hidden)}:{};}
   }
   globalThis.EdgeRecordingSurface=EdgeRecordingSurface;
 })();

@@ -40,6 +40,11 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
      if(endpoint==='api/core/engine')return json({available:true,core_engine:fixtures[mode].engine,running_engine:fixtures[mode].engine,restart_required:false});
      if(endpoint==='api/debug'){events.push(request.postDataJSON());return json({ok:true});}
      if(endpoint==='api/client-diagnostics.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-device-diagnostics.js'),'utf8')});
+     if(endpoint==='api/edge-rtc/client.js'||endpoint==='api/edge-rtc/device-diagnostics.js'){
+      assert.equal(mode,'native');assert.equal(url.searchParams.get('v'),fixtures[mode].version,'preload URL is not versioned');
+      const asset=endpoint.endsWith('/client.js')?'edge-rtc-client.js':'edge-device-diagnostics.js';
+      return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www',asset),'utf8')});
+     }
      if(endpoint==='api/client-diagnostics')return json({ok:true});
      if(endpoint.startsWith('api/edge-rtc/player/'))return route.fulfill({contentType:'text/html',body:'<!doctype html><p>Native player routing fixture</p>'});
      throw new Error('Unexpected fixture request: '+endpoint);

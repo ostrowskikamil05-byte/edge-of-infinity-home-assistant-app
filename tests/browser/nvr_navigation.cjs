@@ -26,30 +26,25 @@ const assert=require('node:assert/strict');
    await page.waitForFunction(()=>!nvrLoading&&document.querySelector('[data-nvr-day]')?.dataset.nvrDay==='2026-07-28');
    await page.waitForFunction(()=>{const v=document.querySelector('video');return v?.readyState>=2&&!v.paused;});
    await page.evaluate(()=>{const v=document.querySelector('video');pauseRecording(v);window.previewVideo=v;window.previewSrc=v.src;});
-   async function preview(value){
-    await page.locator('[data-recording-playback-seek]').evaluate((slider,value)=>{const r=slider.getBoundingClientRect();slider.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerType:'mouse',clientX:r.left+6+(r.width-12)*value/Number(slider.max),buttons:0}));},value);
-    await page.waitForFunction(()=>{const box=document.querySelector('[data-recording-scrub-preview]');const img=box?.querySelector('img');return box&&!box.hidden&&img&&!img.hidden&&img.naturalWidth>100;});
-    return page.locator('[data-recording-scrub-preview] img').evaluate(img=>img.src);
+   const slider=page.locator('[data-recording-playback-seek]');
+   await slider.scrollIntoViewIfNeeded();await slider.hover();await page.waitForTimeout(250);
+   assert.equal(await page.locator('[data-recording-scrub-preview]').count(),0,'hover thumbnail UI returned');
+   async function frame(value){
+    await slider.evaluate((slider,value)=>{slider.value=String(value);slider.dispatchEvent(new Event('input',{bubbles:true}));slider.dispatchEvent(new Event('change',{bubbles:true}));},value);
+    await page.waitForFunction(value=>{const v=document.querySelector('video'),c=document.querySelector('[data-recording-transition]');return v.paused&&!v.seeking&&Math.abs(v.currentTime-value)<.1&&c.hidden&&recordingScrubs.size===0;},value);
+    return page.locator('video').evaluate(v=>{const c=document.createElement('canvas');c.width=160;c.height=90;c.getContext('2d').drawImage(v,0,0,160,90);return c.toDataURL();});
    }
-   const first=await preview(0),next=await preview(5);assert.notEqual(first,next,'scrub image never changes');
-   assert.equal(await preview(0),first,'backward scrub should reuse the matching image');
+   const first=await frame(0);await page.evaluate(()=>previewSrc=previewVideo.src);const next=await frame(5);assert.notEqual(first,next,'main recording picture never changes');
+   assert.equal(await frame(0),first,'backward scrub did not return to the original frame');
    const untouched=await page.evaluate(()=>({same:previewVideo===document.querySelector('video'),src:previewVideo.src===previewSrc,paused:previewVideo.paused}));
-   assert(untouched.same&&untouched.src&&untouched.paused,`preview changed the playing video: ${JSON.stringify(untouched)}`);
-   const box=await page.locator('[data-recording-scrub-preview]').boundingBox();
-   const viewport=await page.evaluate(()=>({width:innerWidth,height:innerHeight}));
-   assert(box.x>=0&&box.y>=0&&box.x+box.width<=viewport.width+1&&box.y+box.height<=viewport.height+1,'preview outside viewport');
-   const jpeg=await page.evaluate(async()=>{
-    const f=recordingStatus[0].files[0],url=panelPath(f.thumbnail_url);
-    return await Promise.all([0,5].map(async at=>{const response=await fetch(`${url}&at=${at}`);if(!response.ok)throw new Error(`thumbnail ${response.status}`);return Array.from(new Uint8Array(await response.arrayBuffer()));}));
-   });
-   assert(jpeg[0].length>512&&jpeg[1].length>512);assert.notDeepEqual(jpeg[0],jpeg[1],'server returned the same frame for different times');
+   assert(untouched.same&&untouched.src&&untouched.paused,`same-file scrub replaced/resumed the player: ${JSON.stringify(untouched)}`);
    await page.locator('[data-recording-fullscreen]').click();
    await page.waitForFunction(()=>document.fullscreenElement||document.querySelector('.edge-soft-fullscreen'));
-   await preview(5);
-   assert(await page.evaluate(()=>{const fullscreen=document.fullscreenElement||document.querySelector('.edge-soft-fullscreen');return fullscreen.contains(document.querySelector('[data-recording-scrub-preview]'));}),'scrub preview disappeared outside fullscreen wrapper');
+   await frame(5);await frame(5);
+   assert(await page.evaluate(()=>{const fullscreen=document.fullscreenElement||document.querySelector('.edge-soft-fullscreen');return fullscreen.contains(document.querySelector('[data-recording-playback-seek]'));}),'main seek bar disappeared in fullscreen');
    await page.evaluate(()=>document.fullscreenElement?document.exitFullscreen():exitSoftFullscreen('test'));
    assert.deepEqual(errors,[]);
-   console.log(`PASS ${width}px: previous day preempts hung refresh, rapid day selection, forward/back scrub changes actual JPEG without touching player`);
+   console.log(`PASS ${width}px: previous day preempts hung refresh, rapid day selection, forward/back native frames, no hover thumbnails, stable paused player and repeated fullscreen seek`);
    await page.unrouteAll({behavior:'ignoreErrors'});await context.close();
   }
  }finally{await browser.close();}
