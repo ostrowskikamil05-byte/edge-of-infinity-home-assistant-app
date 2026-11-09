@@ -7,7 +7,15 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
  try{
   const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
   const page=await context.newPage();page.setDefaultTimeout(30000);const errors=[],videoRequests=[];
-  page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(new URL(r.url()).pathname.startsWith('/recordings/'))videoRequests.push(r.url());});
+  page.on('pageerror',e=>{
+   // WebKit also emits handled fetch console diagnostics as pageerror while
+   // the old document unloads. Their "name" is not a JS exception type.
+   const transport=wk&&e.name.startsWith('Fetch API cannot load ')&&e.message.endsWith(' due to access control checks.');
+   if(!transport)errors.push(e.message);
+  });
+  page.on('console',m=>{if(m.text().startsWith('EDGE_FIXTURE_UNHANDLED:'))errors.push(m.text());});
+  await page.addInitScript(()=>addEventListener('unhandledrejection',e=>console.error('EDGE_FIXTURE_UNHANDLED:'+String(e.reason))));
+  page.on('request',r=>{if(new URL(r.url()).pathname.startsWith('/recordings/'))videoRequests.push(r.url());});
   await page.route('**/api/edge-rtc/player/**',r=>r.fulfill({contentType:'text/html',body:'<p>Generated camera</p>'}));
   await page.goto(base);await page.waitForFunction(()=>recordingStatus[0]?.files?.length>0);
   assert.notEqual(await page.evaluate(()=>activePage),'nvr');assert.equal(videoRequests.length,0,'prefetch downloaded a video on Live');
