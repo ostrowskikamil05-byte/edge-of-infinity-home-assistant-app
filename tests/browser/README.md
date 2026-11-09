@@ -2,6 +2,20 @@
 
 Requires Python 3.12+, FFmpeg/FFprobe, Node.js and Playwright with Chromium.
 
+`nvr_seek_buffer.cjs` uses a separate two-camera fixture on port 18093 with
+`EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1`. It tests actual
+native H.264/HEVC frames, a pending seek superseded before it finishes, Play
+pressed during a paused drag, confirmed-picture holds and transitions through a
+byte-identical RAM file while its network URL is blocked. Run it in WebKit and
+Chromium. It never contacts a camera or changes production recordings.
+
+`python tests/run_edge_rtc_bootstrap.py` runs the actual RTSP/HA proxy/WebCodecs
+fixture twice: once with ignored RTCP PLI, then with a camera simulator that
+emits a fresh IDR on that same session. Set the compiled `EDGE_RTC_TEST_BINARY`
+and the existing browser environment variables. Node unit tests separately
+block the old decoder queue and prove the new IDR unblocks it without waiting
+for obsolete references. A rendered first-image time is a fixture measurement.
+
 `nvr_gallery_cache.cjs` uses the archive fixture on port 18092 in WebKit and
 Chromium. It waits for actual IndexedDB commits, reloads with archive/JPEG
 responses blocked, checks restored visible JPEGs and native video playback, and

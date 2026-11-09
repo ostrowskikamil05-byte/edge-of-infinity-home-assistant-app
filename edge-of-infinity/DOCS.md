@@ -1,5 +1,57 @@
 # Edge of Infinity App Documentation
 
+## 0.12.0: UNV startup, seeking and playback buffers
+
+Update the app, restart Home Assistant Core for the bundled card/integration,
+then reopen the panel/dashboard on each device. Diagnostics should show
+`0.12.0` / `seek-surface-v120`. The existing persistent gallery is retained.
+
+For long camera GOPs, Edge asks for a new I-frame through the existing RTSP
+connection. Requests are coalesced for three seconds per source; no new camera
+session or encoder configuration is created. If a camera ignores RTCP PLI,
+cached video still starts normally. A fresh IDR can now replace a stale cached
+decode queue before the first picture instead of waiting behind hundreds of
+references. Inspect `keyframe_requests`, `keyframe_write_errors`,
+`keyframe_observed_after_request_ms`, `rtc_bootstrap_replaced` and the new
+WebSocket/decoder/bootstrap timings. An I-frame observed after a request is not
+a protocol acknowledgement or a measured camera-to-screen latency.
+
+Releasing the seek bar applies its latest position even when an older seek is
+still pending. Play pressed during a drag remains active. The last confirmed
+picture is held until a new picture is available, using a small preview canvas
+and the native recording decoder. Source/seek generations reject late callbacks.
+`ui_recording_picture_ready` and `ui_recording_picture_released` distinguish a
+rendered frame from metadata/`canplay`; a WebKit fallback is explicitly logged.
+Original video, FPS and AAC bytes are preserved.
+
+The player's settings include **Przygotowuj kolejny fragment**, remembered on
+that device. During stable visible playback Edge may fetch the next saved file
+early, then play its identical bytes from RAM. This uses up to two files / 16 MiB
+plus one in-flight download of at most 8 MiB. Downloads time out after 12 seconds;
+unused entries expire after two minutes. Pause, seeking, native waiting and leaving
+Recordings cancel warming; departure releases the memory and Blob URLs. The
+browser's reported Save-Data/2G preference also skips warming. Turning the option
+off stops future downloads; an already playing memory file finishes normally.
+Video bodies are not stored in IndexedDB, and no additional decoder, recording
+copy or camera channel is opened. Large files and slow links can fall back to
+ordinary server playback. `ui_recording_buffer_ready`, `_hit`, `_skipped` and
+`_setting` show this path; diagnostics retain the logical server source.
+
+MP4 responses include ETag/Last-Modified validators and private caching, allowing
+clients to reuse partial data safely. A stale If-Range validator returns the full
+representation, and LRU touches of an immutable remux do not change its validator.
+
+Logs now offer module, severity, camera, period and server/device filters. The
+default period starts with the current application process. **Cała zachowana
+historia** includes older cache/recording failures, with their original dates and
+source labels; raw histories and exports remain available. Camera filtering
+also recognizes backend recording paths and dashboard camera names.
+
+Old recordings with one keyframe every 24 seconds still require decoding their
+reference frames for an uncached arbitrary seek. A shorter camera GOP can help
+future recordings, with a possible bitrate/storage tradeoff. This update retains
+the camera's codec, resolution, frame rate and encoder settings.
+
 ## 0.11.14: persistent gallery, UNV startup and organized logs
 
 Update the app and reopen the panel. Restart Home Assistant Core to load the

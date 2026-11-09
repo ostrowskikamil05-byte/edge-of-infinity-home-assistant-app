@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/g711"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 )
 
@@ -45,42 +47,72 @@ func (v *viewer) consumed(p []byte) {
 }
 
 type source struct {
-	cfg            sourceConfig
-	server         *gortsplib.Server
-	ctx            context.Context
-	cancel         context.CancelFunc
-	stopped        chan struct{}
-	mu             sync.RWMutex
-	client         *gortsplib.Client
-	stream         *gortsplib.ServerStream
-	viewers        map[*viewer]bool
-	mic            *viewer
-	back           *description.Media
-	backFormat     *format.G711
-	micSeq         uint16
-	micTS          uint32
-	started        time.Time
-	video          map[string]any
-	audio          map[string]any
-	gop            [][]byte
-	gopBytes       int
-	gopEvictions   uint64
-	gopResetReason string
-	connected      atomic.Int32
-	attempts       atomic.Uint64
-	packets        atomic.Uint64
-	bytes          atomic.Uint64
-	drops          atomic.Uint64
-	micPackets     atomic.Uint64
-	relayFailures  atomic.Uint64
-	relayOverflows atomic.Uint64
-	relayLastLog   atomic.Int64
-	relayLastRole  atomic.Value
+	cfg                sourceConfig
+	server             *gortsplib.Server
+	ctx                context.Context
+	cancel             context.CancelFunc
+	stopped            chan struct{}
+	mu                 sync.RWMutex
+	client             *gortsplib.Client
+	stream             *gortsplib.ServerStream
+	viewers            map[*viewer]bool
+	mic                *viewer
+	back               *description.Media
+	backFormat         *format.G711
+	micSeq             uint16
+	micTS              uint32
+	started            time.Time
+	video              map[string]any
+	audio              map[string]any
+	gop                [][]byte
+	gopBytes           int
+	gopEvictions       uint64
+	gopResetReason     string
+	videoMedia         *description.Media
+	videoSSRC          atomic.Uint32
+	haveVideoSSRC      atomic.Bool
+	rtcpSender         uint32
+	keyframeAt         time.Time
+	keyframeRequests   uint64
+	keyframeErrors     uint64
+	keyframeObservedMS int64
+	connected          atomic.Int32
+	attempts           atomic.Uint64
+	packets            atomic.Uint64
+	bytes              atomic.Uint64
+	drops              atomic.Uint64
+	micPackets         atomic.Uint64
+	relayFailures      atomic.Uint64
+	relayOverflows     atomic.Uint64
+	relayLastLog       atomic.Int64
+	relayLastRole      atomic.Value
 }
 
 func newSource(c sourceConfig, server *gortsplib.Server) *source {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &source{cfg: c, server: server, ctx: ctx, cancel: cancel, stopped: make(chan struct{}), viewers: map[*viewer]bool{}, started: time.Now()}
+	return &source{cfg: c, server: server, ctx: ctx, cancel: cancel, stopped: make(chan struct{}), viewers: map[*viewer]bool{}, started: time.Now(), rtcpSender: rand.Uint32() | 1}
+}
+
+// Request an I-frame over the existing transport, without changing the encoder.
+// Unsupported cameras keep working from the cached GOP. Coalesce tile joins.
+func (s *source) requestKeyframe() bool {
+	s.mu.Lock()
+	client, media, ssrc := s.client, s.videoMedia, s.videoSSRC.Load()
+	if client == nil || media == nil || !s.haveVideoSSRC.Load() || !s.keyframeAt.IsZero() && time.Since(s.keyframeAt) < 3*time.Second {
+		s.mu.Unlock()
+		return false
+	}
+	s.keyframeAt = time.Now()
+	s.keyframeRequests++
+	s.keyframeObservedMS = 0
+	s.mu.Unlock()
+	err := client.WritePacketRTCP(media, &rtcp.PictureLossIndication{SenderSSRC: s.rtcpSender, MediaSSRC: ssrc})
+	if err != nil {
+		s.mu.Lock()
+		s.keyframeErrors++
+		s.mu.Unlock()
+	}
+	return err == nil
 }
 func (s *source) stop() { s.cancel(); <-s.stopped }
 func (s *source) status() map[string]any {
@@ -91,7 +123,7 @@ func (s *source) status() map[string]any {
 	if len(s.gop) > 1 {
 		span = (int64(binary.BigEndian.Uint64(s.gop[len(s.gop)-1][2:10])) - int64(binary.BigEndian.Uint64(s.gop[0][2:10]))) / 1000
 	}
-	return map[string]any{"keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
+	return map[string]any{"keyframe_requests": s.keyframeRequests, "keyframe_write_errors": s.keyframeErrors, "keyframe_observed_after_request_ms": s.keyframeObservedMS, "keep_alive": true, "gop_cache_bytes": s.gopBytes, "gop_cache_packets": len(s.gop), "gop_cache_limit_bytes": gopByteLimit, "gop_cache_limit_packets": gopPacketLimit, "gop_cache_span_ms": span, "bootstrap_ready": len(s.gop) > 0, "gop_cache_evictions": s.gopEvictions, "gop_cache_reset_reason": s.gopResetReason, "rtsp_reader_failures": s.relayFailures.Load(), "rtsp_queue_overflows": s.relayOverflows.Load(), "last_failed_reader": lastRole, "rtsp_write_queue_packets": relayWriteQueueSize, "camera_id": s.cfg.ID, "upstream_connections": s.connected.Load(), "connection_attempts": s.attempts.Load(), "packets": s.packets.Load(), "bytes": s.bytes.Load(), "slow_viewers_closed": s.drops.Load(), "microphone_packets": s.micPackets.Load(), "microphone_supported": s.backFormat != nil, "microphone_active": s.mic != nil, "viewers": len(s.viewers), "ready": s.stream != nil, "video": s.video, "audio": s.audio}
 }
 func (s *source) run() {
 	defer close(s.stopped)
@@ -151,6 +183,7 @@ func (s *source) readOnce() error {
 	}
 	forward := &description.Session{}
 	var back *description.Media
+	var videoMedia *description.Media
 	var backFormat *format.G711
 	handlers := map[format.Format]func(*rtp.Packet){}
 	for _, media := range desc.Medias {
@@ -172,6 +205,9 @@ func (s *source) readOnce() error {
 		forward.Medias = append(forward.Medias, media)
 		for _, f := range media.Formats {
 			handlers[f] = s.makeHandler(c, media, f)
+			if media.Type == description.MediaTypeVideo && handlers[f] != nil {
+				videoMedia = media
+			}
 		}
 	}
 	if len(forward.Medias) == 0 {
@@ -190,6 +226,11 @@ func (s *source) readOnce() error {
 	s.mu.Lock()
 	s.stream = stream
 	s.client = c
+	s.videoMedia = videoMedia
+	s.videoSSRC.Store(0)
+	s.haveVideoSSRC.Store(false)
+	s.keyframeAt = time.Time{}
+	s.keyframeObservedMS = 0
 	s.back = back
 	s.backFormat = backFormat
 	s.connected.Store(1)
@@ -199,6 +240,9 @@ func (s *source) readOnce() error {
 		s.mu.Lock()
 		s.stream = nil
 		s.client = nil
+		s.videoMedia = nil
+		s.videoSSRC.Store(0)
+		s.haveVideoSSRC.Store(false)
 		s.back = nil
 		s.backFormat = nil
 		s.connected.Store(0)
@@ -221,6 +265,10 @@ func (s *source) readOnce() error {
 		}
 		s.packets.Add(1)
 		s.bytes.Add(uint64(p.MarshalSize()))
+		if media == videoMedia {
+			s.videoSSRC.Store(p.SSRC)
+			s.haveVideoSSRC.Store(true)
+		}
 		stream.WritePacketRTP(media, p)
 		if handler := handlers[f]; handler != nil {
 			handler(p)
@@ -362,6 +410,9 @@ func (s *source) broadcast(p []byte, key bool) {
 	defer s.mu.Unlock()
 	if p[0] == 1 {
 		if key {
+			if !s.keyframeAt.IsZero() && s.keyframeObservedMS == 0 {
+				s.keyframeObservedMS = max(1, time.Since(s.keyframeAt).Milliseconds())
+			}
 			s.gop = nil
 			s.gopBytes = 0
 			s.gopResetReason = ""

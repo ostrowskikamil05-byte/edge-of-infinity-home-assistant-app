@@ -18,8 +18,28 @@ export class EdgeRTCClient {
     if(!url){const path=`/api/edge/rtc/${this.options.entity}?microphone=${this.options.microphone?1:0}`,before=performance.now();const signed=await this.options.hass.callWS({type:'auth/sign_path',path});this.diagnostics?.note('rtc_ha_sign_complete',{source:this.diagnosticKey,elapsed_ms:performance.now()-before});if(this.closed)return;url=this.options.hass.hassUrl?this.options.hass.hassUrl(signed.path):new URL(signed.path,location.href).href;}
     if(this.closed)return;url=url.replace(/^http:/,'ws:').replace(/^https:/,'wss:');
     this.diagnostics?.note('rtc_transport_target',{source:this.diagnosticKey,endpoint:url});this.ws=new WebSocket(url);this.ws.binaryType='arraybuffer';this.messageChain=Promise.resolve();this.pendingMessages=0;this.pendingBytes=0;this.receivedBytes=0;
-    this.ws.onopen=()=>this.diagnostics?.note('rtc_websocket_open',{source:this.diagnosticKey,open_ms:performance.now()-this.started});
-    this.ws.onmessage=e=>{if(this.closed)return;const size=e.data.byteLength??e.data.length??0;this.receivedBytes+=size;this.lastPacketAt=performance.now();this.pendingMessages++;this.pendingBytes+=size;if(this.pendingMessages>(this.caughtUp?256:4096)||this.pendingBytes>24*1024*1024){this.pendingMessages--;this.pendingBytes-=size;this.fail('EdgeRTC decoder cannot keep up.');return;}this.messageChain=this.messageChain.then(()=>this.message(e.data)).catch(error=>this.fail(error.message)).finally(()=>{this.pendingMessages--;this.pendingBytes-=size;});};this.ws.onerror=()=>this.fail('EdgeRTC connection failed.');this.ws.onclose=e=>{this.diagnostics?.note('rtc_websocket_close',{source:this.diagnosticKey,code:e?.code,clean:e?.wasClean,expected:this.closed});if(!this.closed)this.fail('EdgeRTC source disconnected.');};
+    this.ws.onopen=()=>{this.websocketOpenAt=performance.now();this.diagnostics?.note('rtc_websocket_open',{source:this.diagnosticKey,open_ms:performance.now()-this.started});};
+    this.ws.onmessage=e=>this.queueMessage(e.data);this.ws.onerror=()=>this.fail('EdgeRTC connection failed.');this.ws.onclose=e=>{this.diagnostics?.note('rtc_websocket_close',{source:this.diagnosticKey,code:e?.code,clean:e?.wasClean,expected:this.closed});if(!this.closed)this.fail('EdgeRTC source disconnected.');};
+  }
+  queueMessage(data){
+    if(this.closed)return;
+    const size=data.byteLength??data.length??0;this.receivedBytes+=size;this.lastPacketAt=performance.now();
+    const bytes=data instanceof ArrayBuffer&&size>=10?new Uint8Array(data):null;
+    const video=bytes?.[0]===1,stamp=video?Number(new DataView(data).getBigInt64(2)):null;
+    if(video&&this.firstVideoPacketAt==null)this.firstVideoPacketAt=performance.now();
+    // A newly arrived IDR makes older queued references unnecessary. Prefer
+    // it before decoding hundreds of cached 4K pictures; steady live is intact.
+    if(this.firstFrameMS===null&&video&&(bytes[1]&1)&&(this.latestBootstrapKey==null||stamp>this.latestBootstrapKey)){
+      this.latestBootstrapKey=stamp;
+      this.bootstrapFloorTimestamp=Math.max(this.bootstrapFloorTimestamp??stamp,stamp);
+      this.bootstrapWake?.(true);
+    }
+    this.pendingMessages++;this.pendingBytes+=size;
+    if(this.pendingMessages>(this.caughtUp?256:4096)||this.pendingBytes>24*1024*1024){this.pendingMessages--;this.pendingBytes-=size;this.fail('EdgeRTC decoder cannot keep up.');return;}
+    this.messageChain=this.messageChain.then(()=>{
+      if(this.firstFrameMS===null&&video&&this.latestBootstrapKey!=null&&stamp<this.latestBootstrapKey){this.bootstrapSkippedPackets=(this.bootstrapSkippedPackets||0)+1;return;}
+      return this.message(data);
+    }).catch(error=>this.fail(error.message)).finally(()=>{this.pendingMessages--;this.pendingBytes-=size;});
   }
   fail(message,retryable=true){if(this.closed)return;this.diagnostics?.note('rtc_error',{source:this.diagnosticKey,message,retryable});this.options.onError?.(message,{retryable});this.close();}
   diagnosticState(){return {state:this.closed?'closed':this.playing?'playing':this.connectionState,codec:this._codec,width:this.width,height:this.height,
@@ -27,6 +47,8 @@ export class EdgeRTCClient {
     decode_queue:this.video?.decodeQueueSize,render_queue:this.frameQueue.length,message_queue:this.pendingMessages,received_bytes:this.receivedBytes,
     last_packet_age_ms:this.lastPacketAt?performance.now()-this.lastPacketAt:null,websocket_outgoing_buffer_bytes:this.ws?.bufferedAmount,
     bootstrap_packets:this.bootstrapPackets||0,bootstrap_frames_skipped:this.bootstrapFrames,bootstrap_wait_ms:this.bootstrapWaitMS||0,message_bytes:this.pendingBytes||0,
+    websocket_open_ms:this.websocketOpenAt==null?null:this.websocketOpenAt-this.started,decoder_configured_ms:this.decoderConfiguredAt==null?null:this.decoderConfiguredAt-this.started,first_video_packet_ms:this.firstVideoPacketAt==null?null:this.firstVideoPacketAt-this.started,bootstrap_decode_ms:this.decoderConfiguredAt==null||this.firstFrameMS===null?null:this.firstFrameMS-(this.decoderConfiguredAt-this.started),
+    bootstrap_packets_superseded:this.bootstrapSkippedPackets||0,bootstrap_keyframe_replacements:this.bootstrapKeyReplacements||0,
     measured_end_to_end_latency_ms:null,audio_state:this.audio?.state||'muted_or_not_started'};}
   async message(data){
     if(this.closed)return;
@@ -34,7 +56,7 @@ export class EdgeRTCClient {
       if(typeof data==='string'){
         const msg=JSON.parse(data);if(msg.type==='error'){this.fail(`EdgeRTC: ${msg.code}`);return;}if(msg.type!=='hello'||msg.protocol!=='edgertc/1')return;
         this.bootstrapTimestamp=Number.isFinite(msg.bootstrap_timestamp_us)?msg.bootstrap_timestamp_us:null;this.audioInfo=msg.audio;this.microphoneSupported=Boolean(msg.microphone?.supported);
-        this.bootstrapFloorTimestamp=this.bootstrapTimestamp;this.bootstrapPackets=Number(msg.bootstrap_packets||0);
+        this.bootstrapFloorTimestamp=this.latestBootstrapKey==null?this.bootstrapTimestamp:Math.max(this.bootstrapTimestamp??this.latestBootstrapKey,this.latestBootstrapKey);this.bootstrapPackets=Number(msg.bootstrap_packets||0);
         this.diagnostics?.note('rtc_bootstrap',{source:this.diagnosticKey,packets:this.bootstrapPackets,bytes:msg.bootstrap_bytes||0,has_keyframe:this.bootstrapTimestamp!==null});
         const configuration={codec:msg.video.codec,optimizeForLatency:true,hardwareAcceleration:'prefer-hardware'};
         let supported;
@@ -43,7 +65,7 @@ export class EdgeRTCClient {
         if(this.closed)return;
         if(!supported.supported){const hevc=/^(hev1|hvc1)\./.test(msg.video.codec);this.fail(hevc?'EdgeRTC: this browser/device cannot decode this H.265 profile. Select H.264 in the camera recording profile, or use a device/browser with HEVC decoding. H.265 recording remains available.':'EdgeRTC: this browser cannot decode the camera H.264 profile.',false);return;}
         this.video=new VideoDecoder({output:frame=>this.render(frame),error:error=>this.fail('EdgeRTC video decoder: '+error.message)});
-        this._codec=msg.video.codec;this.decoderConfiguration=configuration;this.videoCodecName=msg.video.codec_name||(/^(hev1|hvc1)\./.test(msg.video.codec)?'h265':'h264');this.video.configure(configuration);
+        this.decoderConfiguredAt=performance.now();this._codec=msg.video.codec;this.decoderConfiguration=configuration;this.videoCodecName=msg.video.codec_name||(/^(hev1|hvc1)\./.test(msg.video.codec)?'h265':'h264');this.video.configure(configuration);
         this.diagnostics?.note('rtc_decoder_configured',{source:this.diagnosticKey,codec:this._codec,requested_acceleration:configuration.hardwareAcceleration,audio_codec:msg.audio?.codec,audio_rate:msg.audio?.sampleRate,microphone_supported:this.microphoneSupported});
         this.connectionState='connected';this.options.onReady?.();
         if(this.options.microphone){if(!msg.microphone?.active)throw new Error('Camera microphone is unavailable.');await this.startMicrophone();}
@@ -52,9 +74,16 @@ export class EdgeRTCClient {
       const bytes=new Uint8Array(data);if(bytes.length<10)return;const timestamp=Number(new DataView(data).getBigInt64(2));const payload=bytes.subarray(10);
       if(bytes[0]===1&&this.video?.state==='configured'){
         const key=Boolean(bytes[1]&1);if(key)this.waitKey=false;if(this.waitKey)return;
+        if(key&&this.firstFrameMS===null){
+          if(this.decodedBootstrapKey!=null&&timestamp>this.decodedBootstrapKey){
+            this.clearFrames();this.video.reset();this.video.configure(this.decoderConfiguration);this.bootstrapKeyReplacements=(this.bootstrapKeyReplacements||0)+1;
+            this.diagnostics?.note('rtc_bootstrap_replaced',{source:this.diagnosticKey,timestamp_us:timestamp,superseded_packets:this.bootstrapSkippedPackets||0});
+          }
+          this.decodedBootstrapKey=timestamp;
+        }
         // A slow decoder cannot accumulate seconds of old frames.
         const bootstrap=this.firstFrameMS===null&&this.bootstrapFloorTimestamp!=null;
-        if(bootstrap){if(!await this.waitForBootstrapCapacity())return;}
+        if(bootstrap){if(!await this.waitForBootstrapCapacity(timestamp))return;}
         else if(this.video.decodeQueueSize>(this.caughtUp?8:180)){this.clearFrames();this.video.reset();this.video.configure(this.decoderConfiguration);this.waitKey=!key;if(!key)return;}
         this.video.decode(new EncodedVideoChunk({type:key?'key':'delta',timestamp,data:payload}));
       }else if(bytes[0]===2&&!this.muted)this.decodeAudio(payload,timestamp);
@@ -64,9 +93,10 @@ export class EdgeRTCClient {
     if(this.renderRequest!=null)cancelAnimationFrame(this.renderRequest);
     this.renderRequest=null;for(const item of this.frameQueue)item.frame.close();this.frameQueue=[];this.lastScheduled=null;this.lastTimestamp=null;
   }
-  async waitForBootstrapCapacity(){
+  async waitForBootstrapCapacity(timestamp){
     const started=performance.now();
     while(!this.closed&&this.video?.state==='configured'&&this.video.decodeQueueSize>=8){
+      if(timestamp!=null&&this.latestBootstrapKey!=null&&timestamp<this.latestBootstrapKey)return false;
       const ready=await new Promise(resolve=>{
         const decoder=this.video;let timer;
         const finish=value=>{clearTimeout(timer);decoder.removeEventListener('dequeue',dequeue);if(this.bootstrapWake===finish)this.bootstrapWake=null;resolve(value);};
@@ -76,7 +106,7 @@ export class EdgeRTCClient {
       if(!ready){if(!this.closed)throw Error('EdgeRTC cached video decoder stalled.');return false;}
     }
     this.bootstrapWaitMS=(this.bootstrapWaitMS||0)+performance.now()-started;
-    return !this.closed&&this.video?.state==='configured';
+    return !this.closed&&this.video?.state==='configured'&&!(timestamp!=null&&this.latestBootstrapKey!=null&&timestamp<this.latestBootstrapKey);
   }
   render(frame){
     if(this.closed){frame.close();return;}
@@ -101,6 +131,7 @@ export class EdgeRTCClient {
   drawFrame(){
     this.renderRequest=null;if(this.closed)return;
     const now=performance.now();
+    while(this.frameQueue.length&&this.firstFrameMS===null&&this.bootstrapFloorTimestamp!=null&&this.frameQueue[0].frame.timestamp<this.bootstrapFloorTimestamp){this.frameQueue.shift().frame.close();this.bootstrapFrames++;}
     while(this.frameQueue.length>1&&this.frameQueue[0].due<now-120){this.frameQueue.shift().frame.close();this.droppedFrames++;}
     const item=this.frameQueue[0];
     if(item&&item.due<=now+1){
@@ -112,13 +143,10 @@ export class EdgeRTCClient {
         this.context.drawImage(current,0,0,this.width,this.height);
       }finally{current.close();}
       clearTimeout(this.connectTimer);this.playing=true;this.frames++;
-      if((this.video?.decodeQueueSize??0)<3)this.caughtUp=true;
+      if((this.video?.decodeQueueSize??0)<3&&(this.pendingMessages??0)<32)this.caughtUp=true;
       if(this.firstFrameMS===null)this.firstFrameMS=now-this.started;
       if(this.diagnostics&&(!this.lastDiagnosticAt||now-this.lastDiagnosticAt>=1000)){
-        const state={state:'playing',codec:this._codec,width:this.width,height:this.height,first_frame_ms:this.firstFrameMS,frames:this.frames,dropped_frames:this.droppedFrames,
-          source_fps:this.frameInterval?1000/this.frameInterval:null,decode_queue:this.video?.decodeQueueSize,render_queue:this.frameQueue.length,message_queue:this.pendingMessages,
-          received_bytes:this.receivedBytes,last_packet_age_ms:this.lastPacketAt?now-this.lastPacketAt:null,websocket_outgoing_buffer_bytes:this.ws?.bufferedAmount,
-          measured_end_to_end_latency_ms:null,audio_state:this.audio?.state||'muted_or_not_started'};
+        const state=this.diagnosticState();
         this.lastDiagnosticAt=now;this.diagnostics.source(this.diagnosticKey,state);if(this.frames===1)this.diagnostics.note('rtc_first_frame',{source:this.diagnosticKey,...state});
       }
       this.options.onFrame?.({width:this.width,height:this.height,firstFrameMS:this.firstFrameMS,frames:this.frames,sourceFPS:this.frameInterval?1000/this.frameInterval:0,droppedFrames:this.droppedFrames,bootstrapFrames:this.bootstrapFrames,queuedFrames:this.frameQueue.length});
@@ -138,6 +166,6 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   playAudio(buffer){if(this.closed||this.muted)return;const now=this.audio.currentTime;this.audioTime=Math.max(now+0.04,this.audioTime||0);if(this.audioTime>now+0.25)this.audioTime=now+0.04;const source=this.audio.createBufferSource();source.buffer=buffer;source.connect(this.gain);source.start(this.audioTime);this.audioTime+=buffer.duration;}
-  async startMicrophone(){this.micTimer=setTimeout(()=>this.fail('Microphone initialization timed out.'),10000);for(const track of this.options.microphone.getTracks())track.addEventListener('ended',()=>this.fail('Microphone device disconnected.'),{once:true});const audio=this.ensureAudio();await audio.audioWorklet.addModule('/edge/edge-pcm-worklet.js?v=0.11.14');if(this.closed)return;this.micSource=audio.createMediaStreamSource(this.options.microphone);this.worklet=new AudioWorkletNode(audio,'edge-pcm');this.silence=audio.createGain();this.silence.gain.value=0;this.micSource.connect(this.worklet);this.worklet.connect(this.silence);this.silence.connect(audio.destination);this.worklet.port.onmessage=event=>{if(this.closed||this.ws.readyState!==WebSocket.OPEN)return;if(this.ws.bufferedAmount>6400){this.fail('Microphone connection is too slow.');return;}const packet=new Uint8Array(321);packet[0]=3;packet.set(new Uint8Array(event.data),1);this.ws.send(packet);};clearTimeout(this.micTimer);this.options.onMicrophone?.(true);}
+  async startMicrophone(){this.micTimer=setTimeout(()=>this.fail('Microphone initialization timed out.'),10000);for(const track of this.options.microphone.getTracks())track.addEventListener('ended',()=>this.fail('Microphone device disconnected.'),{once:true});const audio=this.ensureAudio();await audio.audioWorklet.addModule('/edge/edge-pcm-worklet.js?v=0.12.0');if(this.closed)return;this.micSource=audio.createMediaStreamSource(this.options.microphone);this.worklet=new AudioWorkletNode(audio,'edge-pcm');this.silence=audio.createGain();this.silence.gain.value=0;this.micSource.connect(this.worklet);this.worklet.connect(this.silence);this.silence.connect(audio.destination);this.worklet.port.onmessage=event=>{if(this.closed||this.ws.readyState!==WebSocket.OPEN)return;if(this.ws.bufferedAmount>6400){this.fail('Microphone connection is too slow.');return;}const packet=new Uint8Array(321);packet[0]=3;packet.set(new Uint8Array(event.data),1);this.ws.send(packet);};clearTimeout(this.micTimer);this.options.onMicrophone?.(true);}
   close(){if(this.closed)return;this.diagnostics?.unregisterSource(this.diagnosticKey);this.diagnostics?.source(this.diagnosticKey,{state:'closed',frames:this.frames,dropped_frames:this.droppedFrames,first_frame_ms:this.firstFrameMS});this.diagnostics?.note('rtc_client_closed',{source:this.diagnosticKey,frames:this.frames});this.closed=true;this.bootstrapWake?.(false);clearTimeout(this.connectTimer);clearTimeout(this.micTimer);this.options.microphone?.getTracks().forEach(track=>track.stop());this.playing=false;this.connectionState='closed';this.ws?.close();if(this.video?.state!=='closed')this.video?.close();if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.clearFrames();this.worklet?.port.close();this.micSource?.disconnect();this.worklet?.disconnect();this.silence?.disconnect();this.audio?.close().catch(()=>{});}
 }

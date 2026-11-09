@@ -12,7 +12,12 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
   });
   await page.waitForFunction(()=>longGopClient.frames>=10);
   const metrics=await page.evaluate(()=>longGopClient.diagnosticState());
-  assert(metrics.bootstrap_packets>=240,JSON.stringify(metrics));assert(metrics.bootstrap_frames_skipped>=180);assert(metrics.first_frame_ms<5000,'waited for the next camera keyframe');
+  assert(metrics.bootstrap_packets>=240,JSON.stringify(metrics));
+  if(process.env.EDGE_RTC_TEST_RESPOND_PLI==='1'){
+   const status=await page.evaluate(()=>fetch('/test/status').then(r=>r.json()));
+   assert(status.sources[0].keyframe_requests>=1);assert(status.sources[0].keyframe_observed_after_request_ms>0&&status.sources[0].keyframe_observed_after_request_ms<2000,'camera did not deliver the requested I-frame');
+  }else assert(metrics.bootstrap_frames_skipped>=180);
+  assert(metrics.first_frame_ms<5000,'waited for the next camera keyframe');
   assert.deepEqual(await page.evaluate(()=>liveErrors),[]);assert.equal((await page.evaluate(()=>fetch('/test/status').then(r=>r.json()))).sources[0].connection_attempts,1);
   await page.evaluate(()=>longGopClient.close());
   console.log(`PASS actual long-GOP RTSP -> HA proxy -> WebCodecs: ${metrics.bootstrap_packets} cached packets, first image ${Math.round(metrics.first_frame_ms)} ms, one camera upstream`);

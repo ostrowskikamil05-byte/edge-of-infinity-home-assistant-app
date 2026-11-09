@@ -111,6 +111,26 @@ jobs:
           EDGE_TEST_BROWSER=chromium node tests/browser/device_diagnostics.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_aac_resume.cjs
 
+      - name: Test latest seek and RAM transitions with long-GOP recordings
+        run: |
+          export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
+          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1 EDGE_NVR_TEST_PORT=18093 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/seek-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/seek-ui.log" 2>&1 &
+          edge_seek_fixture_pid=$!
+          trap 'kill "${edge_seek_fixture_pid}" || true' EXIT
+          python - <<'PY'
+          import time, urllib.request
+          deadline=time.monotonic()+60
+          while True:
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:18093/api/version',timeout=1).close()
+                  break
+              except OSError:
+                  if time.monotonic()>deadline:raise
+                  time.sleep(.1)
+          PY
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_seek_buffer.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_seek_buffer.cjs
+
       - name: Test cold phone archive with twelve thousand saved files
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
@@ -145,21 +165,7 @@ jobs:
           export EDGE_RTC_TEST_BINARY="${RUNNER_TEMP}/edge-rtc-long-gop" EDGE_RTC_TEST_FPS=20 EDGE_RTC_TEST_GOP_SECONDS=24
           pip install aiohttp==3.14.4
           go -C edge-of-infinity/edge-rtc test -c -o "${EDGE_RTC_TEST_BINARY}" .
-          python tests/browser/edge_rtc_fixture.py > "${RUNNER_TEMP}/long-gop.log" 2>&1 &
-          edge_gop_fixture_pid=$!
-          trap 'kill "${edge_gop_fixture_pid}" || true' EXIT
-          python - <<'PY'
-          import time, urllib.request
-          deadline=time.monotonic()+30
-          while True:
-              try:
-                  urllib.request.urlopen('http://127.0.0.1:18089/test/status',timeout=1).close()
-                  break
-              except OSError:
-                  if time.monotonic()>deadline:raise
-                  time.sleep(.1)
-          PY
-          node tests/browser/edge_rtc_long_gop.cjs
+          python tests/run_edge_rtc_bootstrap.py
 
   detection-media:
     runs-on: ubuntu-latest

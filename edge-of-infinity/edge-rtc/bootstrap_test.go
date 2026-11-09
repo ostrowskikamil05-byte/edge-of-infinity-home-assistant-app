@@ -2,8 +2,32 @@ package main
 
 import (
 	"github.com/bluenviron/gortsplib/v5"
+	"strings"
 	"testing"
 )
+
+func TestKeyframeRequestUsesExistingSessionAndCoalesces(t *testing.T) {
+	c := newFake(t)
+	a, err := newApp(config{RTSP: freeAddress(), HTTP: freeAddress(), Token: strings.Repeat("k", 40), Sources: []sourceConfig{{ID: "front", URL: "rtsp://" + c.server.RTSPAddress + "/camera", Paths: []string{"front_main"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.close()
+	s := a.lookup("front_main")
+	eventually(t, func() bool { return s.videoSSRC.Load() != 0 })
+	if !s.requestKeyframe() {
+		t.Fatal("request not queued")
+	}
+	eventually(t, func() bool { return c.pli.Load() == 1 })
+	for i := 0; i < 20; i++ {
+		if s.requestKeyframe() {
+			t.Fatal("viewer joins flooded camera feedback")
+		}
+	}
+	if c.maximum.Load() != 1 || s.attempts.Load() != 1 {
+		t.Fatal("feedback opened another camera session")
+	}
+}
 
 func cachedSource(t *testing.T) *source {
 	s := newSource(sourceConfig{}, nil)

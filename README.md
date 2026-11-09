@@ -2,10 +2,10 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.11.14** adds a persistent recording gallery and small-JPEG cache on
-each device, background metadata loading, long-GOP UNV EdgeRTC startup with
-bounded queues, and logs grouped by module/severity/camera. Original video/FPS
-and the shared camera connection are preserved. See [update details](edge-of-infinity/DOCS.md#01114-persistent-gallery-unv-startup-and-organized-logs).
+Version **0.12.0** adds fresh-keyframe startup on the shared EdgeRTC session,
+latest-seek cancellation, confirmed-picture transitions, a bounded next-segment
+RAM buffer and camera/time/source log filters. It retains the persistent gallery,
+original video/FPS and one camera upstream. See [update details](edge-of-infinity/DOCS.md#0120-unv-startup-seeking-and-playback-buffers).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:
 

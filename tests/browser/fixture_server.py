@@ -5,14 +5,18 @@ import os
 import shutil
 import signal
 import time
+from datetime import datetime,timedelta
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from test_edge_panel_config import load_panel_module, camera
 p=load_panel_module()
 p.MIN_RECORDING_FILE_READY_SECONDS=0
+clip_seconds=int(os.environ.get('EDGE_TEST_RECORDING_DURATION','7'))
+long_gop=os.environ.get('EDGE_TEST_RECORDING_LONG_GOP')=='1'
+sample_names=[(datetime.strptime(day,'%Y%m%d')+timedelta(seconds=second)).strftime('%Y%m%d-%H%M%S.mp4') for day in ('20260727','20260728') for second in (0,clip_seconds,2*clip_seconds)]
 fixture_cameras=[camera('front','192.0.2.10','sub')]
 if os.environ.get('EDGE_TEST_MULTI_CAMERA'):fixture_cameras.append(camera('back','192.0.2.11','main'))
-config=p.normalize_config({'storage': {'recordings_dir': str(p.HOME_DIR/'recordings')}, 'nvr': {'segment_seconds': 7}, 'cameras': fixture_cameras})
+config=p.normalize_config({'storage': {'recordings_dir': str(p.HOME_DIR/'recordings')}, 'nvr': {'segment_seconds': clip_seconds}, 'cameras': fixture_cameras})
 p.commit_panel_config(config)
 p.sync_runtime_engine_config=lambda *a: {}
 p.sync_supervisor_options=lambda *a: {"synced": True, "status": "synced"}
@@ -58,7 +62,7 @@ d=p.recording_base_dir(config['cameras'][0],0); d.mkdir(parents=True)
 import subprocess
 sample=d/'sample.mp4'
 subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=160x90:rate=10','-t',os.environ.get('EDGE_TEST_RECORDING_DURATION','7'),'-c:v','libx264','-threads','1','-g','10',str(sample)],check=True)
-for name in ['20260727-000000.mp4','20260727-000007.mp4','20260727-000014.mp4','20260728-000000.mp4','20260728-000007.mp4','20260728-000014.mp4']:
+for name in sample_names:
  shutil.copyfile(sample,d/name)
 sample.unlink()
 archive_count=int(os.environ.get('EDGE_TEST_ARCHIVE_FILES','0'))
@@ -72,11 +76,13 @@ if os.environ.get('EDGE_TEST_MULTI_CAMERA'):
   folder=p.recording_base_dir(c,i);folder.mkdir(exist_ok=True,parents=True)
   sample=folder/'sample.mp4'
   encoding=['-c:v','libx265','-x265-params','pools=none:frame-threads=1:log-level=error','-tag:v','hev1'] if i==0 else ['-c:v','libx264','-threads','1','-g','20']
+  if long_gop:
+   if i==0:encoding[encoding.index('-x265-params')+1]+=f':keyint={20*clip_seconds}:min-keyint={20*clip_seconds}:scenecut=0'
+   else:encoding[encoding.index('-g')+1]=str(20*clip_seconds);encoding+=['-sc_threshold','0']
   rate='48000' if i==0 else '16000'
   subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=640x360:rate=20','-f','lavfi','-i','sine=sample_rate='+rate,
-                  '-t','7',*encoding,'-c:a','aac','-threads:a','1','-b:a','96k' if i==0 else '32k','-output_ts_offset','0.1','-movflags','+faststart',str(sample)],check=True)
-  for day in ('20260727','20260728'):
-   for second in (0,7,14):shutil.copyfile(sample,folder/f'{day}-0000{second:02d}.mp4')
+                  '-t',str(clip_seconds),*encoding,'-c:a','aac','-threads:a','1','-b:a','96k' if i==0 else '32k','-output_ts_offset','0.1','-movflags','+faststart',str(sample)],check=True)
+  for name in sample_names:shutil.copyfile(sample,folder/name)
   sample.unlink()
 if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  p.ALERT_SERVICE=p.AlertMediaService(p.DETECTION_SERVICE.store,p.load_config,p.alert_source_entries,p.save_alert_image,p.save_alert_fallback_image,start=False)

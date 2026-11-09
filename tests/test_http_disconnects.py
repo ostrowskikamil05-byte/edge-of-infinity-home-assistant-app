@@ -1,4 +1,5 @@
 import io
+import os
 import unittest
 from pathlib import Path
 import tempfile
@@ -86,6 +87,31 @@ class HttpDisconnectTests(unittest.TestCase):
             with patch.object(handler,'log_message'),patch.object(handler,'send_response',side_effect=evict):
                 handler.serve_mp4_file(target,'/clip.mp4','clip.mp4','test',{})
             self.assertTrue(output.getvalue().endswith(b'active recording bytes'))
+
+    def test_mp4_validators_allow_range_reuse_and_reject_stale_ranges(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target=Path(directory)/'clip.mp4';target.write_bytes(bytes(range(100)))
+            def get(headers):
+                output=io.BytesIO();handler=self.handler(output);handler.command='GET';handler.requestline='GET /clip.mp4 HTTP/1.1';handler.request_version='HTTP/1.1';handler.headers=headers
+                with patch.object(handler,'log_message'):handler.serve_mp4_file(target,'/clip.mp4','clip.mp4','test',{})
+                head,body=output.getvalue().split(b'\r\n\r\n',1)
+                return head,{k.lower():v.strip() for k,v in (line.split(':',1) for line in head.decode().split('\r\n')[1:] if ':' in line)},body
+            _,headers,_=get({'Range':'bytes=0-1'});etag=headers['etag'];date=headers['last-modified']
+            for validator in (etag,date):
+                head,_,body=get({'Range':'bytes=20-29','If-Range':validator});self.assertIn(b'206 Partial',head);self.assertEqual(body,bytes(range(20,30)))
+            head,_,body=get({'If-None-Match':etag});self.assertIn(b'304 Not Modified',head);self.assertEqual(body,b'')
+            stat=target.stat();target.write_bytes(b'x'*100);os.utime(target,ns=(stat.st_atime_ns,stat.st_mtime_ns+1000000))
+            head,after,body=get({'Range':'bytes=20-29','If-Range':etag});self.assertIn(b'200 OK',head);self.assertNotEqual(etag,after['etag']);self.assertEqual(body,b'x'*100)
+            self.assertIn('private',after['cache-control'])
+
+    def test_immutable_compatibility_copy_lru_touch_keeps_etag(self):
+        root=self.panel.RECORDING_COMPAT.directory;root.mkdir(parents=True,exist_ok=True);target=root/(64*'a'+'.mp4');target.write_bytes(b'cache')
+        tags=[]
+        for _ in range(2):
+            output=io.BytesIO();handler=self.handler(output);handler.command='GET';handler.requestline='GET /clip.mp4 HTTP/1.1';handler.request_version='HTTP/1.1';handler.headers={}
+            with patch.object(handler,'log_message'):handler.serve_mp4_file(target,'/clip.mp4','clip.mp4','test',{})
+            tags.append(next(line for line in output.getvalue().split(b'\r\n') if line.startswith(b'ETag:')));os.utime(target,None)
+        self.assertEqual(*tags)
 
 
 if __name__ == '__main__':
