@@ -7,7 +7,7 @@ const {chromium,webkit}=require('playwright');const assert=require('node:assert/
   const context=await browser.newContext({viewport:{width:430,height:799},isMobile:true,hasTouch:true,userAgent:wk?'Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/HomeAssistant':'Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/156 Mobile Safari/537.36'});
   const page=await context.newPage();page.setDefaultTimeout(30000);const errors=[],hoverRequests=[];
   page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{const u=new URL(r.url());if(u.pathname.includes('/recording-thumbs/')&&u.searchParams.has('at'))hoverRequests.push(r.url());});
-  await page.route('**/api/edge-rtc/player/**',r=>r.fulfill({contentType:'text/html',body:'<p>Fixture live</p>'}));
+  await page.route('**/api/edge-rtc/player/**',r=>r.fulfill({contentType:'text/html',body:`<p>Fixture live</p><script>window.edgeStopLive=()=>{parent.fixtureStoppedLive=(parent.fixtureStoppedLive||0)+1;parent.fixtureStopBeforeRecording=[...parent.document.querySelectorAll('video[data-recording-player]')].every(v=>!v.getAttribute('src'));};</script>`}));
   await page.goto(base);await page.waitForFunction(()=>recordingStatus[0]?.files?.length>0);
   await page.waitForTimeout(2400);
   assert.equal(await page.evaluate(()=>recordingBuffer.entries.size),0,'archive body competed with the first live picture');
@@ -19,6 +19,7 @@ const {chromium,webkit}=require('playwright');const assert=require('node:assert/
   assert(warm.stats.bytes<=16*1024*1024&&warm.stats.files<=2);
   for(const url of warm.sources)await page.route(url,r=>r.abort('failed'));
   if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();
+  assert(await page.evaluate(()=>fixtureStoppedLive>0&&fixtureStopBeforeRecording),'NVR loaded before the Live decoder was explicitly stopped');
   const video=page.locator(`video[data-recording-player="${index}"]`),slider=page.locator(`[data-recording-playback-seek="${index}"]`);
   await page.locator(`[data-recording-toggle="${index}"]`).click();
   await page.waitForFunction(index=>{const v=document.querySelector(`video[data-recording-player="${index}"]`);return v.src.startsWith('blob:')&&!v.paused&&v.currentTime>.2&&v.videoWidth>0;},index);

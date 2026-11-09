@@ -5352,7 +5352,8 @@ import{getDeviceReporter}from'../device-diagnostics.js?v=__EDGE_PANEL_VERSION__'
 const path=location.pathname.split('/').pop(),url=new URL('../stream/'+path,location.href);let client,timer,retries=0,muted=true;
 const diagnostics=getDeviceReporter({context:{surface:'edge_panel_live',source:path},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);try{return(await fetch(new URL('../../client-diagnostics',location.href),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal})).ok;}finally{clearTimeout(timer);}}});
 function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,diagnostics,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;if(f.frames===1)parent.postMessage({type:'edge_live_ready',path},location.origin);const label='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264'),note=document.querySelector('p');if(note.textContent!==label)note.textContent=label;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
-connect();document.querySelector('button').onclick=()=>{muted=!muted;client?.setAudio(.6,muted);document.querySelector('button').textContent=muted?'Sound':'Mute';};document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(document.hidden)client?.close();else connect();});window.addEventListener('pagehide',()=>{clearTimeout(timer);client?.close();});
+window.edgeStopLive=()=>{clearTimeout(timer);client?.close();};
+connect();document.querySelector('button').onclick=()=>{muted=!muted;client?.setAudio(.6,muted);document.querySelector('button').textContent=muted?'Sound':'Mute';};document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(document.hidden)window.edgeStopLive();else connect();});window.addEventListener('pagehide',()=>window.edgeStopLive());
 </script>"""
 
 
@@ -8541,6 +8542,9 @@ INDEX_HTML = r"""<!doctype html>
         const visible=activePage==='home'&&!document.hidden;
         grid.querySelectorAll('iframe.live-frame').forEach(frame=>{
           if(!visible&&frame.dataset.liveSuspended!=='true'){
+            // Release the phone's Live decoder synchronously before NVR can
+            // acquire one; iframe navigation/unload alone is asynchronous.
+            if(EDGE_NATIVE_RTC)try{frame.contentWindow.edgeStopLive?.();}catch(_){}
             frame.dataset.liveSuspended='true';delete frame.dataset.liveReady;frame.src='about:blank';
             clearTimeout(liveFrameTimers.get(frame.dataset.liveKey));liveFrameTimers.delete(frame.dataset.liveKey);
           }else if(visible&&frame.dataset.liveSuspended==='true'){

@@ -11,7 +11,8 @@ native Live players confirm their first picture. This downloads saved compatible
 MP4 bytes without starting an offscreen recording decoder. It never reads from
 the camera. The same two-file / 16 MiB retained budget and 8 MiB / 12-second
 in-flight limit apply. Reported Save-Data/2G skips downloads. Entering NVR cancels
-unfinished warming and can immediately attach a ready file from RAM. Returning
+unfinished warming, explicitly closes the panel's Live decoders before loading
+the recording, and can immediately attach a ready file from RAM. Returning
 to Live closes recording decoders but retains unused bytes for at most two
 minutes; other pages and disabling the option release unused data. This cache is
 per open panel, so a newly opened browser still needs its first transfer.
