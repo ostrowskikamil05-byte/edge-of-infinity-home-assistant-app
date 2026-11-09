@@ -37,6 +37,7 @@ from edge_recording_index import RecordingIndexCache
 from edge_recording_compat import CompatibleRecordings
 from edge_metrics import CpuSampler, cpu_load_severity, hardware_inventory
 from edge_camera_keyframes import CameraKeyframes
+from edge_camera_gop import set_onvif_gop
 sys.path.insert(0,str(Path(__file__).parent/'custom_components/edge'))
 from _device_logs import DeviceLogs, safe_url
 
@@ -99,15 +100,15 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.12.4"
-APP_RELEASE_FEATURES=['Direct saved-video playback; speculative preparation, prefetch controls and the Blob/RAM cache removed',
-                      'All panel UI diagnostics use bounded device batches; no per-event debug HTTP posts',
-                      'Normalized ingress paths, session validation before resume and expired-session request stop',
-                      'Source-paced short Live bursts with at most eight queued frames and 250 ms pending span',
-                      'Fresh detection heartbeat fallback without changing camera configuration precedence',
-                      'Continuous live PCM, original-resolution recording pictures, original video/FPS/AAC and gallery retained']
+APP_VERSION = "0.13.0"
+APP_RELEASE_FEATURES=['Optional EdgeRTC DVR: indexed original H264/H265/AAC, epoch seeks and one bounded persistent socket',
+                      'Actual video previews, frame steps, gray/green alert track and same-socket file transitions',
+                      'Device codec negotiation with native MP4 fallback; original video/FPS and existing AAC retained',
+                      'Native Live status and recording codec decisions use the existing source registry instead of RTSP probes',
+                      'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
+                      'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "direct-ingress-v124"
+UI_BUILD = "archive-rtc-v130"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -1374,6 +1375,11 @@ def diagnostic_severity_from_text(text: str) -> str:
 
 
 def diagnostic_from_tail(title: str, tail: str) -> dict:
+    if title.startswith('Recording FFmpeg'):
+        runtime=ffmpeg_runtime_messages(tail)
+        severity=diagnostic_severity_from_text(runtime)
+        detail='Logged recorder command; no FFmpeg runtime error in this tail.' if not runtime else 'FFmpeg runtime messages evaluated separately from its startup command.'
+        return diagnostic_item(severity,title,detail,{'tail':tail,'runtime_tail':runtime[-4000:]})
     if title == "Recording cache" and tail:
         lowered = tail.lower()
         if "recording_cache_build_error" in lowered or "edge recording cache error" in lowered:
@@ -4099,12 +4105,23 @@ def current_recording_log_tail(path: Path, limit: int = 6000) -> str:
     return tail[start:] if start>=0 else tail
 
 
+def ffmpeg_runtime_messages(tail):
+    marker='=== Edge recording start ==='
+    if marker in tail:
+        tail=tail.rsplit(marker,1)[1].lstrip()
+        if tail.startswith('{'):
+            try:_,end=json.JSONDecoder().raw_decode(tail);tail=tail[end:]
+            except ValueError:return ''  # An incomplete command header is not an FFmpeg failure.
+    return '\n'.join(line for line in tail.splitlines() if line.strip() and not line.lstrip().startswith(('"','{','}',']',',')) and not line.startswith('=== Edge recording'))
+
+
 def recording_health(camera: dict, index: int) -> dict:
     tail = recording_log_tail(camera, index, 5000)
-    lower_tail = tail.lower()
+    runtime=ffmpeg_runtime_messages(tail)
+    lower_tail = runtime.lower()
     error_lines = [
         line.strip()
-        for line in tail.splitlines()
+        for line in runtime.splitlines()
         if any(token in line.lower() for token in ("error", "failed", "invalid", "not found", "unable", "permission denied"))
     ]
     last_error = error_lines[-1] if error_lines else ""
@@ -4135,14 +4152,31 @@ def recording_preflight_error(camera: dict, stream_name: str) -> str:
     return "recording_rtsp_not_configured"
 
 
-def recording_codec_mode(stream: str, nvr: dict) -> tuple[str, str, str, dict]:
-    probe = probe_rtsp_stream(stream, timeout=6)
+def recording_codec_mode(stream: str, nvr: dict, metadata=None) -> tuple[str, str, str, dict]:
+    probe = metadata if metadata is not None else probe_rtsp_stream(stream, timeout=6)
     video = probe.get("video") or {}
     audio = probe.get("audio") or {}
     video_codec = str(video.get("codec_name") or "").lower()
     audio_codec = str(audio.get("codec_name") or "").lower()
     mode = 'copy'
     return mode, video_codec, audio_codec, probe
+
+
+def recording_registry_metadata(camera,index,stream_name,wait_seconds=4):
+    """Use the already connected camera's SDP; never open another probe channel."""
+    path=mediamtx_path(camera,index,stream_name);deadline=time.monotonic()+wait_seconds
+    while True:
+        status=edge_rtc_status()
+        source=next((row for row in status.get('sources',[]) if path in row.get('paths',[]) or row.get('camera_id')==safe_id(camera.get('id') or f'camera_{index+1}')),None)
+        if source and source.get('ready') and (source.get('video') or {}).get('codec_name') and source['video'].get('parameters_ready',True):
+            video=dict(source['video']);video['codec_name']={'h265':'hevc'}.get(video['codec_name'],video['codec_name'])
+            audio=source.get('audio') or {};codec=str(audio.get('codec') or '').lower()
+            codec='aac' if codec.startswith('mp4a.40.') else {'pcma':'pcm_alaw','pcmu':'pcm_mulaw'}.get(codec,codec)
+            return {'video':video,'audio':{'codec_name':codec,'sample_rate':audio.get('sampleRate'),'channels':audio.get('channels')},'metadata_source':'edge_rtc_registry','source_ready':True}
+        if time.monotonic()>=deadline:
+            write_debug_event('recording_source_pending',{'camera_id':camera.get('id'),'source':'edge_rtc_registry','api_reachable':status.get('api_reachable',False),'metadata_ready':False})
+            raise RuntimeError('edge_rtc_source_metadata_pending')
+        time.sleep(.2)
 
 
 def recording_mode_from_codec(video_codec: str, nvr: dict) -> str:
@@ -4198,6 +4232,9 @@ def build_recording_command(stream: str, output_pattern: str, segment_seconds: i
         ]
     else:
         command += ['-c:v','copy']
+    if video_codec.lower() in ('hevc','h265'):
+        command[command.index('-probesize')+1]='1048576'
+        command[command.index('-analyzeduration')+1]='2000000'
     if audio_codec in ('aac','mp4a'):
         command+=['-c:a','copy']
     else:
@@ -4557,7 +4594,8 @@ def start_recording(camera: dict, index: int) -> dict:
     removed_old = cleanup_old_recordings(directory, retention_days)
     log_path = directory / "ffmpeg.log"
     output_pattern = str(directory / "%Y%m%d-%H%M%S.mp4")
-    mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr)
+    metadata=recording_registry_metadata(camera,index,record_stream) if EDGE_RTC_ENABLED else None
+    mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr,metadata)
     audio_info=probe.get('audio') or {}
     command = build_recording_command(stream, output_pattern, segment_seconds, mode,video_codec,audio_codec,audio_info.get('sample_rate'),audio_info.get('channels'))
     log_header = {
@@ -4572,6 +4610,7 @@ def start_recording(camera: dict, index: int) -> dict:
         "mode": mode,
         "video_codec": video_codec,
         "audio_codec": audio_codec,
+        "metadata_source":probe.get('metadata_source','ffprobe_shared_stream' if record_source!='camera_direct' else 'ffprobe_camera'),
         "audio_output": 'copy_aac' if audio_codec in ('aac','mp4a') else 'aac_voice_16k_32k' if audio_codec in ('pcm_alaw','pcm_mulaw') and safe_int(audio_info.get('sample_rate'),0)<=16000 else 'aac',
         "command": redact_command(command),
     }
@@ -4759,7 +4798,7 @@ def hik_raw_fps(value: str) -> str:
     return str(int(number))
 
 
-def keyframe_interval_from_fps(value: str) -> str:
+def keyframe_interval_from_fps(value: str, seconds=2) -> str:
     try:
         if "/" in str(value):
             numerator, denominator = str(value).split("/", 1)
@@ -4770,7 +4809,7 @@ def keyframe_interval_from_fps(value: str) -> str:
         return ""
     if fps > 100:
         fps = fps / 100
-    return str(max(1, int(round(fps * 4))))
+    return str(max(1, int(round(fps * seconds))))
 
 
 def parse_xml(payload: str) -> ET.Element:
@@ -5045,7 +5084,7 @@ def camera_autoconfig_recommendations(streams: dict, channels: list[dict]) -> li
         codec = str(video.get("codec") or "").lower()
         fps = safe_int(video.get("fps"), 0)
         keyframe = safe_int(video.get("keyframe_interval"), 0)
-        target_keyframe = fps * 4 if fps else 0
+        target_keyframe = fps * 2 if fps else 0
         bitrate = safe_int(video.get("bitrate"), 0)
         width = safe_int(video.get("width"), 0)
         height = safe_int(video.get("height"), 0)
@@ -5061,11 +5100,11 @@ def camera_autoconfig_recommendations(streams: dict, channels: list[dict]) -> li
                 "severity": "warning",
                 "message": f"{name}: disable H264+/Smart Codec for live streaming reliability.",
             })
-        if target_keyframe and keyframe and abs(keyframe - target_keyframe) > max(4, fps):
+        if target_keyframe and keyframe and keyframe > target_keyframe + max(1,round(fps*.1)):
             recommendations.append({
                 "stream": name,
                 "severity": "notice",
-                "message": f"{name}: keyframe interval should be close to fps * 4 ({target_keyframe}) for faster starts; camera reports {keyframe}.",
+                "message": f"{name}: GOP 1–2 s improves live/archive seeks. At {fps} FPS use {fps}–{target_keyframe} frames; camera reports {keyframe}. Shorter GOP may increase bitrate or use more of a fixed bitrate budget.",
             })
         if name == "sub" and width and height and (width > 1280 or height > 720):
             recommendations.append({
@@ -5186,6 +5225,7 @@ def refresh_status() -> dict:
         if isinstance(item, dict)
     }
     cameras = []
+    registry=edge_rtc_status() if EDGE_RTC_ENABLED else None
 
     for index, camera in enumerate(config.get("cameras", [])):
         camera_id = safe_id(camera.get("id", "camera"))
@@ -5214,7 +5254,20 @@ def refresh_status() -> dict:
         snapshot_url = ""
         snapshot_path = ""
 
-        if camera.get("enabled"):
+        if camera.get('enabled') and EDGE_RTC_ENABLED:
+            path=mediamtx_path(camera,index,record_stream_name)
+            source=next((row for row in registry.get('sources',[]) if path in row.get('paths',[]) or row.get('camera_id')==camera_id),None)
+            observed=(source or {}).get('video') or {};audio=(source or {}).get('audio') or {}
+            connected=bool(source and source.get('ready') and source.get('upstream_connections',0))
+            status='online' if connected and observed.get('codec_name') and observed.get('parameters_ready',True) else 'checking'
+            detail='EdgeRTC odbiera wspólne źródło kamery; stan potwierdzony bez dodatkowej sondy RTSP.' if status=='online' else 'EdgeRTC oczekuje na połączenie lub parametry obrazu kamery; źródło ponawia połączenie automatycznie.'
+            if not registry.get('api_reachable'):detail='Oczekiwanie na API rdzenia EdgeRTC. Sprawdź stan silnika w diagnostyce.'
+            video_codec={'h265':'hevc'}.get(observed.get('codec_name'),observed.get('codec_name',''))
+            width=str(observed.get('width') or previous.get('width') or '');height=str(observed.get('height') or previous.get('height') or '');fps=str(observed.get('fps') or previous.get('fps') or '');bitrate=str(previous.get('bitrate') or '')
+            audio_codec=str(audio.get('codec') or '');audio_codec='aac' if audio_codec.startswith('mp4a.40.') else {'pcma':'pcm_alaw','pcmu':'pcm_mulaw'}.get(audio_codec,audio_codec)
+            audio_sample_rate=str(audio.get('sampleRate') or '');audio_channels=str(audio.get('channels') or '')
+            live_probe_status='online' if status=='online' else 'warming';live_video_codec=video_codec;live_width=width;live_height=height;live_fps=fps;live_bitrate=bitrate
+        elif camera.get("enabled"):
             rtsp_main = camera.get("rtsp_main") or ""
             if not rtsp_main:
                 status = "missing_rtsp"
@@ -5293,6 +5346,7 @@ def refresh_status() -> dict:
             "live_bitrate": live_bitrate,
             "status": status,
             "detail": detail,
+            "status_source":'edge_rtc_registry' if EDGE_RTC_ENABLED else 'rtsp_probe',
             "codec": video_codec,
             "video_codec": video_codec,
             "audio_codec": audio_codec,
@@ -6515,6 +6569,7 @@ INDEX_HTML = r"""<!doctype html>
       function expireIngressSession(){
         if(ingressSessionExpired)return;ingressSessionExpired=true;liveSessionReady=false;
         deviceReporter?.setPaused?.(true);cancelGalleryPrefetch();updateLivePlaybackVisibility();
+        suspendArchivePlayers();
         nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);
         releaseInactiveRecordingPlayers(null,true);
         const notice=document.createElement('aside');notice.dataset.ingressExpired='';notice.setAttribute('role','alert');
@@ -6839,12 +6894,14 @@ INDEX_HTML = r"""<!doctype html>
 
       function statusLabel(status) {
         if (status === 'online') return 'online';
+        if(status==='checking')return 'connecting';
         if (status === 'lost_connection') return 'lost connection';
         return 'offline';
       }
 
       function statusClass(status) {
         if (status === 'online') return 'badge-online';
+        if(status==='checking')return 'badge-lost-connection';
         if (status === 'lost_connection') return 'badge-lost-connection';
         return 'badge-offline';
       }
@@ -7110,6 +7167,42 @@ INDEX_HTML = r"""<!doctype html>
       function phonePlayback() {
         return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
       }
+
+      const archivePlayers=new Map(),archiveFallbacks=new Map();let archiveModule;
+      let archiveTransport='mp4';try{archiveTransport=localStorage.getItem('edge-archive-transport')||'mp4';}catch(_){}
+      function archiveAvailable(){return EDGE_NATIVE_RTC&&isSecureContext&&typeof VideoDecoder==='function';}
+      function archiveSelected(index=null){return archiveTransport==='edge_rtc'&&archiveAvailable()&&(index===null||!archiveFallbacks.has(String(index)));}
+      function suspendArchivePlayers(){for(const player of archivePlayers.values())player.suspend();}
+      function disposeArchivePlayer(index){const player=archivePlayers.get(String(index));if(player){player.destroy();archivePlayers.delete(String(index));}}
+      function archivePlayerMarkup(index,total,position,poster){return `<div class="recording-player-wrap" data-recording-wrap="${index}" data-dvr-host="${index}">
+        <canvas class="recording-player" width="640" height="360" aria-label="Nagrania EdgeRTC DVR" style="display:block;width:100%;height:auto;aspect-ratio:16/9;background:#080e15"></canvas>
+        ${poster?`<img data-dvr-poster src="${escapeHtml(poster)}" alt="Podgląd wybranego nagrania" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none">`:''}
+        <div class="nvr-playback-controls"><div class="nvr-seek-shell"><div class="nvr-alert-dots" data-alert-axis="${index}" role="group" aria-label="Wykrycia osób i zwierząt na nagraniu"></div><input class="nvr-playback-seek" type="range" min="0" max="${Math.max(0,total-.05)}" step="0.04" value="${position}" data-dvr-seek aria-label="Przewiń nagrania EdgeRTC DVR"></div>
+        <div class="nvr-playback-toolbar"><button type="button" data-dvr-action="toggle" aria-label="Odtwórz">▶</button><button type="button" data-dvr-action="back" aria-label="Poprzednia klatka">‹|</button><button type="button" data-dvr-action="next" aria-label="Następna klatka">|›</button><output class="nvr-playback-clock" data-dvr-clock></output><button type="button" data-dvr-action="sound">Dźwięk</button><select data-dvr-rate aria-label="Szybkość nagrania"><option value=".5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select><button type="button" data-dvr-action="fullscreen" aria-label="Pełny ekran">${fullscreenIcon()}</button></div></div>
+        <section class="nvr-alert-popup" data-alert-popup="${index}" hidden></section><p class="nvr-player-status" data-dvr-message role="status">Naciśnij ▶, aby odtworzyć przez EdgeRTC DVR.</p></div>`;}
+      function mountArchivePlayers(){
+        if(!archiveSelected()||activePage!=='nvr'||ingressSessionExpired)return;
+        archiveModule??=import(panelPath('api/edge-rtc/edge-dvr-panel.js?v='+EDGE_PANEL_VERSION));
+        archiveModule.then(({EdgeDVRPanel})=>{
+          if(!archiveSelected()||activePage!=='nvr'||ingressSessionExpired)return;
+          for(const host of nvrGrid.querySelectorAll('[data-dvr-host]')){
+            const index=host.dataset.dvrHost;if(archivePlayers.has(index))continue;
+            const status=recordingStatus[index]||{},target=recordingTargetForOffset(index,selectedRecordingTimeline[index]||0)||recordingDefaultTarget(status.files||[],status);
+            const player=new EdgeDVRPanel(host,{url:panelPath('api/edge-rtc/archive/'+encodeURIComponent(status.key)),diagnostics:deviceReporter,
+              total:()=>recordingTimeline(recordingStatus[index]?.files||[],recordingStatus[index]||{}).playbackTotal,
+              position:target?.playbackSeek||0,format:recordingPlaybackClock,targetAt:position=>recordingTargetForPlaybackOffset(index,position),fullscreen:wrap=>requestEdgeFullscreen(wrap,'nvr_edge_dvr'),
+              activate:selected=>{if(phonePlayback()){for(const other of archivePlayers.values())if(other!==selected)other.suspend();nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);releaseInactiveRecordingPlayers(null,true);}},
+              onTarget:target=>{selectedRecording[index]=target.target.file.url;selectedRecordingSeek[index]=target.seek;selectedRecordingTimeline[index]=target.requested;updateRecordingTileSelection(index,target.target.file.url);},
+              fallback:reason=>{archiveFallbacks.set(index,reason.code);recordingAutoplayAfterRender[index]=reason.play;debugEvent('ui_dvr_device_fallback',{index,reason:reason.code,transport:'mp4',recording_changed:false});renderNvrGrid({reason:'archive_fallback'});},
+              onPosition:(entry,seconds,fps)=>{selectedRecording[index]=entry.file.url;selectedRecordingSeek[index]=seconds;selectedRecordingTimeline[index]=entry.offset+seconds;updateAlertProgress(index,entry.playbackOffset+seconds);markNvrInteraction('timeupdate');}
+            });archivePlayers.set(index,player);
+            const autoplay=Boolean(recordingAutoplayAfterRender[index]);delete recordingAutoplayAfterRender[index];
+            if(target&&(autoplay||Number(index)===0))void player.seekTarget(target,{play:autoplay});
+          }
+          repaintAlertAxes();
+        }).catch(error=>{archiveModule=null;debugEvent('ui_dvr_module_error',{message:error.message});});
+      }
+      nvrGrid.addEventListener('change',event=>{const select=event.target.closest('[data-archive-transport]');if(!select)return;archiveTransport=select.value;archiveFallbacks.clear();try{localStorage.setItem('edge-archive-transport',archiveTransport);}catch(_){}for(const index of [...archivePlayers.keys()])disposeArchivePlayer(index);renderNvrGrid({reason:'render_config'});debugEvent('ui_dvr_transport',{transport:archiveTransport});});
 
       function releaseInactiveRecordingPlayers(selected,force=false) {
         if(!force&&!phonePlayback())return;
@@ -7393,6 +7486,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function playRecording(video) {
         if(!video?.isConnected||!nvrGrid.contains(video))return;
+        if(phonePlayback())suspendArchivePlayers();
         const status=recordingStatus[video.dataset.recordingPlayer];if(!selectedRecordingDay[video.dataset.recordingPlayer]&&status?.selected_day)selectedRecordingDay[video.dataset.recordingPlayer]=status.selected_day;
         releaseInactiveRecordingPlayers(video);restoreRecordingPlayer(video);
         if(recordingPictureUnavailable(video))return;
@@ -7530,6 +7624,7 @@ INDEX_HTML = r"""<!doctype html>
       function isNvrPlaybackProtected() {
         if (activePage !== 'nvr') return false;
         if (Date.now() < nvrInteractionUntil) return true;
+        if([...archivePlayers.values()].some(player=>player.wantPlay||player.client?.picture))return true;
         return Array.from(nvrGrid.querySelectorAll('video[data-recording-player]')).some((video) => {
           return video.readyState >= 1 && !video.ended;
         });
@@ -7653,6 +7748,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function selectRecordingAtOffset(index, offset, options = {}) {
+        const archive=archivePlayers.get(String(index));if(archive){const target=recordingTargetForOffset(index,offset);if(target)void archive.seekTarget(target,{play:options.play??archive.wantPlay});return;}
         if(!selectedRecordingDay[index]&&recordingStatus[index]?.selected_day)selectedRecordingDay[index]=recordingStatus[index].selected_day;
         if(!options.scrubbing)discardRecordingScrub(index);
         clearRecordingContinuation(index);
@@ -8090,6 +8186,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function recordingVideoDiagnostics(video) {
+        if(!video)return {};
         const buffered=[];
         try{for(let i=0;i<Math.min(4,video.buffered.length);i++)buffered.push([video.buffered.start(i),video.buffered.end(i)]);}catch(_){}
         const current=Number(video?.currentTime||0),range=buffered.find(([a,b])=>a<=current&&current<=b),quality=video.getVideoPlaybackQuality?.();
@@ -8519,10 +8616,10 @@ INDEX_HTML = r"""<!doctype html>
         liveSessionReady=true;updateLivePlaybackVisibility();deviceReporter?.setPaused?.(false);
       }
       document.addEventListener('visibilitychange',()=>{
-        if(document.hidden){liveSessionReady=false;cancelGalleryPrefetch();updateLivePlaybackVisibility();nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);}
+        if(document.hidden){suspendArchivePlayers();liveSessionReady=false;cancelGalleryPrefetch();updateLivePlaybackVisibility();nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);}
         else void resumeVisiblePanel();
       });
-      window.addEventListener('pagehide',()=>{liveSessionReady=false;updateLivePlaybackVisibility();});
+      window.addEventListener('pagehide',()=>{suspendArchivePlayers();liveSessionReady=false;updateLivePlaybackVisibility();});
       window.addEventListener('pageshow',event=>{if(event.persisted)void resumeVisiblePanel();});
 
       function addCameraTile() {
@@ -8639,7 +8736,7 @@ INDEX_HTML = r"""<!doctype html>
             </div>`
           : '';
         const player = playable
-          ? `<div class="recording-player-wrap" data-recording-wrap="${index}" data-controls-visible="true">
+          ? archiveSelected(index)?archivePlayerMarkup(index,timeline.playbackTotal,targetForPoster?.playbackSeek||0,posterUrl):`<div class="recording-player-wrap" data-recording-wrap="${index}" data-controls-visible="true">
               <video class="recording-player" tabindex="0" aria-label="Recordings for selected day" ${deferredPlayer?`data-recording-suspended-src="${escapeHtml(playerSrc.split('#')[0])}"`:`src="${escapeHtml(playerSrc.split('#')[0])}"`} ${posterUrl&&activePage==='nvr' ? `poster="${escapeHtml(posterUrl)}"` : ''} data-recording-poster="${escapeHtml(posterUrl)}" preload="${deferredPlayer?'none':preloadMode}" ${phonePlayback()?'muted':''} playsinline webkit-playsinline data-recording-player="${index}" data-recording-file-url="${escapeHtml(selectedFile?.url || '')}" data-recording-loaded-file="${escapeHtml(selectedFile?.url || '')}" data-recording-src="${escapeHtml(playerSrc.split('#')[0])}" data-recording-seek="${escapeHtml(playerSeek)}" data-recording-stream-start="${escapeHtml(playerStreamStart)}" data-recording-playback-start="${escapeHtml(playerPlaybackStart)}" data-recording-playback-mode="${escapeHtml(playbackMode)}"></video>
               <canvas class="recording-transition-frame" data-recording-transition hidden aria-hidden="true"></canvas>
               ${recordingPlayerControls(index, timeline, targetForPoster?.playbackSeek || 0)}<section class="nvr-alert-popup" data-alert-popup="${index}" hidden></section>
@@ -8669,6 +8766,7 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="rec-badge ${isRecording ? '' : 'off'}">${badgeText}</div>
               </div>
               ${daySelector}
+              <label class="field-help">Odtwarzacz archiwum<select data-archive-transport aria-label="Odtwarzacz archiwum"><option value="mp4" ${!archiveSelected(index)?'selected':''}>MP4 · zgodność urządzeń</option><option value="edge_rtc" ${archiveSelected(index)?'selected':''} ${archiveAvailable()?'':'disabled'}>EdgeRTC DVR · beta${archiveAvailable()?'':' · wymaga HTTPS / WebCodecs'}</option></select>${archiveFallbacks.has(String(index))?'Automatycznie dobrano MP4 dla zgodności tego pliku i urządzenia.':''}</label>
               ${player}<section class="nvr-alert-detail" data-alert-detail="${index}" hidden></section>
               ${currentDay ? `<section class="recording-events" data-recording-events="${index}"><div class="event-history-row"><b>Zdarzenia dnia / Day events</b><button type="button" data-recording-events-refresh="${index}">Odśwież</button></div><div data-recording-event-content><p class="field-help">Ładowanie zdarzeń…</p></div><p class="nvr-playback-message" data-recording-event-message role="status"></p></section>` : ''}
               ${diagnostics}
@@ -8862,6 +8960,7 @@ INDEX_HTML = r"""<!doctype html>
                 <code>${escapeHtml(text(channel.video?.bitrate_mode, 'bitrate'))} ${escapeHtml(text(channel.video?.bitrate, 'unknown'))}</code>
               </div>
             `).join('')}</div>` : ''}
+            <p class="field-help">GOP nagrywanego profilu: 1–2 s przyspiesza przewijanie. Kamera ustala klatki kluczowe; istniejące nagrania zachowują swój GOP. Krótszy GOP może zwiększyć bitrate lub zużyć więcej dostępnego bitrate na klatki kluczowe.</p><div class="actions"><button type="button" data-camera-gop="1" data-camera-index="${index}">Ustaw GOP 1 s</button><button type="button" data-camera-gop="2" data-camera-index="${index}">Ustaw GOP 2 s</button></div><p data-camera-gop-status role="status"></p>
             ${Object.keys(streams).length ? `<div class="stream-grid">${Object.entries(streams).map(([name, stream]) => streamEditor(index, name, stream)).join('')}</div>` : ''}
             ${sectionSummary ? `<p class="section-status">${escapeHtml(sectionSummary)}</p>` : ''}
           </div>
@@ -8869,6 +8968,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       let expandedCameraIds = new Set();
+      form.addEventListener('click',async event=>{const button=event.target.closest('[data-camera-gop]');if(!button)return;const section=button.closest('[data-camera-form]'),message=section.querySelector('[data-camera-gop-status]');button.disabled=true;message.textContent='Zapisywanie wyłącznie GOP w zapisanym profilu kamery…';try{const response=await panelFetch(panelPath('api/camera-gop'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:Number(button.dataset.cameraIndex),seconds:Number(button.dataset.cameraGop)}),signal:AbortSignal.timeout(25000)});const data=await response.json();if(!response.ok)throw Error(data.error);message.textContent=`Potwierdzono GOP ${data.seconds} s · ${data.frames} klatek przy ${data.fps} FPS. Zmiana dotyczy nowych klatek.`;debugEvent('ui_camera_gop_saved',{index:button.dataset.cameraIndex,...data});}catch(error){message.textContent=error.message;debugEvent('ui_camera_gop_error',{index:button.dataset.cameraIndex,message:error.message});}finally{button.disabled=false;}});
       let cameraExpansionInitialized = false;
       let cameraToExpand = '';
       const zonePreviewUrls = new Map(), zonePreviewRequests = new Map();
@@ -9068,6 +9168,7 @@ INDEX_HTML = r"""<!doctype html>
           if (day) node.textContent = `${formatDuration(day.recorded_seconds || 0)} / ${formatDuration(day.day_total_seconds || 86400)} | 00:00–24:00`;
         });
         updateRecordingPlayerControls(video);
+        archivePlayers.get(String(index))?.refresh();
       }
 
       function renderNvrGrid(options = {}) {
@@ -9080,7 +9181,7 @@ INDEX_HTML = r"""<!doctype html>
           keep.add(String(index));
           const same = existing && existing.dataset.nvrDay === day && existing.dataset.nvrKey === (status.key || '');
           const hasFiles = (status.files || []).length > 0;
-          if (same && Boolean(existing.querySelector('video')) === hasFiles && options.reason !== 'render_config') {
+          if (same && Boolean(existing.querySelector('video,[data-dvr-host]')) === hasFiles && Boolean(existing.querySelector('[data-dvr-host]'))===(hasFiles&&archiveSelected(index)) && options.reason !== 'render_config') {
             patchNvrCard(existing, camera, index, options);
             return;
           }
@@ -9088,15 +9189,17 @@ INDEX_HTML = r"""<!doctype html>
           discardRecordingScrub(index);
           const template = document.createElement('template');
           template.innerHTML = nvrCard(camera, index);
+          disposeArchivePlayer(index);
           if (existing) { disposeRecordingPlayer(existing.querySelector('video')); existing.replaceWith(template.content); }
           else nvrGrid.append(template.content);
         });
         nvrGrid.querySelectorAll('[data-nvr-index]').forEach((card) => {
-          if (!keep.has(card.dataset.nvrIndex)) { disposeRecordingPlayer(card.querySelector('video')); card.remove(); }
+          if (!keep.has(card.dataset.nvrIndex)) { disposeArchivePlayer(card.dataset.nvrIndex);disposeRecordingPlayer(card.querySelector('video')); card.remove(); }
         });
         lastNvrRenderSignature = recordingStatusSignature();
         // Initialize only new players; existing nodes keep their source, position and pause state.
         applyRecordingSeek();
+        mountArchivePlayers();
         scheduleGalleryPrefetch();
         scheduleRecordingThumbnailHydration();
         refreshRecordingEvents();
@@ -9727,7 +9830,7 @@ INDEX_HTML = r"""<!doctype html>
         });
         cameras.forEach((camera) => {
           const liveKey = camera.key || `${camera.id || 'camera'}_${camera.index ?? 0}`;
-          if (camera.status === 'online' && live[liveKey] === undefined) {
+          if ((camera.status === 'online'||EDGE_NATIVE_RTC&&camera.status==='checking') && live[liveKey] === undefined) {
             live[liveKey] = true;
           }
         });
@@ -10129,7 +10232,7 @@ INDEX_HTML = r"""<!doctype html>
         }).join('');
         if(axis.dataset.signature!==html){axis.innerHTML=html;axis.dataset.signature=html;}
         const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
-        updateAlertProgress(index,recordingScrubs.get(String(index))?.desired??recordingPlaybackPosition(video));
+        updateAlertProgress(index,archivePlayers.get(String(index))?.position??recordingScrubs.get(String(index))?.desired??recordingPlaybackPosition(video));
       }
       function updateAlertProgress(index,position) {
         nvrGrid.querySelectorAll(`[data-alert-point="${index}"]`).forEach(point=>point.dataset.passed=String(Number(point.dataset.alertPosition)<=position+.05));
@@ -10156,12 +10259,13 @@ INDEX_HTML = r"""<!doctype html>
       async function openAlertRecording(event) {
         const index=(config.cameras||[]).findIndex(camera=>camera.id===event.camera_id);
         if(index>=0){
-          const loaded=recordingStatus[index]?.selected_day===event.day&&nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
+          const loaded=recordingStatus[index]?.selected_day===event.day&&nvrGrid.querySelector(`video[data-recording-player="${index}"],[data-dvr-host="${index}"]`);
           if(!loaded){selectedRecordingDay[index]=event.day;delete selectedRecording[index];delete recordingStreamNonce[index];}
           if(activePage!=='nvr')showPage('nvr');if(!loaded)await loadRecordingStatus({forceRender:true,reason:'alert_recording'});
           let found=seekRecordingEvent(index,event);
           if(!found&&loaded){await loadRecordingStatus({reason:'alert_recording_refresh'});found=seekRecordingEvent(index,event);}
           if(found){
+            const archive=archivePlayers.get(String(index));if(archive){archive.host.scrollIntoView({block:'center'});archive.seekPlayback(archive.position,{play:true});return;}
             nvrGrid.querySelectorAll('[data-alert-detail],[data-alert-popup]').forEach(node=>node.hidden=true);
             const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
             video?.closest('[data-recording-wrap]')?.scrollIntoView({block:'center',behavior:'auto'});
@@ -10172,6 +10276,7 @@ INDEX_HTML = r"""<!doctype html>
         throw new Error('W tym momencie brak zapisanego wideo. Zdjęcie alertu pozostaje w historii.');
       }
       function showSavedAlertClip(event) {
+          suspendArchivePlayers();
           nvrGrid.querySelectorAll('video').forEach(pauseRecording);
           releaseInactiveRecordingPlayers(null,true);
           const dialog=document.createElement('dialog');dialog.setAttribute('aria-label','Zapisany fragment alertu');dialog.style.cssText='max-width:95vw;width:850px;background:#101c29;color:white;border:0;border-radius:8px';
@@ -10297,6 +10402,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function showPage(pageName) {
         cancelGalleryPrefetch();
+        if(pageName!=='nvr')suspendArchivePlayers();
         if(pageName!=='nvr'){for(const state of recordingScrubs.values())discardRecordingScrub(state.index);nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);}
         if(pageName!=='nvr')releaseInactiveRecordingPlayers(null,true);
         if(pageName!=='nvr')releaseRecordedPreviewDecoder();
@@ -10320,6 +10426,7 @@ INDEX_HTML = r"""<!doctype html>
           (phonePlayback()?[...videos].slice(0,1):videos).forEach(restoreRecordingPlayer);
         }
         if (pageName === 'ha-dashboard') loadDashboardEntities();
+        if(pageName==='nvr')mountArchivePlayers();
         if (pageName === 'home') loadCameras().catch((error) => debugEvent('ui_cameras_refresh_error', { message: error.message }));
         if (pageName === 'home') scheduleGalleryPrefetch();
         if (pageName === 'logs') {
@@ -10987,7 +11094,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if compress:append_jsonl_log(HOME_DIR/'playback.jsonl','recording_index_encoded',{'json_bytes':raw_size,'wire_bytes':len(body),'encoding':headers.get('Content-Encoding','identity'),'encode_ms':round((time.monotonic()-started)*1000)})
         self.send_bytes(body,'application/json',status,headers)
 
-    def serve_edge_rtc_stream(self, stream_path: str) -> None:
+    def serve_edge_rtc_stream(self, stream_path: str, archive=False) -> None:
         """Read-only binary tunnel; microphone is available only through HA ACLs."""
         import socket
         import select
@@ -10999,12 +11106,13 @@ class EdgeHandler(BaseHTTPRequestHandler):
         try:
             token = (HOME_DIR / "edge-rtc-token").read_text().strip()
             camera=next((c for c in load_config().get('cameras',[]) if c.get('enabled') and stream_path in (safe_id(c.get('id','camera'))+'_main',safe_id(c.get('id','camera'))+'_sub')),None)
-            if camera:CAMERA_KEYFRAMES.request(camera['id'])
+            if camera and not archive:CAMERA_KEYFRAMES.request(camera['id'])
             backend = socket.create_connection(("127.0.0.1", MEDIAMTX_API_PORT), timeout=5)
             key = self.headers.get("Sec-WebSocket-Key", "")
             if not re.fullmatch(r"[A-Za-z0-9+/=]{20,32}", key):
                 raise ValueError("invalid_websocket_key")
-            header = f"GET /api/stream/{stream_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            endpoint='archive' if archive else 'stream'
+            header = f"GET /api/{endpoint}/{stream_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
             backend.sendall(header.encode())
             response = bytearray()
             while not response.endswith(b"\r\n\r\n") and len(response) < 16384:
@@ -11053,11 +11161,17 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/edge-rtc/client.js":
             self.send_live_script("edge-rtc-client.js")
             return
+        if path in ('/api/edge-rtc/edge-dvr-client.js','/api/edge-rtc/edge-dvr-panel.js'):
+            self.send_live_script(path.rsplit('/',1)[1])
+            return
         if path == "/api/edge-rtc/edge-pcm-worklet.js":
             self.send_live_script("edge-pcm-worklet.js")
             return
         if path.startswith("/api/edge-rtc/stream/") and EDGE_RTC_ENABLED:
             self.serve_edge_rtc_stream(path.removeprefix("/api/edge-rtc/stream/"))
+            return
+        if path.startswith('/api/edge-rtc/archive/') and EDGE_RTC_ENABLED:
+            self.serve_edge_rtc_stream(path.removeprefix('/api/edge-rtc/archive/'),archive=True)
             return
         if path.startswith("/api/edge-rtc/player/") and EDGE_RTC_ENABLED:
             self.send_bytes(EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',APP_VERSION).encode(), "text/html; charset=utf-8")
@@ -11321,6 +11435,23 @@ class EdgeHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/camera-stream-config":
             self.camera_stream_config()
+            return
+        if parsed.path == '/api/camera-gop':
+            try:
+                payload=self.read_body_json();index=int(payload['index']);seconds=int(payload['seconds']);config=load_config()
+                if index<0 or index>=len(config['cameras']) or seconds not in (1,2):raise ValueError('invalid_camera_or_gop')
+                camera=config['cameras'][index]
+                if camera.get('vendor')=='hikvision':
+                    profile=camera.get('record_stream') or 'main';current=parse_stream_config(isapi_request(camera,'GET',f'/ISAPI/Streaming/channels/{stream_channel(camera,profile)}'))
+                    fps=current.get('video',{}).get('fps');frames=int(keyframe_interval_from_fps(str(fps),seconds));verified=update_stream_config(camera,profile,{'video':{'keyframe_interval':frames}})
+                    if int(verified.get('video',{}).get('keyframe_interval',0))!=frames:raise ValueError('gop_camera_readback_mismatch')
+                    result={'status':'saved','seconds':seconds,'frames':frames,'fps':frames/seconds,'profile':profile}
+                else:
+                    result=set_onvif_gop(camera,seconds,CAMERA_KEYFRAMES.resolve,lambda *args:onvif_request(*args,timeout=3))
+                result.pop('encoder_token',None);write_debug_event('camera_gop_saved',{'camera_id':camera.get('id'),**result,'video_transcoded':False});self.send_json(result)
+            except (ValueError,KeyError,TypeError,OSError,RuntimeError,ET.ParseError):
+                write_debug_event('camera_gop_unavailable',{'action':'explicit_gop_write','readback_confirmed':False})
+                self.send_json({'error':'Kamera nie udostępniła lub nie potwierdziła GOP przez to API. Sprawdź GOP w panelu kamery; pozostałe ustawienia profilu są zachowywane.'},HTTPStatus.BAD_REQUEST)
             return
         if parsed.path == "/api/recording/start":
             self.recording_action("start")
@@ -11863,7 +11994,7 @@ def main() -> None:
     write_debug_event('release_features',{'version':APP_VERSION,'features':APP_RELEASE_FEATURES,
                       'hardware':hardware_inventory(),'recordings_changed':False,'camera_codec_settings_changed':False,
                       'edge_rtc':'Sources stay connected on the server; viewers share its bounded keyframe buffer.'})
-    print(f'[edge-panel] {APP_VERSION}: fresh-keyframe startup, latest-seek playback, confirmed pictures, bounded RAM buffer and filtered histories. Original video/FPS unchanged.')
+    print(f'[edge-panel] {APP_VERSION}: indexed EdgeRTC DVR, registry-based live status, native AAC packet copy and explicit GOP actions. Original video/FPS unchanged.')
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
     try:

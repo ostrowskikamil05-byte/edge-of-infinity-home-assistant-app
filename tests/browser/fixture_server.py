@@ -98,6 +98,22 @@ if os.environ.get('EDGE_TEST_DETECTION_FIXTURE'):
  # Fixture dates are intentionally historical; retention is covered separately.
  p.ALERT_SERVICE.prune=lambda reserve=0:{'bytes':0,'limit_bytes':256*1024*1024}
  for ident in fixture_alert_ids:p.ALERT_SERVICE.build(p.DETECTION_SERVICE.store.get(ident))
-Path(os.environ.get('EDGE_NVR_FIXTURE_INFO', '/tmp/edge-nvr-browser-fixture.json')).write_text(json.dumps({'recordings_dir': str(d), 'recording_cache_dir':str(p.RECORDING_CACHE_DIR), 'thumbnail_dir':str(p.RECORDING_THUMB_DIR)}))
+fixture_info={'recordings_dir':str(d),'recording_cache_dir':str(p.RECORDING_CACHE_DIR),'thumbnail_dir':str(p.RECORDING_THUMB_DIR)}
+if os.environ.get('EDGE_TEST_ARCHIVE_RTC_BINARY'):
+ import atexit,socket
+ with socket.socket() as available:
+  available.bind(('127.0.0.1',0));p.MEDIAMTX_API_PORT=available.getsockname()[1]
+ private=p.HOME_DIR/'archive-core.json';token='disposable-browser-archive-token-'+str(os.getpid())
+ p.write_json(private,{'rtsp':'127.0.0.1:0','http':'127.0.0.1:'+str(p.MEDIAMTX_API_PORT),'token':token,'sources':[],
+                       'recordings':config['storage']['recordings_dir'],'archives':{p.recording_key(c,i):p.recording_base_dir(c,i).name for i,c in enumerate(config['cameras'])}})
+ (p.HOME_DIR/'edge-rtc-token').write_text(token)
+ core=subprocess.Popen([os.environ['EDGE_TEST_ARCHIVE_RTC_BINARY'],'-config',str(private)])
+ def stop_core():
+  core.terminate()
+  try:core.wait(timeout=3)
+  except subprocess.TimeoutExpired:core.kill();core.wait()
+ atexit.register(stop_core)
+ fixture_info['archive_core']='http://127.0.0.1:'+str(p.MEDIAMTX_API_PORT);fixture_info['archive_token']=token
+Path(os.environ.get('EDGE_NVR_FIXTURE_INFO', '/tmp/edge-nvr-browser-fixture.json')).write_text(json.dumps(fixture_info))
 signal.signal(signal.SIGTERM,lambda *args:sys.exit(0))
 p.ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('EDGE_NVR_TEST_PORT', '18088'))),p.EdgeHandler).serve_forever()

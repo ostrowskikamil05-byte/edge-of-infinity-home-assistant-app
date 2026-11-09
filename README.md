@@ -2,13 +2,14 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.12.4** removes speculative recording preparation and the application
-RAM/Blob video cache. Recordings play directly through native HTTP byte ranges.
-UI diagnostics use bounded batches, Ingress paths are normalized and an expired
-session stops further requests. Live keeps camera cadence for short packet
-bursts within a bounded display queue. Continuous camera PCM, original video/FPS,
-recording AAC, the gallery and one always-on camera source are retained.
-See [update details](edge-of-infinity/DOCS.md#0124-direct-recordings-ingress-and-live-cadence).
+Version **0.13.0** adds optional **EdgeRTC DVR** archive playback with indexed
+keyframe seeks, one persistent authenticated socket and bounded frame delivery.
+Original video/FPS and AAC stay unchanged. Native MP4 remains available and is
+selected automatically for unsupported device profiles. Live status and recorder
+codec detection now use the existing EdgeRTC source registry, fixing false UNV
+probe failures and avoiding unnecessary AAC encoding. Camera GOP 1 s / 2 s actions
+are explicit and verified.
+See [update details](edge-of-infinity/DOCS.md#0130-edgertc-dvr-source-metadata-and-native-aac).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:
 

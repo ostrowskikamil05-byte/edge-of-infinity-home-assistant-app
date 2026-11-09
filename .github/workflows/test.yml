@@ -188,6 +188,50 @@ jobs:
         with:
           go-version: '1.25.x'
           cache-dependency-path: edge-of-infinity/edge-rtc/go.sum
+      - name: Test indexed EdgeRTC DVR and automatic device fallback
+        run: |
+          export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
+          go -C edge-of-infinity/edge-rtc build -o "${RUNNER_TEMP}/edge-rtc-archive" .
+          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1 EDGE_TEST_ARCHIVE_RTC_BINARY="${RUNNER_TEMP}/edge-rtc-archive" EDGE_NVR_TEST_PORT=18095 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-rtc-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/archive-rtc.log" 2>&1 &
+          edge_archive_pid=$!
+          trap 'kill "${edge_archive_pid}" || true' EXIT
+          python - <<'PY'
+          import time, urllib.request
+          deadline=time.monotonic()+60
+          while True:
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:18095/api/version',timeout=1).close()
+                  break
+              except OSError:
+                  if time.monotonic()>deadline:raise
+                  time.sleep(.1)
+          PY
+          export EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-rtc-fixture.json"
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_edge_dvr.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_edge_dvr.cjs
+          EDGE_TEST_BROWSER=webkit EDGE_TEST_DVR_CAMERA=0 node tests/browser/nvr_edge_dvr.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_dvr_fallback.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_dvr_fallback.cjs
+      - name: Test original 4K frames through EdgeRTC DVR
+        run: |
+          export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
+          EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_4K=1 EDGE_TEST_ARCHIVE_RTC_BINARY="${RUNNER_TEMP}/edge-rtc-archive" EDGE_NVR_TEST_PORT=18096 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-rtc-4k.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/archive-rtc-4k.log" 2>&1 &
+          edge_archive_4k_pid=$!
+          trap 'kill "${edge_archive_4k_pid}" || true' EXIT
+          python - <<'PY'
+          import time, urllib.request
+          deadline=time.monotonic()+120
+          while True:
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:18096/api/version',timeout=1).close()
+                  break
+              except OSError:
+                  if time.monotonic()>deadline:raise
+                  time.sleep(.1)
+          PY
+          export EDGE_NVR_TEST_URL=http://127.0.0.1:18096 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-rtc-4k.json" EDGE_TEST_DVR_CAMERA=0 EDGE_TEST_DVR_WIDTH=3840 EDGE_TEST_DVR_HEIGHT=2160
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_edge_dvr.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_edge_dvr.cjs
       - name: Test native long-GOP cached startup with actual WebCodecs
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
@@ -233,7 +277,7 @@ jobs:
           python -m unittest discover -s tests -p test_alert_media.py
           python -m unittest discover -s tests -p test_recording_compat.py
           go -C edge-of-infinity/edge-rtc test -c -o "${EDGE_RTC_TEST_BINARY}" .
-          python tests/run_detection_media.py
+          EDGE_RTC_TEST_NO_SDP_PARAMS=1 python tests/run_detection_media.py
 
 
   edge-rtc:

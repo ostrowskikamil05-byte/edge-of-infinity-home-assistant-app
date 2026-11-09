@@ -6,7 +6,7 @@ An advertised RTSP G711 8 kHz mono backchannel is SETUP on that **same** session
 only one microphone lease may write to it. Unsupported backchannels leave video
 working. No direct-camera microphone fallback is opened in this mode.
 
-The native browser path uses **neither WebRTC nor MSE**. Complete H264 access units
+The native browser path uses **neither WebRTC nor MSE**. Complete H264/H265 access units
 are depacketized from RTP, prefixed with SPS/PPS on IDRs, and sent over WebSocket.
 WebCodecs decodes them directly. Video is not re-encoded. WSS passes through the
 normal authenticated HA connection; the Edge panel has a separate read-only
@@ -25,7 +25,7 @@ Server binary messages:
 
 | Offset | Meaning |
 | --- | --- |
-| 0 | 1 = H264 access unit; 2 = encoded camera audio |
+| 0 | 1 = H264/H265 access unit; 2 = encoded camera audio |
 | 1 | Bit 0 marks an independently decodable video keyframe |
 | 2–9 | Big-endian signed 64-bit media timestamp in microseconds |
 | 10… | Annex-B H264, or encoded audio as described by `hello` |
@@ -83,10 +83,10 @@ software fallback is allowed. Physical speakers and actual HA Core were not run.
 ## Current limits and next modules
 
 This is the first transport/ownership stage of Edge, not the complete planned
-NVR/AI platform. Native live requires H264, a secure browser context and WebCodecs.
+NVR/AI platform. Native live requires a supported H264/H265 profile, a secure browser context and WebCodecs.
 Camera G711 audio has a WebAudio fallback; AAC/Opus playback additionally depends
-on browser AudioDecoder support. Recording still copies the source video; H265
-can remain recordable while native H264-only live reports unsupported. Native PiP
+on browser AudioDecoder support. Recording copies the original source video; an unsupported HEVC profile remains
+recordable and can be viewed on a compatible device. Native PiP
 and proprietary vendor talk APIs are not implemented. Existing legacy engines
 remain selectable.
 
@@ -96,3 +96,24 @@ local detection, zones and tracking on the shared source. Those capabilities are
 planned and are not advertised as working controls in this version.
 
 Runtime third-party licenses are included in `THIRD_PARTY_NOTICES.md`.
+
+## EdgeRTC archive/1 (0.13.0)
+
+`/api/archive/{key}` uses the private API token and a configured key-to-folder
+map. The panel tunnels it through normal authenticated HA Ingress. No source
+registry entry or camera connection is created. MP4 sample tables support
+32/64-bit offsets, decode/composition clocks, edits and sync sample lookup.
+The current file index is reused until size/mtime/inode changes. Go's confined
+filesystem roots and strict names prevent traversal/symlink escapes.
+
+A client sends `{type:"seek",epoch,file,at}` (seconds), then bounded
+`{type:"pull",epoch,count}` messages. `hello` includes video/audio configuration,
+target, duration, keyframe position and index timings. Binary packets retain the
+live first ten header bytes, add a big-endian uint32 seek epoch at bytes 10–13,
+and start payload at byte 14. H264 carries original AVC samples plus avcC in the
+hello; H265 carries Annex B. AAC samples/configuration are unchanged. A `batch`
+message signals completion/EOF. Obsolete epochs are discarded. There is no
+unbounded push queue and a paused client stops requesting media.
+
+Limits and device fallback are documented in the app DOCS 0.13.0 section.
+This is WebSocket/WebCodecs archive transport, not WebRTC DVR or a UDP protocol.

@@ -104,8 +104,10 @@ async def main():
                 async def detection_status(request):
                     return web.json_response(detector.snapshot() if detector else {})
                 async def record(request):
-                    mode=panel.recording_mode_from_codec('hevc' if hevc else 'h264',{})
-                    command=panel.build_recording_command(info['rtsp'],str(folder/'record-%Y%m%d-%H%M%S.mp4'),2,mode,'hevc' if hevc else 'h264')
+                    metadata=panel.recording_registry_metadata(camera('front','192.0.2.10','main'),0,'main')
+                    mode,video_codec,audio_codec,probe=panel.recording_codec_mode(info['rtsp'],{},metadata)
+                    audio_info=probe.get('audio') or {}
+                    command=panel.build_recording_command(info['rtsp'],str(folder/'record-%Y%m%d-%H%M%S.mp4'),2,mode,video_codec,audio_codec,audio_info.get('sample_rate'),audio_info.get('channels'))
                     with (folder/'recorder.log').open('wb') as record_log:
                         recorder=await asyncio.create_subprocess_exec(*command,stdout=record_log,stderr=record_log)
                         await asyncio.sleep(3.5);recorder.terminate();await recorder.wait()

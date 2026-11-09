@@ -311,6 +311,13 @@ func TestBrowserFixture(t *testing.T) {
 		t.Fatal(e)
 	}
 	c.direct = &description.Media{Type: description.MediaTypeVideo, Formats: []format.Format{videoFormat}}
+	if os.Getenv("EDGE_RTC_TEST_NO_SDP_PARAMS") == "1" {
+		if hevc {
+			videoFormat.(*format.H265).SafeSetParams(nil, nil, nil)
+		} else {
+			videoFormat.(*format.H264).SafeSetParams(nil, nil)
+		}
+	}
 	audio := &description.Media{Type: description.MediaTypeAudio, Formats: []format.Format{&format.G711{PayloadTyp: 8, SampleRate: 8000, ChannelCount: 1}}}
 	c.back = &description.Media{Type: description.MediaTypeAudio, IsBackChannel: true, Formats: []format.Format{&format.G711{PayloadTyp: 8, SampleRate: 8000, ChannelCount: 1}}}
 	c.server = &gortsplib.Server{RTSPAddress: freeAddress(), Handler: c}

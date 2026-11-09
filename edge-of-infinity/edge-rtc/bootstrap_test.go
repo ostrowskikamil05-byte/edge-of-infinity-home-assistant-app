@@ -2,10 +2,42 @@ package main
 
 import (
 	"github.com/bluenviron/gortsplib/v5"
+	"github.com/gorilla/websocket"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestViewerWaitsForSourceMetadataOnSameSocket(t *testing.T) {
+	a, err := newApp(config{RTSP: freeAddress(), HTTP: freeAddress(), Token: strings.Repeat("w", 40)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.close()
+	s := cachedSource(t)
+	s.video = nil
+	a.mu.Lock()
+	a.paths["warming_main"] = s
+	a.mu.Unlock()
+	time.AfterFunc(150*time.Millisecond, func() {
+		s.setVideo(map[string]any{"codec": "avc1.640028", "codec_name": "h264"})
+		s.broadcast(frame(1, true, 0, []byte{1, 2, 3}), true)
+	})
+	ws, _, err := websocket.DefaultDialer.Dial("ws://"+a.cfg.HTTP+"/api/stream/warming_main", http.Header{"Authorization": []string{"Bearer " + a.cfg.Token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var hello map[string]any
+	if err = ws.ReadJSON(&hello); err != nil {
+		t.Fatal(err)
+	}
+	if hello["type"] != "hello" || hello["metadata_wait_ms"].(float64) < 100 || hello["metadata_wait_ms"].(float64) > 3000 {
+		t.Fatal("metadata race disconnected viewer", hello)
+	}
+}
 
 func TestKeyframeRequestUsesExistingSessionAndCoalesces(t *testing.T) {
 	c := newFake(t)

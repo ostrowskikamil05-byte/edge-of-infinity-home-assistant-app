@@ -46,7 +46,7 @@ export class EdgeRTCClient {
     first_frame_ms:this.firstFrameMS,frames:this.frames,dropped_frames:this.droppedFrames,source_fps:this.frameInterval?1000/this.frameInterval:null,
     decode_queue:this.video?.decodeQueueSize,render_queue:this.frameQueue.length,render_ahead_ms:Math.max(0,(this.frameQueue.at(-1)?.due||0)-performance.now()),render_limit_ms:250,message_queue:this.pendingMessages,received_bytes:this.receivedBytes,
     last_packet_age_ms:this.lastPacketAt?performance.now()-this.lastPacketAt:null,websocket_outgoing_buffer_bytes:this.ws?.bufferedAmount,
-    bootstrap_packets:this.bootstrapPackets||0,bootstrap_frames_skipped:this.bootstrapFrames,bootstrap_wait_ms:this.bootstrapWaitMS||0,decoder_wait_ms:this.decoderWaitMS||0,message_bytes:this.pendingBytes||0,
+    bootstrap_packets:this.bootstrapPackets||0,bootstrap_frames_skipped:this.bootstrapFrames,bootstrap_wait_ms:this.bootstrapWaitMS||0,source_metadata_wait_ms:this.sourceMetadataWaitMS||0,decoder_wait_ms:this.decoderWaitMS||0,message_bytes:this.pendingBytes||0,
     websocket_open_ms:this.websocketOpenAt==null?null:this.websocketOpenAt-this.started,decoder_configured_ms:this.decoderConfiguredAt==null?null:this.decoderConfiguredAt-this.started,first_video_packet_ms:this.firstVideoPacketAt==null?null:this.firstVideoPacketAt-this.started,bootstrap_decode_ms:this.decoderConfiguredAt==null||this.firstFrameMS===null?null:this.firstFrameMS-(this.decoderConfiguredAt-this.started),
     bootstrap_packets_superseded:this.bootstrapSkippedPackets||0,bootstrap_keyframe_replacements:this.bootstrapKeyReplacements||0,
     measured_end_to_end_latency_ms:null,audio_state:this.audio?.state||'muted_or_not_started',audio_codec:this.audioInfo?.codec,audio_rate:this.audioInfo?.sampleRate,
@@ -57,7 +57,7 @@ export class EdgeRTCClient {
     try{
       if(typeof data==='string'){
         const msg=JSON.parse(data);if(msg.type==='error'){this.fail(`EdgeRTC: ${msg.code}`);return;}if(msg.type!=='hello'||msg.protocol!=='edgertc/1')return;
-        this.bootstrapTimestamp=Number.isFinite(msg.bootstrap_timestamp_us)?msg.bootstrap_timestamp_us:null;this.audioInfo=msg.audio;this.microphoneSupported=Boolean(msg.microphone?.supported);
+        this.bootstrapTimestamp=Number.isFinite(msg.bootstrap_timestamp_us)?msg.bootstrap_timestamp_us:null;this.sourceMetadataWaitMS=Number(msg.metadata_wait_ms||0);this.audioInfo=msg.audio;this.microphoneSupported=Boolean(msg.microphone?.supported);
         this.bootstrapFloorTimestamp=this.latestBootstrapKey==null?this.bootstrapTimestamp:Math.max(this.bootstrapTimestamp??this.latestBootstrapKey,this.latestBootstrapKey);this.bootstrapPackets=Number(msg.bootstrap_packets||0);
         this.diagnostics?.note('rtc_bootstrap',{source:this.diagnosticKey,packets:this.bootstrapPackets,bytes:msg.bootstrap_bytes||0,refreshed_before_send:Boolean(msg.bootstrap_refreshed),has_keyframe:this.bootstrapTimestamp!==null});
         const configuration={codec:msg.video.codec,optimizeForLatency:true,hardwareAcceleration:'prefer-hardware'};
@@ -173,7 +173,7 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   audioModule(){
-    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.12.4',import.meta.url).href);
+    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.13.0',import.meta.url).href);
   }
   startAudioPlayback(){
     if(this.audioPlaybackPromise||this.closed||this.audioDisabled)return;

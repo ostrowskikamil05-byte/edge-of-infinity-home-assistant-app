@@ -25,7 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const version = "0.12.4"
+const version = "0.13.0"
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -36,10 +36,12 @@ type sourceConfig struct {
 	Microphone bool     `json:"microphone"`
 }
 type config struct {
-	RTSP    string         `json:"rtsp"`
-	HTTP    string         `json:"http"`
-	Token   string         `json:"token"`
-	Sources []sourceConfig `json:"sources"`
+	RTSP       string            `json:"rtsp"`
+	HTTP       string            `json:"http"`
+	Token      string            `json:"token"`
+	Sources    []sourceConfig    `json:"sources"`
+	Recordings string            `json:"recordings"`
+	Archives   map[string]string `json:"archives"`
 }
 
 func readConfig(path string) (config, error) {
@@ -72,16 +74,19 @@ func readConfig(path string) (config, error) {
 }
 
 type app struct {
-	cfg      config
-	mu       sync.RWMutex
-	sources  map[string]*source
-	paths    map[string]*source
-	rtsp     *gortsplib.Server
-	server   *http.Server
-	listener net.Listener
-	stop     chan struct{}
-	closed   bool
-	readers  sync.Map
+	cfg          config
+	mu           sync.RWMutex
+	sources      map[string]*source
+	paths        map[string]*source
+	rtsp         *gortsplib.Server
+	server       *http.Server
+	listener     net.Listener
+	stop         chan struct{}
+	closed       bool
+	readers      sync.Map
+	archiveRoot  string
+	archiveKeys  map[string]string
+	archiveSlots chan struct{}
 }
 
 const relayWriteQueueSize = 4096 // bounded burst capacity for large 4K I-frames
@@ -93,7 +98,7 @@ type relayReader struct {
 }
 
 func newApp(c config) (*app, error) {
-	a := &app{cfg: c, sources: map[string]*source{}, paths: map[string]*source{}, stop: make(chan struct{})}
+	a := &app{cfg: c, sources: map[string]*source{}, paths: map[string]*source{}, stop: make(chan struct{}), archiveSlots: make(chan struct{}, 4)}
 	a.rtsp = &gortsplib.Server{RTSPAddress: c.RTSP, Handler: a, WriteQueueSize: relayWriteQueueSize, WriteTimeout: 5 * time.Second}
 	if e := a.rtsp.Start(); e != nil {
 		return nil, e
@@ -115,6 +120,13 @@ func (a *app) reload(c config) {
 	if a.closed {
 		a.mu.Unlock()
 		return
+	}
+	a.archiveRoot = c.Recordings
+	a.archiveKeys = map[string]string{}
+	for key, directory := range c.Archives {
+		if validID.MatchString(key) && validID.MatchString(directory) {
+			a.archiveKeys[key] = directory
+		}
 	}
 	old := []*source{}
 	for id, s := range a.sources {
@@ -199,12 +211,22 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out := []any{}
 		a.mu.RLock()
 		for _, s := range a.sources {
-			out = append(out, s.status())
+			row := s.status()
+			paths := []string{}
+			for path, owner := range a.paths {
+				if owner == s {
+					paths = append(paths, path)
+				}
+			}
+			row["paths"] = paths
+			out = append(out, row)
 		}
 		a.mu.RUnlock()
 		reply(w, 200, map[string]any{"engine": "edge_rtc", "protocol": "edgertc/1", "sources": out, "policy": "one_upstream_per_camera"})
 	case strings.HasPrefix(r.URL.Path, "/api/stream/") && r.Method == "GET":
 		a.stream(w, r, strings.TrimPrefix(r.URL.Path, "/api/stream/"))
+	case strings.HasPrefix(r.URL.Path, "/api/archive/") && r.Method == "GET":
+		a.archive(w, r, strings.TrimPrefix(r.URL.Path, "/api/archive/"))
 	default:
 		reply(w, 404, map[string]string{"error": "not_found"})
 	}
@@ -223,12 +245,25 @@ func (a *app) stream(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 	defer ws.Close()
+	metadataStarted := time.Now()
 	v, hello, cache, e := s.attach(r.URL.Query().Get("microphone") == "1")
+	// A warm-up race is not a permanent decoder failure. Keep this authenticated
+	// viewer on the same socket briefly while the existing source learns SPS/PPS.
+	for e != nil && (e.Error() == "camera_connecting" || e.Error() == "h264_or_h265_video_metadata_required") && time.Since(metadataStarted) < 3*time.Second {
+		s.requestKeyframe()
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+		v, hello, cache, e = s.attach(r.URL.Query().Get("microphone") == "1")
+	}
 	if e != nil {
 		ws.WriteJSON(map[string]string{"type": "error", "code": e.Error()})
 		return
 	}
 	defer s.detach(v)
+	hello["metadata_wait_ms"] = time.Since(metadataStarted).Milliseconds()
 	hello["keyframe_request_sent"] = false
 	if len(cache) == 0 || len(cache) >= 40 {
 		hello["keyframe_request_sent"] = s.requestKeyframe()
@@ -351,6 +386,11 @@ func (a *app) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, err
 		}
 	}
 	a.readers.Store(ctx.Session, &relayReader{source: a.lookup(ctx.Path), role: role})
+	if role == "recording" {
+		if source := a.lookup(ctx.Path); source != nil {
+			source.requestKeyframe()
+		}
+	}
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
 
