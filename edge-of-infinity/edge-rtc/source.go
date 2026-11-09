@@ -173,7 +173,7 @@ func (s *source) readOnce() (result error) {
 	closeClient := func() { once.Do(func() { c.Close() }) }
 	c.OnDecodeError = func(err error) { s.handleSourceDecodeError(err, time.Now(), closeClient) }
 	c.OnRequest = s.connection.request
-	c.OnResponse = s.connection.response
+	c.OnResponse = s.handleRTSPResponse
 	done := make(chan struct{})
 	go func() {
 		select {

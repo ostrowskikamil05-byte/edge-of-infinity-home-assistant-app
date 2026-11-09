@@ -1,5 +1,31 @@
 # Edge of Infinity App Documentation
 
+## 0.13.3: UNV optional talk AAC compatibility
+
+Update the app to `0.13.3` and reopen Edge. Version/build: `0.13.3` /
+`unv-sdp-v133`. Restart Home Assistant Core to refresh the bundled integration
+if it is installed. Camera codec settings do not need changing.
+
+The reported UNV failure is RTSP 200 at DESCRIBE followed by
+`invalid SDP: media 3 is invalid: config is missing`. A valid H265 video track
+and AAC 48 kHz mono track can coexist with a malformed AAC alternative in the
+optional ONVIF microphone track. The library previously rejected all of them.
+
+Edge now filters only invalid AAC alternatives from explicitly `sendonly` audio
+before library parsing, on the same RTSP connection. Valid PCMA/PCMU microphone
+formats remain. If no valid optional format remains, that optional track is
+omitted. The whole candidate SDP must still pass normal validation; forward
+video/audio and unrelated errors are not bypassed. No AAC config is guessed.
+Original video quality/FPS, source AAC copy, recording settings and retention
+are preserved. No extra probe or physical camera session is created.
+
+The event `rtsp_optional_audio_filtered` records the camera ID, media index and
+discarded payload number without control URLs or credentials. Source diagnostics
+include `connection.optional_audio_filtered`; `sdp_formats` keeps the original
+camera declarations, now with media indices and directions. AAC configuration
+belongs to its own media, even when forward and talk tracks reuse payload 104.
+
+
 ## 0.13.2: RTSP negotiation and source errors
 
 Update the app, restart Home Assistant Core, then reopen Edge through HA.

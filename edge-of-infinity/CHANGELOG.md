@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.3
+
+- Fix RTSP DESCRIBE failure when a camera advertises optional backchannel AAC
+  without its configuration. Discard only invalid AAC alternatives in explicitly
+  sendonly audio; retain valid G711 microphone alternatives and source H265/AAC.
+  Validate the complete description before applying the compatibility filter.
+- Apply the filter before library SDP parsing on the existing camera connection.
+  Do not guess AAC configuration, rewrite source profiles or add camera clients.
+  Forward-media and unrelated SDP errors remain visible.
+- Log `rtsp_optional_audio_filtered` with camera, media index and payload number.
+  Keep AAC configuration diagnostics scoped to the media, so a duplicate PT104
+  cannot borrow another track's config. Include direction and media index.
+- Reproduce the reported media-3 missing-config error in regression tests; verify
+  original HEVC/AAC RTP at the recorder, live frame delivery and G711 microphone
+  on one physical upstream. Retain recorder metadata retries and existing NVR.
+
 ## 0.13.2
 
 - Retain and report camera connection failures previously discarded by the
