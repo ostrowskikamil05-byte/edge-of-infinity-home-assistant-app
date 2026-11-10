@@ -14,7 +14,7 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
     await page.locator('[name="camera-0-name"]').fill('Settings');await page.locator('[name="camera-0-password"]').fill('Private-test-<tag>-ąć');
     await page.evaluate(()=>showPage('edge-settings'));
     const state=await page.evaluate(()=>({config:JSON.stringify(config),dirty:configDirty}));assert(state.dirty);
-    await page.evaluate(()=>{window.savedMedia=[...document.querySelectorAll('video,canvas,iframe')];window.savedForm=document.querySelector('[data-camera-form]');});
+    await page.evaluate(()=>{window.savedMedia=[...document.querySelectorAll('video,canvas,iframe')];window.savedForm=document.querySelector('[data-camera-form]');const raw=document.createElement('section');raw.dataset.logEvents='';raw.id='language-raw-fixture';raw.textContent='Recordings';document.body.append(raw);const code=document.createElement('pre');code.id='language-code-fixture';code.textContent='Settings';document.body.append(code);});
     for(const [code,[recordings,settings]]of Object.entries(labels)){
      await page.locator('#edge-language').selectOption(code);
      await page.waitForFunction(code=>document.documentElement.lang===code,code);
@@ -24,6 +24,7 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
      assert.equal(await page.locator('[data-camera-summary]').first().textContent(),'Settings');
      assert.equal(await page.locator('[name="camera-0-password"]').inputValue(),'Private-test-<tag>-ąć');
      assert(await page.evaluate(()=>savedForm===document.querySelector('[data-camera-form]')&&savedMedia.every(n=>n.isConnected)),'language replaced form/media elements');
+     assert.equal(await page.locator('#language-raw-fixture').textContent(),'Recordings');assert.equal(await page.locator('#language-code-fixture').textContent(),'Settings');
      assert.equal(await page.evaluate(()=>JSON.stringify(config)),state.config);assert(await page.evaluate(()=>configDirty));
      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'localized phone UI overflows: '+code);
     }

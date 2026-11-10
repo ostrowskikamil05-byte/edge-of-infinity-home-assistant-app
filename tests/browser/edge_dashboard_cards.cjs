@@ -31,6 +31,12 @@ const engine=process.env.EDGE_TEST_BROWSER==='webkit'?webkit:chromium;
    await rec(card=>card.shadowRoot.querySelector('.big').click());
    await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._index===0&&!card._front.paused&&card._front.videoWidth>0&&card._front.currentTime>.3;});
    assert(await rec(card=>card.shadowRoot.querySelector('.big').hidden&&card.shadowRoot.querySelector('.poster').hidden),'poster or play overlay covers the playing picture');
+   await page.waitForFunction(()=>Boolean(window.EdgeI18n));await rec(card=>{window.languageVideo=card._front;window.languageVideoSrc=card._front.currentSrc;});
+   for(const [code,title]of Object.entries({en:'Recordings',pl:'Nagrania',de:'Aufnahmen',fr:'Enregistrements',es:'Grabaciones',it:'Registrazioni',uk:'Записи'})){
+    await page.evaluate(code=>EdgeI18n.setPreference(code),code);assert.equal(await rec(card=>card.shadowRoot.querySelector('h2').textContent),title);
+    assert(await rec(card=>card._front===languageVideo&&card._front.currentSrc===languageVideoSrc&&!card._front.paused),'language interrupted HA recording playback');
+   }
+   await page.evaluate(()=>EdgeI18n.setPreference('auto'));
    await rec(card=>{card.shadowRoot.querySelector('[data-speed]').value='4';card.shadowRoot.querySelector('[data-speed]').dispatchEvent(new Event('change'));});
    await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._index===1&&!card._front.paused&&card._front.currentTime>.2&&card._front.videoWidth>0;});
    assert.equal(await rec(card=>card._front.playbackRate),4);

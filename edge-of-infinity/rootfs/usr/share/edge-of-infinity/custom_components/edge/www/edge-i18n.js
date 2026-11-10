@@ -482,7 +482,7 @@
   globalThis.addEventListener?.('languagechange',notify);
   function attach(root,{hass=parentHass,onChange=()=>{}}={}){
     // Translate leaf values only. Never replace elements or inspect media frames.
-    const skip='script,style,pre,code,textarea,input,video,canvas,iframe,[translate="no"],[data-i18n-ignore],.name,[data-camera-summary],.camera-summary small,#log-events,#device-log-events';
+    const skip='script,style,pre,code,textarea,input,video,canvas,iframe,[translate="no"],[data-i18n-ignore],.name,[data-camera-summary],.camera-summary small,[data-log-events],#device-log-view';
     const originals=new WeakMap(),attributes=new WeakMap();let language=resolve(hass()),scheduled=false,closed=false;
     const blocked=node=>!node||node.closest?.(skip);
     const lookup=message;
