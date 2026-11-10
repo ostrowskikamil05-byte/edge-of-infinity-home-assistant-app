@@ -25,7 +25,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
   seek(file,at,{paused=this.paused,rate=this.speed}={}){
     if(this.closed)return;
     this.epoch=(this.epoch+1)>>>0||1;this.request={file,at:Math.max(0,Number(at)||0)};this.paused=paused;this.speed=Math.min(4,Math.max(.5,Number(rate)||1));this.position=this.request.at;this.handlingFailure=false;clearTimeout(this.recoveryTimer);clearTimeout(this.yieldTimer);if(this.options.hass)edgeMediaCoordinator().claim(this);
-    this.target=Math.round(this.request.at*1e6);this.seekStarted=performance.now();this.picture=false;this.playing=false;this.eof=false;this.networkEOF=false;this.ended=false;this.pulling=false;this.pendingPulls=0;this.queuedBatches=0;this.batchTimes=[];this.batchCount=0;this.sentEpoch=0;this.originWall=null;this.prerollFrames=0;this.seekBytes=0;this.audioDrainEpoch=null;this.archiveVideoPending=0;
+    this.target=Math.round(this.request.at*1e6);this.seekStarted=performance.now();this.picture=false;this.playing=false;this.eof=false;this.networkEOF=false;this.ended=false;this.pulling=false;this.pendingPulls=0;this.queuedBatches=0;this.batchTimes=[];this.batchCount=0;this.sentEpoch=0;this.originWall=null;this.lastPresentationAt=null;this.archiveMaxPresentationGapMS=0;this.prerollFrames=0;this.seekBytes=0;this.audioDrainEpoch=null;this.archiveVideoPending=0;
     // A replaced seek must not wait behind old decoder/backpressure promises.
     // Their callbacks remain epoch-guarded and own no new request's counters.
     this.messageChain=Promise.resolve();this.pendingMessages=0;this.pendingBytes=0;
@@ -164,9 +164,19 @@ export class EdgeDVRClient extends EdgeRTCClient {
     if(!this.frameQueue.length&&this.originWall!=null){const due=this.originWall+(frame.timestamp-this.originPTS)/1000/this.speed;if(performance.now()-due>80){this.originWall+=performance.now()-due;this.archiveRebuffers=(this.archiveRebuffers||0)+1;}}
     this.frameQueue.push({frame});this.scheduleDraw();
   }
-  scheduleDraw(){if(this.closed||this.paused||this.renderRequest!=null)return;this.renderRequest=requestAnimationFrame(()=>this.drawArchiveFrame());}
+  clearFrames(){clearTimeout(this.drawTimer);super.clearFrames();}
+  scheduleDraw(){
+    if(this.closed||this.paused||this.renderRequest!=null)return;
+    const epoch=this.epoch,run=fallback=>{if(this.closed||epoch!==this.epoch||this.renderRequest==null)return;if(fallback)this.archivePresentationFallbacks=(this.archivePresentationFallbacks||0)+1;this.drawArchiveFrame();};
+    this.renderRequest=requestAnimationFrame(()=>run(false));
+    // WebKit may throttle RAF below the source FPS while audio is still live.
+    // Race it against the next frame's media deadline, canceling the loser.
+    // Deliver every 1x picture; no source/recording FPS or codec is changed.
+    const head=this.frameQueue[0],wait=head&&this.originWall!=null?this.originWall+(head.frame.timestamp-this.originPTS)/1000/this.speed-performance.now():(head?4:40);
+    this.drawTimer=setTimeout(()=>run(true),Math.min(40,Math.max(1,wait)));
+  }
   drawArchiveFrame(){
-    this.renderRequest=null;if(this.closed||this.paused)return;
+    if(this.renderRequest!=null)cancelAnimationFrame(this.renderRequest);clearTimeout(this.drawTimer);this.renderRequest=null;if(this.closed||this.paused)return;
     let item=this.frameQueue[0];const now=performance.now();
     if(this.speed>1&&this.originWall!=null){while(this.frameQueue.length>1&&this.originWall+(this.frameQueue[1].frame.timestamp-this.originPTS)/1000/this.speed<=now){this.frameQueue.shift().frame.close();this.droppedFrames++;}item=this.frameQueue[0];}
     if(item){
@@ -184,6 +194,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
     const first=!this.picture;this.width=frame.displayWidth;this.height=frame.displayHeight;
     if(this.canvas.width!==this.width||this.canvas.height!==this.height){this.canvas.width=this.width;this.canvas.height=this.height;}
     try{this.context??=this.canvas.getContext('2d',{alpha:false,desynchronized:true});if(!this.context)throw Error('canvas_unavailable');this.context.drawImage(frame,0,0,this.width,this.height);this.position=frame.timestamp/1e6;}catch(error){this.nativeFallback('canvas_unavailable','Nie udało się wyświetlić klatki EdgeRTC DVR. Pobierz nagranie, aby otworzyć je w innym odtwarzaczu.');return;}finally{frame.close();}
+    const presentedAt=performance.now();if(this.lastPresentationAt!=null)this.archiveMaxPresentationGapMS=Math.max(this.archiveMaxPresentationGapMS||0,presentedAt-this.lastPresentationAt);this.lastPresentationAt=presentedAt;
     this.connectionStage='playing';this.picture=true;this.frames++;this.playing=!this.paused;clearTimeout(this.connectTimer);clearTimeout(this.seekTimer);this.options.onWaiting?.(false);
     if(first){
       this.seekMS=performance.now()-this.seekStarted;this.firstFrameMS??=performance.now()-this.started;
@@ -214,6 +225,6 @@ export class EdgeDVRClient extends EdgeRTCClient {
     }finally{if(this.audioDrainEpoch===epoch)this.audioDrainEpoch=null;}
   }
   playPCM(channels,rate,timestamp){if(!this.paused)super.playPCM(channels,rate*this.speed,Math.round(this.target+(timestamp-this.target)/this.speed));}
-  diagnosticState(){return {...super.diagnosticState(),transport:'edgertc/archive/1',epoch:this.epoch,paused:this.paused,seconds:this.position,seek_ms:this.seekMS,preroll_frames:this.prerollFrames,indexed_file:this.request?.file,archive_buffer_frames:this.frameQueue.length,archive_video_pending:this.archiveVideoPending,archive_audio_packets:this.archiveAudio.length,archive_audio_limit_ms:600,pull_pending:this.pulling,archive_network_rtt_ms:Math.round(this.archiveRTT||0),archive_lookahead_ms:Math.round((this.archiveLookahead||.4)*1000),archive_rebuffers:this.archiveRebuffers||0,archive_batch_count:this.batchCount,archive_batch_bytes:this.batchBytes??null,archive_byte_budget:this.archiveByteBudget?524288:null,archive_pending_pulls:this.pendingPulls,archive_queued_batches:this.queuedBatches,archive_batch_transfer_ms:this.batchTransferMS??null,archive_batch_read_ms:this.batchReadMS??null,archive_batch_server_ms:this.batchServerMS??null};}
+  diagnosticState(){return {...super.diagnosticState(),transport:'edgertc/archive/1',source_fps:this.frameDuration?1e6/this.frameDuration:null,archive_presentation_fallbacks:this.archivePresentationFallbacks||0,archive_max_presentation_gap_ms:Math.round(this.archiveMaxPresentationGapMS||0),epoch:this.epoch,paused:this.paused,seconds:this.position,seek_ms:this.seekMS,preroll_frames:this.prerollFrames,indexed_file:this.request?.file,archive_buffer_frames:this.frameQueue.length,archive_video_pending:this.archiveVideoPending,archive_audio_packets:this.archiveAudio.length,archive_audio_limit_ms:600,pull_pending:this.pulling,archive_network_rtt_ms:Math.round(this.archiveRTT||0),archive_lookahead_ms:Math.round((this.archiveLookahead||.4)*1000),archive_rebuffers:this.archiveRebuffers||0,archive_batch_count:this.batchCount,archive_batch_bytes:this.batchBytes??null,archive_byte_budget:this.archiveByteBudget?524288:null,archive_pending_pulls:this.pendingPulls,archive_queued_batches:this.queuedBatches,archive_batch_transfer_ms:this.batchTransferMS??null,archive_batch_read_ms:this.batchReadMS??null,archive_batch_server_ms:this.batchServerMS??null};}
   close(){clearTimeout(this.recoveryTimer);clearTimeout(this.yieldTimer);if(this.options.hass)edgeMediaCoordinator().release(this);clearTimeout(this.pullTimer);clearTimeout(this.seekTimer);this.archiveAudio=[];super.close();}
 }

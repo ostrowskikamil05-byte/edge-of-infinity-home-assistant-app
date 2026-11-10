@@ -12,6 +12,9 @@
 - Connect the authenticated HA archive bridge directly to the same private
   EdgeRTC core used by Live. Preserve entity permissions, exact alert ownership,
   signed URLs and the remote-installation bridge fallback.
+- Keep visible DVR at the media frame deadline when WebKit throttles animation
+  callbacks, preventing video-paced AAC starvation. Cancel both scheduling paths
+  on seek/pause/close and report fallback/gap metrics. Preserve every 1x picture.
 - Adapt bounded DVR read-ahead/batches to measured transport RTT. Keep original
   resolution, codec and 1x FPS; rebase presentation after a network gap rather
   than racing through delayed pictures. Support 48 kHz AAC at 4x playback speed.
