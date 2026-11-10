@@ -53,6 +53,15 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
 
   }
   assert((await picture()).bright>2000);
+  if(audioDecoder){
+   await page.evaluate(()=>archivePlayers.get(window.fixtureDVRIndex).client.setRate(4));
+   await page.waitForFunction(()=>{const c=archivePlayers.get(window.fixtureDVRIndex).client;return c.picture&&c.speed===4&&c.playing;});
+   const rateStart=await page.evaluate(()=>archivePlayers.get(window.fixtureDVRIndex).position);await page.waitForTimeout(1800);
+   const fast=await page.evaluate(()=>{const c=archivePlayers.get(window.fixtureDVRIndex).client,a=new Float32Array(dvrAnalyser.fftSize);dvrAnalyser.getFloatTimeDomainData(a);return{position:archivePlayers.get(window.fixtureDVRIndex).position,state:c.diagnosticState(),audible:a.some(v=>Math.abs(v)>.01)};});
+   assert(fast.position-rateStart>5.5&&fast.position-rateStart<8.2,'4x playback did not advance at requested speed: '+JSON.stringify(fast));
+   assert(fast.audible,'4x AAC produced no PCM');assert.equal(fast.state.audio_overruns,0);assert.equal(fast.state.audio_dropped_packets,0);
+   await page.evaluate(()=>archivePlayers.get(window.fixtureDVRIndex).client.setRate(1));
+  }
   await seek(47.8);await page.waitForFunction(()=>{const p=archivePlayers.get(window.fixtureDVRIndex);return p.client?.picture&&p.wantPlay&&p.client.request.file.endsWith('000048.mp4')&&p.position>=48.1;});
   const diagnostics=await page.evaluate(()=>archivePlayers.get(window.fixtureDVRIndex).client.diagnosticState());assert.equal(diagnostics.transport,'edgertc/archive/1');assert(Number.isFinite(diagnostics.seek_ms));assert(diagnostics.archive_buffer_frames<=24);
   await page.evaluate(()=>showPage('home'));assert(await page.evaluate(()=>[...archivePlayers.values()].every(p=>!p.client)),'hidden NVR retained a decoder/socket');

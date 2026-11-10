@@ -409,6 +409,10 @@ func TestBrowserFixture(t *testing.T) {
 	}()
 	defer close(c.done)
 	cfg := config{RTSP: freeAddress(), HTTP: freeAddress(), Token: strings.Repeat("fixture-private-", 4), Sources: []sourceConfig{{ID: "front", URL: "rtsp://" + c.server.RTSPAddress + "/camera", Paths: []string{"front_main", "front_sub"}, Microphone: true}}}
+	if directory := os.Getenv("EDGE_RTC_TEST_RECORDINGS"); directory != "" {
+		cfg.Recordings = directory
+		cfg.Archives = map[string]string{"front_0": "front"}
+	}
 	a, e := newApp(cfg)
 	if e != nil {
 		t.Fatal(e)

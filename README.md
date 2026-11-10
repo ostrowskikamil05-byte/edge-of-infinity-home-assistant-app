@@ -7,14 +7,16 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.16.0** uses indexed EdgeRTC DVR for the panel and Home Assistant
-recordings/events cards. MP4 is kept for downloading the original recordings.
-Visible Live views receive original camera quality; views outside the dashboard
-viewport release their browser decoders while the server keeps the source warm.
-The update also fixes vertical touch scrolling and shares a bounded, per-user
-thumbnail cache. Existing card configuration, seven interface languages,
-original resolution/FPS/AAC and 14-day retention are preserved.
-See [migration and setup](edge-of-infinity/DOCS.md).
+Version **0.17.0** improves shared Live/DVR playback on phones and Home Assistant
+cards, adds accurate playback diagnostics and bounded network-aware archive
+prefetch. Original camera resolution, codec, 1x FPS, AAC and retention remain
+unchanged. MP4 is retained for original-file downloads.
+
+Live, DVR, events and dashboard cards can work entirely locally without Nabu
+Casa. An optional HTTPS setup prepares a local certificate, a trusted-proxy
+configuration snippet and a disabled-by-default gateway on port 8443.
+See [local HTTPS setup](edge-of-infinity/DOCS.md#local-https-without-nabu-casa).
+After updating the app, restart **Home Assistant Core** and reload the dashboard.
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:
 

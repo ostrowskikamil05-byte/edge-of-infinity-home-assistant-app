@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.16.0"
+version: "0.17.0"
 slug: edge_of_infinity
 description: Local live and NVR core for Hikvision, Uniview, Reolink and ONVIF/RTSP cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -26,7 +26,9 @@ ports:
   8088/tcp: 8088
   8556/tcp: null
   9997/tcp: null
+  8443/tcp: null
 ports_description:
+  8443/tcp: Optional local HTTPS gateway for Home Assistant; enable and trust its certificate first
   8088/tcp: Edge Core API and web interface
   8556/tcp: Shared core RTSP feed, host exposure disabled by default
   9997/tcp: Private streaming core API, host exposure disabled by default

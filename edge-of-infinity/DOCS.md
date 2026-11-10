@@ -1,10 +1,72 @@
 # Edge of Infinity
 
+## 0.17.0: shared mobile playback and local HTTPS
+
+Update Edge, restart **Home Assistant Core** to load the bundled integration,
+and fully reopen the dashboard/Companion app to load the new card modules.
+Existing card YAML, cameras, recording paths, original codecs/FPS and retention
+are preserved. Live and DVR share browser decoder resources on phones/tablets;
+pausing DVR releases its decoder and lets visible Live resume. The camera
+connection stays warm on the server throughout. A remote network still needs
+sufficient throughput for the original camera bitrate; no fixed instant-start
+or zero-buffering guarantee is made.
+
+### Local HTTPS without Nabu Casa
+
+**All Live, DVR, recording, seeking, alerts and HA dashboard functions remain
+available locally.** EdgeRTC uses WebCodecs, which browsers require to run in a
+secure context. A LAN HTTP address does not meet that requirement. If HA already
+has a working trusted local HTTPS address, use it; no new gateway is needed.
+
+For a standard HA OS installation with HA listening on HTTP port 8123:
+
+1. Open **Edge panel → Settings → Network → Local HTTPS**. Enter the exact LAN
+   IP/hostname clients will use; reserve that IP in the router if needed. Add any
+   extra DNS names that resolve to this same HA machine. Do not include a scheme
+   or port in the certificate fields. Select **Prepare local certificate**.
+2. Download the **public CA certificate**, preferably from your existing trusted
+   HA/Nabu Casa session. Compare its SHA-256 fingerprint with the setup page.
+   Private keys remain in the persistent Edge directory and are never downloaded.
+3. Install/trust that CA on each device. On iPhone/iPad, install the profile,
+   then enable full trust under **Settings → General → About → Certificate Trust
+   Settings**. Android/computers must trust it in the store used by the browser/app.
+   Managed devices may restrict user CAs; use a trusted local certificate/proxy
+   already accepted by that device in that case. Do not bypass certificate warnings.
+4. Merge the generated `http:` snippet into Home Assistant's `configuration.yaml`.
+   Keep existing HTTP settings and existing `trusted_proxies`; add the exact proxy
+   IP shown by the wizard. Do not create a second `http:` block. Check configuration
+   and restart **HA Core**. The wizard writes a separate
+   `edge/local-https-home-assistant.yaml` helper and never edits HA YAML itself.
+5. In **HA → Apps → Edge of Infinity → Configuration → Network**, show disabled
+   ports and map **8443/tcp** to host port **8443** (or choose another free host
+   port). Then enable/save **Local HTTPS gateway** in the Edge network setup.
+   Use the mapped host port in your address; generated links assume 8443.
+6. Open `https://YOUR-LAN-IP:8443`, sign in to HA normally and open Edge/dashboard.
+   In Companion configure that address as the **internal connection URL** for
+   your home Wi-Fi. Keep the existing Nabu Casa/external URL for access away
+   from home, if used. No cloud account is needed for local operation.
+
+The gateway proxies the whole HA to `http://homeassistant:8123`, including HA
+WebSockets and Ingress; it does not expose the private EdgeRTC core or bypass HA
+login/entity permissions. It is off and its host port is unmapped by default.
+Enable it only after proxy/certificate setup. A failure of this optional listener
+does not stop Live sources or recorders. Disabling it closes its own sockets;
+access through your original HA address is retained. If an app reinstall changes
+the proxy's internal IP, refresh the snippet and update that exact trusted proxy.
+To change certificate addresses, disable the gateway first, prepare the new
+certificate and enable it again. The existing CA is retained, so normally you do
+not reinstall trust when adding a hostname. The server certificate lasts one
+year; renew it using the same procedure before the displayed expiry date.
+
+Reference: [HA HTTP and trusted proxies](https://www.home-assistant.io/integrations/http/),
+[Companion internal/external URLs](https://companion.home-assistant.io/docs/troubleshooting/networking/),
+[WebCodecs secure-context requirement](https://developer.mozilla.org/en-US/docs/Web/API/VideoDecoder).
+
 ## 0.15.2: automatic and manual interface languages
 
 EdgeRTC is the sole streaming core. Update the app, restart Home Assistant Core
 if the bundled integration is installed, and reopen Edge through the HA sidebar.
-The version/build is `0.15.2` / `languages-v152`.
+The current version/build is `0.17.0` / `shared-sessions-v170`.
 
 The panel and Live/recordings/events cards support Polish, English, German,
 French, Spanish, Italian and Ukrainian (`pl`, `en`, `de`, `fr`, `es`, `it`, `uk`).

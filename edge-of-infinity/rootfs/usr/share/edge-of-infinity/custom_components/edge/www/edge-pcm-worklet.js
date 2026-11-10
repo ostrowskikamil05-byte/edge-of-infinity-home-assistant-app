@@ -12,7 +12,7 @@ registerProcessor('edge-pcm',EdgePCM);
 class EdgePlayback extends AudioWorkletProcessor {
   constructor(options={}){
     super();this.archive=options.processorOptions?.mode==='archive';this.networkTarget=0;this.bufferSeconds=this.archive ? .6 : .24;this.startSeconds=this.archive ? .12 : .08;
-    this.size=this.archive?65536:131072;this.mask=this.size-1;this.ring=[new Float32Array(this.size),new Float32Array(this.size)];this.outputFrames=0;this.underruns=0;this.overruns=0;this.droppedFrames=0;this.statsFrames=0;this.reset();
+    this.size=131072;this.mask=this.size-1;this.ring=[new Float32Array(this.size),new Float32Array(this.size)];this.outputFrames=0;this.underruns=0;this.overruns=0;this.droppedFrames=0;this.statsFrames=0;this.reset();
     this.networkPolicy(options.processorOptions?.network_target_ms||0);
     this.port.onmessage=event=>{if(event.data.type==='clear')this.reset();else if(event.data.type==='pcm')this.append(event.data);else if(event.data.type==='network')this.networkPolicy(event.data.target_ms);};
   }
@@ -30,7 +30,7 @@ class EdgePlayback extends AudioWorkletProcessor {
   reset(){this.read=0;this.write=0;this.rate=0;this.playing=false;this.waited=0;this.waitSeconds=this.startSeconds;this.attack=0;this.nextStamp=null;this.last=[0,0];this.tail=0;}
   append(packet){
     const {channels,rate,timestamp}=packet,n=channels?.[0]?.length;
-    if(!Number.isFinite(rate)||rate<8000||rate>96000||!n||n>rate*.25||channels.length>2||channels.some(c=>c.length!==n))return;
+    if(!Number.isFinite(rate)||rate<8000||rate>(this.archive?192000:96000)||!n||n>rate*.25||channels.length>2||channels.some(c=>c.length!==n))return;
     if(this.rate&&this.rate!==rate)this.reset();this.rate=rate;
     const gap=this.nextStamp==null||!Number.isFinite(timestamp)?0:(timestamp-this.nextStamp)/1e6;
     if(gap<-.002&&gap> -2){this.droppedFrames+=n;return;}
