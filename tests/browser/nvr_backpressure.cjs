@@ -21,7 +21,7 @@ const assert=require('node:assert/strict');
    assert(recordings.every(url=>url.includes('000000.mp4')),'a busy JPEG triggered full-video preview downloads');
    await page.route('**/api/detection',route=>route.fulfill({json:{model:'NanoDet',model_installed:true,max_fps:1,analysis_ms:100,cameras:[{id:'front',name:'Front',camera_status:'disabled',local_status:'running',supported_kinds:['person'],states:{person:false},decoder:{backend:'cpu_keyframes',fallback_reason:'cpu_overload'}}]}}));
    await nav('events');await page.locator('#detection-cameras .notice.warning').waitFor();
-   assert((await page.locator('#detection-cameras .notice.warning').textContent()).includes('mogą zostać pominięte'),'resource-saving AI limitation is hidden');
+   assert((await page.locator('#detection-cameras .notice.warning').textContent()).includes('may be missed'),'resource-saving AI limitation is hidden');
    await nav('edge-settings');await page.locator('[name="detection-decoder"]').evaluate(node=>node.closest('details').open=true);await page.locator('[name="detection-decoder"]').selectOption('keyframes');
    await page.locator('#save-edge-settings').click();await page.waitForFunction(()=>document.getElementById('edge-save-state').textContent.startsWith('Saved and verified.'));
    const config=await page.evaluate(()=>fetch('api/config').then(response=>response.json()));assert.equal(config.detection.decoder,'keyframes');

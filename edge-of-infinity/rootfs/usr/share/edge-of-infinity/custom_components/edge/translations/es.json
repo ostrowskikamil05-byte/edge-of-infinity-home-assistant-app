@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Conectar Edge of Infinity",
+        "description": "Usa local para el complemento instalado o la dirección API del servidor Edge. Las tarjetas de directo, grabaciones y eventos se registran automáticamente.",
+        "data": {
+          "url": "Dirección Edge",
+          "api_key": "Clave API"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "No se puede conectar con Edge of Infinity",
+      "invalid_auth": "Clave API incorrecta",
+      "invalid_url": "URL incorrecta",
+      "unknown": "Error inesperado"
+    },
+    "abort": {
+      "already_configured": "Edge of Infinity ya está configurado"
+    }
+  }
+}

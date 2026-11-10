@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.15.2
+
+- Add bundled interface translations for Polish, English, German, French,
+  Spanish, Italian and Ukrainian across the Edge panel and Live/recordings/events
+  cards, plus Home Assistant integration setup translations.
+- Detect HA profile/browser language automatically, normalize regional codes and
+  fall back to English. Add Settings → Language with a remembered browser
+  preference and optional per-card `language` selection.
+- Change labels and accessible text without replacing forms or reconnecting
+  media. Preserve user camera names, credentials, addresses, YAML and raw logs.
+- Add browser coverage for locale detection, manual switching, persistence,
+  same-origin preference updates, phone layout and continuous Live/DVR playback.
+  Camera profiles, source sharing, audio, original recordings and retention are
+  unchanged.
+
 ## 0.15.1
 
 - Build on 0.15.0, retaining its recordings/events dashboard cards, authenticated

@@ -13,6 +13,7 @@ go -C edge-of-infinity/edge-rtc test -race ./...
 node tests/edge_rtc_pacing.cjs
 node tests/edge_rtc_audio.cjs
 node tests/edge_log_view.cjs
+node tests/edge_i18n.cjs
 node tests/browser/remote_live.cjs
 node tests/browser/edge_rtc_support.cjs
 ```
@@ -89,6 +90,12 @@ native Live test while AVC/HEVC MP4 remains covered by the DVR suites. These
 browser scenarios simulate delivery, not an actual mobile carrier or radio.
 
 ## Dashboard cards
+
+`interface_languages.cjs` checks the real panel in Chromium/WebKit: HA/browser
+locale priority, regional and unsupported locales, all seven manual choices,
+reload and cross-page persistence, intact private form values and media nodes.
+The native Live and indexed DVR suites also switch languages during playback
+and verify the same clients/sockets keep delivering original frames.
 
 ```sh
 EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 python tests/browser/fixture_server.py

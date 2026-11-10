@@ -7,11 +7,11 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.15.1** improves indexed DVR startup and seeking, smooths cellular
-Live adaptation and adds transparent branding. It includes the theme-aware
-`custom:edge-recordings-card` and `custom:edge-events-card` from 0.15.0.
-Original camera quality, source sharing, recordings and 14-day retention
-are preserved.
+Version **0.15.2** adds automatic and manual interface languages: Polish,
+English, German, French, Spanish, Italian and Ukrainian. The panel and HA cards
+use the HA profile language, then the browser language, with English fallback.
+Original camera quality, shared sources, DVR, dashboard cards and 14-day
+retention are preserved.
 See [migration and setup](edge-of-infinity/DOCS.md).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:

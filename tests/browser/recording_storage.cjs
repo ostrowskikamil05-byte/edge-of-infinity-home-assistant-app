@@ -36,7 +36,7 @@ const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).diges
    assert.equal(status.storage.playback_cache_bytes,0);
    assert.equal(status.cameras[0].playback_cache.enabled,false);
    assert(status.storage.recordings_bytes>0&&status.cameras[0].bytes_per_day_estimate>0);
-   await page.waitForFunction(()=>document.querySelector('#edge-settings-form [data-recording-disk-usage]')?.textContent.includes('Szacunek'));
+   await page.waitForFunction(()=>document.querySelector('#edge-settings-form [data-recording-disk-usage]')?.textContent.includes('Continuous recording estimate'));
    await open('nvr');
    await page.waitForFunction(()=>document.querySelector('[data-recording-duration]')?.textContent.endsWith('/ 00:00:21'));
    assert.equal(await page.locator('video').getAttribute('data-recording-playback-mode'),'server_file_sequence');

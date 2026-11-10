@@ -1,10 +1,28 @@
 # Edge of Infinity
 
-## 0.15.1: faster DVR previews and transparent branding
+## 0.15.2: automatic and manual interface languages
 
 EdgeRTC is the sole streaming core. Update the app, restart Home Assistant Core
 if the bundled integration is installed, and reopen Edge through the HA sidebar.
-The version/build is `0.15.1` / `dvr-preview-v151`.
+The version/build is `0.15.2` / `languages-v152`.
+
+The panel and Live/recordings/events cards support Polish, English, German,
+French, Spanish, Italian and Ukrainian (`pl`, `en`, `de`, `fr`, `es`, `it`, `uk`).
+Automatic mode uses the Home Assistant profile language when available;
+standalone access uses the browser's preferred languages. Region variants such
+as `pl-PL` are supported; unsupported languages fall back to English.
+
+Select **Settings → Language → Interface language** to override automatic mode.
+The choice stays in this browser and is shared with Edge cards on the same HA
+origin. Return to Automatic to use the HA/browser setting again. A card can
+override the preference with `language: de` (also available in its editor).
+The integration's setup dialog follows HA's own profile language.
+
+Translations are bundled locally. Changing languages updates text and accessible
+labels without replacing forms, reconnecting cameras or restarting playback.
+Camera names, credentials, URLs, YAML, raw diagnostic data and recording files
+are preserved. Dates use the selected interface locale; recorder timezone and
+recording positions are unchanged.
 
 The update removes Janus and MediaMTX binaries, packages, startup services,
 configuration generators, engine selection, public media ports and obsolete
