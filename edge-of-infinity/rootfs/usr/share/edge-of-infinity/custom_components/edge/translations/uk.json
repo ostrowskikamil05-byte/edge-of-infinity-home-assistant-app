@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Підключити Edge of Infinity",
+        "description": "Використайте local для встановленого додатка або адресу API сервера Edge. Картки перегляду, записів і подій реєструються автоматично.",
+        "data": {
+          "url": "Адреса Edge",
+          "api_key": "Ключ API"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не вдалося підключитися до Edge of Infinity",
+      "invalid_auth": "Неправильний ключ API",
+      "invalid_url": "Неправильна URL-адреса",
+      "unknown": "Неочікувана помилка"
+    },
+    "abort": {
+      "already_configured": "Edge of Infinity вже налаштовано"
+    }
+  }
+}

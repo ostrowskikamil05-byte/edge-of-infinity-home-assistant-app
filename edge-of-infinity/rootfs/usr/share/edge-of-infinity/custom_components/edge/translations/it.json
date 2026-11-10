@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Collega Edge of Infinity",
+        "description": "Usa local per il componente installato o l’indirizzo API del server Edge. Le schede di diretta, registrazioni ed eventi vengono registrate automaticamente.",
+        "data": {
+          "url": "Indirizzo Edge",
+          "api_key": "Chiave API"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossibile collegarsi a Edge of Infinity",
+      "invalid_auth": "Chiave API non valida",
+      "invalid_url": "URL non valido",
+      "unknown": "Errore imprevisto"
+    },
+    "abort": {
+      "already_configured": "Edge of Infinity è già configurato"
+    }
+  }
+}

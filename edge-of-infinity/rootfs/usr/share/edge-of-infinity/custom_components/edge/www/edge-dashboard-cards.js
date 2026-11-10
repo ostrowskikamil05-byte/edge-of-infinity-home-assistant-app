@@ -1,6 +1,7 @@
 /* Edge of Infinity dashboard cards: recordings and events.
    All data comes through Home Assistant's authenticated /api/edge/dashboard bridge. */
-const EDGE_DASH_VERSION = "0.15.1";
+const EDGE_DASH_VERSION = "0.15.2";
+const edgeDashI18nReady=import('/edge/edge-i18n.js?v='+EDGE_DASH_VERSION).catch(()=>null);
 const EDGE_DASH_API = "edge/dashboard";
 const EDGE_DASH_OPEN = "edge-dashboard-open-recording";
 const EDGE_KINDS = ["person", "vehicle", "animal", "motion"];
@@ -29,7 +30,9 @@ const EDGE_ICONS = {
   motion:'<path d="M3 12h4l2-6 4 12 2-6h6"/>',
 };
 const edgeIcon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${EDGE_ICONS[name] || ""}</svg>`;
-const edgeLang = hass => (hass?.locale?.language || hass?.language || "en").startsWith("pl") ? "pl" : "en";
+const edgeLang = (hass,language) => globalThis.EdgeI18n?.resolve(hass,language)||((hass?.locale?.language||hass?.language||navigator.language||'en').toLowerCase().startsWith('pl')?'pl':'en');
+const edgeDashText=(hass,key,language)=>globalThis.EdgeI18n?.text(EDGE_DASH_TEXT.en[key]||({language:'Language'}[key])||key,hass,language)||EDGE_DASH_TEXT[edgeLang(hass)==='pl'?'pl':'en'][key]||key;
+const edgeLanguageSchema=()=>({name:'language',selector:{select:{mode:'dropdown',options:[{value:'auto',label:'Auto'},...Object.entries(globalThis.EdgeI18n?.languages||{en:'English',pl:'Polski',de:'Deutsch',fr:'Français',es:'Español',it:'Italiano',uk:'Українська'}).map(([value,label])=>({value,label}))]}}});
 const edgeClock = seconds => { const s = Math.max(0, Math.floor(seconds)); return [s / 3600, s / 60 % 60, s % 60].map(v => String(Math.floor(v)).padStart(2, "0")).join(":"); };
 const edgeEscape = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const edgeDayKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -114,7 +117,7 @@ class EdgeDashMedia {
 class EdgeDashCard extends HTMLElement {
   constructor() { super(); this.attachShadow({mode:"open"}); this._media = new EdgeDashMedia(this); }
   get hass() { return this._hass; }
-  _t(key) { return EDGE_DASH_TEXT[edgeLang(this._hass)][key] || key; }
+  _t(key) { return edgeDashText(this._hass,key,this._config?.language); }
   _cameras() { const wanted = this._config?.cameras; const known = edgeCameraIds(this._hass); return wanted?.length ? wanted.filter(id => this._hass?.states?.[id]) : known; }
   _name(entity) { return this._hass?.states?.[entity]?.attributes?.friendly_name || entity; }
   _api(path) { return this._hass.callApi("GET", `${EDGE_DASH_API}/${path}`); }
@@ -131,10 +134,10 @@ class EdgeDashCard extends HTMLElement {
   _dayLabel(day) {
     const now = new Date(); if (day === edgeDayKey(now)) return this._t("today");
     now.setDate(now.getDate() - 1); if (day === edgeDayKey(now)) return this._t("yesterday");
-    return new Intl.DateTimeFormat(edgeLang(this._hass), {weekday:"short", day:"numeric", month:"short"}).format(new Date(day + "T12:00:00"));
+    return new Intl.DateTimeFormat(edgeLang(this._hass,this._config?.language), {weekday:"short", day:"numeric", month:"short"}).format(new Date(day + "T12:00:00"));
   }
-  connectedCallback() { this._connected = true; this._visible = () => { if (!document.hidden) this._wake?.(); }; document.addEventListener("visibilitychange", this._visible); this._timer = setInterval(() => { if (!document.hidden) this._tick?.(); }, 60000); this._wake?.(); }
-  disconnectedCallback() { this._connected = false; document.removeEventListener("visibilitychange", this._visible); clearInterval(this._timer); this._sleep?.(); }
+  connectedCallback() { this._connected = true; edgeDashI18nReady.then(()=>{if(!this.isConnected||!globalThis.EdgeI18n)return;this._languageUnsubscribe?.();const refresh=()=>{this.lang=edgeLang(this._hass,this._config?.language);this._render();};this._languageUnsubscribe=EdgeI18n.subscribe(refresh);refresh();}); this._visible = () => { if (!document.hidden) this._wake?.(); }; document.addEventListener("visibilitychange", this._visible); this._timer = setInterval(() => { if (!document.hidden) this._tick?.(); }, 60000); this._wake?.(); }
+  disconnectedCallback() { this._connected = false; this._languageUnsubscribe?.(); document.removeEventListener("visibilitychange", this._visible); clearInterval(this._timer); this._sleep?.(); }
 }
 
 class EdgeRecordingsCard extends EdgeDashCard {
@@ -209,19 +212,20 @@ class EdgeRecordingsCard extends EdgeDashCard {
   }
   static getStubConfig() { return {type:"custom:edge-recordings-card"}; }
   static getConfigForm() {
-    return {schema:[{name:"title", selector:{text:{}}}, {name:"cameras", selector:{entity:{multiple:true, filter:{domain:"camera", integration:"edge"}}}}, {name:"muted", selector:{boolean:{}}}],
-      computeLabel:(schema, hass) => EDGE_DASH_TEXT[edgeLang(hass)][schema.name] || schema.name};
+    return {schema:[edgeLanguageSchema(),{name:"title", selector:{text:{}}}, {name:"cameras", selector:{entity:{multiple:true, filter:{domain:"camera", integration:"edge"}}}}, {name:"muted", selector:{boolean:{}}}],
+      computeLabel:(schema, hass) => edgeDashText(hass,schema.name)};
   }
   getCardSize() { return 9; }
   getGridOptions() { return {columns:"full", rows:"auto", min_columns:6}; }
   setConfig(config) { this._validate(config); this._config = {muted:false, ...config}; this._muted = Boolean(this._config.muted); this._entity = ""; this._render(); if (this._hass && this._connected) this._load(); }
-  set hass(value) { const first = !this._hass; this._hass = value; if (first) { this._render(); if (this._connected) this._load(); } else if (!this._entity && this._cameras().length) this._load(); }
+  set hass(value) { const first = !this._hass, oldLanguage = edgeLang(this._hass,this._config?.language); this._hass = value; if (!first && oldLanguage !== edgeLang(value,this._config?.language)) this._render(); if (first) { this._render(); if (this._connected) this._load(); } else if (!this._entity && this._cameras().length) this._load(); }
   get hass() { return this._hass; }
   _wake() { (window.__edgeRecordingCards ||= new Set()).add(this); window.addEventListener(EDGE_DASH_OPEN, this._open); if (this._hass && this._config && !this._files.length) this._load(); }
   _sleep() { window.__edgeRecordingCards?.delete(this); window.removeEventListener(EDGE_DASH_OPEN, this._open); this._stop(); }
   _tick() { if (this._entity && this._day === this._days?.[0]?.day && !this._dragging) this._load(this._day, true); }
   _render() {
     if (!this._config || !this._hass) return;
+    this.lang=edgeLang(this._hass,this._config.language);
     const label = (selector, key) => { const node = this._$(selector); node.title = this._t(key); node.setAttribute("aria-label", this._t(key)); };
     this._$("h2").textContent = this._config.title || this._t("recordings");
     label('[data-action="refresh"]', "refresh"); label('[data-action="earlier"]', "earlier"); label('[data-action="later"]', "later"); label('[data-action="back"]', "back"); label('[data-action="forward"]', "forward");
@@ -429,9 +433,9 @@ class EdgeEventsCard extends EdgeDashCard {
   }
   static getStubConfig() { return {type:"custom:edge-events-card"}; }
   static getConfigForm() {
-    return {schema:[{name:"title", selector:{text:{}}}, {name:"cameras", selector:{entity:{multiple:true, filter:{domain:"camera", integration:"edge"}}}},
+    return {schema:[edgeLanguageSchema(),{name:"title", selector:{text:{}}}, {name:"cameras", selector:{entity:{multiple:true, filter:{domain:"camera", integration:"edge"}}}},
       {name:"kinds", selector:{select:{multiple:true, mode:"list", options:EDGE_KINDS}}}, {name:"layout", selector:{select:{mode:"dropdown", options:["grid", "strip"]}}}, {name:"limit", selector:{number:{min:4, max:60, mode:"box"}}}, {name:"max_height", selector:{number:{min:0, max:2000, mode:"box"}}}],
-      computeLabel:(schema, hass) => EDGE_DASH_TEXT[edgeLang(hass)][{max_height:"maxHeight"}[schema.name] || schema.name] || schema.name};
+      computeLabel:(schema, hass) => edgeDashText(hass,{max_height:"maxHeight"}[schema.name] || schema.name)};
   }
   getCardSize() { return 8; }
   getGridOptions() { return {columns:12, rows:"auto", min_columns:6}; }
@@ -444,7 +448,7 @@ class EdgeEventsCard extends EdgeDashCard {
     this._render(); if (this._hass && this._connected) this._load();
   }
   set hass(value) {
-    const first = !this._hass; this._hass = value;
+    const first = !this._hass, oldLanguage = edgeLang(this._hass,this._config?.language); this._hass = value; if (!first && oldLanguage !== edgeLang(value,this._config?.language)) this._render();
     if (first) { this._render(); if (this._connected) this._load(); return; }
     const active = Object.entries(value.states).filter(([id, state]) => id.startsWith("binary_sensor.") && state.attributes?.edge_camera_id && state.state === "on").map(([id]) => id).join();
     if (active !== this._active) { const grew = active.length > (this._active || "").length; this._active = active; if (grew) { clearTimeout(this._soon); this._soon = setTimeout(() => this._tick(), 2500); } }
@@ -455,6 +459,7 @@ class EdgeEventsCard extends EdgeDashCard {
   _tick() { if (this._hass && this._config && this._connected && !this._loading) this._load(false, true); }
   _render() {
     if (!this._config || !this._hass) return;
+    this.lang=edgeLang(this._hass,this._config.language);
     this._$("h2").textContent = this._config.title || this._t("events");
     for (const [action, key] of [["refresh", "refresh"], ["close", "close"], ["previous", "previous"], ["next", "next"]]) { const node = this._$(`[data-action="${action}"]`); node.title = this._t(key); node.setAttribute("aria-label", this._t(key)); }
     this._$('[data-action="older"]').textContent = this._t("older"); this._$('[data-action="recordings"] span').textContent = this._t("inRecordings");

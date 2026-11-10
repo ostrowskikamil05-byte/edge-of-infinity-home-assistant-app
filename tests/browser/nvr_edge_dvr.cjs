@@ -17,6 +17,10 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
   const host=page.locator(`[data-dvr-host="${index}"]`),slider=host.locator('[data-dvr-seek]');
   await host.locator('[data-dvr-action="toggle"]').click();
   await page.waitForFunction(()=>{const p=archivePlayers.get(window.fixtureDVRIndex);return p.client?.picture&&p.wantPlay&&p.position>.2;});
+  await page.evaluate(()=>{const p=archivePlayers.get(window.fixtureDVRIndex);window.languageArchive={client:p.client,ws:p.client.ws,epoch:p.client.epoch,position:p.position};EdgeI18n.setPreference('de');});
+  await page.waitForTimeout(200);
+  assert(await page.evaluate(()=>{const p=archivePlayers.get(window.fixtureDVRIndex);return p.client===languageArchive.client&&p.client.ws===languageArchive.ws&&p.client.epoch===languageArchive.epoch&&p.wantPlay&&p.position>languageArchive.position;}),'language interrupted the archive player');
+  await page.evaluate(()=>EdgeI18n.setPreference('auto'));
   const picture=async()=>host.locator('canvas').evaluate(c=>{const small=document.createElement('canvas');small.width=160;small.height=90;const g=small.getContext('2d');g.drawImage(c,0,0,160,90);return {image:small.toDataURL(),bright:[...g.getImageData(0,0,160,90).data].filter((v,i)=>i%4!==3&&v>50).length,width:c.width,height:c.height};});
   const first=await picture();if(process.env.EDGE_DVR_SCREENSHOT)await host.screenshot({path:process.env.EDGE_DVR_SCREENSHOT});assert(first.bright>2000&&first.width===expectedWidth&&first.height===expectedHeight,'actual DVR picture is black or resized');
   const seek=async value=>slider.evaluate((s,value)=>{s.value=String(value);s.dispatchEvent(new Event('input',{bubbles:true}));s.dispatchEvent(new Event('change',{bubbles:true}));},value);

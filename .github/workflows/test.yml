@@ -60,6 +60,7 @@ jobs:
           EDGE_TEST_BROWSER=webkit node tests/browser/panel_session.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/panel_session.cjs
           node tests/edge_rtc_pacing.cjs
+          node tests/edge_i18n.cjs
           node tests/edge_log_view.cjs
       - name: Install fixture media tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -100,6 +101,8 @@ jobs:
           node tests/browser/ui_dashboard.cjs
           node tests/browser/camera_settings.cjs
           node tests/browser/brand_assets.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/interface_languages.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/interface_languages.cjs
       - name: Test native phone recording decoders and camera switching
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"

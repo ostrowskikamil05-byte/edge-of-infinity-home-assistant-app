@@ -15,8 +15,9 @@ Native EdgeRTC Live, recording and indexed DVR for Home Assistant.
 - Native card with 1–4 views and separate microphone permissions.
 - Dashboard cards for recordings and events that adapt to phone, tablet and desktop.
 
-Version 0.15.1 improves indexed DVR seeking and cellular Live and adds transparent
-branding. It retains the recordings/events dashboard cards and theme support
-from 0.15.0. Restart Home Assistant Core after updating to load the cards.
+Version 0.15.2 adds automatic and manual interface languages for the panel and
+HA cards: PL, EN, DE, FR, ES, IT and UK. Change the preference in Settings →
+Language; it is saved in the current browser. Restart Home Assistant Core
+after updating to load the integration/card changes.
 
 See [configuration, migration and playback](DOCS.md).

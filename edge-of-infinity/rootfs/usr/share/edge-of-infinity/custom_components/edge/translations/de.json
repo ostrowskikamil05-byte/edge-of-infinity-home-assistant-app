@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Edge of Infinity verbinden",
+        "description": "Verwenden Sie local für das installierte Add-on oder die API-Adresse des Edge-Servers. Live-, Aufnahme- und Ereigniskarten werden automatisch registriert.",
+        "data": {
+          "url": "Edge-Adresse",
+          "api_key": "API-Schlüssel"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zu Edge of Infinity nicht möglich",
+      "invalid_auth": "Ungültiger API-Schlüssel",
+      "invalid_url": "Ungültige URL",
+      "unknown": "Unerwarteter Fehler"
+    },
+    "abort": {
+      "already_configured": "Edge of Infinity ist bereits eingerichtet"
+    }
+  }
+}

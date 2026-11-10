@@ -1,10 +1,11 @@
 /* Edge of Infinity Live Card. Signaling uses Home Assistant's authenticated camera API. */
-const EDGE_LIVE_VERSION = "0.15.1";
+const EDGE_LIVE_VERSION = "0.15.2";
+const edgeLiveI18nReady=import('/edge/edge-i18n.js?v='+EDGE_LIVE_VERSION).catch(()=>null);
 const EDGE_LIVE_TEXT = {
   en: {play:"Start live",pause:"Stop live",sound:"Sound",mute:"Mute",mic:"Microphone",micStop:"Stop microphone",settings:"Settings",full:"Fullscreen",reconnect:"Reconnect",pip:"Picture in picture",shot:"Snapshot",fit:"Image fit",contain:"Whole image",cover:"Fill card",echo:"Echo cancellation",retry:"Reconnect automatically",ready:"Ready",connecting:"Connecting via WebRTC…",connected:"Live · WebRTC",stopped:"Live view stopped",select:"Select a camera in the card editor.",missing:"Camera entity is unavailable.",required:"WebRTC is unavailable. Enable a Home Assistant WebRTC provider such as go2rtc.",https:"Microphone requires HTTPS or localhost.",permission:"Microphone permission was denied or no microphone is available.",micWait:"Waiting for microphone permission…",micOn:"Microphone on · audio sent through WebRTC",micNo:"This connection did not accept return audio. Check camera RTSP/ONVIF backchannel support.",micHelp:"Press to talk; press again to release the microphone. The camera and streaming engine must support return audio.",tap:"Press Start live to allow playback.",failed:"Connection failed. Press Reconnect to try again.",video:"Live camera video",volume:"Volume",title:"Title",entity:"Camera entity",autoplay:"Start live automatically",muted:"Start muted",microphone:"Show microphone control",header:"Show header",enabled:"Enabled",disabled:"Disabled",quality:"Stream quality",nvr:"NVR · recording profile",main:"Main stream",sub:"Substream · less data",views:"View",all:"All cameras",columns:"Columns",auto:"Auto",cameras:"Cameras",count:"Number of cameras",qualityMissing:"This camera has no registered NVR entity for that profile. Update/restart Edge and Home Assistant Core.",nvrHelp:"NVR shares the recording profile without reducing its resolution. Main and sub profiles can use separate camera connections. Talking temporarily connects directly to the camera."},
   pl: {play:"Włącz podgląd",pause:"Zatrzymaj",sound:"Dźwięk",mute:"Wycisz",mic:"Mikrofon",micStop:"Wyłącz mikrofon",settings:"Ustawienia",full:"Pełny ekran",reconnect:"Połącz ponownie",pip:"Obraz w obrazie",shot:"Zapisz klatkę",fit:"Dopasowanie obrazu",contain:"Cały obraz",cover:"Wypełnij kartę",echo:"Redukcja echa",retry:"Łącz ponownie automatycznie",ready:"Gotowe",connecting:"Łączenie przez WebRTC…",connected:"Na żywo · WebRTC",stopped:"Podgląd zatrzymany",select:"Wybierz kamerę w edytorze karty.",missing:"Encja kamery jest niedostępna.",required:"WebRTC jest niedostępne. Włącz dostawcę WebRTC w Home Assistant, np. go2rtc.",https:"Mikrofon wymaga HTTPS lub localhost.",permission:"Brak zgody na mikrofon lub brak urządzenia.",micWait:"Oczekiwanie na zgodę na mikrofon…",micOn:"Mikrofon włączony · dźwięk wysyłany przez WebRTC",micNo:"Połączenie nie przyjęło dźwięku zwrotnego. Sprawdź obsługę RTSP/ONVIF backchannel w kamerze.",micHelp:"Kliknij, aby mówić; kliknij ponownie, aby zwolnić mikrofon. Kamera i silnik transmisji muszą obsługiwać dźwięk zwrotny.",tap:"Kliknij Włącz podgląd, aby zezwolić na odtwarzanie.",failed:"Połączenie nieudane. Kliknij Połącz ponownie.",video:"Podgląd kamery na żywo",volume:"Głośność",title:"Nazwa",entity:"Encja kamery",autoplay:"Uruchamiaj podgląd automatycznie",muted:"Rozpoczynaj bez dźwięku",microphone:"Pokaż przycisk mikrofonu",header:"Pokaż nagłówek",enabled:"Włączone",disabled:"Wyłączone",quality:"Jakość strumienia",nvr:"NVR · profil nagrywania",main:"Strumień główny",sub:"Pomocniczy · mniej danych",views:"Widok",all:"Wszystkie kamery",columns:"Kolumny",auto:"Automatycznie",cameras:"Kamery",count:"Liczba kamer",qualityMissing:"Brak zarejestrowanej encji NVR dla tego profilu. Zaktualizuj i uruchom ponownie Edge oraz Home Assistant Core.",nvrHelp:"NVR współdzieli profil nagrywania bez obniżania jego rozdzielczości. Główny i pomocniczy profil mogą korzystać z osobnych połączeń kamery. Rozmowa tymczasowo łączy się bezpośrednio z kamerą."}
 };
-const edgeText = (hass, key) => EDGE_LIVE_TEXT[(hass?.locale?.language || hass?.language || "en").startsWith("pl") ? "pl" : "en"][key] || key;
+const edgeText = (hass,key,language) => globalThis.EdgeI18n?.text(EDGE_LIVE_TEXT.en[key]||key,hass,language)||EDGE_LIVE_TEXT[(language||hass?.locale?.language||hass?.language||navigator.language||'en').toLowerCase().startsWith('pl')?'pl':'en'][key]||key;
 const edgeDefaults = config => ({autoplay:true,muted:true,volume:0.6,microphone:true,reconnect:true,fit:"contain",show_header:true,quality:"nvr",columns:"auto",...config});
 
 class EdgeLivePlayer extends HTMLElement {
@@ -58,9 +59,9 @@ class EdgeLivePlayer extends HTMLElement {
   }
   set hass(value){this._hass=value;this._update();this._maybeStart();}
   get hass(){return this._hass;}
-  connectedCallback(){document.addEventListener("visibilitychange",this._visibility);this._maybeStart();}
-  disconnectedCallback(){document.removeEventListener("visibilitychange",this._visibility);this._stopConnection();}
-  _t(key){return edgeText(this._hass,key);}
+  connectedCallback(){document.addEventListener("visibilitychange",this._visibility);edgeLiveI18nReady.then(()=>{if(!this.isConnected||!globalThis.EdgeI18n)return;this._languageUnsubscribe?.();this._languageUnsubscribe=EdgeI18n.subscribe(()=>this._update());this._update();});this._maybeStart();}
+  disconnectedCallback(){document.removeEventListener("visibilitychange",this._visibility);this._languageUnsubscribe?.();this._stopConnection();}
+  _t(key){return edgeText(this._hass,key,this._config?.language);}
   _state(){return this._hass?.states?.[this._config?.entity];}
   _resolveEntity(talking=false){const state=this._state();const streams=state?.attributes?.edge_stream_entities||{};if(talking)return streams.talk||(state?.attributes?.edge_stream_source==='edge_nvr'?'':this._config.entity);return streams[this._quality]||(this._quality==='nvr'?this._config.entity:'');}
   setSuspended(value){if(this._suspended===value)return;this._suspended=value;if(value)this._stopConnection();else this._maybeStart();}
@@ -71,11 +72,12 @@ class EdgeLivePlayer extends HTMLElement {
     if((this._pc||this._starting)&&!this._micStream&&this._activeEntity!==this._resolveEntity()){this._holdFrame();this._start();return;}
     if(this._config.autoplay&&!this._userStopped&&!this._pc&&!this._starting&&!this._retryTimer&&!this._hardFailed)this._start();
   }
-  _message(text,error=false){this._status.textContent=String(text||"").replace(/(rtsps?:\/\/)[^@\s]+@/gi,"$1***@").slice(0,400);this._status.classList.toggle("error",error);}
+  _message(text,error=false){this._messageSource=globalThis.EdgeI18n?.canonical(text)||text;this._status.textContent=String(globalThis.EdgeI18n?.text(this._messageSource,this._hass,this._config?.language)||text||"").replace(/(rtsps?:\/\/)[^@\s]+@/gi,"$1***@").slice(0,400);this._status.classList.toggle("error",error);}
   _isPlaying(){return this._edgeRTC?this._edgeRTC.playing:!this._video.paused;}
   _applyAudio(){this._edgeRTC?.setAudio(this._volume??0.6,this._muted??true);this._video.volume=this._volume??0.6;this._video.muted=this._muted??true;this._update();}
   _update(){
     if(!this._config)return;
+    if(globalThis.EdgeI18n){this.lang=EdgeI18n.resolve(this._hass,this._config.language);if(this._messageSource)this._status.textContent=EdgeI18n.text(this._messageSource,this._hass,this._config.language).replace(/(rtsps?:\/\/)[^@\s]+@/gi,'$1***@').slice(0,400);}
     const root=this.shadowRoot;root.querySelector("h2").textContent=this._config.name||this._state()?.attributes?.friendly_name||this._config.entity||"Edge of Infinity";
     root.querySelector("header").hidden=this._config.show_header===false;
     this._video.style.objectFit=this._fit||"contain";if(this._edgeCanvas)this._edgeCanvas.style.objectFit=this._fit||'contain';this._video.setAttribute("aria-label",this._t("video"));
@@ -91,6 +93,7 @@ class EdgeLivePlayer extends HTMLElement {
     for(const key of ['fit','echo','retry'])root.querySelector(`[data-label="${key}"]`).textContent=this._t(key);
     root.querySelector('[data-fit] option[value="contain"]').textContent=this._t("contain");root.querySelector('[data-fit] option[value="cover"]').textContent=this._t("cover");root.querySelector("[data-fit]").value=this._fit||"contain";root.querySelector("[data-retry]").checked=this._config.reconnect!==false;
     root.querySelector(".hint").textContent=this._state()?.attributes?.edge_stream_source==='edge_rtc' ? (this._hass?.locale?.language||this._hass?.language||'en').startsWith('pl') ? "EdgeRTC · jeden profil kamery dla live i NVR. Mikrofon korzysta z tego samego połączenia, gdy kamera obsługuje RTSP G711 backchannel. Wymagane HTTPS i WebCodecs." : "EdgeRTC · one camera profile for live and NVR. Microphone shares this connection when RTSP G711 backchannel is available. HTTPS and WebCodecs are required." : this._t("micHelp")+" "+this._t("nvrHelp");
+    if(globalThis.EdgeI18n&&this._state()?.attributes?.edge_stream_source==='edge_rtc')root.querySelector('.hint').textContent=EdgeI18n.text('EdgeRTC · one camera profile for live and NVR. Microphone shares this connection when RTSP G711 backchannel is available. HTTPS and WebCodecs are required.',this._hass,this._config.language);
   }
   async _action(action){
     try{
@@ -150,7 +153,7 @@ class EdgeLivePlayer extends HTMLElement {
     this._starting=true;this._message(this._t(this._micRejected?'micNo':'connecting'),Boolean(this._micRejected));this._applyAudio();
     try{
       if(this._state()?.attributes?.edge_stream_source==='edge_rtc'){
-        this._message('EdgeRTC · connecting…');
+        this._message(globalThis.EdgeI18n?.text('EdgeRTC · connecting…',this._hass,this._config?.language)||'EdgeRTC · connecting…');
         const {EdgeRTCClient}=await import('/edge/edge-rtc-client.js?v='+EDGE_LIVE_VERSION);if(gen!==this._generation)return;
         let diagnostics=null;const diagnosticEntity=this._activeEntity,diagnosticHass=this._hass;
         try{const {getDeviceReporter}=await import('/edge/edge-device-diagnostics.js?v='+EDGE_LIVE_VERSION);
@@ -212,6 +215,8 @@ class EdgeLivePlayer extends HTMLElement {
 }
 
 class EdgeLiveCard extends HTMLElement {
+  connectedCallback(){edgeLiveI18nReady.then(()=>{if(!this.isConnected||!globalThis.EdgeI18n)return;this._languageUnsubscribe?.();this._languageUnsubscribe=EdgeI18n.subscribe(()=>this._renderControls());this._renderControls();});}
+  disconnectedCallback(){this._languageUnsubscribe?.();}
   constructor(){
     super();this.attachShadow({mode:'open'});this._players=new Map();this._focus='all';
     this.shadowRoot.innerHTML=`<style>:host{display:block;container-type:inline-size;container-name:edge-grid}.toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin:0 0 10px;color:var(--primary-text-color,#edf5f7);font:14px system-ui}.toolbar[hidden]{display:none}.toolbar label{display:flex;align-items:center;gap:8px}select{font:inherit;max-width:100%;padding:10px;border-radius:min(calc(var(--ha-card-border-radius,12px) * .7),14px);border:0;background:color-mix(in srgb,var(--primary-text-color,#edf5f7) 8%,transparent);color:inherit}select option{background:var(--card-background-color,#1c2530);color:var(--primary-text-color,#edf5f7)}.grid{display:grid;gap:12px;grid-template-columns:repeat(var(--edge-columns,1),minmax(0,1fr))}edge-live-player{min-width:0}edge-live-player[hidden]{display:none}@container edge-grid (max-width:620px){.grid{grid-template-columns:minmax(0,1fr)}}</style><div class="toolbar" hidden><b></b><label><span></span><select data-view></select></label></div><div class="grid"></div>`;
@@ -236,23 +241,26 @@ class EdgeLiveCard extends HTMLElement {
   }
   set hass(value){this._hass=value;for(const player of this._players.values())player.hass=value;this._renderControls();}
   get hass(){return this._hass;}
-  _renderControls(){if(!this._items)return;const t=key=>edgeText(this._hass,key);const bar=this.shadowRoot.querySelector('.toolbar');bar.hidden=this._items.length<2;bar.querySelector('b').textContent=this._config.name||t('cameras');bar.querySelector('span').textContent=t('views');const choices=[['all',t('all')],...this._items.map(item=>[item.entity,item.name||this._hass?.states?.[item.entity]?.attributes?.friendly_name||item.entity])];const signature=JSON.stringify(choices);const select=bar.querySelector('select');if(signature!==this._choices){select.replaceChildren(...choices.map(([value,name])=>{const option=document.createElement('option');option.value=value;option.textContent=name;return option;}));this._choices=signature;}select.value=this._focus;}
+  _renderControls(){if(!this._items)return;const t=key=>edgeText(this._hass,key,this._config?.language);const bar=this.shadowRoot.querySelector('.toolbar');bar.hidden=this._items.length<2;bar.querySelector('b').textContent=this._config.name||t('cameras');bar.querySelector('span').textContent=t('views');const choices=[['all',t('all')],...this._items.map(item=>[item.entity,item.name||this._hass?.states?.[item.entity]?.attributes?.friendly_name||item.entity])];const signature=JSON.stringify(choices);const select=bar.querySelector('select');if(signature!==this._choices){select.replaceChildren(...choices.map(([value,name])=>{const option=document.createElement('option');option.value=value;option.textContent=name;return option;}));this._choices=signature;}select.value=this._focus;}
   _applyView(){if(!this._config)return;this.shadowRoot.querySelector('.grid').style.setProperty('--edge-columns',this._focus!=='all'||this._items.length===1?'1':String(this._config.columns)==='1'?'1':'2');for(const [id,player] of this._players){const hidden=this._focus!=='all'&&id!==this._focus;player.hidden=hidden;player.setSuspended(hidden);}}
 }
 
 class EdgeLiveCardEditor extends HTMLElement {
   constructor(){super();this.attachShadow({mode:'open'});this._config={};}
+  connectedCallback(){edgeLiveI18nReady.then(()=>{if(!this.isConnected||!globalThis.EdgeI18n)return;this._languageUnsubscribe?.();this._languageUnsubscribe=EdgeI18n.subscribe(()=>this._render());this._render();});}
+  disconnectedCallback(){this._languageUnsubscribe?.();}
   set hass(value){this._hass=value;const signature=JSON.stringify([value?.locale?.language||value?.language,Object.entries(value?.states||{}).filter(([id])=>id.startsWith('camera.')).map(([id,s])=>[id,s.attributes?.friendly_name,s.attributes?.edge_stream_role])]);if(signature!==this._signature){this._signature=signature;this._render();}}
   setConfig(value){this._config=edgeDefaults(value);this._render();}
   _rows(){return this._config.cameras?.map(row=>typeof row==='string'?{entity:row}:{...row})||[{entity:this._config.entity||'',quality:this._config.quality||'nvr'}];}
   _emit(){this.dispatchEvent(new CustomEvent('config-changed',{detail:{config:{...this._config,type:'custom:edge-live-card'}},bubbles:true,composed:true}));}
   _setRows(rows){if(rows.length===1){delete this._config.cameras;this._config.entity=rows[0].entity;this._config.quality=rows[0].quality||'nvr';}else{delete this._config.entity;this._config.cameras=rows;}this._emit();}
   _render(){
-    if(!this._hass)return;const t=key=>edgeText(this._hass,key);this.shadowRoot.innerHTML='<style>:host{display:grid;gap:14px;padding:12px}label{display:grid;gap:6px;font:14px system-ui}input,select{min-width:0;padding:10px;font:inherit;border:1px solid var(--divider-color,#aaa);border-radius:6px;background:var(--card-background-color,white);color:var(--primary-text-color,black)}.check{display:flex;justify-content:space-between;align-items:center}fieldset{display:grid;gap:12px;min-width:0;border:1px solid var(--divider-color,#aaa);border-radius:8px;padding:12px}p{font:12px/1.5 system-ui;margin:0}</style>';
+    if(!this._hass)return;const t=key=>edgeText(this._hass,key,this._config?.language);this.shadowRoot.innerHTML='<style>:host{display:grid;gap:14px;padding:12px}label{display:grid;gap:6px;font:14px system-ui}input,select{min-width:0;padding:10px;font:inherit;border:1px solid var(--divider-color,#aaa);border-radius:6px;background:var(--card-background-color,white);color:var(--primary-text-color,black)}.check{display:flex;justify-content:space-between;align-items:center}fieldset{display:grid;gap:12px;min-width:0;border:1px solid var(--divider-color,#aaa);border-radius:8px;padding:12px}p{font:12px/1.5 system-ui;margin:0}</style>';
     const control=(parent,key,text,kind,value,choices,onChange)=>{const label=document.createElement('label');label.textContent=text;let input;
       if(choices){input=document.createElement('select');for(const [id,name] of choices){const option=document.createElement('option');option.value=id;option.textContent=name;input.append(option);}}
       else{input=document.createElement('input');input.type=kind;if(kind==='checkbox')label.className='check';if(kind==='number'){input.min='0';input.max='1';input.step='0.05';}}
       if(kind==='checkbox')input.checked=Boolean(value);else input.value=value??'';input.dataset.config=key;input.addEventListener('change',()=>onChange(kind==='checkbox'?input.checked:kind==='number'?Number(input.value):input.value));label.append(input);parent.append(label);return input;};
+    control(this.shadowRoot,'language',globalThis.EdgeI18n?.text('Language',this._hass,this._config.language)||'Language','text',this._config.language||'auto',[['auto',t('auto')],...Object.entries(globalThis.EdgeI18n?.languages||{en:'English',pl:'Polski',de:'Deutsch',fr:'Français',es:'Español',it:'Italiano',uk:'Українська'})],value=>{this._config={...this._config,language:value};this._emit();this._render();});
     const rows=this._rows();control(this.shadowRoot,'count',t('count'),'number',rows.length,[1,2,3,4].map(v=>[String(v),String(v)]),count=>{const next=this._rows().slice(0,count);while(next.length<count)next.push({entity:'',quality:this._config.quality||'nvr'});this._setRows(next);this._render();});
     const entities=Object.entries(this._hass.states||{}).filter(([id,s])=>id.startsWith('camera.')&&(!s.attributes?.edge_stream_role||s.attributes.edge_stream_role==='nvr')).map(([id,s])=>[id,s.attributes?.friendly_name||id]);
     const quality=['nvr','main','sub'].map(v=>[v,t(v)]);

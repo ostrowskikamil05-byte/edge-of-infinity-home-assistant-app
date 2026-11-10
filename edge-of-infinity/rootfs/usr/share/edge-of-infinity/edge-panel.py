@@ -101,7 +101,7 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.15.1"
+APP_VERSION = "0.15.2"
 APP_RELEASE_FEATURES=['EdgeRTC-only Live, recording and DVR; retired engines and options removed with bounded migration',
                       'DVR AAC uses timestamp lookahead, bounded PCM and decoder backpressure; original Live policy retained',
                       'UNV malformed optional talk AAC compatibility; valid forward H265/AAC and G711 mic share one connection',
@@ -117,7 +117,7 @@ APP_RELEASE_FEATURES=['EdgeRTC-only Live, recording and DVR; retired engines and
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "dvr-preview-v151"
+UI_BUILD = "languages-v152"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -4886,6 +4886,7 @@ def health_payload() -> dict:
 EDGE_RTC_PLAYER_HTML = r"""<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;height:100%;background:#080e15;color:#d9e7ee;font:13px system-ui}canvas{width:100%;height:100%;object-fit:contain}button{position:absolute;bottom:12px;right:12px;padding:10px;border:0;border-radius:8px;background:#20384b;color:white}p{position:absolute;top:8px;left:10px}</style><canvas></canvas><p>EdgeRTC · connecting…</p><button>Sound</button><script type="module">
 import{EdgeRTCClient}from'../client.js?v=__EDGE_PANEL_VERSION__';
 import{getDeviceReporter}from'../device-diagnostics.js?v=__EDGE_PANEL_VERSION__';
+try{window.EdgeI18n=parent.EdgeI18n;}catch(_){}const languageUI=window.EdgeI18n?.attach(document.body);window.addEventListener('pagehide',()=>languageUI?.close(),{once:true});
 const playerBase=new URL(document.baseURI),path=playerBase.pathname.split('/').pop(),url=new URL('../stream/'+path,playerBase);let client,timer,retries=0,muted=true;
 const diagnostics=getDeviceReporter({context:{surface:'edge_panel_live',source:path},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),12000);try{const response=await fetch(new URL('../../client-diagnostics',playerBase),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});if([401,403].includes(response.status)){diagnostics.setPaused?.(true);window.edgeStopLive?.();parent.postMessage({type:'edge_ingress_expired',path},playerBase.origin);}return response.ok;}finally{clearTimeout(timer);}}});
 function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,diagnostics,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;if(f.frames===1)parent.postMessage({type:'edge_live_ready',path},playerBase.origin);const label='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264'),note=document.querySelector('p');if(note.textContent!==label)note.textContent=label;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
@@ -4902,6 +4903,8 @@ INDEX_HTML = r"""<!doctype html>
     <meta name="edge-panel-version" content="__EDGE_PANEL_VERSION__">
     <meta name="edge-ui-build" content="__EDGE_UI_BUILD__">
     <script>{const p=location.pathname.replace(/\/{2,}/g,'/').replace(/\/index\.html$/,'/'),b=document.createElement('base');b.href=location.origin+(p.endsWith('/')?p:p+'/');document.head.prepend(b);}</script>
+    <script>__EDGE_INTERFACE_LANGUAGE__</script>
+    <script>document.addEventListener('DOMContentLoaded',()=>{const select=document.getElementById('edge-language');for(const [value,label] of [['auto','Automatic (Home Assistant / browser)'],...Object.entries(EdgeI18n.languages)]){const option=document.createElement('option');option.value=value;option.textContent=label;if(value!=='auto')option.translate=false;select.append(option);}EdgeI18n.attach(document.body,{onChange:(language,preference)=>{select.value=preference;document.documentElement.dataset.interfaceLanguage=language;}});select.addEventListener('change',event=>{event.stopPropagation();EdgeI18n.setPreference(select.value);debugEvent('ui_language_changed',{language:EdgeI18n.resolve(),preference:select.value});});debugEvent('ui_language_selected',{language:EdgeI18n.resolve(),preference:EdgeI18n.preference()});},{once:true});</script>
     __EDGE_LIVE_PRELOAD__
     <title>Edge of Infinity</title>
     <script>{const url=new URL('api/brand/icon.png?v=__EDGE_PANEL_VERSION__',document.baseURI).href,icon=document.createElement('link');icon.rel='icon';icon.type='image/png';icon.href=url;document.head.append(icon);document.addEventListener('DOMContentLoaded',()=>{for(const image of document.querySelectorAll('img[data-edge-brand]'))image.src=url;},{once:true});}</script>
@@ -5891,6 +5894,7 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </header>
           <section class="settings">
+            <section class="field-section" id="language-settings"><h2>Language</h2><label>Interface language<select id="edge-language"></select></label><p class="field-help">Saved in this browser. Automatic uses Home Assistant, then your browser language.</p></section>
             <section class="field-section" id="edge-rtc-engine-info"><h2>EdgeRTC · Live / DVR</h2><p class="notice">Wspólne źródło kamery dla podglądu, nagrywarki i analizy. Archiwum jest odczytywane z serwera przez EdgeRTC DVR. / One camera source; indexed archive playback.</p></section>
             <div class="settings-jumps"><button type="button" data-settings-jump="recording-settings">Recording</button><button type="button" data-settings-jump="network-settings">Network</button><button type="button" data-settings-jump="storage-settings">Storage</button><button type="button" data-settings-jump="advanced-settings">Advanced</button></div>
             <form id="edge-settings-form"></form>
@@ -6272,14 +6276,14 @@ INDEX_HTML = r"""<!doctype html>
         if (!value) return 'unknown';
         const date = new Date(value);
         if (Number.isNaN(date.getTime())) return value;
-        return date.toLocaleString();
+        return date.toLocaleString(EdgeI18n.resolve());
       }
 
       function formatTimestampSeconds(value) {
         if (!value) return 'unknown time';
         const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
         if (Number.isNaN(date.getTime())) return String(value);
-        return date.toLocaleString(undefined, {
+        return date.toLocaleString(EdgeI18n.resolve(), {
           year: 'numeric',
           month: '2-digit',
           day: '2-digit',
@@ -6410,7 +6414,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!day) return 'No day';
         const [year, month, date] = String(day).split('-').map((value) => Number(value));
         if (!year || !month || !date) return day;
-        return new Date(year, month - 1, date).toLocaleDateString(undefined, {
+        return new Date(year, month - 1, date).toLocaleDateString(EdgeI18n.resolve(), {
           weekday: 'short',
           year: 'numeric',
           month: '2-digit',
@@ -7704,7 +7708,7 @@ INDEX_HTML = r"""<!doctype html>
         const labels={server:'Serwer',playback:'Odtwarzanie',thumbnail:'Miniatury',stream:'Strumień nagrań',archive:'Archiwum kopii',discovery:'Wykrywanie kamery',device:'Urządzenie'};
         const selected=rows.filter(row=>(group==='all'||row.category===group)&&(level==='all'||level==='problems'&&row.severity!=='ok'||row.severity===level)&&(period==='all'||EdgeLogView.stamp(row.time)>=cutoff)&&(camera==='all'||logCameraId(row)===camera)&&(origin==='all'||(row.origin==='device'?'device':'server')===origin)&&(!search||`${EdgeLogView.label(row)} ${row.event} ${logCamera(row)} ${JSON.stringify(row.data)}`.toLowerCase().includes(search))).sort((a,b)=>EdgeLogView.stamp(b.time)-EdgeLogView.stamp(a.time)).slice(0,150);
         if(!selected.length)return '<p class="notice" data-log-empty>Brak zdarzeń dla wybranych filtrów. Wybierz „Wszystkie zdarzenia” lub szerszy okres, aby zobaczyć historię.</p>';
-        return `<div class="log-grid" data-log-events>${selected.map(row=>`<details class="log-event log-${row.severity}" data-log-event="${escapeHtml(row.event)}" data-log-category="${row.category}" data-log-level="${row.severity}" data-log-origin="${escapeHtml(row.origin||'server')}"><summary><time>${escapeHtml(EdgeLogView.stamp(row.time)?new Date(EdgeLogView.stamp(row.time)).toLocaleString():'—')}</time><b>${escapeHtml(EdgeLogView.label(row))}</b><span>${escapeHtml(logCamera(row))}</span><small>${escapeHtml(labels[row.origin]||'Serwer')}</small><span class="log-severity">${row.severity==='ok'?'INFO':row.severity.toUpperCase()}</span></summary><pre class="log-output">${escapeHtml(pretty({event:row.event,...row.data}))}</pre></details>`).join('')}</div>`;
+        return `<div class="log-grid" data-log-events>${selected.map(row=>`<details class="log-event log-${row.severity}" data-log-event="${escapeHtml(row.event)}" data-log-category="${row.category}" data-log-level="${row.severity}" data-log-origin="${escapeHtml(row.origin||'server')}"><summary><time>${escapeHtml(EdgeLogView.stamp(row.time)?new Date(EdgeLogView.stamp(row.time)).toLocaleString(EdgeI18n.resolve()):'—')}</time><b>${escapeHtml(EdgeLogView.label(row))}</b><span>${escapeHtml(logCamera(row))}</span><small>${escapeHtml(labels[row.origin]||'Serwer')}</small><span class="log-severity">${row.severity==='ok'?'INFO':row.severity.toUpperCase()}</span></summary><pre class="log-output">${escapeHtml(pretty({event:row.event,...row.data}))}</pre></details>`).join('')}</div>`;
       }
       function renderLogs() {
         if (!panelLogs) {
@@ -8205,7 +8209,7 @@ INDEX_HTML = r"""<!doctype html>
           haDashboard = await response.json();
           const select = document.getElementById('ha-camera-select');
           const selected = haRequestedCamera || select.value;
-          select.innerHTML = haDashboard.cameras.map((camera) => `<option value="${escapeHtml(camera.id)}">${escapeHtml(camera.name)}${camera.enabled ? '' : ' (disabled)'}</option>`).join('');
+          select.innerHTML = haDashboard.cameras.map((camera) => `<option translate="no" value="${escapeHtml(camera.id)}">${escapeHtml(camera.name)}${camera.enabled ? '' : ' (disabled)'}</option>`).join('');
           if (haDashboard.cameras.some((camera) => camera.id === selected)) select.value = selected;
           haRequestedCamera = '';
           selectDashboardCamera();renderDashboardSlots();updateDashboardCard();
@@ -8577,7 +8581,7 @@ INDEX_HTML = r"""<!doctype html>
           <section class="field-section" id="detection-settings"><h2>Wykrywanie i alerty</h2><p class="field-help">Włącz wykrywanie, wybierz kamery i zapisz ustawienia. Analiza czyta wyłącznie wspólny strumień Edge; klipy powstają z zapisanych plików. Jakość i FPS nagrań pozostają bez zmian.</p>
             <div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-local" ${detection.local_enabled?'checked':''}> Wykrywanie lokalne w Edge</label>
               <label class="check-row"><input type="checkbox" name="detection-person" ${detection.person_enabled!==false?'checked':''}> Osoba</label><label class="check-row"><input type="checkbox" name="detection-animal" ${detection.animal_enabled!==false?'checked':''}> Zwierzę (m.in. kot, pies, ptak)</label><label class="check-row"><input type="checkbox" name="detection-vehicle" ${detection.vehicle_enabled!==false?'checked':''}> Pojazd</label>
-              ${(config.cameras||[]).map((camera,index)=>`<label class="check-row"><input type="checkbox" data-easy-detection-camera="${index}" ${camera.local_detection_enabled?'checked':''} ${camera.enabled?'':'disabled'}> ${escapeHtml(camera.name||camera.id)}${camera.enabled?'':' · kamera wyłączona'}</label>`).join('')}
+              ${(config.cameras||[]).map((camera,index)=>`<label class="check-row"><input type="checkbox" data-easy-detection-camera="${index}" ${camera.local_detection_enabled?'checked':''} ${camera.enabled?'':'disabled'}> <span translate="no">${escapeHtml(camera.name||camera.id)}</span>${camera.enabled?'':' · kamera wyłączona'}</label>`).join('')}
             </div><p class="field-help">Punkt na pasku filmu → zdjęcie osoby lub zwierzęcia → właściwy moment nagrania. Fragment alertu obejmuje najbliższe zamknięte części nagrania przed i po wykryciu. Nagrywanie wybranej kamery musi być włączone.</p>
             <div class="form-grid"><label>Limit klipów alertów (MB)<input type="number" min="32" max="4096" name="detection-alert-mb" value="${detection.alert_media_mb||256}"></label><label>Sekundy przed wykryciem<input type="number" min="0" max="10" name="detection-pre" value="${detection.pre_seconds??5}"></label><label>Sekundy po wykryciu<input type="number" min="5" max="60" name="detection-post" value="${detection.post_seconds||15}"></label></div><p class="field-help">Zdjęcia alertów mają limit 32 MB. Klipy mają osobny limit powyżej i retencję taką jak nagrania; najstarsze alerty wygasają po zapełnieniu limitu. Oryginalny zapis pozostaje niezależny. Klip pojawi się po zamknięciu części nagrania, zdjęcie lokalnego wykrycia od razu.</p>
             <details class="settings-group"><summary>Powiadomienia na telefon</summary><div class="form-grid"><label class="check-row"><input type="checkbox" name="detection-notifications" ${detection.notifications_enabled?'checked':''}> Powiadamiaj o osobie lub zwierzęciu</label><label>Telefon w Home Assistant<input name="detection-notify-service" list="edge-notify-services" placeholder="notify.mobile_app_twoj_telefon" value="${escapeHtml(detection.notify_service||'')}"><datalist id="edge-notify-services"></datalist></label><label>Przerwa między alertami (s)<input type="number" name="detection-notify-cooldown" min="5" max="3600" value="${detection.notify_cooldown||30}"></label></div><p class="field-help" data-phone-services>Wybierz usługę telefonu z aplikacją Home Assistant Companion. Zapisz ustawienia; zaktualizowana integracja Edge wysyła nowe alerty ze zdjęciem, bez dodatkowej automatyzacji YAML.</p></details>
@@ -9132,14 +9136,15 @@ INDEX_HTML = r"""<!doctype html>
         document.querySelectorAll('[data-recording-disk-usage]').forEach(output => {
           if (!recordingStorage) return;
           const usage=recordingStorage;
+          const write=value=>{for(const [source,target] of [["Wolne miejsce na nagrania", "Free space for recordings"], ["Wolne miejsce", "Free space"], ["Szacunkowy zapis", "Estimated recording"], ["Szczegóły zajętości są odświeżane w tle.", "Usage details are refreshed in the background."], ["Nagrania", "Recordings"], ["Kopie odtwarzania", "Playback copies"], ["Kopie zgodności", "Compatibility copies"], ["Miniatury", "Thumbnails"], ["Klipy alertów", "Alert clips"], ["Zdjęcia alertów", "Alert pictures"], ["Wolne na dysku nagrań", "Free on recordings disk"], ["wolne w konfiguracji HA", "Free in HA configuration"], ["Szacunek ciągłego nagrywania", "Continuous recording estimate"], ["/dobę", "/day"], [" na ", " for "], [" dni.", " days."], ["Zależy od bitrate i sceny.", "Depends on bitrate and scene."]])value=value.replaceAll(source,EdgeI18n.text(target));output.textContent=value;};
           const daily=Object.values(recordingStatus).reduce((sum,item)=>sum+Number(item.bytes_per_day_estimate||0),0);
           const retention=Number(config.nvr?.retention_days||14);
           if(output.hasAttribute('data-storage-compact')){
             output.hidden=usage.recordings_volume?.free_bytes==null;
-            output.textContent=`Wolne miejsce: ${formatBytes(usage.recordings_volume?.free_bytes)}${daily?' · Szacunkowy zapis: '+formatBytes(daily)+'/dobę':''}`;return;
+            write(`Wolne miejsce: ${formatBytes(usage.recordings_volume?.free_bytes)}${daily?' · Szacunkowy zapis: '+formatBytes(daily)+'/dobę':''}`);return;
           }
-          if(usage.pending){output.textContent=`Wolne miejsce na nagrania: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}. Szczegóły zajętości są odświeżane w tle.`;return;}
-          output.textContent=`Nagrania: ${formatBytes(usage.recordings_bytes)} · Kopie odtwarzania: ${formatBytes(usage.playback_cache_bytes)} / ${formatBytes(usage.playback_cache_limit_bytes)} · Kopie zgodności: ${formatBytes(usage.phone_cache_bytes)} / ${formatBytes(usage.phone_cache_limit_bytes)} · Miniatury: ${formatBytes(usage.thumbnail_cache_bytes)} / ${formatBytes(usage.thumbnail_cache_limit_bytes)} · Klipy alertów: ${formatBytes(usage.alert_clip_bytes)} / ${formatBytes(usage.alert_clip_limit_bytes)} · Zdjęcia alertów: ${formatBytes(usage.alert_image_bytes)} / ${formatBytes(usage.alert_image_limit_bytes)}. Wolne na dysku nagrań: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}; wolne w konfiguracji HA: ${usage.cache_volume?.free_bytes==null?'—':formatBytes(usage.cache_volume.free_bytes)}.${daily?' Szacunek ciągłego nagrywania: '+formatBytes(daily)+'/dobę, '+formatBytes(daily*retention)+' na '+retention+' dni. Zależy od bitrate i sceny.':''}`;
+          if(usage.pending){write(`Wolne miejsce na nagrania: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}. Szczegóły zajętości są odświeżane w tle.`);return;}
+          write(`Nagrania: ${formatBytes(usage.recordings_bytes)} · Kopie odtwarzania: ${formatBytes(usage.playback_cache_bytes)} / ${formatBytes(usage.playback_cache_limit_bytes)} · Kopie zgodności: ${formatBytes(usage.phone_cache_bytes)} / ${formatBytes(usage.phone_cache_limit_bytes)} · Miniatury: ${formatBytes(usage.thumbnail_cache_bytes)} / ${formatBytes(usage.thumbnail_cache_limit_bytes)} · Klipy alertów: ${formatBytes(usage.alert_clip_bytes)} / ${formatBytes(usage.alert_clip_limit_bytes)} · Zdjęcia alertów: ${formatBytes(usage.alert_image_bytes)} / ${formatBytes(usage.alert_image_limit_bytes)}. Wolne na dysku nagrań: ${usage.recordings_volume?.free_bytes==null?'—':formatBytes(usage.recordings_volume.free_bytes)}; wolne w konfiguracji HA: ${usage.cache_volume?.free_bytes==null?'—':formatBytes(usage.cache_volume.free_bytes)}.${daily?' Szacunek ciągłego nagrywania: '+formatBytes(daily)+'/dobę, '+formatBytes(daily*retention)+' na '+retention+' dni. Zależy od bitrate i sceny.':''}`);
         });
       }
       function recordingDayLoadMessage(message) {
@@ -9367,7 +9372,7 @@ INDEX_HTML = r"""<!doctype html>
       function populateEventCameras() {
         for (const id of ['event-camera-filter', 'event-notify-camera']) {
           const select = document.getElementById(id), selected = select.value;
-          const options = (id === 'event-camera-filter' ? '<option value="">Wszystkie / All</option>' : '') + (config.cameras || []).map(camera => `<option value="${escapeHtml(camera.id)}">${escapeHtml(camera.name || camera.id)}</option>`).join('');
+          const options = (id === 'event-camera-filter' ? '<option value="">Wszystkie / All</option>' : '') + (config.cameras || []).map(camera => `<option translate="no" value="${escapeHtml(camera.id)}">${escapeHtml(camera.name || camera.id)}</option>`).join('');
           if (select.innerHTML !== options) {
             select.innerHTML = options;
             if (Array.from(select.options).some(option => option.value === selected)) select.value = selected;
@@ -9381,7 +9386,7 @@ INDEX_HTML = r"""<!doctype html>
         try {
           detectionData = await eventJson('api/detection');
           document.getElementById('detection-runtime').textContent = `${detectionData.model || 'Detection'} · ${detectionData.backend || 'CPU'} · limit ${detectionData.max_fps || 1} FPS total · analysis ${detectionData.analysis_ms || 0} ms. Model: ${detectionData.model_installed ? 'ready' : 'not installed / starting'}`;
-          document.getElementById('detection-cameras').innerHTML = (detectionData.cameras || []).map(camera => `<article class="camera"><div class="body"><b>${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)} · Dekoder: ${escapeHtml(camera.decoder?.backend||'—')}</p>${camera.decoder?.backend==='cpu_keyframes'?'<p class="notice warning">AI analizuje klatki kluczowe. Krótkie zdarzenia pomiędzy nimi mogą zostać pominięte. Pełna jakość i FPS nagrań pozostają zachowane.</p>':''}${camera.local_error?`<p role="status">AI: ${escapeHtml(camera.local_error.code)} (${escapeHtml(camera.local_error.phase)}). Szczegóły znajdziesz w logach Local AI.</p>`:''}${camera.last_analysis?`<p>Ostatnia analiza: ${escapeHtml(new Date(camera.last_analysis.timestamp*1000).toLocaleTimeString())} · ${Number(camera.last_analysis.objects)} obiektów · ${Number(camera.last_analysis.analysis_ms)} ms.</p>`:''}<p>Strefa Edge (tylko lokalne AI): ${camera.local_zone?.enabled ? (camera.local_zone.valid ? 'włączona' : 'nieprawidłowa — popraw ustawienia') : 'cały kadr'}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(eventKindNames[kind] || kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
+          document.getElementById('detection-cameras').innerHTML = (detectionData.cameras || []).map(camera => `<article class="camera"><div class="body"><b translate="no">${escapeHtml(camera.name)}</b><p>ONVIF: ${escapeHtml(camera.camera_status)} · AI: ${escapeHtml(camera.local_status)} · Dekoder: ${escapeHtml(camera.decoder?.backend||'—')}</p>${camera.decoder?.backend==='cpu_keyframes'?'<p class="notice warning">AI analizuje klatki kluczowe. Krótkie zdarzenia pomiędzy nimi mogą zostać pominięte. Pełna jakość i FPS nagrań pozostają zachowane.</p>':''}${camera.local_error?`<p role="status">AI: ${escapeHtml(camera.local_error.code)} (${escapeHtml(camera.local_error.phase)}). Szczegóły znajdziesz w logach Local AI.</p>`:''}${camera.last_analysis?`<p>Ostatnia analiza: ${escapeHtml(new Date(camera.last_analysis.timestamp*1000).toLocaleTimeString(EdgeI18n.resolve()))} · ${Number(camera.last_analysis.objects)} obiektów · ${Number(camera.last_analysis.analysis_ms)} ms.</p>`:''}<p>Strefa Edge (tylko lokalne AI): ${camera.local_zone?.enabled ? (camera.local_zone.valid ? 'włączona' : 'nieprawidłowa — popraw ustawienia') : 'cały kadr'}</p><p>${Object.entries(camera.states || {}).map(([kind, active]) => `${escapeHtml(eventKindNames[kind] || kind)}: ${(camera.supported_kinds || []).includes(kind) ? (active ? '●' : '○') : '—'}`).join(' · ')}</p></div></article>`).join('');
         } finally {detectionLoading = false;}
       }
       function eventFilters() {
@@ -9427,7 +9432,7 @@ INDEX_HTML = r"""<!doctype html>
         document.getElementById('event-list').innerHTML = eventHistory.events.length ? eventHistory.events.map(item => {
           const camera = cameras.find(camera => camera.id === item.camera_id);
           alertItems.set(String(item.id),item);
-          return `<article class="field-section"><div class="event-history-row"><b>${escapeHtml(camera?.name || item.camera_id)} · ${escapeHtml(eventKindNames[item.kind] || item.kind)} <small>(${escapeHtml(item.kind)})</small></b><span>${escapeHtml(item.day)} ${escapeHtml(item.time_label || new Date(item.timestamp * 1000).toLocaleTimeString())}</span></div><p>${item.source === 'local' ? (item.zone_id === 'local_zone' ? 'Local AI · Strefa Edge' : 'Local AI') : 'Camera / ONVIF'}${item.score ? ` · ${Math.round(item.score * 100)}%` : ''}</p>${['person','animal'].includes(item.kind)?intrusionCard(item):''}<button type="button" data-event-recording="${Number(item.id)}" ${camera ? '' : 'disabled'}>Otwórz nagranie / Open recording</button></article>`;
+          return `<article class="field-section"><div class="event-history-row"><b><span translate="no">${escapeHtml(camera?.name || item.camera_id)}</span> · <span>${escapeHtml(eventKindNames[item.kind] || item.kind)}</span> <small>(${escapeHtml(item.kind)})</small></b><span>${escapeHtml(item.day)} ${escapeHtml(item.time_label || new Date(item.timestamp * 1000).toLocaleTimeString(EdgeI18n.resolve()))}</span></div><p>${item.source === 'local' ? (item.zone_id === 'local_zone' ? 'Local AI · Strefa Edge' : 'Local AI') : 'Camera / ONVIF'}${item.score ? ` · ${Math.round(item.score * 100)}%` : ''}</p>${['person','animal'].includes(item.kind)?intrusionCard(item):''}<button type="button" data-event-recording="${Number(item.id)}" ${camera ? '' : 'disabled'}>Otwórz nagranie / Open recording</button></article>`;
         }).join('') : '<p class="notice">Brak zdarzeń dla wybranych filtrów. Sprawdź dzień, kamerę oraz ustawienia detekcji.</p>';
       }
       function enterEventsPage() {
@@ -9493,7 +9498,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         const html=[...bins.values()].map(group=>{
           const label=group.events.map(event=>eventKindNames[event.kind]||event.kind).filter((value,index,values)=>values.indexOf(value)===index).join(', ');
-          return `<button type="button" data-alert-point="${index}" data-alert-position="${group.position*Math.max(.1,total-.1)}" data-alert-ids="${[...group.events].reverse().map(event=>Number(event.id)).join(',')}" style="left:${group.position*100}%" aria-label="${escapeHtml(label)} · ${group.events.length} alertów" title="${escapeHtml(label)} · ${new Date(group.events[0].timestamp*1000).toLocaleTimeString()}"></button>`;
+          return `<button type="button" data-alert-point="${index}" data-alert-position="${group.position*Math.max(.1,total-.1)}" data-alert-ids="${[...group.events].reverse().map(event=>Number(event.id)).join(',')}" style="left:${group.position*100}%" aria-label="${escapeHtml(label)} · ${group.events.length} alertów" title="${escapeHtml(label)} · ${new Date(group.events[0].timestamp*1000).toLocaleTimeString(EdgeI18n.resolve())}"></button>`;
         }).join('');
         if(axis.dataset.signature!==html){axis.innerHTML=html;axis.dataset.signature=html;}
         const video=nvrGrid.querySelector(`video[data-recording-player="${index}"]`);
@@ -9504,7 +9509,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       function intrusionCard(event, index=null) {
         const kind=eventKindNames[event.kind]||event.kind,state={pending:'Zapisywanie fragmentu…',ready:'Fragment zapisany',expired:'Fragment wygasł',unavailable:'Brak klipu · dostępne zdjęcie',error:'Nie udało się zapisać klipu'}[event.clip_state]||'';
-        return `<div class="nvr-alert-card"><button type="button" data-alert-watch="${Number(event.id)}" ${index===null?'':`data-alert-index="${index}"`}><b>${escapeHtml(kind)} · ${escapeHtml(event.time_label||new Date(event.timestamp*1000).toLocaleTimeString())}</b>${event.image_url?`<img src="${escapeHtml(panelPath(event.image_url))}" alt="${escapeHtml(kind)} w chwili wykrycia" loading="lazy">`:'<span class="field-help">Miniatura oczekuje lub wygasła</span>'}<small>${escapeHtml(state)}</small><span>Obejrzyj od tego momentu</span></button>${event.clip_url?`<button type="button" data-alert-clip="${Number(event.id)}">Zapisany fragment</button>`:''}</div>`;
+        return `<div class="nvr-alert-card"><button type="button" data-alert-watch="${Number(event.id)}" ${index===null?'':`data-alert-index="${index}"`}><b>${escapeHtml(kind)} · ${escapeHtml(event.time_label||new Date(event.timestamp*1000).toLocaleTimeString(EdgeI18n.resolve()))}</b>${event.image_url?`<img src="${escapeHtml(panelPath(event.image_url))}" alt="${escapeHtml(kind)} w chwili wykrycia" loading="lazy">`:'<span class="field-help">Miniatura oczekuje lub wygasła</span>'}<small>${escapeHtml(state)}</small><span>Obejrzyj od tego momentu</span></button>${event.clip_url?`<button type="button" data-alert-clip="${Number(event.id)}">Zapisany fragment</button>`:''}</div>`;
       }
       async function showAlertDetails(index,ids) {
         const wrap=nvrGrid.querySelector(`[data-recording-wrap="${index}"]`);
@@ -10258,6 +10263,7 @@ INDEX_HTML = r"""<!doctype html>
         });
       });
 
+      EdgeI18n.subscribe(renderRecordingStorage);
       restoreNavState();
 
       async function checkPanelVersion() {
@@ -10298,6 +10304,7 @@ INDEX_HTML = r"""<!doctype html>
 
 INDEX_HTML = (
     INDEX_HTML
+    .replace("__EDGE_INTERFACE_LANGUAGE__", (Path(__file__).parent/'custom_components'/'edge'/'www'/'edge-i18n.js').read_text().replace('</script', '<\\/script'))
     .replace("__EDGE_LIVE_PRELOAD__", '<script>{for(const name of ["client.js","device-diagnostics.js","edge-dvr-client.js","edge-dvr-panel.js"]){const link=document.createElement("link");link.rel="modulepreload";link.href=new URL("api/edge-rtc/"+name+"?v=__EDGE_PANEL_VERSION__",document.baseURI).href;document.head.append(link);}}</script>')
     .replace("__EDGE_NATIVE_PLAYER_DOCUMENT__", json.dumps(EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',APP_VERSION)).replace('<', '\\u003c'))
     .replace("__EDGE_PANEL_VERSION__", APP_VERSION)

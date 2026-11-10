@@ -25,6 +25,15 @@ try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],
  try{await page.waitForFunction(()=>[...card._players.values()].every(p=>p._edgeRTC?.frames>=3));}catch(e){console.error(await page.evaluate(()=>({secure:isSecureContext,decoder:typeof VideoDecoder,players:[...card._players.values()].map(p=>({status:p._status.textContent,frames:p._edgeRTC?.frames,pc:p._pc?.connectionState})),errors:document.body.textContent})));throw e;}
  const metrics=await page.evaluate(()=>[...card._players.values()].map(p=>({firstFrameMS:p._edgeRTC.firstFrameMS,width:p._edgeRTC.width,height:p._edgeRTC.height})));
  assert(metrics.every(m=>m.width===640&&m.height===360));assert(metrics.every(m=>m.firstFrameMS<5000),'unreasonable first frame delay');assert.equal(await page.evaluate(()=>permissions),0);
+ if(name==='desktop'){
+  await page.waitForFunction(()=>Boolean(window.EdgeI18n));
+  await page.evaluate(()=>window.languageClients=[...card._players.values()].map(p=>({player:p,client:p._edgeRTC,ws:p._edgeRTC.ws,generation:p._generation,frames:p._edgeRTC.frames})));
+  for(const [code,label]of Object.entries({pl:'Ustawienia',en:'Settings',de:'Einstellungen',fr:'Paramètres',es:'Ajustes',it:'Impostazioni',uk:'Налаштування'})){
+   await page.evaluate(code=>EdgeI18n.setPreference(code),code);assert.equal(await page.evaluate(()=>[...card._players.values()][0].shadowRoot.querySelector('[data-action="settings"]').textContent),label);
+   assert(await page.evaluate(()=>languageClients.every(({player,client,ws,generation})=>player._edgeRTC===client&&client.ws===ws&&player._generation===generation)),'language reconnected a live player');
+  }
+  await page.waitForTimeout(200);assert(await page.evaluate(()=>languageClients.every(({client,frames})=>client.frames>frames)),'live stopped during language changes');await page.evaluate(()=>EdgeI18n.setPreference('auto'));
+ }
  if(process.env.EDGE_RTC_TEST_FPS){
   const expected=Number(process.env.EDGE_RTC_TEST_FPS),before=await page.evaluate(()=>[...card._players.values()].map(p=>p._edgeRTC.frames));
   const started=Date.now();await page.waitForTimeout(2000);const elapsed=(Date.now()-started)/1000;

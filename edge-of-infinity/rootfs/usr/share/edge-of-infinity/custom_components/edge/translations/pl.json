@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Połącz Edge of Infinity",
-        "description": "Dla dodatku na tym samym Home Assistant użyj local. Dla zdalnego serwera podaj jego adres API. Karta Edge Live zostanie zarejestrowana automatycznie.",
+        "description": "Dla dodatku na tym samym Home Assistant użyj local. Dla zdalnego serwera podaj jego adres API. Karty podglądu, nagrań i zdarzeń zostaną zarejestrowane automatycznie.",
         "data": {
           "url": "Adres Edge",
           "api_key": "Klucz API"
