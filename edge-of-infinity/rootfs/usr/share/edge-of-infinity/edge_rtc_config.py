@@ -39,7 +39,10 @@ def build_config(config, home, rtsp_port=8556, api_port=9997):
             if path not in row['paths']:
                 row['paths'].append(path)
     archives={re.sub(r'[^A-Za-z0-9_.-]','_',c.get('id') or f'camera_{i+1}')+'_'+str(i):re.sub(r'[^A-Za-z0-9_.-]','_',c.get('id') or f'camera_{i+1}') for i,c in enumerate(config.get('cameras',[]))}
-    return {'rtsp': ':' + str(rtsp_port), 'http': ':' + str(api_port), 'token': private_token(home), 'sources': list(sources.values()),
+    from edge_local_network import local_settings
+    network=local_settings(home)
+    local_https={'enabled':network.get('enabled') is True,'listen':':8443','directory':str(Path(home)/'local-https'),'upstream':'http://homeassistant:8123'}
+    return {'local_https':local_https,'rtsp': ':' + str(rtsp_port), 'http': ':' + str(api_port), 'token': private_token(home), 'sources': list(sources.values()),
             'recordings': str((config.get('storage') or {}).get('recordings_dir') or '/media/edge-of-infinity/recordings'), 'archives': archives}
 
 

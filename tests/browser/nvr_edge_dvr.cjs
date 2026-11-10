@@ -40,11 +40,15 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
    await page.evaluate(()=>{const c=archivePlayers.get(window.fixtureDVRIndex).client;c.ensureAudio();window.dvrAnalyser=c.audio.createAnalyser();c.gain.disconnect();c.gain.connect(dvrAnalyser);dvrAnalyser.connect(c.audio.destination);});
    await page.waitForFunction(()=>{const a=new Float32Array(dvrAnalyser.fftSize);dvrAnalyser.getFloatTimeDomainData(a);return a.some(v=>Math.abs(v)>.01);});
    await page.waitForTimeout(500);
+   // WebKit can throttle animation callbacks even while audio keeps running.
+   // A visible DVR must retain the camera cadence rather than starve AAC.
+   if(wk&&expectedWidth<=1920)await page.evaluate(()=>{window.fixtureRAF={request:requestAnimationFrame,cancel:cancelAnimationFrame};window.requestAnimationFrame=callback=>setTimeout(()=>callback(performance.now()),100);window.cancelAnimationFrame=clearTimeout;});
    const continuity=await page.evaluate(()=>new Promise(resolve=>{
     const start=performance.now();let lastSound=start,maxSilence=0;
     const timer=setInterval(()=>{const now=performance.now(),samples=new Float32Array(dvrAnalyser.fftSize);dvrAnalyser.getFloatTimeDomainData(samples);if(samples.some(v=>Math.abs(v)>.01))lastSound=now;maxSilence=Math.max(maxSilence,now-lastSound);if(now-start>=6000){clearInterval(timer);resolve({maxSilence,state:archivePlayers.get(window.fixtureDVRIndex).client.diagnosticState()});}},20);
    }));
    console.log('DVR AAC continuity',JSON.stringify(continuity));
+   if(wk&&expectedWidth<=1920){await page.evaluate(()=>{window.requestAnimationFrame=fixtureRAF.request;window.cancelAnimationFrame=fixtureRAF.cancel;});assert(continuity.state.archive_presentation_fallbacks>0,'slow WebKit RAF did not use the media deadline');assert(continuity.state.frames>120,'visible DVR lost its 20 FPS source cadence');}
    assert.equal(continuity.state.state,'playing','DVR stopped during sustained playback');
    assert(continuity.state.audio_output_frames>48000,'DVR did not deliver sustained PCM output');
    assert(continuity.maxSilence<200,'DVR AAC had a sustained silent interruption: '+JSON.stringify(continuity));
@@ -53,6 +57,15 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
 
   }
   assert((await picture()).bright>2000);
+  if(audioDecoder&&expectedWidth<=1920){
+   await page.evaluate(()=>archivePlayers.get(window.fixtureDVRIndex).client.setRate(4));
+   await page.waitForFunction(()=>{const c=archivePlayers.get(window.fixtureDVRIndex).client;return c.picture&&c.speed===4&&c.playing;});
+   const rateStart=await page.evaluate(()=>archivePlayers.get(window.fixtureDVRIndex).position);await page.waitForTimeout(1800);
+   const fast=await page.evaluate(()=>{const c=archivePlayers.get(window.fixtureDVRIndex).client,a=new Float32Array(dvrAnalyser.fftSize);dvrAnalyser.getFloatTimeDomainData(a);return{position:archivePlayers.get(window.fixtureDVRIndex).position,state:c.diagnosticState(),audible:a.some(v=>Math.abs(v)>.01)};});
+   assert(fast.position-rateStart>5.5&&fast.position-rateStart<8.2,'4x playback did not advance at requested speed: '+JSON.stringify(fast));
+   assert(fast.audible,'4x AAC produced no PCM');assert.equal(fast.state.audio_overruns,0);assert.equal(fast.state.audio_dropped_packets,0);
+   await page.evaluate(()=>archivePlayers.get(window.fixtureDVRIndex).client.setRate(1));
+  }
   await seek(47.8);await page.waitForFunction(()=>{const p=archivePlayers.get(window.fixtureDVRIndex);return p.client?.picture&&p.wantPlay&&p.client.request.file.endsWith('000048.mp4')&&p.position>=48.1;});
   const diagnostics=await page.evaluate(()=>archivePlayers.get(window.fixtureDVRIndex).client.diagnosticState());assert.equal(diagnostics.transport,'edgertc/archive/1');assert(Number.isFinite(diagnostics.seek_ms));assert(diagnostics.archive_buffer_frames<=24);
   await page.evaluate(()=>showPage('home'));assert(await page.evaluate(()=>[...archivePlayers.values()].every(p=>!p.client)),'hidden NVR retained a decoder/socket');

@@ -1,11 +1,17 @@
 /* Offline interface translations. Classic-script and module compatible. */
 (()=>{
   'use strict';
-  if(globalThis.EdgeI18n?.version==='0.16.0')return;
-  const version='0.16.0',key='edge.interface.language';
+  if(globalThis.EdgeI18n?.version==='0.17.0')return;
+  const version='0.17.0',key='edge.interface.language';
   const languages=Object.freeze({en:'English',pl:'Polski',de:'Deutsch',fr:'Français',es:'Español',it:'Italiano',uk:'Українська'});
   // Columns: English, Polish, German, French, Spanish, Italian, Ukrainian.
   const rows=[
+    ["Live, DVR and alerts work locally over HTTPS without Nabu Casa. Remote access can continue using Nabu Casa. Camera and recording settings are shared.","Live, DVR i alerty działają lokalnie bez Nabu Casa przez HTTPS. Dostęp zdalny może nadal korzystać z Nabu Casa. Ustawienia kamer i nagrań pozostają wspólne.","Live, DVR und Alarme funktionieren lokal über HTTPS ohne Nabu Casa. Der Fernzugriff kann weiter Nabu Casa nutzen. Kamera- und Aufnahmeeinstellungen bleiben gemeinsam.","Le direct, le DVR et les alertes fonctionnent localement en HTTPS sans Nabu Casa. L’accès distant peut continuer via Nabu Casa. Les réglages des caméras et des enregistrements restent communs.","Live, DVR y alertas funcionan localmente por HTTPS sin Nabu Casa. El acceso remoto puede seguir usando Nabu Casa. Se comparten los ajustes de cámaras y grabaciones.","Live, DVR e avvisi funzionano localmente via HTTPS senza Nabu Casa. L’accesso remoto può continuare con Nabu Casa. Le impostazioni di telecamere e registrazioni sono condivise.","Live, DVR і сповіщення працюють локально через HTTPS без Nabu Casa. Віддалений доступ може й далі використовувати Nabu Casa. Налаштування камер і запису спільні."],
+
+    ["Live paused while viewing recordings.","Podgląd Live wstrzymany podczas oglądania nagrań.","Live beim Ansehen von Aufnahmen pausiert.","Le direct est en pause pendant la lecture des enregistrements.","Directo en pausa mientras se ven grabaciones.","Live in pausa durante la visione delle registrazioni.","Перегляд наживо призупинено під час перегляду записів."],
+    ["Local HTTPS","Lokalny HTTPS","Lokales HTTPS","HTTPS local","HTTPS local","HTTPS locale","Локальний HTTPS"],
+    ["The card and integration versions differ. Restart Home Assistant Core and reload the dashboard.","Karta i integracja mają różne wersje. Uruchom ponownie Home Assistant Core i przeładuj dashboard.","Karte und Integration haben unterschiedliche Versionen. Starten Sie Home Assistant Core neu und laden Sie das Dashboard erneut.","Les versions de la carte et de l’intégration diffèrent. Redémarrez Home Assistant Core et rechargez le tableau de bord.","Las versiones de la tarjeta y la integración difieren. Reinicia Home Assistant Core y recarga el panel.","Le versioni della scheda e dell’integrazione sono diverse. Riavvia Home Assistant Core e ricarica la dashboard.","Версії картки та інтеграції різні. Перезапустіть Home Assistant Core й оновіть панель."],
+
     ["Live view", "Podgląd na żywo", "Live-Ansicht", "Vue en direct", "Vista en directo", "Vista dal vivo", "Перегляд наживо"],
     ["Recordings", "Nagrania", "Aufnahmen", "Enregistrements", "Grabaciones", "Registrazioni", "Записи"],
     ["Events", "Zdarzenia", "Ereignisse", "Événements", "Eventos", "Eventi", "Події"],

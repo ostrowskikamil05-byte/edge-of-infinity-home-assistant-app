@@ -10,7 +10,7 @@ import urllib.request
 
 
 RETIRED_PREFIXES = ('mediamtx_', 'janus_')
-NATIVE_PORTS = {'8088/tcp', '8556/tcp', '9997/tcp'}
+NATIVE_PORTS = {'8088/tcp', '8556/tcp', '9997/tcp', '8443/tcp'}
 
 
 def native_options(options):

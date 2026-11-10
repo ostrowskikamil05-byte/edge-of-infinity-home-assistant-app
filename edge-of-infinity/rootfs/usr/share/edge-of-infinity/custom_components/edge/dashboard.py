@@ -20,7 +20,8 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.components.http.const import KEY_HASS_USER
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN
+from .const import DOMAIN, CARD_VERSION
+from .client import EdgeClientError
 
 ENTITY = re.compile(r"camera\.[a-z0-9_]+")
 DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -339,6 +340,64 @@ def archive_command(data: str, clip: str = '') -> bool:
         return False
 
 
+def https_address(value):
+    """Only navigation targets; no credentials, tokens or arbitrary API prefixes."""
+    try:
+        parts=urlsplit(str(value or ''))
+        if parts.scheme!='https' or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment or parts.path not in ('','/'):
+            return None
+        _=parts.port
+        return str(value).rstrip('/')
+    except ValueError:
+        return None
+
+
+class EdgeDashboardStatusView(HomeAssistantView):
+    url='/api/edge/dashboard/status/{entity_id}'
+    name='api:edge:dashboard:status'
+    requires_auth=True
+
+    def __init__(self,hass):
+        self.hass=hass
+
+    async def get(self,request,entity_id):
+        try:
+            target=resolve_camera(self.hass,request[KEY_HASS_USER],entity_id)
+            upstream(target['entry'])
+        except BridgeError as error:
+            return fail(error)
+        config=getattr(self.hass,'config',None)
+        return web.json_response({'integration_version':CARD_VERSION,'archive':True,
+            'transport':'edgertc/archive/1','secure_context_required':True,
+            'local_https_url':https_address(getattr(config,'internal_url',None)),
+            'external_https_url':https_address(getattr(config,'external_url',None)),
+            'local_setup':not bool(https_address(getattr(config,'internal_url',None)))},headers={'Cache-Control':'no-store'})
+
+
+async def archive_upstream(target,endpoint):
+    """Use the same private core as Live when running inside HA's add-on network.
+
+    This removes a Python socket relay while preserving entity ACLs and the
+    fixed archive/clip endpoint. Remote installations retain the panel bridge.
+    """
+    entry=target['entry'];client=entry['client']
+    if client.is_local:
+        coordinator=entry.get('coordinator')
+        camera=next((row for row in ((coordinator.data if coordinator else None) or {}).get('cameras',[]) if row.get('id')==target['camera_id']),{})
+        api=(camera.get('edge_rtc') or {}).get('api')
+        parts=urlsplit(str(api or ''))
+        if parts.scheme in ('http','https') and parts.hostname and not parts.username and not parts.password and parts.path in ('','/') and not parts.query and not parts.fragment:
+            try:
+                token=(await client._read_local_bytes('edge-rtc-token')).decode().strip()
+            except (EdgeClientError,OSError,UnicodeError,RuntimeError) as error:
+                raise BridgeError(503,'edge_token_unavailable') from error
+            if not token or len(token)<32:
+                raise BridgeError(503,'edge_token_unavailable')
+            return str(api).rstrip('/')+endpoint.replace('/api/edge-rtc/','/api/',1),{'Authorization':'Bearer '+token}
+    base,headers=upstream(entry)
+    return base+endpoint,headers
+
+
 class EdgeArchiveView(HomeAssistantView):
     """Authorized camera/archive WebSocket; no media URL or token is public."""
 
@@ -363,7 +422,7 @@ class EdgeArchiveView(HomeAssistantView):
             else:
                 slot = await recording_slot(self.hass, target)
                 endpoint = f'/api/edge-rtc/archive/{slot["key"]}'
-            base, headers = upstream(target['entry'])
+            endpoint,headers=await archive_upstream(target,endpoint)
         except BridgeError as error:
             return fail(error)
         front = web.WebSocketResponse(heartbeat=20, compress=False, max_msg_size=4096)
@@ -371,7 +430,7 @@ class EdgeArchiveView(HomeAssistantView):
             return web.Response(status=400)
         await front.prepare(request)
         try:
-            async with async_get_clientsession(self.hass).ws_connect(base + endpoint, headers=headers, heartbeat=20, compress=0, max_msg_size=9*1024*1024) as back:
+            async with async_get_clientsession(self.hass).ws_connect(endpoint, headers=headers, heartbeat=20, compress=0, max_msg_size=9*1024*1024) as back:
                 async def commands():
                     async for message in front:
                         if message.type != WSMsgType.TEXT or not archive_command(message.data, clip):
@@ -397,12 +456,12 @@ class EdgeArchiveView(HomeAssistantView):
                     await asyncio.gather(*tasks, return_exceptions=True)
         except (ClientError, OSError, TimeoutError):
             with suppress(ConnectionError):
-                await front.send_json({'type': 'error', 'code': 'edge_archive_unavailable'})
+                await front.send_json({'type':'error','code':'edge_archive_unavailable','stage':'archive_bridge'})
         finally:
             await front.close()
         return front
 
 
 def async_register_dashboard(hass) -> None:
-    for view in (EdgeRecordingsView, EdgeEventsView, EdgeMediaView, EdgeArchiveView):
+    for view in (EdgeRecordingsView, EdgeEventsView, EdgeMediaView, EdgeArchiveView, EdgeDashboardStatusView):
         hass.http.register_view(view(hass))

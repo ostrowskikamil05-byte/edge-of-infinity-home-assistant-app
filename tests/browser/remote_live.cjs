@@ -36,11 +36,12 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
      }
      if(endpoint==='cameras.json')return json({cameras:[{id:'front',key:'front_0',index:0,name:'Front',vendor:'hikvision',status:checking?'checking':'online',record_stream:'main',tile_stream:'sub',live_stream:'sub',video_codec:'h264'}]});
      if(endpoint==='api/presets')return json({presets:[]});
+     if(endpoint==='api/network/local'){assert.equal(request.method(),'GET');return json({enabled:false,hosts:[],gateway:{active:false},home_assistant_yaml:'',urls:[],cloud_required:false});}
      if(endpoint==='api/recording/status')return json({summary:url.searchParams.get('summary')==='1',cameras:[]});
      if(endpoint==='api/storage/status')return json({pending:false,recordings_bytes:0,recordings_volume:{free_bytes:2*1024**3},cache_volume:{free_bytes:2*1024**3}});
      if(endpoint==='api/debug')throw Error('per-event debug HTTP must not be used');
      if(endpoint==='api/client-diagnostics.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-device-diagnostics.js'),'utf8')});
-     const moduleAssets={'api/edge-rtc/edge-rtc-client.js':'edge-rtc-client.js','api/edge-rtc/device-diagnostics.js':'edge-device-diagnostics.js','api/edge-rtc/edge-dvr-client.js':'edge-dvr-client.js','api/edge-rtc/edge-dvr-panel.js':'edge-dvr-panel.js'};
+     const moduleAssets={'api/edge-rtc/edge-rtc-client.js':'edge-rtc-client.js','api/edge-rtc/device-diagnostics.js':'edge-device-diagnostics.js','api/edge-rtc/edge-dvr-client.js':'edge-dvr-client.js','api/edge-rtc/edge-dvr-panel.js':'edge-dvr-panel.js','api/edge-rtc/edge-local-network.js':'edge-local-network.js'};
      if(moduleAssets[endpoint]){
       assert.equal(mode,'native');assert.equal(url.searchParams.get('v'),fixtures[mode].version,'preload URL is not versioned');
       const asset=moduleAssets[endpoint];
@@ -76,7 +77,7 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
     await storageResponse;
     await page.locator('#network-settings > summary').click();
     assert.equal(await page.locator('[name="live-mobile-public-url"]').count(),0);
-    if(native)assert(await page.locator('[data-native-network-info]').isVisible());
+    if(native){assert(await page.locator('[data-native-network-info]').isVisible());await page.locator('edge-local-network [data-host]').waitFor();assert.equal(await page.locator('edge-local-network [data-enabled]').isChecked(),false,'local HTTPS unexpectedly enabled');}
     await page.locator('#advanced-settings > summary').click();
     assert.equal(await page.locator('[name="live-engine"]').count(),0);
     await page.locator('[name="nvr-retention-days"]').fill('21');

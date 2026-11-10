@@ -105,6 +105,7 @@ if os.environ.get('EDGE_TEST_ARCHIVE_RTC_BINARY'):
   available.bind(('127.0.0.1',0));p.EDGE_RTC_API_PORT=available.getsockname()[1]
  private=p.HOME_DIR/'archive-core.json';token='disposable-browser-archive-token-'+str(os.getpid())
  p.write_json(private,{'rtsp':'127.0.0.1:0','http':'127.0.0.1:'+str(p.EDGE_RTC_API_PORT),'token':token,'sources':[],
+                       'local_https':{'enabled':False,'listen':'127.0.0.1:0','directory':str(p.HOME_DIR/'local-https'),'upstream':'http://127.0.0.1:18195'},
                        'recordings':config['storage']['recordings_dir'],'archives':{p.recording_key(c,i):p.recording_base_dir(c,i).name for i,c in enumerate(config['cameras'])}})
  (p.HOME_DIR/'edge-rtc-token').write_text(token)
  core=subprocess.Popen([os.environ['EDGE_TEST_ARCHIVE_RTC_BINARY'],'-config',str(private)])
@@ -113,7 +114,7 @@ if os.environ.get('EDGE_TEST_ARCHIVE_RTC_BINARY'):
   try:core.wait(timeout=3)
   except subprocess.TimeoutExpired:core.kill();core.wait()
  atexit.register(stop_core)
- fixture_info['archive_core']='http://127.0.0.1:'+str(p.EDGE_RTC_API_PORT);fixture_info['archive_token']=token
+ fixture_info['archive_core']='http://127.0.0.1:'+str(p.EDGE_RTC_API_PORT);fixture_info['archive_token']=token;fixture_info['core_config']=str(private)
 Path(os.environ.get('EDGE_NVR_FIXTURE_INFO', '/tmp/edge-nvr-browser-fixture.json')).write_text(json.dumps(fixture_info))
 signal.signal(signal.SIGTERM,lambda *args:sys.exit(0))
 p.ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('EDGE_NVR_TEST_PORT', '18088'))),p.EdgeHandler).serve_forever()

@@ -1,8 +1,8 @@
 /* Edge of Infinity dashboard cards: recordings and events.
    All data comes through Home Assistant's authenticated /api/edge/dashboard bridge. */
-const EDGE_DASH_VERSION = "0.16.0";
+const EDGE_DASH_VERSION = "0.17.0";
 const edgeDashI18nReady=import('/edge/edge-i18n.js?v='+EDGE_DASH_VERSION).catch(()=>null);
-const edgeDVRModule=()=>import('/edge/edge-dvr-client.js?v='+EDGE_DASH_VERSION);
+let edgeProblemText;const edgeDVRModule=()=>import('/edge/edge-dvr-client.js?v='+EDGE_DASH_VERSION);
 const edgeGalleryReady=import('/edge/edge-gallery-cache.js?v='+EDGE_DASH_VERSION).catch(()=>null);
 const EDGE_DASH_API = "edge/dashboard";
 const EDGE_DASH_OPEN = "edge-dashboard-open-recording";
@@ -345,11 +345,11 @@ class EdgeRecordingsCard extends EdgeDashCard {
     try {const link=document.createElement('a');link.href=await this._media.signed(this._entity,'video',file[0]);link.download=`${this._hass.states[this._entity]?.attributes?.edge_camera_id||'edge'}-${file[0]}`;link.click();}
     catch (_) { this._note(this._t("unreachable")); }
   }
-  _stop(){this._token++;this._wantPlay=false;this._index=-1;this._dvr?.close();this._dvr=null;clearTimeout(this._scrubTimer);this._note('');}
-  _suspendMedia(){if(this._dvr){this._dvr.close();this._dvr=null;}}
+  _stop(){clearTimeout(this._reconnectTimer);this._networkRetries=0;this._token++;this._wantPlay=false;this._index=-1;this._dvr?.close();this._dvr=null;clearTimeout(this._scrubTimer);this._note('');}
+  _suspendMedia(){clearTimeout(this._reconnectTimer);if(this._dvr){this._dvr.close();this._dvr=null;}}
   _resumeMedia(){if(this._connected&&this._inView&&!document.hidden&&this._index>=0&&!this._dvr)this._show(this._index,Math.max(0,this._position-this._files[this._index][1]));}
   async _seek(stamp, play = this._wantPlay) {
-    if (!this._files.length) return;
+    if (!this._files.length) return;this._networkRetries=0;
     let index = this._find(stamp); if (index >= this._files.length) index = this._files.length - 1;
     const file = this._files[index]; const offset = Math.max(0, Math.min(file[2] - 0.3, stamp - file[1]));
     this._wantPlay = Boolean(play); this._position = file[1] + offset; this._retries = 0; this._follow(); this._paint();
@@ -360,15 +360,16 @@ class EdgeRecordingsCard extends EdgeDashCard {
     if(document.hidden||this._inView===false)return;
     try{
       if(!this._dvr||this._dvr.closed){
-        const {EdgeDVRClient}=await edgeDVRModule();if(token!==this._token||!this.isConnected)return;
+        const {EdgeDVRClient,edgeMediaProblem}=await edgeDVRModule();edgeProblemText=edgeMediaProblem;if(token!==this._token||!this.isConnected)return;
         const client=new EdgeDVRClient({hass:this._hass,entity:this._entity,canvas:this._canvas,
           onWaiting:waiting=>{if(this._dvr===client)this._note(waiting?this._t('preparing'):'');},
-          onFrame:frame=>{if(this._dvr!==client||this._index<0)return;this._position=this._files[this._index][1]+frame.seconds;this._$('.poster').hidden=true;const now=performance.now();if(client.paused||now-(this._lastPaint||0)>=100){this._lastPaint=now;this._paint();}},
+          onFrame:frame=>{if(this._dvr!==client||this._index<0)return;if(performance.now()-client.started>10000)this._networkRetries=0;this._position=this._files[this._index][1]+frame.seconds;this._$('.poster').hidden=true;const now=performance.now();if(client.paused||now-(this._lastPaint||0)>=100){this._lastPaint=now;this._paint();}},
+          onYield:()=>{this._wantPlay=false;this._paint();},
           onAudioUnavailable:()=>{this._muted=true;this._paint();},onEnded:()=>{if(this._dvr===client)this._advance();},
-          onError:()=>{if(this._dvr===client){this._wantPlay=false;this._note(this._t('playError'));this._paint();}}});
+          onError:(message,detail)=>{if(this._dvr===client){if(detail?.retryable&&this._wantPlay&&this._connected&&this._inView&&!document.hidden&&(this._networkRetries||0)<2){this._networkRetries=(this._networkRetries||0)+1;this._note(message);clearTimeout(this._reconnectTimer);const failedToken=this._token;this._reconnectTimer=setTimeout(()=>{if(this._token===failedToken&&this._connected&&this._inView&&this._wantPlay&&this._index>=0&&!document.hidden)this._show(this._index,Math.max(0,this._position-this._files[this._index][1]));},this._networkRetries*400);return;}this._wantPlay=false;this._note(edgeProblemText(message,detail,edgeLang(this._hass,this._config.language)));this._paint();}}});
         this._dvr=client;client.setAudio(.6,this._muted);client.seek(file[0],offset,{paused:!this._wantPlay,rate:this._rate});await client.start();
       }else this._dvr.seek(file[0],offset,{paused:!this._wantPlay,rate:this._rate});
-    }catch(_){if(token===this._token){this._wantPlay=false;this._note(this._t('playError'));this._paint();}}
+    }catch(error){if(token===this._token){this._wantPlay=false;this._note(edgeProblemText?.(error.message,{code:error.code},edgeLang(this._hass,this._config.language))||error.message||this._t('playError'));this._paint();}}
   }
   async _advance(){
     const next=this._index+1;
@@ -530,11 +531,11 @@ class EdgeEventsCard extends EdgeDashCard {
     const picture = async () => { if (!event.image) { stage.innerHTML = `<p>${this._t("noPicture")}</p>`; return; } try { const url = await this._media.fetch(this._media.path(event.entity_id, "event-image", event.id + ".jpg")); if (this._viewing === event) { const img = document.createElement("img"); img.alt="";stage.replaceChildren(img);this._media._show(img,url); } } catch (_) { if (this._viewing === event) stage.innerHTML = `<p>${this._t("noPicture")}</p>`; } };
     if (!event.clip) { await picture(); if (event.image && event.kind !== "motion") { note.textContent = this._t("clipPending"); note.hidden = false; } return; }
     try {
-      const {EdgeDVRClient}=await edgeDVRModule();if(this._viewing!==event)return;
+      const {EdgeDVRClient,edgeMediaProblem}=await edgeDVRModule();if(this._viewing!==event)return;
       const canvas=document.createElement('canvas'),controls=document.createElement('div');canvas.width=640;canvas.height=360;stage.replaceChildren(canvas);
       controls.className='view-bar';const play=document.createElement('button'),sound=document.createElement('button');play.textContent=this._t('pause');sound.textContent=this._t('sound');controls.append(play,sound);stage.append(controls);controls.style.cssText='position:absolute;bottom:0;z-index:2';
       let muted=true;const client=new EdgeDVRClient({hass:this._hass,entity:event.entity_id,clip:event.id,canvas,
-        onFrame:()=>{note.hidden=true;},onError:()=>{note.textContent=this._t('playError');note.hidden=false;},
+        onYield:()=>{play.textContent=this._t('play');},onFrame:()=>{note.hidden=true;},onError:(message,detail)=>{note.textContent=edgeMediaProblem(message,detail,edgeLang(this._hass,this._config.language));note.hidden=false;},
         onEnded:()=>{play.textContent=this._t('play');}});this._clipClient=client;
       play.onclick=()=>{if(client.paused||client.ended){client.seek('event-'+event.id+'.mp4',client.ended?0:client.position,{paused:false});play.textContent=this._t('pause');}else{client.pause();play.textContent=this._t('play');}};
       sound.onclick=()=>{muted=!muted;client.setAudio(.6,muted);sound.textContent=this._t(muted?'sound':'mute');};

@@ -1,25 +1,62 @@
 /* EdgeRTC/1: H264/H265 access units -> WebCodecs. No RTCPeerConnection, MP4 or MSE. */
 export function edgeRTCPlaybackSupport(language=globalThis.navigator?.language||'en'){
   const pl=language.startsWith('pl');
-  if(!globalThis.isSecureContext)return{supported:false,code:'insecure_context',message:pl?'EdgeRTC: otwórz Home Assistant przez HTTPS, np. adresem https://…ui.nabu.casa z Home Assistant Cloud. HTTP w sieci lokalnej blokuje WebCodecs.':'EdgeRTC: open Home Assistant over HTTPS, for example your https://…ui.nabu.casa Home Assistant Cloud address. Local-network HTTP blocks WebCodecs.'};
+  if(!globalThis.isSecureContext)return{supported:false,code:'insecure_context',message:pl?'EdgeRTC: otwórz Home Assistant przez HTTPS, lokalnym adresem z zaufanym certyfikatem lub Nabu Casa. Skonfiguruj lokalny HTTPS w ustawieniach sieci Edge.':'EdgeRTC: open Home Assistant over HTTPS, using a trusted local certificate or Nabu Casa. Configure local HTTPS in Edge network settings.'};
   if(typeof globalThis.VideoDecoder!=='function'||typeof globalThis.EncodedVideoChunk!=='function')return{supported:false,code:'webcodecs_unavailable',message:pl?'EdgeRTC: ta przeglądarka nie udostępnia dekodera WebCodecs. Otwórz adres HTTPS Home Assistanta w aktualnym Chrome lub Edge.':'EdgeRTC: this browser does not provide a WebCodecs decoder. Open the Home Assistant HTTPS address in an up-to-date Chrome or Edge browser.'};
   return{supported:true,code:'supported',message:''};
+}
+
+// One foreground archive on constrained devices. Camera sources stay on the server.
+// Shared across versioned module URLs so cards and event viewers cooperate.
+export function edgeMediaCoordinator(){
+  const key=Symbol.for('edge.media.coordinator');
+  return globalThis[key]??=new class {
+    constructor(){this.live=new Set();this.archives=new Set();this.owner=null;}
+    constrained(){return globalThis.matchMedia?.('(max-width: 820px)').matches||/Android|iPhone|iPad|iPod/.test(globalThis.navigator?.userAgent||'')||(globalThis.navigator?.platform==='MacIntel'&&globalThis.navigator?.maxTouchPoints>1);}
+    registerLive(player){this.live.add(player);player.setMediaSuspended?.(Boolean(this.owner));return()=>this.live.delete(player);}
+    claim(client,force=false){
+      this.archives.add(client);if(!force&&!this.constrained())return;
+      const previous=this.owner;this.owner=client;
+      const others=force?[...this.archives]:[previous];for(const other of others)if(other&&!other.closed&&other!==client){other.options.onYield?.();if(other.yieldMedia)other.yieldMedia();else other.pause();}
+      for(const player of this.live)player.setMediaSuspended?.(true);
+    }
+    release(client){this.archives.delete(client);if(this.owner!==client)return;this.owner=null;for(const player of this.live)player.setMediaSuspended?.(false);}
+    activateLive(){if(this.owner){this.owner.options.onYield?.();if(this.owner.yieldMedia)this.owner.yieldMedia();else this.owner.pause();}}
+  };
+}
+export function edgeMediaProblem(message,detail={},language=globalThis.navigator?.language||'en'){
+  const code=detail.code||'media_error',pl=String(language).startsWith('pl');
+  const text={
+    insecure_context:pl?'Dostęp lokalny wymaga HTTPS. Otwórz lokalny adres HTTPS Home Assistanta lub Nabu Casa.':'Local access requires HTTPS. Open your local Home Assistant HTTPS address or Nabu Casa.',
+    webcodecs_unavailable:pl?'Ta przeglądarka nie udostępnia WebCodecs. Użyj aktualnej przeglądarki lub aplikacji Home Assistant.':'This browser does not provide WebCodecs. Use an up-to-date browser or Home Assistant app.',
+    integration_restart_required:pl?'Karta i integracja mają różne wersje. Uruchom ponownie Home Assistant Core i przeładuj dashboard.':'The card and integration versions differ. Restart Home Assistant Core and reload the dashboard.',
+    websocket_failed:pl?'Nie udało się otworzyć połączenia DVR. Sprawdź połączenie z Home Assistantem; szczegóły zapisano w logach urządzenia.':'The DVR connection could not be opened. Check the Home Assistant connection; details are in the device log.',
+    authorization_failed:pl?'Sesja Home Assistanta wygasła lub brakuje uprawnień do kamery. Zaloguj się ponownie.':'The Home Assistant session expired or camera access was denied. Sign in again.',
+    upstream_unavailable:pl?'Serwer DVR jest chwilowo niedostępny. Sprawdź stan aplikacji Edge.':'The DVR server is temporarily unavailable. Check the Edge app status.',
+    connection_timeout:pl?'Połączenie z obrazem przekroczyło limit czasu. Sprawdź log urządzenia i połączenie z serwerem.':'The video connection timed out. Check the device log and server connection.',
+    source_disconnected:pl?'Połączenie z nagraniem zostało przerwane. Naciśnij Odtwórz, aby połączyć ponownie.':'The recording connection was interrupted. Press Play to reconnect.',
+    archive_viewer_limit:pl?'Wszystkie sesje DVR są zajęte. Zatrzymaj inny podgląd i spróbuj ponownie.':'All DVR sessions are busy. Stop another viewer and try again.',
+    video_decoder_unavailable:pl?'Przeglądarka nie obsługuje profilu tego nagrania. Pobierz oryginał lub użyj urządzenia z obsługą tego kodeka.':'This browser does not support the recording profile. Download the original or use a device that supports its codec.',
+    decoder_rejected_stream:pl?'Dekoder nie uruchomił obrazu. Zwolniono inne podglądy; szczegóły są w logach urządzenia.':'The video decoder could not start. Other viewers were released; details are in the device log.'
+  };
+  const chosen=text[code]||message;if(chosen)return globalThis.EdgeI18n?.text(chosen,null,language)||chosen;
+  return (pl?'Odtwarzanie nie jest dostępne. Sprawdź log urządzenia.':'Playback is unavailable. Check the device log.');
 }
 
 export class EdgeRTCClient {
   constructor(options){this.options=options;this.canvas=options.canvas;this.closed=false;this.playing=false;this.connectionState='connecting';this.waitKey=true;this.firstFrameMS=null;this.frames=0;this.started=performance.now();this.frameQueue=[];this.droppedFrames=0;this.bootstrapFrames=0;}
   async start(){
-    this.diagnosticKey=this.options.diagnosticSource||this.options.entity||(this.options.url?new URL(this.options.url,location.href).pathname.split('/').pop():'edge_rtc');this.diagnostics=this.options.diagnostics;
+    this.connectionStage='browser_support';this.diagnosticKey=this.options.diagnosticSource||this.options.entity||(this.options.url?new URL(this.options.url,location.href).pathname.split('/').pop():'edge_rtc');this.diagnostics=this.options.diagnostics;
     this.diagnostics?.registerSource(this.diagnosticKey,()=>this.diagnosticState());
     this.diagnostics?.note('rtc_connect_start',{source:this.diagnosticKey});
     this.language=this.options.language||this.options.hass?.locale?.language||this.options.hass?.language||globalThis.navigator?.language||'en';const support=edgeRTCPlaybackSupport(this.language);
     if(!support.supported){const error=new Error(support.message);error.code=support.code;error.retryable=false;this.diagnostics?.note('rtc_support_missing',{source:this.diagnosticKey,code:support.code});this.close();throw error;}
-    this.connectTimer=setTimeout(()=>this.fail('EdgeRTC camera timed out.'),15000);let url=this.options.url;
+    this.connectTimer=setTimeout(()=>this.fail('EdgeRTC camera timed out.',true,{code:'connection_timeout'}),15000);this.connectionStage='signing';let url=this.options.url;
     if(!url){const path=`/api/edge/rtc/${this.options.entity}?microphone=${this.options.microphone?1:0}`,before=performance.now();const signed=await this.options.hass.callWS({type:'auth/sign_path',path});this.diagnostics?.note('rtc_ha_sign_complete',{source:this.diagnosticKey,elapsed_ms:performance.now()-before});if(this.closed)return;url=this.options.hass.hassUrl?this.options.hass.hassUrl(signed.path):new URL(signed.path,location.href).href;}
     if(this.closed)return;url=url.replace(/^http:/,'ws:').replace(/^https:/,'wss:');
-    this.diagnostics?.note('rtc_transport_target',{source:this.diagnosticKey,endpoint:url});this.ws=new WebSocket(url);this.ws.binaryType='arraybuffer';this.messageChain=Promise.resolve();this.pendingMessages=0;this.pendingBytes=0;this.receivedBytes=0;
+    this.diagnostics?.note('rtc_transport_target',{source:this.diagnosticKey,endpoint:url});this.connectionStage='websocket';this.ws=new WebSocket(url);this.ws.binaryType='arraybuffer';this.messageChain=Promise.resolve();this.pendingMessages=0;this.pendingBytes=0;this.receivedBytes=0;
     this.ws.onopen=()=>{this.websocketOpenAt=performance.now();this.diagnostics?.note('rtc_websocket_open',{source:this.diagnosticKey,open_ms:performance.now()-this.started});};
-    this.ws.onmessage=e=>this.queueMessage(e.data);this.ws.onerror=()=>this.fail('EdgeRTC connection failed.');this.ws.onclose=e=>{this.diagnostics?.note('rtc_websocket_close',{source:this.diagnosticKey,code:e?.code,clean:e?.wasClean,expected:this.closed});if(!this.closed)this.fail('EdgeRTC source disconnected.');};
+    this.ws.onmessage=e=>this.queueMessage(e.data);this.ws.onerror=()=>this.fail('EdgeRTC connection failed.',true,{code:'websocket_failed'});this.ws.onclose=e=>{this.diagnostics?.note('rtc_websocket_close',{source:this.diagnosticKey,code:e?.code,clean:e?.wasClean,expected:this.closed});if(!this.closed)this.fail('EdgeRTC source disconnected.',true,{code:'source_disconnected'});};
   }
   queueMessage(data){
     if(this.closed)return;
@@ -83,7 +120,7 @@ export class EdgeRTCClient {
     const id=this.networkPingID=(this.networkPingID||0)%4294967295+1;
     this.networkPingPending={id,at:performance.now()};this.ws.send(JSON.stringify({type:'network_ping',id}));
   }
-  fail(message,retryable=true){if(this.closed)return;this.diagnostics?.note('rtc_error',{source:this.diagnosticKey,message,retryable});this.options.onError?.(message,{retryable});this.close();}
+  fail(message,retryable=true,detail={}){if(this.closed)return;const problem={code:detail.code||'media_error',stage:this.connectionStage,retryable,...detail};this.diagnostics?.note('rtc_error',{source:this.diagnosticKey,message,...problem});this.options.onError?.(message,problem);this.close();}
   diagnosticState(){return {state:this.closed?'closed':this.playing?'playing':this.connectionState,codec:this._codec,width:this.width,height:this.height,
     first_frame_ms:this.firstFrameMS,frames:this.frames,dropped_frames:this.droppedFrames,source_fps:this.frameInterval?1000/this.frameInterval:null,
     decode_queue:this.video?.decodeQueueSize,render_queue:this.frameQueue.length,render_ahead_ms:Math.max(0,(this.frameQueue.at(-1)?.due||0)-performance.now()),render_limit_ms:250+2*(this.networkBufferMS||0),message_queue:this.pendingMessages,received_bytes:this.receivedBytes,
@@ -99,7 +136,7 @@ export class EdgeRTCClient {
     if(this.closed)return;
     try{
       if(typeof data==='string'){
-        const msg=JSON.parse(data);if(msg.type==='error'){this.fail(`EdgeRTC: ${msg.code}`);return;}
+        const msg=JSON.parse(data);if(msg.type==='error'){this.fail(`EdgeRTC: ${msg.code}`,true,{code:msg.code});return;}
         if(msg.type==='network_pong'){
           if(msg.id===this.networkPingPending?.id){this.networkRTTMS=Math.round(performance.now()-this.networkPingPending.at);this.networkPingPending=null;this.networkServerQueueBytes=msg.queue_bytes;this.diagnostics?.note('rtc_network_sample',{source:this.diagnosticKey,...this.diagnosticState()});}return;
         }
@@ -229,7 +266,7 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   audioModule(){
-    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.16.0',import.meta.url).href);
+    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.17.0',import.meta.url).href);
   }
   startAudioPlayback(){
     if(this.audioPlaybackPromise||this.closed||this.audioDisabled)return;

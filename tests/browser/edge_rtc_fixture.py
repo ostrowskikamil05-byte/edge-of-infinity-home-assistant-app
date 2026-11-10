@@ -32,9 +32,13 @@ async def main():
         if not hevc and gop > 1:
             encoding[encoding.index('-g')+1]=str(fps*gop)
         subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i',f'testsrc2=size=640x360:rate={fps}','-t',str(gop),*encoding,str(video)],check=True)
+        archive = os.environ.get('EDGE_RTC_TEST_ARCHIVE') == '1'
+        if archive:
+            saved=folder/'recordings/front';saved.mkdir(parents=True)
+            subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i',f'testsrc2=size=640x360:rate={fps}','-f','lavfi','-i','sine=sample_rate=48000','-t','12',*encoding[:-2],'-c:a','aac','-threads:a','1','-movflags','+faststart',str(saved/'20260728-000000.mp4')],check=True)
         info_file = folder/'info.json'
         log = (folder/'fixture.log').open('wb')
-        process = subprocess.Popen([os.environ['EDGE_RTC_TEST_BINARY'],'-test.run=^TestBrowserFixture$','-test.v'],env={**os.environ,'EDGE_RTC_TEST_VIDEO':str(video),'EDGE_RTC_TEST_INFO':str(info_file)},stdout=log,stderr=log)
+        process = subprocess.Popen([os.environ['EDGE_RTC_TEST_BINARY'],'-test.run=^TestBrowserFixture$','-test.v'],env={**os.environ,'EDGE_RTC_TEST_VIDEO':str(video),'EDGE_RTC_TEST_INFO':str(info_file),**({'EDGE_RTC_TEST_RECORDINGS':str(folder/'recordings')} if archive else {})},stdout=log,stderr=log)
         try:
             for _ in range(150):
                 if info_file.exists():
@@ -52,6 +56,7 @@ async def main():
             sys.modules['homeassistant.components.http'].HomeAssistantView=object
             sys.modules['homeassistant.components.http.const'].KEY_HASS_USER='hass_user'
             sys.modules['edge_fixture.const'].DOMAIN='edge'
+            sys.modules['edge_fixture.const'].CARD_VERSION='0.17.0'
             sys.modules['edge_fixture.client'].EdgeClientError=type('EdgeClientError',(Exception,),{})
             async with ClientSession() as session:
                 sys.modules['homeassistant.helpers.aiohttp_client'].async_get_clientsession=lambda hass:session
@@ -59,11 +64,14 @@ async def main():
                 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
                 async def token(name):
                     return info['token'].encode()
-                client=types.SimpleNamespace(is_local=True,_read_local_bytes=token)
+                client=types.SimpleNamespace(is_local=True,base_url='local',_read_local_bytes=token)
                 ids=['camera.front','camera.side','camera.back','camera.garage']
                 rows=[{'camera_id':str(index),'entity_id':entity,'role':'nvr','name':entity} for index,entity in enumerate(ids)]
                 cameras=[{'id':str(index),'enabled':True,'edge_rtc':{'api':info['api'],'path':'front_main'}} for index in range(4)]
                 hass=types.SimpleNamespace(data={'edge':{'entry':{'client':client,'coordinator':types.SimpleNamespace(data={'cameras':cameras}),'entities':{str(i):row for i,row in enumerate(rows)}}}})
+                if archive:
+                    rows[0]['camera_id']='front';cameras[0].update(id='front',index=0,key='front_0')
+                    cameras[0]['edge_rtc']['keyframe_api']='http://127.0.0.1:18090/api/edge-rtc/keyframe/front'
                 bridge=module.EdgeRTCView(hass)
                 spec=importlib.util.spec_from_file_location('edge_fixture.device_diagnostics',ASSETS.parent/'device_diagnostics.py')
                 diagnostics_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(diagnostics_module)
@@ -82,10 +90,10 @@ async def main():
                     async with session.get(info['api']+'/api/status',headers={'Authorization':'Bearer '+info['token']}) as response:
                         return web.json_response(await response.json())
                 async def index(request):
-                    return web.Response(text='<html><body style="margin:8px;background:#0d151e;--primary-text-color:#edf5f7;--card-background-color:#111d28"></body></html>',content_type='text/html')
+                    return web.Response(text='<html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="margin:8px;background:#0d151e;--primary-text-color:#edf5f7;--card-background-color:#111d28"></body></html>',content_type='text/html')
                 async def asset(request):
                     name=request.match_info['name']
-                    if name not in ['edge-live-card.js','edge-rtc-client.js','edge-pcm-worklet.js','edge-device-diagnostics.js','edge-i18n.js','edge-brand.png']:
+                    if name not in ['edge-live-card.js','edge-rtc-client.js','edge-pcm-worklet.js','edge-device-diagnostics.js','edge-i18n.js','edge-brand.png','edge-dashboard-cards.js','edge-dvr-client.js','edge-recording-gallery.js']:
                         raise web.HTTPNotFound()
                     return web.Response(body=(ASSETS/name).read_bytes(),content_type='image/png' if name.endswith('.png') else 'text/javascript')
                 sys.path.insert(0, str(ROOT/'tests'))
@@ -93,6 +101,15 @@ async def main():
                 os.environ['EDGE_CORE_ENGINE']='edge_rtc'
                 panel=load_panel_module();panel.EDGE_RTC_ENABLED=True;panel.EDGE_RTC_API_PORT=urlparse(info['api']).port
                 panel.HOME_DIR.mkdir(parents=True,exist_ok=True);(panel.HOME_DIR/'edge-rtc-token').write_text(info['token'])
+                if archive:
+                    from test_edge_panel_config import camera as make_camera
+                    panel.MIN_RECORDING_FILE_READY_SECONDS=0
+                    panel.commit_panel_config(panel.normalize_config({'storage':{'recordings_dir':str(folder/'recordings')},'cameras':[make_camera('front','192.0.2.10','main')]}))
+                    panel.schedule_recording_ensure=lambda *args:None
+                    panel.schedule_recording_cache_refresh=lambda *args,**kw:False
+                    panel.sync_runtime_engine_config=lambda *args:{}
+                    spec=importlib.util.spec_from_file_location('edge_fixture.dashboard',ASSETS.parent/'dashboard.py')
+                    dashboard=importlib.util.module_from_spec(spec);spec.loader.exec_module(dashboard)
                 server=panel.ThreadingHTTPServer(('127.0.0.1',18090),panel.EdgeHandler);threading.Thread(target=server.serve_forever,daemon=True).start()
                 from edge_detection import DetectionService
                 from test_edge_panel_config import camera
@@ -147,6 +164,13 @@ async def main():
                         return {'state':store.get(ident)['clip_state'],'pixel_identical':original==pixels(clip),'fps':video_timing(clip)['fps'],'recorded_fps':recorded_fps}
                     return web.json_response(await asyncio.to_thread(build))
                 app=web.Application();app.router.add_get('/',index);app.router.add_get('/edge/{name}',asset);app.router.add_get('/api/edge/rtc/{entity}',websocket);app.router.add_post('/api/edge/client-diagnostics',device_report);app.router.add_get('/test/devices',device_logs);app.router.add_get('/test/status',status);app.router.add_get('/test/detection',detection_status);app.router.add_get('/test/record',record);app.router.add_get('/test/alert',alert)
+                if archive:
+                    for view_class in (dashboard.EdgeRecordingsView,dashboard.EdgeEventsView,dashboard.EdgeMediaView,dashboard.EdgeArchiveView,dashboard.EdgeDashboardStatusView):
+                        view=view_class(hass)
+                        async def handle(request,view=view):
+                            request['hass_user']=types.SimpleNamespace(permissions=types.SimpleNamespace(check_entity=lambda entity,policy:True))
+                            return await view.get(request,**request.match_info)
+                        app.router.add_get(view.url,handle)
                 runner=web.AppRunner(app);await runner.setup();site=web.TCPSite(runner,'127.0.0.1',18089);await site.start()
                 print('EdgeRTC real transport fixture ready on 18089',flush=True)
                 event=asyncio.Event();asyncio.get_running_loop().add_signal_handler(signal.SIGTERM,event.set);await event.wait();await runner.cleanup();await asyncio.to_thread(server.shutdown);server.server_close()

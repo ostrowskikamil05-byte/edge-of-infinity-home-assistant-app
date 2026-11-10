@@ -25,7 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const version = "0.16.0"
+const version = "0.17.0"
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -42,6 +42,7 @@ type config struct {
 	Sources    []sourceConfig    `json:"sources"`
 	Recordings string            `json:"recordings"`
 	Archives   map[string]string `json:"archives"`
+	LocalHTTPS localHTTPSConfig  `json:"local_https"`
 }
 
 func readConfig(path string) (config, error) {
@@ -74,6 +75,7 @@ func readConfig(path string) (config, error) {
 }
 
 type app struct {
+	local        localHTTPS
 	cfg          config
 	mu           sync.RWMutex
 	sources      map[string]*source
@@ -115,6 +117,7 @@ func newApp(c config) (*app, error) {
 	return a, nil
 }
 func (a *app) reload(c config) {
+	a.local.apply(c.LocalHTTPS)
 	// Removal/changes are closed and joined BEFORE their replacements are started.
 	a.mu.Lock()
 	if a.closed {
@@ -227,6 +230,10 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		a.mu.RUnlock()
 		reply(w, 200, map[string]any{"engine": "edge_rtc", "protocol": "edgertc/1", "sources": out, "policy": "one_upstream_per_camera"})
+	case r.URL.Path == "/api/local-https" && r.Method == "GET":
+		reply(w, 200, a.local.status())
+	case r.URL.Path == "/api/local-https/certificate" && r.Method == "POST":
+		a.localCertificate(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/stream/") && r.Method == "GET":
 		a.stream(w, r, strings.TrimPrefix(r.URL.Path, "/api/stream/"))
 	case strings.HasPrefix(r.URL.Path, "/api/archive/") && r.Method == "GET":
@@ -376,6 +383,7 @@ func (a *app) stream(w http.ResponseWriter, r *http.Request, path string) {
 	}
 }
 func (a *app) close() {
+	a.local.close()
 	close(a.stop)
 	a.mu.Lock()
 	a.closed = true

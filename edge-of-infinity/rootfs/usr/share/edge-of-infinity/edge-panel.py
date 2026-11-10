@@ -39,6 +39,7 @@ from edge_metrics import CpuSampler, cpu_load_severity, hardware_inventory
 from edge_camera_keyframes import CameraKeyframes
 from edge_camera_gop import set_onvif_gop
 from edge_native_migration import native_options
+from edge_local_network import local_settings, save_local_settings, network_status, normalize_hosts, save_proxy_helper
 sys.path.insert(0,str(Path(__file__).parent/'custom_components/edge'))
 from _device_logs import DeviceLogs, safe_url
 
@@ -101,8 +102,11 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.16.0"
-APP_RELEASE_FEATURES=['Native-only DVR in panel and HA cards; MP4 retained as original downloads',
+APP_VERSION = "0.17.0"
+APP_RELEASE_FEATURES=['Shared mobile Live/DVR decoder ownership, typed playback failures and direct authenticated archive bridge',
+                      'Optional local HTTPS gateway and CA setup; full Live/DVR/dashboard without Nabu Casa',
+                      'Bounded RTT-aware DVR pulls, 4x AAC playback and stable image cadence after network gaps',
+                      'Native-only DVR in panel and HA cards; MP4 retained as original downloads',
                       'Viewport-aware Live/DVR and smaller archive batches preserve original resolution/FPS',
                       'Vertical dashboard gestures, stable thumbnail DOM and bounded per-user JPEG cache',
                       'EdgeRTC-only Live, recording and DVR; retired engines and options removed with bounded migration',
@@ -120,7 +124,7 @@ APP_RELEASE_FEATURES=['Native-only DVR in panel and HA cards; MP4 retained as or
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "native-dashboard-v160"
+UI_BUILD = "shared-sessions-v170"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -2128,6 +2132,32 @@ def edge_rtc_status() -> dict:
             return {"enabled": True, "api_reachable": True, **json.loads(response.read())}
     except (OSError, ValueError):
         return {"enabled": EDGE_RTC_ENABLED, "api_reachable": False}
+
+
+def local_core_request(path, payload=None):
+    import urllib.request
+    if path not in ('/api/local-https','/api/local-https/certificate'):
+        raise ValueError('invalid_local_core_route')
+    token=(HOME_DIR/'edge-rtc-token').read_text().strip()
+    data=json.dumps(payload).encode() if payload is not None else None
+    request=urllib.request.Request(f'http://127.0.0.1:{EDGE_RTC_API_PORT}'+path,data=data,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+    try:
+        with urllib.request.urlopen(request,timeout=8) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        try:
+            detail=json.loads(error.read(4096)).get('error','local_https_request_failed')
+        except (ValueError,AttributeError):
+            detail='local_https_request_failed'
+        raise ValueError(detail) from error
+
+
+def local_network_status():
+    try:
+        runtime=local_core_request('/api/local-https')
+    except (OSError,ValueError):
+        runtime={'active':False,'error':'edge_core_unavailable'}
+    return network_status(HOME_DIR,runtime)
 
 
 def engine_runtime_status() -> dict:
@@ -8491,11 +8521,13 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Oryginalna jakość i kodek (zalecane)</option>
 
               </select></label></div><p class="field-help">Testy H.264/H.265 i dźwięku są w menu Kodeki odtwarzacza. Zapis zachowuje kodek, rozdzielczość i FPS kamery. Nagranie jest już skompresowane przez kamerę. Zmniejszanie bitrate lub ponowne kodowanie może pogorszyć szczegóły. Obsługa odtwarzania H.265 zależy od przeglądarki.</p><div class="notice" data-recording-disk-usage role="status">Statystyki dysku są odczytywane osobno od nagrań.</div><button type="button" data-cleanup-recording-cache>Posprzątaj cache i miniatury</button><output data-storage-cleanup-result role="status"></output><input type="hidden" name="storage-retention-days" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"><details class="settings-group"><summary>Advanced recording <small>Limity miejsca i długość fragmentów</small></summary><div class="form-grid"><label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label><label>Limit miniatur (MB)<input name="nvr-thumbnail-cache-mb" type="number" min="1" max="256" value="${nvrConfig.thumbnail_cache_mb ?? 32}"></label><label>Limit kopii do odtwarzania (MB, 0 = wyłączone)<input name="nvr-playback-cache-mb" type="number" min="0" max="2048" value="${nvrConfig.playback_cache_mb ?? 0}"></label><label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label></div><p class="field-help">Domyślnie cały dzień odtwarza się z oryginalnych fragmentów, bez pełnej kopii filmu. Miniatury mają wspólny limit miejsca, maksymalnie 2048 obrazów i wygasają po 48 godzinach bez użycia. Usunięte miniatury można wygenerować ponownie z nagrania.</p></details></section>
-          <details class="settings-group" id="network-settings"><summary>Network & remote access <small>Home Assistant HTTPS / WSS</small></summary><p class="notice" data-native-network-info>EdgeRTC Live i DVR korzystają z uwierzytelnionego połączenia Home Assistanta, także przez Nabu Casa. Otwórz panel przez HTTPS. / Live and DVR share the authenticated Home Assistant connection.</p></details>
+          <details class="settings-group" id="network-settings"><summary>Network & remote access <small>Home Assistant HTTPS / WSS</small></summary><p class="notice" data-native-network-info>Live, DVR and alerts work locally over HTTPS without Nabu Casa. Remote access can continue using Nabu Casa. Camera and recording settings are shared.</p><h3>Local HTTPS</h3><edge-local-network></edge-local-network></details>
           <details class="settings-group" id="storage-settings"><summary>Storage locations <small>Keep the defaults unless you use a custom disk layout</small></summary><div class="form-grid"><label>Recordings directory<input name="storage-recordings-dir" value="${escapeHtml(text(storage.recordings_dir, '/media/edge-of-infinity/recordings'))}"></label><label>Database path<input name="storage-database-path" value="${escapeHtml(text(storage.database_path, '/homeassistant/edge/edge.db'))}"></label></div></details>
           <details class="settings-group" id="advanced-settings"><summary>Advanced system settings <small>Server</small></summary><p class="field-help">Źródła kamer działają stale na serwerze. Podgląd zachowuje oryginalną jakość i FPS. / Camera sources stay connected; original video quality and FPS.</p><div class="form-grid"><label>API listen<input name="server-listen" value="${escapeHtml(text(server.listen, '0.0.0.0:8088'))}" readonly></label><label>Public panel URL<input name="server-public-url" value="${escapeHtml(server.public_url || '')}" placeholder="Optional external URL"></label></div><p class="field-help">The API port is configured in Home Assistant.</p></details>
         `;
       }
+
+      document.addEventListener('toggle',event=>{if(event.target.id==='network-settings'&&event.target.open)import(panelPath('api/edge-rtc/edge-local-network.js?v='+EDGE_PANEL_VERSION)).then(()=>{const element=document.querySelector('edge-local-network');if(element){element.endpoint=panelPath('api/network/local');element.load();}}).catch(error=>debugEvent('ui_local_network_module_error',{message:error.message}));},true);
 
       function renderPresets() {
         presetSelect.innerHTML = presets.length
@@ -10319,6 +10351,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = route_path(parsed.path)
 
+        if path=='/api/network/local':
+            self.send_json(local_network_status());return
+        if path=='/api/network/local/ca.crt':
+            target=HOME_DIR/'local-https/root-ca.crt'
+            if target.parent.is_symlink() or target.is_symlink() or not target.is_file():self.send_json({'error':'local_https_certificate_missing'},HTTPStatus.NOT_FOUND);return
+            self.send_bytes(target.read_bytes(),'application/x-x509-ca-cert',extra_headers={'Content-Disposition':'attachment; filename="edge-local-root-ca.crt"','Cache-Control':'no-store'});return
         if path in ("/", "/index.html"):
             self.send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
             return
@@ -10342,7 +10380,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path in ("/api/edge-rtc/client.js", "/api/edge-rtc/edge-rtc-client.js"):
             self.send_live_script("edge-rtc-client.js")
             return
-        if path in ('/api/edge-rtc/edge-dvr-client.js','/api/edge-rtc/edge-dvr-panel.js'):
+        if path in ('/api/edge-rtc/edge-dvr-client.js','/api/edge-rtc/edge-dvr-panel.js','/api/edge-rtc/edge-local-network.js'):
             self.send_live_script(path.rsplit('/',1)[1])
             return
         if path == "/api/edge-rtc/edge-pcm-worklet.js":
@@ -10522,6 +10560,35 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if route_path(parsed.path) in ('/api/network/local','/api/network/local/certificate'):
+            import ipaddress
+            try:
+                peer=ipaddress.ip_address(self.client_address[0])
+                ingress=self.client_address[0]=='172.30.32.2' and self.headers.get('X-Ingress-Path','').startswith('/api/hassio_ingress/')
+                if not (peer.is_loopback or ingress) or self.headers.get('Content-Type','').split(';')[0]!='application/json':
+                    self.send_json({'error':'open_home_assistant_ingress'},HTTPStatus.FORBIDDEN);return
+                payload=self.read_body_json()
+                if not isinstance(payload,dict):raise ValueError('local_https_invalid_config')
+                if route_path(parsed.path).endswith('/certificate'):
+                    hosts=normalize_hosts(payload.get('hosts'))
+                    result=local_core_request('/api/local-https/certificate',{'hosts':hosts})
+                    save_local_settings(HOME_DIR,{'enabled':False,'hosts':hosts})
+                    report=network_status(HOME_DIR,result)
+                    save_proxy_helper(HOME_DIR,report['home_assistant_yaml'])
+                    write_debug_event('local_https_certificate_prepared',{'hosts':hosts,'camera_settings_changed':False})
+                else:
+                    if payload.get('enabled') is True:
+                        runtime=local_core_request('/api/local-https')
+                        covered=set((runtime.get('dns_names') or [])+(runtime.get('ip_addresses') or []))
+                        if not runtime.get('certificate_ready'):raise ValueError('local_https_certificate_missing')
+                        if not set(normalize_hosts(payload.get('hosts'))).issubset(covered):raise ValueError('local_https_certificate_address_mismatch')
+                    settings=save_local_settings(HOME_DIR,payload)
+                    sync_runtime_engine_config(load_config(),'local_https_settings')
+                    write_debug_event('local_https_configured',{'enabled':settings['enabled'],'camera_settings_changed':False})
+                self.send_json(local_network_status())
+            except (OSError,ValueError,TypeError) as error:
+                self.send_json({'error':str(error)},HTTPStatus.BAD_REQUEST)
+            return
         _post_path = route_path(parsed.path)
         parsed = parsed._replace(path=_post_path)
         write_debug_event("api_post", {"path": parsed.path, "query": parse_qs(parsed.query), "client": self.client_address[0]})

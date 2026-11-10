@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.17.0
+
+- Coordinate HA Live, recordings and alert viewers on phones/tablets. Retain the
+  last picture while yielding a decoder; resume visible Live after DVR pauses.
+  Retry hardware reclamation once and cancel stale seek/failure/reconnect work.
+  Camera sources and recording settings remain unchanged.
+- Report transport, authorization, old integration and codec errors separately.
+  Check integration compatibility only after connection failure, without adding
+  an extra startup request. Restart HA Core after updating the bundled integration.
+- Connect the authenticated HA archive bridge directly to the same private
+  EdgeRTC core used by Live. Preserve entity permissions, exact alert ownership,
+  signed URLs and the remote-installation bridge fallback.
+- Keep visible DVR at the media frame deadline when WebKit throttles animation
+  callbacks, preventing video-paced AAC starvation. Cancel both scheduling paths
+  on seek/pause/close and report fallback/gap metrics. Preserve every 1x picture.
+- Adapt bounded DVR read-ahead/batches to measured transport RTT. Keep original
+  resolution, codec and 1x FPS; rebase presentation after a network gap rather
+  than racing through delayed pictures. Support 48 kHz AAC at 4x playback speed.
+- Add an optional local HTTPS gateway for the entire Home Assistant, including
+  login, dashboard, WebSockets and Ingress. No Nabu Casa subscription is required.
+  Setup creates a private local CA/server certificate, downloads only the public
+  CA and prepares a narrow trusted-proxy YAML snippet. Users explicitly install
+  and trust the CA, merge HA settings and enable/map port 8443. The gateway and
+  host port are disabled by default. Camera/HA configuration is not overwritten.
+- Test actual H264/H265 Live plus two DVR cards with one available decoder,
+  Chromium/WebKit seeking/AAC/network delay, TLS authentication/WS forwarding,
+  certificate trust/hostname checks and configuration isolation.
+
 ## 0.16.0
 
 - Use indexed EdgeRTC DVR throughout the panel and HA recordings/events cards,

@@ -35,7 +35,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
  p.port.onmessage({data:{type:'clear'}});assert.equal(p.write,0);assert.equal(p.read,0);assert.equal(quantum(p),0);
  // DVR video is allowed to queue 400 ms ahead. Preserve those AAC samples
  // rather than applying Live's 240 ms latest-frame policy to saved footage.
- for(const rate of[24000,48000,96000]){
+ for(const rate of[24000,48000,96000,192000]){
   const archive=new Processor({processorOptions:{mode:'archive'}});let delivered=0,nextBatch=0;
   for(let tick=0;tick<Math.ceil(2.1*48000/128);tick++){
    const seconds=tick*128/48000;
@@ -74,5 +74,5 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
  // Closing the panel during module fetch is intentional cancellation. A
  // genuine failure while the player is open must still be reported.
  for(const closed of[true,false]){const c=new EdgeRTCClient({canvas:{}}),notes=[];let reject;c.diagnostics={note:event=>notes.push(event)};c.audioModule=()=>new Promise((resolve,fail)=>{reject=fail;});c.startAudioPlayback();await Promise.resolve();c.closed=closed;reject(Error('module download failed'));await c.audioPlaybackPromise;assert.equal(notes.includes('rtc_audio_error'),!closed);assert.equal(Boolean(c.audioDisabled),!closed);}
- console.log('PASS: G711 matches FFmpeg; continuous Live PCM; DVR 400 ms AAC bursts at 0.5/1/2x without sample loss, bounded queues and decoder backpressure');
+ console.log('PASS: G711 matches FFmpeg; continuous Live PCM; DVR 400 ms AAC bursts at 0.5/1/2/4x without sample loss, bounded queues and decoder backpressure');
 })().catch(error=>{console.error(error);process.exit(1);});

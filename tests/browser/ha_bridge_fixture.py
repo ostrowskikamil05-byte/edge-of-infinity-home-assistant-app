@@ -32,6 +32,7 @@ def load_bridge(session_factory):
     modules['homeassistant.helpers.aiohttp_client'].async_get_clientsession = session_factory
     modules['edge_bridge_test'].__path__ = [str(COMPONENT)]
     modules['edge_bridge_test.const'].DOMAIN = 'edge'
+    modules['edge_bridge_test.const'].CARD_VERSION = '0.17.0'
     sys.modules.update(modules)
     spec = importlib.util.spec_from_file_location('edge_bridge_test.dashboard', COMPONENT / 'dashboard.py')
     module = importlib.util.module_from_spec(spec)
@@ -48,6 +49,14 @@ def build_hass(panel=PANEL):
     }
     entry = {'client': types.SimpleNamespace(is_local=True, base_url='local', api_key=None), 'entities': entities,
              'coordinator': types.SimpleNamespace(data={'cameras': [{'id': 'front', 'edge_rtc': {'keyframe_api': panel + '/api/edge-rtc/keyframe/front'}}]})}
+    info_path=os.environ.get('EDGE_NVR_FIXTURE_INFO')
+    if info_path:
+        info=json.loads(Path(info_path).read_text())
+        async def read_token(name):
+            if name!='edge-rtc-token':raise ValueError('unexpected local file')
+            return info['archive_token'].encode()
+        entry['client']._read_local_bytes=read_token
+        entry['coordinator'].data['cameras']=[{'id':name,'index':index,'key':name+'_'+str(index),'edge_rtc':{'api':info['archive_core'],'keyframe_api':panel+'/api/edge-rtc/keyframe/'+name}} for index,name in enumerate(('front','back'))]
     return types.SimpleNamespace(data={'edge': {'entry': entry}}, http=types.SimpleNamespace(register_view=lambda view: None))
 
 
@@ -102,7 +111,7 @@ def create_app(panel=PANEL):
     app = web.Application(middlewares=[authenticate])
     app.on_startup.append(start)
     app.on_cleanup.append(stop)
-    for view_class in (bridge.EdgeRecordingsView, bridge.EdgeEventsView, bridge.EdgeMediaView, bridge.EdgeArchiveView):
+    for view_class in (bridge.EdgeRecordingsView, bridge.EdgeEventsView, bridge.EdgeMediaView, bridge.EdgeArchiveView, bridge.EdgeDashboardStatusView):
         view = view_class(hass)
         # Home Assistant passes URL parameters to the view as keyword arguments.
         app.router.add_get(view.url, lambda request, view=view: view.get(request, **request.match_info))
