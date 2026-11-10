@@ -65,7 +65,15 @@ func TestLocalHTTPSCertificateAndAuthenticatedProxy(t *testing.T) {
 				}
 			}
 		}
-		io.Copy(w, r.Body)
+		// Like HA JSON endpoints, consume the request before replying. Go's
+		// HTTP/1 server otherwise drains/closes a large body on the first write.
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			http.Error(w, "bad body", 400)
+			return
+		}
+		w.Write(payload)
 	}))
 	defer backend.Close()
 	cfg := localHTTPSConfig{Enabled: true, Listen: "127.0.0.1:0", Directory: directory, Upstream: backend.URL}
