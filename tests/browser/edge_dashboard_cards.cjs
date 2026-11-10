@@ -10,6 +10,8 @@ const engine=process.env.EDGE_TEST_BROWSER==='webkit'?webkit:chromium;
  try{
   for(const [label,width,height,query] of [['desktop',1440,900,'?split=1'],['tablet',820,1180,''],['phone',390,844,''],['small-phone',320,740,'']]){
    const context=await browser.newContext({viewport:{width,height},hasTouch:width<1000});const page=await context.newPage();page.setDefaultTimeout(20000);const errors=[];
+   let busyPath='',busyRetried=false;
+   await page.route('**/api/edge/dashboard/media/**/thumb/**',async route=>{const url=route.request().url();if(!busyPath){busyPath=url;await route.fulfill({status:429,headers:{'Retry-After':'0.1'},body:'thumbnail busy'});}else{if(url===busyPath)busyRetried=true;await route.continue();}});
    page.on('pageerror',error=>errors.push(error.message));
    const fits=async step=>assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`${label}: horizontal overflow after ${step}`);
    const rec=(fn,arg)=>page.evaluate(([source,arg])=>new Function('card','arg','return ('+source+')(card,arg)')(document.querySelector('edge-recordings-card'),arg),[fn.toString(),arg]);
@@ -17,6 +19,8 @@ const engine=process.env.EDGE_TEST_BROWSER==='webkit'?webkit:chromium;
    await page.goto(base+'/'+query);
    // Recordings: days, moments and authenticated thumbnails.
    await page.waitForFunction(()=>document.querySelector('edge-recordings-card').shadowRoot.querySelectorAll('.moment .thumb.loaded').length===3);
+   await page.waitForFunction(()=>[...document.querySelector('edge-recordings-card').shadowRoot.querySelectorAll('.day .thumb')].every(thumb=>thumb.classList.contains('loaded')));
+   assert(busyPath&&busyRetried,'a busy thumbnail was not retried');
    assert.equal(await rec(card=>card.shadowRoot.querySelectorAll('.day').length),2);
    assert.equal(await rec(card=>card.shadowRoot.querySelector('.day[aria-selected="true"]').dataset.day),'2026-07-28');
    assert.equal(await rec(card=>card.shadowRoot.querySelector('h2').textContent),'Nagrania');

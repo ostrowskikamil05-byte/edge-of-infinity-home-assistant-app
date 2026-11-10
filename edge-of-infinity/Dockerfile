@@ -9,7 +9,7 @@ RUN edge_goarch="${BUILD_ARCH}"; if [ "${edge_goarch}" = "aarch64" ]; then edge_
 
 FROM ghcr.io/home-assistant/base:latest
 
-ARG BUILD_VERSION=0.15.0
+ARG BUILD_VERSION=0.15.1
 ARG BUILD_ARCH=amd64
 
 LABEL \

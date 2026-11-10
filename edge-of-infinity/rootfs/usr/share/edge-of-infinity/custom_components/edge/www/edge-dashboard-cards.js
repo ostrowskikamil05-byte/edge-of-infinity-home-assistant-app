@@ -1,6 +1,6 @@
 /* Edge of Infinity dashboard cards: recordings and events.
    All data comes through Home Assistant's authenticated /api/edge/dashboard bridge. */
-const EDGE_DASH_VERSION = "0.15.0";
+const EDGE_DASH_VERSION = "0.15.1";
 const EDGE_DASH_API = "edge/dashboard";
 const EDGE_DASH_OPEN = "edge-dashboard-open-recording";
 const EDGE_KINDS = ["person", "vehicle", "animal", "motion"];
@@ -69,7 +69,7 @@ const EDGE_SHARED_STYLE = `
    are fetched with it and shown from short-lived object URLs. */
 class EdgeDashMedia {
   constructor(card) {
-    this.card = card; this.cache = new Map(); this.queue = []; this.active = 0;
+    this.card = card; this.cache = new Map(); this.pending = new Map(); this.queue = []; this.active = 0;
     this.observer = new IntersectionObserver(entries => { for (const entry of entries) if (entry.isIntersecting) { this.observer.unobserve(entry.target); this.queue.push(entry.target); this._pump(); } }, {rootMargin:"240px"});
   }
   path(entity, kind, name) { return `/api/${EDGE_DASH_API}/media/${entity}/${kind}/${name}`; }
@@ -84,7 +84,21 @@ class EdgeDashMedia {
   }
   async fetch(src) {
     const hit = this.cache.get(src); if (hit) return hit;
-    const response = await this.card.hass.fetchWithAuth(src); if (!response.ok) throw new Error(String(response.status));
+    if (this.pending.has(src)) return this.pending.get(src);
+    const request = this._fetch(src); this.pending.set(src, request);
+    try { return await request; } finally { this.pending.delete(src); }
+  }
+  async _fetch(src) {
+    let response;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      response = await this.card.hass.fetchWithAuth(src);
+      if (![425, 429, 503].includes(response.status) || attempt === 5) break;
+      const wait = Math.min(8000, Math.max(250 * 2 ** attempt, (Number(response.headers.get("Retry-After")) || 0) * 1000));
+      await response.body?.cancel();
+      await new Promise(resolve => setTimeout(resolve, wait));
+      if (!this.card.isConnected) throw new Error("card_disconnected");
+    }
+    if (!response.ok) throw new Error(String(response.status));
     const url = URL.createObjectURL(await response.blob()); this.cache.set(src, url);
     if (this.cache.size > 400) { const [key, old] = this.cache.entries().next().value; URL.revokeObjectURL(old); this.cache.delete(key); }
     return url;

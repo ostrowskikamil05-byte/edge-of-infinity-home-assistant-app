@@ -257,7 +257,7 @@ class EdgeMediaView(HomeAssistantView):
             async with async_get_clientsession(self.hass).get(base + path, headers=headers, timeout=MEDIA_TIMEOUT) as source:
                 if source.status not in (200, 206):
                     passed = {"Retry-After": source.headers["Retry-After"]} if "Retry-After" in source.headers else {}
-                    return web.json_response({"error": "media_unavailable"}, status=source.status if source.status in (404, 416, 503) else 502, headers=passed)
+                    return web.json_response({"error": "media_unavailable"}, status=source.status if source.status in (404, 416, 425, 429, 503) else 502, headers=passed)
                 if image:
                     data = await source.read()
                     if len(data) > MAX_IMAGE_BYTES or not data.startswith(b"\xff\xd8\xff"):

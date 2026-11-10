@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.15.1
+
+- Build on 0.15.0, retaining its recordings/events dashboard cards, authenticated
+  bridge and theme styling.
+- Retry temporarily busy dashboard thumbnails with bounded backoff and reuse
+  simultaneous requests for the same image. Preserve busy status/Retry-After
+  through the authenticated bridge instead of reporting a gateway failure.
+- Reduce DVR seek/start round trips with opt-in initial media, batches up to 64
+  access units and two bounded batches of encoded lookahead. Preserve legacy
+  clients/cores, the 24-picture decoder budget and the 600 ms AAC policy.
+- Receive seeks independently of archive delivery, coalesce queued obsolete
+  requests and cancel old batches at access-unit boundaries. New seeks no longer
+  wait for old decoder promises. Skip unnecessary paused-preview decoding and
+  coalesce duplicate scrub commits.
+- Preload DVR modules without opening a recording/camera connection. Add batch
+  transfer/read timings, queue counts and coalesced-seek diagnostics.
+- Stabilize cellular Live buffer adaptation with coarser headroom steps, avoiding
+  repeated small refills while keeping the 400 ms reserve cap and steady Wi-Fi.
+- Add transparent app/repository/card branding, light/dark wordmarks, cached
+  asset delivery and the supplied camera-infinity icon.
+- Compare legacy/fast archive delivery through a bounded TCP proxy at 200 ms RTT.
+  Retain original-file, AAC, frame-step, fallback and source-sharing checks.
+  No transcoding, retention or camera-profile changes.
+
 ## 0.15.0
 
 - Add `custom:edge-recordings-card` for Home Assistant dashboards: camera and

@@ -99,6 +99,7 @@ jobs:
           node tests/browser/recording_storage.cjs
           node tests/browser/ui_dashboard.cjs
           node tests/browser/camera_settings.cjs
+          node tests/browser/brand_assets.cjs
       - name: Test native phone recording decoders and camera switching
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
@@ -238,6 +239,8 @@ jobs:
           EDGE_TEST_BROWSER=webkit EDGE_TEST_DVR_CAMERA=0 node tests/browser/nvr_edge_dvr.cjs
           EDGE_TEST_BROWSER=webkit node tests/browser/nvr_dvr_fallback.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_dvr_fallback.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_dvr_latency.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_dvr_latency.cjs
       - name: Test original 4K frames through EdgeRTC DVR
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"

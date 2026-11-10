@@ -1,5 +1,5 @@
 /* EdgeRTC archive: persistent socket, indexed seeks, bounded pull-based delivery. */
-import {EdgeRTCClient} from './client.js?v=0.15.0';
+import {EdgeRTCClient} from './client.js?v=0.15.1';
 
 export class EdgeDVRClient extends EdgeRTCClient {
   constructor(options){super({...options,audioPlaybackMode:'archive'});this.epoch=0;this.paused=true;this.speed=1;this.position=0;this.duration=0;this.archiveAudio=[];}
@@ -7,7 +7,10 @@ export class EdgeDVRClient extends EdgeRTCClient {
   seek(file,at,{paused=this.paused,rate=this.speed}={}){
     if(this.closed)return;
     this.epoch=(this.epoch+1)>>>0||1;this.request={file,at:Math.max(0,Number(at)||0)};this.paused=paused;this.speed=Math.min(2,Math.max(.5,Number(rate)||1));this.position=this.request.at;
-    this.target=Math.round(this.request.at*1e6);this.seekStarted=performance.now();this.picture=false;this.playing=false;this.eof=false;this.ended=false;this.pulling=false;this.originWall=null;this.prerollFrames=0;this.seekBytes=0;this.audioDrainEpoch=null;this.archiveVideoPending=0;
+    this.target=Math.round(this.request.at*1e6);this.seekStarted=performance.now();this.picture=false;this.playing=false;this.eof=false;this.networkEOF=false;this.ended=false;this.pulling=false;this.pendingPulls=0;this.queuedBatches=0;this.batchTimes=[];this.batchCount=0;this.sentEpoch=0;this.originWall=null;this.prerollFrames=0;this.seekBytes=0;this.audioDrainEpoch=null;this.archiveVideoPending=0;
+    // A replaced seek must not wait behind old decoder/backpressure promises.
+    // Their callbacks remain epoch-guarded and own no new request's counters.
+    this.messageChain=Promise.resolve();this.pendingMessages=0;this.pendingBytes=0;
     clearTimeout(this.pullTimer);clearTimeout(this.seekTimer);this.bootstrapWake?.(false);this.clearFrames();this.clearAudio();this.archiveAudio=[];
     if(this.video?.state!=='closed')this.video?.close();this.video=null;
     if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.audioDecoder=null;
@@ -15,8 +18,10 @@ export class EdgeDVRClient extends EdgeRTCClient {
     this.options.onWaiting?.(true);this.sendSeek();
   }
   sendSeek(){
-    if(!this.socketReady||!this.request||this.ws?.readyState!==WebSocket.OPEN)return;
-    this.ws.send(JSON.stringify({type:'seek',epoch:this.epoch,file:this.request.file,at:this.request.at}));
+    if(!this.socketReady||!this.request||this.ws?.readyState!==WebSocket.OPEN||this.sentEpoch===this.epoch)return;
+    const count=this.archiveInitialBatch?this.archiveBatchPackets:0;this.sentEpoch=this.epoch;
+    if(count){this.pendingPulls++;this.pulling=true;this.batchTimes.push(performance.now());}
+    this.ws.send(JSON.stringify({type:'seek',epoch:this.epoch,file:this.request.file,at:this.request.at,...(count?{count}:{})}));
     clearTimeout(this.seekTimer);this.seekTimer=setTimeout(()=>this.fail('EdgeRTC DVR: przekroczony czas dekodowania wybranej pozycji.'),15000);
   }
   play(){if(this.closed)return;this.seek(this.request.file,this.position,{paused:false});}
@@ -34,12 +39,18 @@ export class EdgeDVRClient extends EdgeRTCClient {
   queueMessage(data){
     if(this.closed)return;
     let epoch;
-    if(typeof data==='string'){let message;try{message=JSON.parse(data);}catch(_){this.fail('EdgeRTC DVR: nieprawidłowa odpowiedź serwera.');return;}if(message.type==='archive_ready'){if(message.protocol!=='edgertc/archive/1'){this.fail('EdgeRTC DVR: niezgodny protokół.');return;}this.archiveBatchPackets=Math.min(16,Math.max(1,Number(message.batch_packets)||8));this.socketReady=true;this.sendSeek();return;}epoch=message.epoch;}
+    let acknowledgement;
+    if(typeof data==='string'){let message;try{message=JSON.parse(data);}catch(_){this.fail('EdgeRTC DVR: nieprawidłowa odpowiedź serwera.');return;}if(message.type==='archive_ready'){if(message.protocol!=='edgertc/archive/1'){this.fail('EdgeRTC DVR: niezgodny protokół.');return;}this.archiveBatchPackets=Math.min(64,Math.max(1,Number(message.batch_packets)||8));this.archiveInitialBatch=Boolean(message.initial_batch);this.archiveWindow=Math.min(2,Math.max(1,Number(message.pipeline_batches)||1));this.socketReady=true;this.sendSeek();return;}epoch=message.epoch;if(message.type==='batch')acknowledgement=message;}
     else{if(data.byteLength<14)return;epoch=new DataView(data).getUint32(10);}
     if(epoch!==this.epoch)return;
+    if(acknowledgement){
+      this.pendingPulls=Math.max(0,this.pendingPulls-1);this.pulling=this.pendingPulls>0;this.queuedBatches++;this.networkEOF||=Boolean(acknowledgement.end);this.batchCount++;
+      const sent=this.batchTimes.shift();this.batchTransferMS=sent==null?null:Math.round(performance.now()-sent);this.batchReadMS=acknowledgement.read_ms??null;this.batchServerMS=acknowledgement.server_ms??null;
+    }
     const size=data.byteLength??data.length;this.pendingMessages=(this.pendingMessages||0)+1;this.pendingBytes=(this.pendingBytes||0)+size;this.receivedBytes=(this.receivedBytes||0)+size;this.seekBytes+=size;this.lastPacketAt=performance.now();
-    if(this.pendingMessages>64||this.pendingBytes>24*1024*1024){this.fail('EdgeRTC DVR: dekoder nie nadąża za danymi.');return;}
-    this.messageChain=(this.messageChain||Promise.resolve()).then(()=>{if(!this.closed&&epoch===this.epoch)return this.archiveMessage(data,epoch);}).catch(error=>{if(!this.closed&&epoch===this.epoch)this.fail(error.message);}).finally(()=>{this.pendingMessages--;this.pendingBytes-=size;});
+    if(this.pendingMessages>192||this.pendingBytes>24*1024*1024){this.fail('EdgeRTC DVR: dekoder nie nadąża za danymi.');return;}
+    this.messageChain=(this.messageChain||Promise.resolve()).then(()=>{if(!this.closed&&epoch===this.epoch)return this.archiveMessage(data,epoch);}).catch(error=>{if(!this.closed&&epoch===this.epoch)this.fail(error.message);}).finally(()=>{if(epoch===this.epoch){this.pendingMessages--;this.pendingBytes-=size;}});
+    if(acknowledgement)this.pull();
   }
   async archiveMessage(data,epoch){
     if(typeof data==='string'){
@@ -47,7 +58,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
       if(message.type==='archive_error'){if(message.code==='archive_requires_mp4')this.nativeFallback(message.code,'Ten plik wymaga odtwarzacza MP4.');else this.fail(`EdgeRTC DVR: ${message.code}.`,false);return;}
       if(message.type==='hello'){await this.configureArchive(message,epoch);return;}
       if(message.type==='batch'){
-        this.pulling=false;this.eof=Boolean(message.end);
+        this.queuedBatches=Math.max(0,this.queuedBatches-1);this.eof=Boolean(message.end);
         // Flush only at EOF or for a paused preview. Play starts a fresh
         // keyframe request, as WebCodecs requires a key after flush().
         if(this.video?.state==='configured'&&(this.eof||this.paused&&!this.picture&&(this.lastDecodedTimestamp||0)>this.target+500000))await this.video.flush();
@@ -58,6 +69,9 @@ export class EdgeDVRClient extends EdgeRTCClient {
     }
     const bytes=new Uint8Array(data),timestamp=Number(new DataView(data).getBigInt64(2)),payload=bytes.subarray(14);
     if(bytes[0]===1&&this.video?.state==='configured'){
+      // Pause/preview resumes with a fresh indexed seek, so frames after its
+      // first picture need neither GPU decoding nor additional memory.
+      if(this.paused&&this.picture)return;
       const key=Boolean(bytes[1]&1);if(this.waitKey&&!key)return;this.waitKey=false;
       // decodeQueueSize excludes frames retained by the decoder for reordering.
       // Reserve capacity for every submitted picture until its output callback,
@@ -87,10 +101,12 @@ export class EdgeDVRClient extends EdgeRTCClient {
   }
   pull(){
     clearTimeout(this.pullTimer);
-    if(this.closed||this.pulling||this.eof||this.paused&&this.picture||!this.video||this.ws?.readyState!==WebSocket.OPEN)return;
+    if(this.closed||this.networkEOF||this.eof||this.paused&&this.picture||!this.video||this.ws?.readyState!==WebSocket.OPEN)return;
+    if(this.pendingPulls+this.queuedBatches>=(this.archiveWindow||1))return;
     const ahead=this.frameQueue.length?(this.frameQueue.at(-1).frame.timestamp-this.position*1e6)/1e6/this.speed:0;
-    if(this.frameQueue.length>=8||ahead>=.4||this.video.decodeQueueSize>=8||this.picture&&this.archiveAudio.length>=16){this.pullTimer=setTimeout(()=>this.pull(),15);return;}
-    this.pulling=true;this.ws.send(JSON.stringify({type:'pull',epoch:this.epoch,count:this.audioInfo?this.archiveBatchPackets||8:8}));
+    if(this.frameQueue.length>=8||ahead>=.4||this.video.decodeQueueSize>=8||this.picture&&this.archiveAudio.length>=16||this.pendingMessages>=96||this.pendingBytes>=12*1024*1024){this.pullTimer=setTimeout(()=>this.pull(),15);return;}
+    const count=Math.min(this.archiveBatchPackets||8,this.picture?32:64);
+    this.pendingPulls++;this.pulling=true;this.batchTimes.push(performance.now());this.ws.send(JSON.stringify({type:'pull',epoch:this.epoch,count}));
   }
   render(frame){
     if(this.closed){frame.close();return;}
@@ -108,7 +124,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
       const due=this.originWall+(item.frame.timestamp-this.originPTS)/1000/this.speed;
       if(due<=now+1){this.frameQueue.shift();this.present(item.frame);}
     }
-    if(this.eof&&!this.frameQueue.length&&!(this.video?.decodeQueueSize)&&this.picture){
+    if(this.eof&&!this.frameQueue.length&&!this.archiveVideoPending&&!(this.video?.decodeQueueSize)&&this.picture){
       if(!this.ended){this.ended=true;this.options.onEnded?.();}return;
     }
     if(!this.frameQueue.length&&this.picture&&!this.eof)this.options.onWaiting?.(true);
@@ -146,6 +162,6 @@ export class EdgeDVRClient extends EdgeRTCClient {
     }finally{if(this.audioDrainEpoch===epoch)this.audioDrainEpoch=null;}
   }
   playPCM(channels,rate,timestamp){if(!this.paused)super.playPCM(channels,rate*this.speed,Math.round(this.target+(timestamp-this.target)/this.speed));}
-  diagnosticState(){return {...super.diagnosticState(),transport:'edgertc/archive/1',epoch:this.epoch,paused:this.paused,seconds:this.position,seek_ms:this.seekMS,preroll_frames:this.prerollFrames,indexed_file:this.request?.file,archive_buffer_frames:this.frameQueue.length,archive_video_pending:this.archiveVideoPending,archive_audio_packets:this.archiveAudio.length,archive_audio_limit_ms:600,pull_pending:this.pulling};}
+  diagnosticState(){return {...super.diagnosticState(),transport:'edgertc/archive/1',epoch:this.epoch,paused:this.paused,seconds:this.position,seek_ms:this.seekMS,preroll_frames:this.prerollFrames,indexed_file:this.request?.file,archive_buffer_frames:this.frameQueue.length,archive_video_pending:this.archiveVideoPending,archive_audio_packets:this.archiveAudio.length,archive_audio_limit_ms:600,pull_pending:this.pulling,archive_batch_count:this.batchCount,archive_pending_pulls:this.pendingPulls,archive_queued_batches:this.queuedBatches,archive_batch_transfer_ms:this.batchTransferMS??null,archive_batch_read_ms:this.batchReadMS??null,archive_batch_server_ms:this.batchServerMS??null};}
   close(){clearTimeout(this.pullTimer);clearTimeout(this.seekTimer);this.archiveAudio=[];super.close();}
 }

@@ -101,7 +101,7 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.15.0"
+APP_VERSION = "0.15.1"
 APP_RELEASE_FEATURES=['EdgeRTC-only Live, recording and DVR; retired engines and options removed with bounded migration',
                       'DVR AAC uses timestamp lookahead, bounded PCM and decoder backpressure; original Live policy retained',
                       'UNV malformed optional talk AAC compatibility; valid forward H265/AAC and G711 mic share one connection',
@@ -117,7 +117,7 @@ APP_RELEASE_FEATURES=['EdgeRTC-only Live, recording and DVR; retired engines and
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "cellular-live-v141"
+UI_BUILD = "dvr-preview-v151"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -4904,6 +4904,7 @@ INDEX_HTML = r"""<!doctype html>
     <script>{const p=location.pathname.replace(/\/{2,}/g,'/').replace(/\/index\.html$/,'/'),b=document.createElement('base');b.href=location.origin+(p.endsWith('/')?p:p+'/');document.head.prepend(b);}</script>
     __EDGE_LIVE_PRELOAD__
     <title>Edge of Infinity</title>
+    <script>{const url=new URL('api/brand/icon.png?v=__EDGE_PANEL_VERSION__',document.baseURI).href,icon=document.createElement('link');icon.rel='icon';icon.type='image/png';icon.href=url;document.head.append(icon);document.addEventListener('DOMContentLoaded',()=>{for(const image of document.querySelectorAll('img[data-edge-brand]'))image.src=url;},{once:true});}</script>
     <style>
       :root {
         color-scheme: dark;
@@ -5710,7 +5711,10 @@ INDEX_HTML = r"""<!doctype html>
       body { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; }
       .sidebar { background: #0e1721; overflow-y: auto; }
       .sidebar-header { flex-wrap: wrap; gap: 8px; }
-      .brand { font-weight: 700; letter-spacing: -.035em; }
+      .brand { font-weight: 700; letter-spacing: -.035em; display:flex;align-items:center;gap:4px;font-size:12px;line-height:1.15;white-space:normal; }
+      .brand img { width:28px;height:22px;object-fit:cover;flex:0 0 28px; }
+      .brand span { max-width:56px; }
+      @media(max-width:820px) { .brand,body.nav-collapsed .brand { display:flex;font-size:16px;gap:8px; } .brand span { max-width:none;white-space:nowrap; } .brand img { width:44px;height:28px;flex-basis:44px; } }
       .nav { gap: 5px; }
       .nav-section-label { padding: 20px 11px 6px; color: #728a9f; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
       body.nav-collapsed .nav-section-label { font-size: 0; padding: 8px 0 0; }
@@ -5791,7 +5795,7 @@ INDEX_HTML = r"""<!doctype html>
           <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Toggle navigation" aria-expanded="true">
             <span class="menu-toggle-lines" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
-          <div class="brand">Edge of Infinity</div>
+          <div class="brand"><img data-edge-brand alt="" decoding="async" fetchpriority="low"><span>Edge of Infinity</span></div>
           <div class="build-pill" title="Panel build">v__EDGE_PANEL_VERSION__</div>
         </div>
         <nav class="nav" aria-label="Main navigation">
@@ -10294,7 +10298,7 @@ INDEX_HTML = r"""<!doctype html>
 
 INDEX_HTML = (
     INDEX_HTML
-    .replace("__EDGE_LIVE_PRELOAD__", '<script>{for(const name of ["client.js","device-diagnostics.js"]){const link=document.createElement("link");link.rel="modulepreload";link.href=new URL("api/edge-rtc/"+name+"?v=__EDGE_PANEL_VERSION__",document.baseURI).href;document.head.append(link);}}</script>')
+    .replace("__EDGE_LIVE_PRELOAD__", '<script>{for(const name of ["client.js","device-diagnostics.js","edge-dvr-client.js","edge-dvr-panel.js"]){const link=document.createElement("link");link.rel="modulepreload";link.href=new URL("api/edge-rtc/"+name+"?v=__EDGE_PANEL_VERSION__",document.baseURI).href;document.head.append(link);}}</script>')
     .replace("__EDGE_NATIVE_PLAYER_DOCUMENT__", json.dumps(EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',APP_VERSION)).replace('<', '\\u003c'))
     .replace("__EDGE_PANEL_VERSION__", APP_VERSION)
     .replace("__EDGE_GALLERY_CACHE__", (Path(__file__).parent/'edge-recording-gallery.js').read_text())
@@ -10411,6 +10415,16 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
         if path in ("/", "/index.html"):
             self.send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            return
+        if path in ('/api/brand/icon.png','/api/brand/logo.png','/api/brand/logo-light.png'):
+            asset=Path(__file__).resolve().parent/'brand'/path.rsplit('/',1)[1]
+            try:
+                stat=asset.stat();etag=f'"edge-brand-{APP_VERSION}-{stat.st_size}-{stat.st_mtime_ns}"'
+                headers={'Cache-Control':'public, max-age=31536000, immutable','ETag':etag,'Pragma':'','Expires':self.date_time_string(time.time()+31536000)}
+                if self.headers.get('If-None-Match')==etag:
+                    self.send_bytes(b'', 'image/png', HTTPStatus.NOT_MODIFIED,headers)
+                else:self.send_bytes(asset.read_bytes(),'image/png',extra_headers=headers)
+            except OSError:self.send_json({'error':'brand_asset_unavailable'},HTTPStatus.NOT_FOUND)
             return
         if path == "/health":
             payload = health_payload()

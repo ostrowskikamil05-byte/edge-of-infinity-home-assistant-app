@@ -89,5 +89,10 @@ const path = require('node:path');
   assert.equal(resets,1);assert.deepEqual(units.filter(t=>t>=1000000),[1000000,1050000,1100000,1150000,1200000,1250000]);
   assert(fast.bootstrapSkippedPackets>0);assert(fast.frames>0);assert.equal(fast.pendingMessages,0);assert.equal(fast.pendingBytes,0);
   fast.queueMessage(unit(1500000,true));await fast.messageChain;assert.equal(resets,1,'normal live IDR reset the decoder');fast.close();
-  console.log('PASS: source 4K at 20/25/30 FPS, timestamp pacing of bursts, cached GOP startup, bounded backlog and frame cleanup');
+  now=0;let changes=0,stamp=0;
+  const mobile=new EdgeRTCClient({canvas:{}});mobile.caughtUp=true;mobile.diagnostics={note:event=>{if(event==='rtc_network_buffer')changes++;},unregisterSource(){},source(){}};
+  mobile.observeDelivery(1000,stamp);
+  for(const gap of[350,355,365,370]){now+=gap;for(let i=0;i<7;i++){stamp+=50000;mobile.observeDelivery(1000,stamp);}}
+  assert.equal(mobile.networkBufferMS,400);assert.equal(changes,1,'cellular noise repeatedly refilled the buffer');mobile.close();
+  console.log('PASS: source 4K at 20/25/30 FPS, timestamp pacing of bursts, cached GOP startup, bounded backlog, cellular hysteresis and frame cleanup');
 })().catch(error=>{console.error(error);process.exit(1);});

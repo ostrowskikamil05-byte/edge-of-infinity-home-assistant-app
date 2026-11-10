@@ -1,13 +1,17 @@
 # Edge of Infinity Home Assistant App
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="edge-of-infinity/logo.png">
+  <img src="edge-of-infinity/logo-light.png" alt="Edge of Infinity — CCTV &amp; Live Stream" width="280">
+</picture>
+
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.15.0** adds two Home Assistant dashboard cards next to Edge Live:
-`custom:edge-recordings-card` (days, timeline, playback) and
-`custom:edge-events-card` (detections with pictures and clips). They adapt to
-phones, tablets and desktops; the Edge panel itself is unchanged.
-EdgeRTC remains the sole core for Live and indexed DVR, with original
-recordings and 14-day retention preserved.
+Version **0.15.1** improves indexed DVR startup and seeking, smooths cellular
+Live adaptation and adds transparent branding. It includes the theme-aware
+`custom:edge-recordings-card` and `custom:edge-events-card` from 0.15.0.
+Original camera quality, source sharing, recordings and 14-day retention
+are preserved.
 See [migration and setup](edge-of-infinity/DOCS.md).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:

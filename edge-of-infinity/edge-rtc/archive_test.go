@@ -97,7 +97,7 @@ func TestArchiveFromFFmpeg(t *testing.T) {
 			if e = ws.ReadJSON(&hello); e != nil {
 				t.Fatal(e)
 			}
-			if hello["protocol"] != "edgertc/archive/1" {
+			if hello["protocol"] != "edgertc/archive/1" || hello["batch_packets"] != float64(archiveBatchPackets) || hello["initial_batch"] != true || hello["pipeline_batches"] != float64(2) {
 				t.Fatal(hello)
 			}
 			for epoch := uint32(1); epoch <= 2; epoch++ {
@@ -142,6 +142,53 @@ func TestArchiveFromFFmpeg(t *testing.T) {
 			ws.ReadJSON(&hello)
 			if hello["code"] != "invalid_archive_seek" {
 				t.Fatal("path validation", hello)
+			}
+			// First media is included only when the seeker explicitly opts in;
+			// old Count=0 clients above still require their explicit pull.
+			ws.WriteJSON(archiveCommand{Type: "seek", Epoch: 4, File: name, At: .1, Count: archiveBatchPackets})
+			if e = ws.ReadJSON(&hello); e != nil || hello["type"] != "hello" {
+				t.Fatalf("initial seek metadata: %v %v", e, hello)
+			}
+			packets, bytes := 0, 0
+			for {
+				kind, data, e := ws.ReadMessage()
+				if e != nil {
+					t.Fatal(e)
+				}
+				if kind == websocket.TextMessage {
+					var batch map[string]any
+					json.Unmarshal(data, &batch)
+					if batch["type"] != "batch" || batch["packets"] != float64(packets) || batch["bytes"] != float64(bytes) || packets != archiveBatchPackets {
+						t.Fatalf("initial bounded batch: %v packets=%d", batch, packets)
+					}
+					break
+				}
+				if binary.BigEndian.Uint32(data[10:14]) != 4 {
+					t.Fatal("initial batch epoch")
+				}
+				packets++
+				bytes += len(data)
+			}
+			for epoch := uint32(5); epoch <= 7; epoch++ {
+				ws.WriteJSON(archiveCommand{Type: "seek", Epoch: epoch, File: name, At: float64(epoch - 4), Count: archiveBatchPackets})
+			}
+			for {
+				kind, data, e := ws.ReadMessage()
+				if e != nil {
+					t.Fatal(e)
+				}
+				if kind != websocket.TextMessage {
+					continue
+				}
+				var message map[string]any
+				json.Unmarshal(data, &message)
+				if message["type"] == "hello" && message["epoch"] == float64(7) {
+					break
+				}
+			}
+			kind, data, e := ws.ReadMessage()
+			if e != nil || kind != websocket.BinaryMessage || binary.BigEndian.Uint32(data[10:14]) != 7 || data[1]&1 == 0 {
+				t.Fatalf("latest seek did not start with its keyframe: %v", e)
 			}
 		})
 	}

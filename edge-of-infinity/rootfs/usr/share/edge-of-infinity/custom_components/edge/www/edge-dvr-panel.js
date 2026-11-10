@@ -1,4 +1,4 @@
-import {EdgeDVRClient} from './edge-dvr-client.js?v=0.15.0';
+import {EdgeDVRClient} from './edge-dvr-client.js?v=0.15.1';
 
 export class EdgeDVRPanel {
   constructor(host,options){
@@ -31,6 +31,9 @@ export class EdgeDVRPanel {
   async seekPlayback(position,options={}){const target=this.options.targetAt(Math.max(0,position));if(target)return this.seekTarget(target,options);}
   async seekTarget(target,{play=this.wantPlay}={}){
     if(!this.host.isConnected)return;
+    if(this.client&&!this.client.closed&&(this.client.paused||!this.client.picture)&&this.entry?.file.name===target.target.file.name&&this.client.paused===!play&&Math.abs((this.client.request?.at??-1)-target.seek)<.0005){
+      this.options.diagnostics?.note('dvr_seek_coalesced',{file:target.target.file.name,seconds:target.seek,epoch:this.client.epoch});return;
+    }
     this.options.activate(this);this.entry=target.target;this.position=(this.entry.playbackOffset||0)+target.seek;this.wantPlay=play;this.waiting=true;this.update();
     this.options.onTarget?.(target);
     if(!this.client||this.client.closed){

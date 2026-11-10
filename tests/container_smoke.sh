@@ -40,6 +40,9 @@ from pathlib import Path
 import shutil
 assert shutil.which('edge-rtc') and shutil.which('ffmpeg')
 assert not shutil.which('janus') and not shutil.which('mediamtx')
+for name in ('icon.png','logo.png','logo-light.png'):
+    data=Path('/usr/share/edge-of-infinity/brand',name).read_bytes()
+    assert data.startswith(b'\x89PNG\r\n\x1a\n') and data[25]==6, name
 options=json.loads(Path('/tmp/edge-runtime/native-options.json').read_text())
 assert options['edge_rtc_rtsp_port']==9556 and options['edge_rtc_api_port']==10997
 assert not any(k.startswith(('mediamtx_', 'janus_')) or k=='core_engine' for k in options)
