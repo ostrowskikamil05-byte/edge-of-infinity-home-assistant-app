@@ -11,7 +11,10 @@ import re
 import time
 from urllib.parse import urlsplit
 
-from aiohttp import ClientError, ClientTimeout, web
+from aiohttp import ClientError, ClientTimeout, WSMsgType, web
+from contextlib import suppress
+import math
+import json
 from homeassistant.auth.permissions.const import POLICY_READ
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.components.http.const import KEY_HASS_USER
@@ -24,12 +27,11 @@ DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 SEGMENT = re.compile(r"\d{8}-\d{6}\.mp4")
 EVENT_ID = re.compile(r"[1-9][0-9]{0,18}")
 KINDS = ("person", "vehicle", "animal", "motion")
-COMPAT = "?compat=1&container=aac-clock-v6"
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 KEY_TTL_SECONDS = 30
 JSON_TIMEOUT = ClientTimeout(total=20)
 MEDIA_TIMEOUT = ClientTimeout(total=None, sock_connect=5, sock_read=30)
-FORWARDED_HEADERS = ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Retry-After")
+FORWARDED_HEADERS = ("Content-Type", "Content-Length", "Content-Range", "Content-Disposition", "Accept-Ranges", "Retry-After")
 
 
 class BridgeError(Exception):
@@ -99,11 +101,20 @@ async def fetch_json(hass, entry: dict, path: str):
 async def recording_slot(hass, target: dict) -> dict:
     """Find the add-on's recording key/index for a camera; cached briefly per entry."""
     entry = target["entry"]
+    coordinator = entry.get('coordinator')
+    for camera in ((coordinator.data if coordinator else None) or {}).get('cameras', []):
+        if camera.get('id') == target['camera_id'] and type(camera.get('index')) is int and re.fullmatch(r'[A-Za-z0-9_.-]{1,96}', str(camera.get('key') or '')):
+            return camera
     cache = entry.setdefault("_dashboard_slots", {"at": 0.0, "rows": {}})
     if time.monotonic() - cache["at"] > KEY_TTL_SECONDS or target["camera_id"] not in cache["rows"]:
-        payload = await fetch_json(hass, entry, "/api/recording/status?summary=1")
-        cache["rows"] = {row.get("id"): row for row in payload.get("cameras", []) if re.fullmatch(r"[A-Za-z0-9_-]{1,96}", str(row.get("key") or ""))}
-        cache["at"] = time.monotonic()
+        async def refresh():
+            payload = await fetch_json(hass, entry, "/api/recording/status?summary=1")
+            cache["rows"] = {row.get("id"): row for row in payload.get("cameras", []) if re.fullmatch(r"[A-Za-z0-9_-]{1,96}", str(row.get("key") or ""))}
+            cache["at"] = time.monotonic()
+        task = cache.get("task")
+        if task is None or task.done():
+            task = cache["task"] = asyncio.create_task(refresh())
+        await asyncio.shield(task)
     row = cache["rows"].get(target["camera_id"])
     if not row:
         raise BridgeError(404, "camera_not_recording")
@@ -285,7 +296,7 @@ class EdgeMediaView(HomeAssistantView):
             if not SEGMENT.fullmatch(wanted):
                 raise BridgeError(400, "invalid_name")
             key = (await recording_slot(self.hass, target))["key"]
-            return (f"/recording-thumbs/{key}/{wanted}.jpg", True) if kind == "thumb" else (f"/recordings/{key}/{wanted}{COMPAT}", False)
+            return (f"/recording-thumbs/{key}/{wanted}.jpg", True) if kind == "thumb" else (f"/recordings/{key}/{wanted}?download=1", False)
         if kind in ("event-image", "event-clip"):
             ident = name.rsplit(".", 1)[0]
             if not EVENT_ID.fullmatch(ident) or name != ident + (".jpg" if kind == "event-image" else ".mp4"):
@@ -298,10 +309,100 @@ class EdgeMediaView(HomeAssistantView):
                 owners[ident] = meta.get("camera_id")
             if owners[ident] != target["camera_id"]:
                 raise BridgeError(404, "event_not_found")
-            return (f"/api/alerts/{ident}/image", True) if kind == "event-image" else (f"/api/alerts/{ident}/clip.mp4{COMPAT}", False)
+            return (f"/api/alerts/{ident}/image", True) if kind == "event-image" else (f"/api/alerts/{ident}/clip.mp4?download=1", False)
         raise BridgeError(404, "not_found")
 
 
+def archive_command(data: str, clip: str = '') -> bool:
+    """Only bounded, read-only DVR seeks/pulls may reach the private core."""
+    if len(data) > 4096:
+        return False
+    try:
+        value = json.loads(data)
+        if not isinstance(value, dict) or value.get('type') not in ('seek', 'pull'):
+            return False
+        fields = {'type', 'epoch', 'count', 'bytes'} | ({'file', 'at'} if value['type'] == 'seek' else set())
+        if set(value) - fields or type(value.get('epoch')) is not int or not 1 <= value['epoch'] <= 4294967295:
+            return False
+        count, budget = value.get('count', 0), value.get('bytes', 0)
+        if type(count) is not int or not (0 if value['type'] == 'seek' else 1) <= count <= 64:
+            return False
+        if type(budget) is not int or budget != 0 and not 65536 <= budget <= 2097152:
+            return False
+        if value['type'] == 'seek':
+            at = value.get('at')
+            if type(at) not in (float, int) or not math.isfinite(at) or not 0 <= at <= 172800:
+                return False
+            return value.get('file') == f'event-{clip}.mp4' if clip else bool(SEGMENT.fullmatch(str(value.get('file') or '')))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+class EdgeArchiveView(HomeAssistantView):
+    """Authorized camera/archive WebSocket; no media URL or token is public."""
+
+    url = '/api/edge/dashboard/archive/{entity_id}'
+    name = 'api:edge:dashboard:archive'
+    requires_auth = True
+
+    def __init__(self, hass):
+        self.hass = hass
+
+    async def get(self, request, entity_id):
+        try:
+            target = resolve_camera(self.hass, request[KEY_HASS_USER], entity_id)
+            clip = request.query.get('clip', '')
+            if clip:
+                if not EVENT_ID.fullmatch(clip):
+                    raise BridgeError(400, 'invalid_event')
+                event = await fetch_json(self.hass, target['entry'], f'/api/alerts/{clip}')
+                if event.get('camera_id') != target['camera_id'] or not event.get('clip_url'):
+                    raise BridgeError(404, 'event_not_found')
+                endpoint = f'/api/edge-rtc/clip/{clip}'
+            else:
+                slot = await recording_slot(self.hass, target)
+                endpoint = f'/api/edge-rtc/archive/{slot["key"]}'
+            base, headers = upstream(target['entry'])
+        except BridgeError as error:
+            return fail(error)
+        front = web.WebSocketResponse(heartbeat=20, compress=False, max_msg_size=4096)
+        if not front.can_prepare(request).ok:
+            return web.Response(status=400)
+        await front.prepare(request)
+        try:
+            async with async_get_clientsession(self.hass).ws_connect(base + endpoint, headers=headers, heartbeat=20, compress=0, max_msg_size=9*1024*1024) as back:
+                async def commands():
+                    async for message in front:
+                        if message.type != WSMsgType.TEXT or not archive_command(message.data, clip):
+                            await front.close(code=1008, message=b'invalid_archive_command')
+                            return
+                        await back.send_str(message.data)
+
+                async def media():
+                    async for message in back:
+                        if message.type == WSMsgType.BINARY:
+                            await front.send_bytes(message.data)
+                        elif message.type == WSMsgType.TEXT:
+                            await front.send_str(message.data)
+                        else:
+                            return
+
+                tasks = [asyncio.create_task(commands()), asyncio.create_task(media())]
+                try:
+                    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+        except (ClientError, OSError, TimeoutError):
+            with suppress(ConnectionError):
+                await front.send_json({'type': 'error', 'code': 'edge_archive_unavailable'})
+        finally:
+            await front.close()
+        return front
+
+
 def async_register_dashboard(hass) -> None:
-    for view in (EdgeRecordingsView, EdgeEventsView, EdgeMediaView):
+    for view in (EdgeRecordingsView, EdgeEventsView, EdgeMediaView, EdgeArchiveView):
         hass.http.register_view(view(hass))

@@ -25,7 +25,7 @@ async function until(page,predicate){const deadline=Date.now()+15000;while(!pred
    if(endpoint==='api/core/engine')return json({available:true,core_engine:'edge_rtc',running_engine:'edge_rtc'});
    if(endpoint==='api/edge-rtc/player/front_main')return route.fulfill({contentType:'text/html',body:'<body data-fixture="live">Isolated camera</body>'});
    if(endpoint==='api/client-diagnostics.js'||endpoint==='api/edge-rtc/device-diagnostics.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-device-diagnostics.js'),'utf8')});
-   if(endpoint==='api/edge-rtc/client.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-rtc-client.js'),'utf8')});
+   if(endpoint==='api/edge-rtc/edge-rtc-client.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-rtc-client.js'),'utf8')});
    if(endpoint==='api/client-diagnostics'){const data=request.postDataJSON();assert(Buffer.byteLength(request.postData())<=24000);assert(data.events.length<=32);reports.push({at:Date.now(),data});return json({ok:true});}
    throw Error('Unexpected request: '+endpoint);
   });

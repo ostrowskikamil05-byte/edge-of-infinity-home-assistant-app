@@ -12,7 +12,7 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
   await page.goto(base);await page.locator('[data-camera-form]').first().waitFor({state:'attached'});
   if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();
   await page.waitForFunction(()=>archivePlayers.has(window.fixtureDVRIndex));
-  if(index==='1')await page.waitForFunction(()=>archiveFallbacks.get('0')==='video_decoder_unavailable'&&document.querySelector('video[data-recording-player="0"]'));
+  if(index==='1')await page.waitForFunction(()=>archivePlayers.get('0')?.client?.closed&&archivePlayers.get('0').note.textContent.includes('profil'));
   assert.equal(await page.locator(`[data-nvr-index="${index}"] [data-recording-playback-seek]`).count(),0,'two seek controls were rendered');
   const host=page.locator(`[data-dvr-host="${index}"]`),slider=host.locator('[data-dvr-seek]');
   await host.locator('[data-dvr-action="toggle"]').click();
@@ -56,11 +56,11 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
   await seek(47.8);await page.waitForFunction(()=>{const p=archivePlayers.get(window.fixtureDVRIndex);return p.client?.picture&&p.wantPlay&&p.client.request.file.endsWith('000048.mp4')&&p.position>=48.1;});
   const diagnostics=await page.evaluate(()=>archivePlayers.get(window.fixtureDVRIndex).client.diagnosticState());assert.equal(diagnostics.transport,'edgertc/archive/1');assert(Number.isFinite(diagnostics.seek_ms));assert(diagnostics.archive_buffer_frames<=24);
   await page.evaluate(()=>showPage('home'));assert(await page.evaluate(()=>[...archivePlayers.values()].every(p=>!p.client)),'hidden NVR retained a decoder/socket');
-  await page.evaluate(()=>showPage('nvr'));await page.locator('[data-archive-transport]').first().selectOption('mp4');assert.equal(await page.locator('[data-dvr-host]').count(),0);
-  await page.locator(`[data-recording-toggle="${index}"]`).click();await page.waitForFunction(()=>{const v=document.querySelector(`video[data-recording-player="${fixtureDVRIndex}"]`);return v&&!v.paused&&v.videoWidth>0&&v.currentTime>.1;});
+  await page.evaluate(()=>showPage('nvr'));assert.equal(await page.locator('[data-archive-transport]').count(),0);assert.equal(await page.locator('video[data-recording-player]').count(),0);
+  const download=await page.locator(`[data-recording-download="${index}"]`).getAttribute('href');assert(download.includes('download=1'));const file=await context.request.get(new URL(download,base).href,{headers:{Range:'bytes=0-1023'}});assert.equal(file.status(),206);assert.equal((await file.body()).length,1024);
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'phone UI overflow');assert.deepEqual(errors,[]);for(const [n,hash]of originals)assert.equal(crypto.createHash('sha256').update(fs.readFileSync(info.recordings_dir+'/'+n)).digest('hex'),hash,'archive modified an original recording');
   const status=await context.request.get(info.archive_core+'/api/status',{headers:{Authorization:'Bearer '+info.archive_token}});assert.deepEqual((await status.json()).sources,[],'archive connected to a camera');
-  console.log(`PASS ${wk?'webkit':'chromium'}: actual indexed DVR pixels/AAC=${audioDecoder}, latest long-GOP seek ${Math.round(diagnostics.seek_ms)} ms, frame stepping, same-socket file transition, pause stops downloads, original files and MP4 fallback retained`);
+  console.log(`PASS ${wk?'webkit':'chromium'}: actual indexed DVR pixels/AAC=${audioDecoder}, latest long-GOP seek ${Math.round(diagnostics.seek_ms)} ms, frame stepping, same-socket file transition, pause stops downloads, original files and MP4 downloads retained`);
   await page.unrouteAll({behavior:'ignoreErrors'});await context.close();
  }catch(error){try{console.error('DVR state',JSON.stringify(await page.evaluate(()=>({players:[...archivePlayers].map(([i,p])=>({i,position:p.position,wantPlay:p.wantPlay,client:p.client?.diagnosticState(),message:p.note.textContent})),page:activePage}))));}catch(_){}throw error;}finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exit(1);});

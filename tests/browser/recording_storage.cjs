@@ -20,7 +20,7 @@ const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).diges
    assert.equal(await page.locator('[name="nvr-browser-playback"]').inputValue(),'copy');
    assert.equal(await page.locator('[name="nvr-playback-cache-mb"]').inputValue(),'0');
    await open('nvr');
-   await page.waitForFunction(()=>document.querySelector('[data-recording-duration]')?.textContent.endsWith('/ 00:00:21'));
+   await page.waitForFunction(()=>document.querySelector('[data-dvr-clock]')?.textContent.endsWith('/ 00:00:21'));
    await open('edge-settings');
    const copy=path.join(fixture.recording_cache_dir,'front_0','2026-07-27','timeline.mp4');
    fs.mkdirSync(path.dirname(copy),{recursive:true});fs.writeFileSync(copy,Buffer.alloc(2*1024*1024,7));
@@ -38,12 +38,12 @@ const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).diges
    assert(status.storage.recordings_bytes>0&&status.cameras[0].bytes_per_day_estimate>0);
    await page.waitForFunction(()=>document.querySelector('#edge-settings-form [data-recording-disk-usage]')?.textContent.includes('Continuous recording estimate'));
    await open('nvr');
-   await page.waitForFunction(()=>document.querySelector('[data-recording-duration]')?.textContent.endsWith('/ 00:00:21'));
-   assert.equal(await page.locator('video').getAttribute('data-recording-playback-mode'),'server_file_sequence');
-   await page.locator('[data-recording-playback-seek]').fill('15');await page.locator('[data-recording-playback-seek]').dispatchEvent('change');
-   await page.waitForFunction(()=>document.querySelector('video')?.dataset.recordingFileUrl.endsWith('000014.mp4'));
+   await page.waitForFunction(()=>document.querySelector('[data-dvr-clock]')?.textContent.endsWith('/ 00:00:21'));
+   assert.equal(await page.locator('video[data-recording-player]').count(),0);
+   await page.locator('[data-dvr-seek]').fill('15');await page.locator('[data-dvr-seek]').dispatchEvent('change');
+   await page.waitForFunction(()=>archivePlayers.get('0')?.client?.request?.file.endsWith('000014.mp4'));
    await page.getByRole('button',{name:'Previous day',exact:true}).click();
-   await page.waitForFunction(()=>document.querySelector('video')?.dataset.recordingFileUrl.includes('20260727'));
+   await page.waitForFunction(()=>archivePlayers.get('0')?.client?.request?.file.includes('20260727'));
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'disk-usage view overflows');
    assert.deepEqual(errors,[]);
    console.log(`PASS ${width}px: cleanup frees duplicate MP4/orphan JPEG, original hashes unchanged, visible usage/estimates and full-day seek without playback copies`);

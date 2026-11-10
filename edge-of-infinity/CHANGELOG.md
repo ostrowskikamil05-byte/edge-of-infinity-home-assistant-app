@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.16.0
+
+- Use indexed EdgeRTC DVR throughout the panel and HA recordings/events cards,
+  including saved alert clips. Keep original MP4s as streamed downloads with
+  Range support; no video Blob downloads, automatic remux or MP4 player fallback.
+  Unsupported video profiles show an error/download link; unsupported audio
+  leaves native video playing and records the limitation in device diagnostics.
+- Keep the archive socket between fragments, cancel stale seeks, decode actual
+  frames while scrubbing and negotiate smaller, bounded archive delivery batches.
+  Stop idle DVR animation work when there are no frames ready to display.
+- Release HA Live/DVR browser connections outside the viewport and keep the
+  shared camera upstream running. Reduce Live UI updates and ignore unrelated
+  Home Assistant state changes. Original video quality/FPS is preserved.
+- Allow vertical touch scrolling over the timeline. Capture horizontal gestures
+  only after detecting their direction; retain the existing card YAML and layout.
+  Stop quiet metadata refreshes from scrolling/rebuilding the thumbnail gallery.
+- Share thumbnail requests and an 8 MiB/96-image memory cache per HA user,
+  reuse the existing bounded WebKit-safe JPEG store and coalesce recording-key
+  lookups. Camera credentials and signed URLs are never stored in that cache.
+- Authenticate archive/alert sockets through HA entity read permissions. Bind an
+  alert socket to that exact alert file, reject microphone/unknown commands and
+  enforce request/queue bounds. Add actual Chromium/WebKit playback, gesture,
+  permissions, original-file integrity, AAC and 4K regression coverage.
+- Update both the add-on and integration to 0.16.0. Restart Home Assistant Core
+  and reopen the dashboard/panel. Recording files, retention, detection options,
+  camera profiles and seven interface languages remain unchanged.
+
 ## 0.15.2
 
 - Add bundled interface translations for Polish, English, German, French,

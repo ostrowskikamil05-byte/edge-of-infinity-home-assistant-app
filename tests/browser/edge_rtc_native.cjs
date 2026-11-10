@@ -13,6 +13,8 @@ try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],
   const ids=['camera.front','camera.side','camera.back','camera.garage'];window.hass={fetchWithAuth:(path,options)=>fetch(path,options),connection:{},locale:{language:'pl'},hassUrl:p=>new URL(p,location.href).href,states:Object.fromEntries(ids.map((id,index)=>[id,{state:'idle',attributes:{friendly_name:['Front','Side','Back','Garage'][index],edge_camera_id:String(index),edge_stream_source:'edge_rtc',edge_profiles:['nvr','main'],edge_stream_entities:{nvr:id,main:id}}}])),callWS:async msg=>{if(msg.type!=='auth/sign_path')throw new Error('Unexpected signaling API '+msg.type);return {path:msg.path};}};
   window.card=document.createElement('edge-live-card');card.setConfig({cameras:ids,reconnect:false});card.hass=hass;document.body.append(card);
  });
+ // Make all four views visible for source-FPS/microphone checks; viewport lifecycle is checked separately below.
+ await page.setViewportSize({width,height:Math.max(height,2200)});
  const sourceStatus=await page.evaluate(()=>fetch('/test/status').then(r=>r.json()));
  const codec=sourceStatus.sources[0].video.codec;
  const supported=await page.evaluate(async codec=>(await VideoDecoder.isConfigSupported({codec,optimizeForLatency:true,hardwareAcceleration:'no-preference'})).supported,codec);
@@ -52,6 +54,11 @@ try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],
  await page.locator('edge-live-card [data-view]').selectOption('camera.front');await page.waitForFunction(async()=>{const status=await fetch('/test/status').then(r=>r.json());return status.sources[0].viewers===1;});
  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'native card overflow');
  if(process.env.EDGE_NVR_SCREENSHOT_DIR)await page.screenshot({path:`${process.env.EDGE_NVR_SCREENSHOT_DIR}/edgertc-native-${name}.png`,fullPage:true});
+ // Restore phone viewport, scroll the complete card away and back. Server source remains warm.
+ await page.setViewportSize({width,height});await page.evaluate(()=>{const spacer=document.createElement('div');spacer.id='viewport-spacer';spacer.style.height='4000px';document.body.append(spacer);window.scrollTo(0,document.body.scrollHeight);});
+ await page.waitForFunction(()=>[...card._players.values()].every(p=>!p._pc));
+ const warm=await page.evaluate(()=>fetch('/test/status').then(r=>r.json()));assert.equal(warm.sources[0].upstream_connections,1);assert.equal(warm.sources[0].connection_attempts,1);
+ await page.evaluate(()=>{window.scrollTo(0,0);document.getElementById('viewport-spacer').remove();});await page.waitForFunction(()=>[...card._players.values()][0]._edgeRTC?.frames>=3);
  await page.evaluate(()=>card.remove());await page.waitForFunction(async()=>{const status=await fetch('/test/status').then(r=>r.json());return status.sources[0].viewers===0&&!status.sources[0].microphone_active;});
  if(name==='desktop'){const preview=await context.newPage();await preview.goto('http://127.0.0.1:18090/api/edge-rtc/player/front_main');await preview.waitForFunction(()=>document.querySelector('p').textContent.includes('640'));await preview.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));});await page.waitForFunction(async()=>{const s=await fetch('/test/status').then(r=>r.json());return s.sources[0].viewers===0;});await preview.evaluate(()=>{document.querySelector('p').textContent='resuming';Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));});await preview.waitForFunction(()=>document.querySelector('p').textContent.includes('640'));await preview.close();}
  const diagnosticDevice=await page.evaluate(()=>globalThis.__edgeDeviceReporter?.device_id);assert(diagnosticDevice);let deviceData;

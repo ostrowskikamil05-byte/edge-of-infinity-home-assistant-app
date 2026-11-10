@@ -25,7 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const version = "0.15.2"
+const version = "0.16.0"
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -128,6 +128,10 @@ func (a *app) reload(c config) {
 			a.archiveKeys[key] = directory
 		}
 	}
+	// Alert clips are immutable local files, never another camera source.
+	if c.Recordings != "" {
+		a.archiveKeys["__alerts"] = ".alerts"
+	}
 	old := []*source{}
 	for id, s := range a.sources {
 		same := false
@@ -227,6 +231,8 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.stream(w, r, strings.TrimPrefix(r.URL.Path, "/api/stream/"))
 	case strings.HasPrefix(r.URL.Path, "/api/archive/") && r.Method == "GET":
 		a.archive(w, r, strings.TrimPrefix(r.URL.Path, "/api/archive/"))
+	case strings.HasPrefix(r.URL.Path, "/api/clip/") && r.Method == "GET":
+		a.archiveClip(w, r, strings.TrimPrefix(r.URL.Path, "/api/clip/"))
 	default:
 		reply(w, 404, map[string]string{"error": "not_found"})
 	}

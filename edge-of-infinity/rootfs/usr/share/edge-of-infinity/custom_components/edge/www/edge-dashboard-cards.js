@@ -1,7 +1,9 @@
 /* Edge of Infinity dashboard cards: recordings and events.
    All data comes through Home Assistant's authenticated /api/edge/dashboard bridge. */
-const EDGE_DASH_VERSION = "0.15.2";
+const EDGE_DASH_VERSION = "0.16.0";
 const edgeDashI18nReady=import('/edge/edge-i18n.js?v='+EDGE_DASH_VERSION).catch(()=>null);
+const edgeDVRModule=()=>import('/edge/edge-dvr-client.js?v='+EDGE_DASH_VERSION);
+const edgeGalleryReady=import('/edge/edge-gallery-cache.js?v='+EDGE_DASH_VERSION).catch(()=>null);
 const EDGE_DASH_API = "edge/dashboard";
 const EDGE_DASH_OPEN = "edge-dashboard-open-recording";
 const EDGE_KINDS = ["person", "vehicle", "animal", "motion"];
@@ -70,48 +72,59 @@ const EDGE_SHARED_STYLE = `
 
 /* Lazy, authenticated pictures. <img> cannot send HA's bearer token, so pictures
    are fetched with it and shown from short-lived object URLs. */
+// Shared per HA user, bounded by bytes as well as entry count. No video cache.
+const edgePictureCaches=new Map();
 class EdgeDashMedia {
-  constructor(card) {
-    this.card = card; this.cache = new Map(); this.pending = new Map(); this.queue = []; this.active = 0;
-    this.observer = new IntersectionObserver(entries => { for (const entry of entries) if (entry.isIntersecting) { this.observer.unobserve(entry.target); this.queue.push(entry.target); this._pump(); } }, {rootMargin:"240px"});
+  constructor(card){
+    this.card=card;this.queue=[];this.active=0;this.owners=new Map();
+    this.observer=new IntersectionObserver(entries=>{for(const entry of entries)if(entry.isIntersecting){this.observer.unobserve(entry.target);this.queue.push(entry.target);this._pump();}},{rootMargin:'80px'});
   }
-  path(entity, kind, name) { return `/api/${EDGE_DASH_API}/media/${entity}/${kind}/${name}`; }
-  image(img, entity, kind, name) { img.dataset.src = this.path(entity, kind, name); const hit = this.cache.get(img.dataset.src); if (hit) this._show(img, hit); else this.observer.observe(img); }
-  _show(img, url) { img.src = url; img.closest(".thumb")?.classList.add("loaded"); }
-  _pump() {
-    while (this.active < 4 && this.queue.length) {
-      const img = this.queue.shift(); if (!img.isConnected) continue;
-      const src = img.dataset.src; this.active++;
-      this.fetch(src).then(url => { if (img.dataset.src === src) this._show(img, url); }).catch(() => img.closest(".thumb")?.classList.add("failed")).finally(() => { this.active--; this._pump(); });
+  _cache(){
+    const scope=this.card.hass?.user?.id||this.card;
+    if(!edgePictureCaches.has(scope))edgePictureCaches.set(scope,{images:new Map(),urls:new Map(),pending:new Map(),bytes:0,tail:Promise.resolve()});
+    return edgePictureCaches.get(scope);
+  }
+  path(entity,kind,name){return `/api/${EDGE_DASH_API}/media/${entity}/${kind}/${name}`;}
+  image(img,entity,kind,name){img.decoding='async';img.dataset.src=this.path(entity,kind,name);const hit=this._cache().images.get(img.dataset.src);if(hit)this._show(img,hit.url);else this.observer.observe(img);}
+  _release(img,row){row.refs.delete(img);if(row.evicted&&!row.refs.size){URL.revokeObjectURL(row.url);row.cache.urls.delete(row.url);}}
+  releaseDetached(){for(const [img,row] of this.owners)if(!img.isConnected){this.owners.delete(img);this._release(img,row);}}
+  _show(img,url){if(!img.isConnected)return;const old=this.owners.get(img),row=this._cache().urls.get(url);if(old&&old!==row)this._release(img,old);if(row){row.refs.add(img);this.owners.set(img,row);}if(img.src!==url)img.src=url;img.closest('.thumb')?.classList.add('loaded');}
+  _pump(){while(this.active<2&&this.queue.length){const img=this.queue.shift();if(!img.isConnected)continue;const src=img.dataset.src;this.active++;this.fetch(src).then(url=>{if(img.dataset.src===src)this._show(img,url);}).catch(()=>img.closest('.thumb')?.classList.add('failed')).finally(()=>{this.active--;this._pump();});}}
+  async fetch(src){
+    this.releaseDetached();const cache=this._cache(),hit=cache.images.get(src);if(hit){cache.images.delete(src);cache.images.set(src,hit);return hit.url;}
+    if(cache.pending.has(src))return cache.pending.get(src);
+    const task=this._fetch(src,cache);cache.pending.set(src,task);
+    try{return await task;}finally{cache.pending.delete(src);}
+  }
+  async _fetch(src,cache){
+    const user=this.card.hass?.user?.id;let blob;
+    // Do not let a blocked browser database delay an actual media request.
+    if(user){await Promise.race([edgeGalleryReady,new Promise(resolve=>setTimeout(resolve,40))]);cache.gallery??=globalThis.EdgeRecordingGallery?new EdgeRecordingGallery():null;
+      if(cache.gallery)blob=await Promise.race([cache.gallery.loadThumbnail('ha:'+user,src),new Promise(resolve=>setTimeout(()=>resolve(null),40))]);}
+    if(!blob){
+      // The server has one thumbnail decoder. Serial cold requests avoid 429 storms.
+      const previous=cache.tail;let release;cache.tail=new Promise(resolve=>release=resolve);await previous;
+      try{
+        if(!this.card.isConnected)throw Error('card_disconnected');
+        let response;
+        for(let attempt=0;attempt<3;attempt++){
+          response=await this.card.hass.fetchWithAuth(src);
+          if(![425,429,503].includes(response.status)||attempt===2)break;
+          const wait=Math.min(2000,Math.max(200,Number(response.headers.get('Retry-After'))*1000||200));await response.body?.cancel();await new Promise(resolve=>setTimeout(resolve,wait));
+          if(!this.card.isConnected)throw Error('card_disconnected');
+        }
+        if(!response.ok)throw Error(String(response.status));blob=await response.blob();
+        if(blob.type!=='image/jpeg'||blob.size>4*1024*1024)throw Error('invalid_image');
+        if(user)void cache.gallery?.saveThumbnail('ha:'+user,src,blob);
+      }finally{release();}
     }
-  }
-  async fetch(src) {
-    const hit = this.cache.get(src); if (hit) return hit;
-    if (this.pending.has(src)) return this.pending.get(src);
-    const request = this._fetch(src); this.pending.set(src, request);
-    try { return await request; } finally { this.pending.delete(src); }
-  }
-  async _fetch(src) {
-    let response;
-    for (let attempt = 0; attempt < 6; attempt++) {
-      response = await this.card.hass.fetchWithAuth(src);
-      if (![425, 429, 503].includes(response.status) || attempt === 5) break;
-      const wait = Math.min(8000, Math.max(250 * 2 ** attempt, (Number(response.headers.get("Retry-After")) || 0) * 1000));
-      await response.body?.cancel();
-      await new Promise(resolve => setTimeout(resolve, wait));
-      if (!this.card.isConnected) throw new Error("card_disconnected");
-    }
-    if (!response.ok) throw new Error(String(response.status));
-    const url = URL.createObjectURL(await response.blob()); this.cache.set(src, url);
-    if (this.cache.size > 400) { const [key, old] = this.cache.entries().next().value; URL.revokeObjectURL(old); this.cache.delete(key); }
+    const url=URL.createObjectURL(blob),row={url,bytes:blob.size,refs:new Set(),cache};cache.images.set(src,row);cache.urls.set(url,row);cache.bytes+=blob.size;
+    while(cache.images.size>96||cache.bytes>8*1024*1024){const [key,old]=cache.images.entries().next().value;cache.images.delete(key);cache.bytes-=old.bytes;old.evicted=true;if(!old.refs.size){URL.revokeObjectURL(old.url);cache.urls.delete(old.url);}}
     return url;
   }
-  /* <video> needs a URL it can range-request by itself: ask HA for a signed path. */
-  async signed(entity, kind, name) {
-    const hass = this.card.hass; const result = await hass.callWS({type:"auth/sign_path", path:this.path(entity, kind, name), expires:3600});
-    return hass.hassUrl ? hass.hassUrl(result.path) : result.path;
-  }
-  dispose() { this.observer.disconnect(); this.queue = []; for (const url of this.cache.values()) URL.revokeObjectURL(url); this.cache.clear(); }
+  async signed(entity,kind,name){const hass=this.card.hass,result=await hass.callWS({type:'auth/sign_path',path:this.path(entity,kind,name),expires:3600});return hass.hassUrl?hass.hassUrl(result.path):result.path;}
+  resume(){for(const img of this.card.shadowRoot.querySelectorAll('img[data-src]')){const hit=this._cache().images.get(img.dataset.src);if(hit)this._show(img,hit.url);else this.observer.observe(img);}}
+  dispose(){this.observer.disconnect();this.queue=[];for(const [img,row] of this.owners)this._release(img,row);this.owners.clear();const cache=edgePictureCaches.get(this.card);if(cache){for(const row of cache.urls.values())URL.revokeObjectURL(row.url);edgePictureCaches.delete(this.card);}}
 }
 
 class EdgeDashCard extends HTMLElement {
@@ -136,8 +149,8 @@ class EdgeDashCard extends HTMLElement {
     now.setDate(now.getDate() - 1); if (day === edgeDayKey(now)) return this._t("yesterday");
     return new Intl.DateTimeFormat(edgeLang(this._hass,this._config?.language), {weekday:"short", day:"numeric", month:"short"}).format(new Date(day + "T12:00:00"));
   }
-  connectedCallback() { this._connected = true; edgeDashI18nReady.then(()=>{if(!this.isConnected||!globalThis.EdgeI18n)return;this._languageUnsubscribe?.();const refresh=()=>{this.lang=edgeLang(this._hass,this._config?.language);this._render();};this._languageUnsubscribe=EdgeI18n.subscribe(refresh);refresh();}); this._visible = () => { if (!document.hidden) this._wake?.(); }; document.addEventListener("visibilitychange", this._visible); this._timer = setInterval(() => { if (!document.hidden) this._tick?.(); }, 60000); this._wake?.(); }
-  disconnectedCallback() { this._connected = false; this._languageUnsubscribe?.(); document.removeEventListener("visibilitychange", this._visible); clearInterval(this._timer); this._sleep?.(); }
+  connectedCallback() { this._connected = true;this._media.resume(); edgeDashI18nReady.then(()=>{if(!this.isConnected||!globalThis.EdgeI18n)return;this._languageUnsubscribe?.();const refresh=()=>{this.lang=edgeLang(this._hass,this._config?.language);this._render();};this._languageUnsubscribe=EdgeI18n.subscribe(refresh);refresh();}); this._visible = () => { if(document.hidden)this._suspendMedia?.();else {this._wake?.();this._resumeMedia?.();} }; document.addEventListener("visibilitychange", this._visible); this._timer = setInterval(() => { if (!document.hidden) this._tick?.(); }, 60000); this._wake?.(); }
+  disconnectedCallback() { this._connected = false; this._languageUnsubscribe?.(); document.removeEventListener("visibilitychange", this._visible); clearInterval(this._timer); this._sleep?.(); this._media.dispose(); }
 }
 
 class EdgeRecordingsCard extends EdgeDashCard {
@@ -150,7 +163,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
       .day .thumb{width:64px;border-radius:calc(var(--edge-inner) * .6)}.day b{display:block;font-size:13px;font-weight:600;white-space:nowrap}.day small{display:block;font-size:11px;color:var(--edge-muted);white-space:nowrap}
       .day[aria-selected=true]{background:var(--edge-tint)}.day[aria-selected=true] b{color:var(--edge-accent)}
       .stage{position:relative;aspect-ratio:16/9;max-height:72vh;background:#000;color:#fff;overflow:hidden}
-      .stage video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0;background:#000}.stage video.front{opacity:1;z-index:1}
+      .stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0;background:#000}.stage canvas{opacity:1;z-index:1}
       .poster{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;z-index:2}
       .big,.big:hover:not(:disabled){position:absolute;inset:0;margin:auto;z-index:3;width:68px;height:68px;border-radius:50%;background:rgba(0,0,0,.5);color:#fff;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}.big svg{width:30px;height:30px}
       .note{position:absolute;left:10px;right:10px;bottom:10px;z-index:4;margin:0;padding:8px 10px;border-radius:8px;background:rgba(6,16,24,.86);font-size:13px;line-height:1.4}
@@ -158,10 +171,11 @@ class EdgeRecordingsCard extends EdgeDashCard {
       .scale{display:flex;align-items:center;gap:6px;padding:10px 12px 4px;font-size:12px;color:var(--edge-muted)}
       .scale output{flex:1;text-align:center;font-variant-numeric:tabular-nums}
       .scale button{min-height:32px;padding:0 10px;font-size:12px}.scale button.icon{width:32px}.scale button{color:var(--edge-text)}.scale button[aria-pressed=true]{background:var(--edge-tint);color:var(--edge-accent);font-weight:600}
-      .track{position:relative;height:44px;margin:0 12px;cursor:pointer;touch-action:none;border-radius:6px}
+      .track{position:relative;height:44px;margin:0 12px;cursor:pointer;touch-action:pan-y;border-radius:6px}
       .track::before{content:"";position:absolute;left:0;right:0;top:17px;height:10px;border-radius:5px;background:var(--edge-fill-strong)}
       .range{position:absolute;top:17px;height:10px;min-width:2px;border-radius:5px;background:var(--edge-accent)}
-      .dot{position:absolute;top:2px;width:22px;height:22px;min-height:0;margin-left:-11px;padding:0;border:0;background:transparent;z-index:2}.dot::after{content:"";display:block;margin:auto;width:9px;height:9px;border-radius:50%;background:var(--kind);box-shadow:0 0 0 2px rgba(0,0,0,.35)}
+      .dot{position:absolute;top:2px;width:22px;height:22px;min-height:0;margin-left:-11px;padding:0;border:0;background:transparent;z-index:2}.dot::after{content:"";display:block;margin:auto;width:9px;height:9px;border-radius:50%;background:var(--secondary-text-color,#a3aab3);box-shadow:0 0 0 2px rgba(0,0,0,.35)}
+      .dot.passed::after{background:var(--edge-accent)}
       .cursor{position:absolute;top:8px;width:4px;height:28px;margin-left:-2px;border-radius:2px;background:var(--edge-text);box-shadow:0 0 0 2px color-mix(in srgb,var(--edge-text) 25%,transparent);z-index:3;pointer-events:none}
       .ticks{display:flex;justify-content:space-between;padding:0 12px;font-size:11px;color:var(--edge-muted);font-variant-numeric:tabular-nums}
       .bar{display:flex;align-items:center;gap:6px;padding:8px 12px 12px}
@@ -181,7 +195,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
       <div class="chips cams" role="tablist"></div>
       <div class="days" role="tablist"></div>
       <div class="body"><div class="player" hidden>
-        <div class="stage"><video playsinline preload="auto" class="front"></video><video playsinline preload="auto"></video><img class="poster" alt="" hidden><span class="live" hidden></span><button class="big" data-action="toggle">${edgeIcon("play")}</button><p class="note" role="status" hidden></p></div>
+        <div class="stage"><canvas width="640" height="360" aria-label="EdgeRTC DVR"></canvas><img class="poster" alt="" hidden><span class="live" hidden></span><button class="big" data-action="toggle">${edgeIcon("play")}</button><p class="note" role="status" hidden></p></div>
         <div class="scale"><button class="icon" data-action="earlier">${edgeIcon("left")}</button><output></output><button class="icon" data-action="later">${edgeIcon("right")}</button><button data-zoom="86400">24 h</button><button data-zoom="21600">6 h</button><button data-zoom="3600">1 h</button></div>
         <div class="track" role="slider" tabindex="0"><div class="ranges"></div><div class="dots"></div><div class="cursor"></div></div>
         <div class="ticks"></div>
@@ -191,22 +205,20 @@ class EdgeRecordingsCard extends EdgeDashCard {
       <div class="moments"></div></div><p class="status" role="status"></p>
     </ha-card>`;
     const root = this.shadowRoot; this._$ = selector => root.querySelector(selector);
-    this._videos = [...root.querySelectorAll("video")]; this._front = this._videos[0]; this._back = this._videos[1];
-    root.addEventListener("click", event => this._click(event));
-    this._$("[data-speed]").addEventListener("change", event => { this._rate = Number(event.target.value) || 1; for (const video of this._videos) video.playbackRate = this._rate; });
-    for (const video of this._videos) {
-      video.addEventListener("timeupdate", () => { if (video === this._front && this._index >= 0 && !this._dragging && !video.seeking) { this._position = this._files[this._index][1] + video.currentTime; this._paint(); } });
-      video.addEventListener("ended", () => { if (video === this._front) this._advance(); });
-      video.addEventListener("playing", () => { if (video !== this._front) return; if (!video.videoWidth) { this._unsupported(); return; } this._retries = 0; this._note(""); this._$(".poster").hidden = true; this._paint(); });
-      video.addEventListener("pause", () => { if (video === this._front) this._paint(); });
-      video.addEventListener("error", () => { if (video === this._front && video.getAttribute("src")) this._failed(); else if (video === this._back) this._ready = -1; });
-    }
+    this._canvas=this._$('.stage canvas');
+    root.addEventListener('click',event=>this._click(event));
+    this._$('[data-speed]').addEventListener('change',event=>{this._rate=Number(event.target.value)||1;this._dvr?.setRate(this._rate);});
+    this._viewport=new IntersectionObserver(entries=>{const visible=entries.some(entry=>entry.isIntersecting);if(visible===this._inView)return;this._inView=visible;if(visible)this._resumeMedia();else this._suspendMedia();},{rootMargin:'80px'});
     const track = this._$(".track");
     const pick = event => { const box = track.getBoundingClientRect(); return this._dayStart + this._window + Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)) * this._zoom; };
-    track.addEventListener("pointerdown", event => { if (event.target.closest(".dot") || !this._files.length) return; track.setPointerCapture(event.pointerId); this._dragging = true; this._position = pick(event); this._paint(); });
-    track.addEventListener("pointermove", event => { if (this._dragging) { this._position = pick(event); this._paint(); } });
-    const drop = event => { if (!this._dragging) return; this._dragging = false; this._seek(pick(event)); };
-    track.addEventListener("pointerup", drop); track.addEventListener("pointercancel", () => { this._dragging = false; });
+    track.addEventListener('pointerdown',event=>{if(event.target.closest('.dot')||!this._files.length||event.button!==0)return;this._gesture={id:event.pointerId,x:event.clientX,y:event.clientY,play:this._wantPlay};});
+    track.addEventListener('pointermove',event=>{
+      const g=this._gesture;if(!g||g.id!==event.pointerId)return;const dx=Math.abs(event.clientX-g.x),dy=Math.abs(event.clientY-g.y);
+      if(!this._dragging){if(dy>8&&dy>dx){this._gesture=null;return;}if(dx<8||dx<dy*1.25)return;this._dragging=true;track.setPointerCapture(event.pointerId);}
+      this._position=pick(event);this._paint();if(!this._scrubTimer)this._scrubTimer=setTimeout(()=>{this._scrubTimer=null;this._seek(this._position,false);},160);
+    });
+    track.addEventListener('pointerup',event=>{const g=this._gesture;if(!g||g.id!==event.pointerId)return;clearTimeout(this._scrubTimer);this._scrubTimer=null;this._gesture=null;this._dragging=false;this._seek(pick(event),g.play);});
+    track.addEventListener('pointercancel',()=>{clearTimeout(this._scrubTimer);this._scrubTimer=null;const play=this._gesture?.play;this._gesture=null;this._dragging=false;if(play&&this._dvr?.paused)this._seek(this._position,true);});
     track.addEventListener("keydown", event => { const step = {ArrowLeft:-10, ArrowRight:10, PageDown:-60, PageUp:60}[event.key]; if (step) { event.preventDefault(); this._seek(this._position + step); } });
     this._open = event => this._openAt(event.detail || {});
   }
@@ -217,11 +229,11 @@ class EdgeRecordingsCard extends EdgeDashCard {
   }
   getCardSize() { return 9; }
   getGridOptions() { return {columns:"full", rows:"auto", min_columns:6}; }
-  setConfig(config) { this._validate(config); this._config = {muted:false, ...config}; this._muted = Boolean(this._config.muted); this._entity = ""; this._render(); if (this._hass && this._connected) this._load(); }
+  setConfig(config) { this._stop(); this._validate(config); this._config = {muted:false, ...config}; this._muted = Boolean(this._config.muted); this._entity = ""; this._render(); if (this._hass && this._connected) this._load(); }
   set hass(value) { const first = !this._hass, oldLanguage = edgeLang(this._hass,this._config?.language); this._hass = value; if (!first && oldLanguage !== edgeLang(value,this._config?.language)) this._render(); if (first) { this._render(); if (this._connected) this._load(); } else if (!this._entity && this._cameras().length) this._load(); }
   get hass() { return this._hass; }
-  _wake() { (window.__edgeRecordingCards ||= new Set()).add(this); window.addEventListener(EDGE_DASH_OPEN, this._open); if (this._hass && this._config && !this._files.length) this._load(); }
-  _sleep() { window.__edgeRecordingCards?.delete(this); window.removeEventListener(EDGE_DASH_OPEN, this._open); this._stop(); }
+  _wake() { this._viewport.observe(this); (window.__edgeRecordingCards ||= new Set()).add(this); window.addEventListener(EDGE_DASH_OPEN, this._open); if (this._hass && this._config && !this._files.length) this._load(); }
+  _sleep() { this._viewport.disconnect(); window.__edgeRecordingCards?.delete(this); window.removeEventListener(EDGE_DASH_OPEN, this._open); this._stop(); }
   _tick() { if (this._entity && this._day === this._days?.[0]?.day && !this._dragging) this._load(this._day, true); }
   _render() {
     if (!this._config || !this._hass) return;
@@ -234,8 +246,8 @@ class EdgeRecordingsCard extends EdgeDashCard {
     bar.innerHTML = cameras.map(id => `<button class="chip" role="tab" data-camera="${id}" aria-selected="${id === this._entity}">${edgeEscape(this._name(id))}</button>`).join("");
     this._paint();
   }
-  _status(text, error = false) { const node = this._$(".status"); node.textContent = text || ""; node.hidden = !text; node.classList.toggle("error", error); }
-  _note(text) { const node = this._$(".note"); node.textContent = text || ""; node.hidden = !text; }
+  _status(text, error = false) { const node = this._$(".status"); if(node.textContent!==(text||""))node.textContent=text||"";if(node.hidden!==!text)node.hidden=!text; node.classList.toggle("error", error); }
+  _note(text) { const node = this._$(".note"); if(node.textContent!==(text||""))node.textContent=text||"";if(node.hidden!==!text)node.hidden=!text; }
   async _load(day = "", quiet = false) {
     const cameras = this._cameras();
     if (!cameras.length) { this._$(".player").hidden = true; this._status(this._t("noCamera")); return; }
@@ -259,39 +271,41 @@ class EdgeRecordingsCard extends EdgeDashCard {
     catch (_) { this._events = []; }
   }
   _paintDays() {
+    const signature=JSON.stringify([this._entity,this._day,this.lang,this._days]);if(signature===this._daysSignature)return;this._daysSignature=signature;
     const strip = this._$(".days"); strip.hidden = !this._days.length;
     strip.innerHTML = this._days.map(row => { const minutes = Math.floor(row.seconds / 60); const length = minutes >= 60 ? `${Math.floor(minutes / 60)} ${this._t("hours")} ${minutes % 60} ${this._t("minutes")}` : minutes ? `${minutes} ${this._t("minutes")}` : `${Math.round(row.seconds)} s`;
       return `<button class="day" role="tab" data-day="${row.day}" aria-selected="${row.day === this._day}"><span class="thumb">${edgeIcon("film")}<img alt="" data-name="${edgeEscape(row.thumb)}"></span><span><b>${edgeEscape(this._dayLabel(row.day))}</b><small>${length}</small></span></button>`; }).join("");
     for (const img of strip.querySelectorAll("img")) if (img.dataset.name) this._media.image(img, this._entity, "thumb", img.dataset.name + ".jpg");
-    strip.querySelector('[aria-selected="true"]')?.scrollIntoView({block:"nearest", inline:"nearest"});
+
   }
   _paintMoments() {
     const grid = this._$(".moments"); const files = this._files; grid.hidden = files.length < 2; if (files.length < 2) { grid.innerHTML = ""; return; }
     const span = files[files.length - 1][1] - files[0][1]; const step = files.length <= 48 ? 0 : [60, 120, 300, 600, 900, 1800, 3600].find(value => span / value <= 48) || 3600;
     const picked = []; let edge = -Infinity;
     for (const file of files) if (!step || file[1] >= edge) { picked.push(file); edge = step ? Math.floor(file[1] / step) * step + step : edge; }
+    const signature=JSON.stringify([this._entity,picked]);if(signature===this._momentsSignature)return;this._momentsSignature=signature;
     this._moments = picked.reverse();
     grid.innerHTML = this._moments.map(file => `<button class="moment" data-at="${file[1]}"><span class="thumb">${edgeIcon("film")}<img alt=""></span><span class="label">${edgeClock(file[1] - this._dayStart)}</span></button>`).join("");
     grid.querySelectorAll("img").forEach((img, index) => this._media.image(img, this._entity, "thumb", this._moments[index][0] + ".jpg"));
   }
   async _poster() {
     const poster = this._$(".poster"); const file = this._files[this._find(this._position)] || this._files[this._files.length - 1]; poster.hidden = true; if (!file) return;
-    try { const url = await this._media.fetch(this._media.path(this._entity, "thumb", file[0] + ".jpg")); if (this._index < 0) { poster.src = url; poster.hidden = false; } } catch (_) { /* black stage is fine */ }
+    try {poster.dataset.src=this._media.path(this._entity,"thumb",file[0]+".jpg"); const url = await this._media.fetch(poster.dataset.src); if (this._index < 0) { this._media._show(poster,url);poster.hidden=false; } } catch (_) { /* black stage is fine */ }
   }
   _follow() { const offset = Math.max(0, Math.min(86400 - 1, this._position - this._dayStart)); this._window = this._zoom >= 86400 ? 0 : Math.floor(offset / this._zoom) * this._zoom; }
   _paint() {
     if (!this._config || !this._hass) return;
-    const playing = this._index >= 0 && !this._front.paused && !this._front.ended;
-    const toggle = this._$("[data-toggle]"); toggle.innerHTML = edgeIcon(playing ? "pause" : "play"); toggle.title = this._t(playing ? "pause" : "play"); toggle.setAttribute("aria-label", toggle.title);
-    const big = this._$(".big"); big.hidden = playing || Boolean(this._wantPlay); big.setAttribute("aria-label", this._t("play"));
-    const sound = this._$('[data-action="sound"]'); sound.innerHTML = edgeIcon(this._muted ? "mute" : "sound"); sound.title = this._t(this._muted ? "sound" : "mute"); sound.setAttribute("aria-label", sound.title);
+    const playing = Boolean(this._dvr&&!this._dvr.closed&&!this._dvr.paused&&this._wantPlay);
+    const toggle = this._$("[data-toggle]"); if(toggle.dataset.playing!==String(playing)){toggle.dataset.playing=String(playing);toggle.innerHTML=edgeIcon(playing?"pause":"play");} toggle.title = this._t(playing ? "pause" : "play"); toggle.setAttribute("aria-label", toggle.title);
+    const big = this._$(".big"); big.hidden=playing||Boolean(this._wantPlay)||Boolean(this._dragging); big.setAttribute("aria-label", this._t("play"));
+    const sound = this._$('[data-action="sound"]'); if(sound.dataset.muted!==String(this._muted)){sound.dataset.muted=String(this._muted);sound.innerHTML=edgeIcon(this._muted?"mute":"sound");} sound.title = this._t(this._muted ? "sound" : "mute"); sound.setAttribute("aria-label", sound.title);
     this._$(".live").hidden = !(this._recording && this._day === this._days?.[0]?.day);
     for (const button of this.shadowRoot.querySelectorAll("[data-zoom]")) button.setAttribute("aria-pressed", String(Number(button.dataset.zoom) === this._zoom));
     for (const tab of this.shadowRoot.querySelectorAll("[data-camera]")) tab.setAttribute("aria-selected", String(tab.dataset.camera === this._entity));
     if (!this._files.length) return;
     const offset = this._position - this._dayStart; if (!this._dragging && this._index >= 0 && (offset < this._window || offset >= this._window + this._zoom)) this._follow();
     const from = this._dayStart + this._window; const percent = value => ((value - from) / this._zoom * 100).toFixed(3);
-    this._$(".time").textContent = edgeClock(offset);
+    if(this._$(".time").textContent!==edgeClock(offset))this._$(".time").textContent=edgeClock(offset);
     this._$(".scale output").textContent = `${edgeClock(this._window).slice(0, 5)} – ${edgeClock(Math.min(86400, this._window + this._zoom)).slice(0, 5).replace("00:00", "24:00")}`;
     this._$('[data-action="earlier"]').disabled = this._window <= 0; this._$('[data-action="later"]').disabled = this._window + this._zoom >= 86400;
     const signature = `${from}:${this._zoom}:${this._ranges.length}:${this._ranges[this._ranges.length - 1]?.[1]}:${this._events.length}`;
@@ -304,6 +318,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
       this._$(".ticks").innerHTML = [0, 1, 2, 3, 4].map(i => `<span>${edgeClock(this._window + this._zoom * i / 4).slice(0, 5).replace(/^00:00$/, i ? "24:00" : "00:00")}</span>`).join("");
     }
     const cursor = this._$(".cursor"); const visible = offset >= this._window && offset <= this._window + this._zoom; cursor.hidden = !visible; if (visible) cursor.style.left = percent(this._position) + "%";
+    for(const dot of this._$(".dots").children)dot.classList.toggle("passed",Number(dot.dataset.at)+3<=this._position);
     const track = this._$(".track"); track.setAttribute("aria-valuemin", "0"); track.setAttribute("aria-valuemax", "86400"); track.setAttribute("aria-valuenow", String(Math.round(offset))); track.setAttribute("aria-valuetext", edgeClock(offset));
     let current = null; for (const file of this._moments || []) if (file[1] <= this._position) { current = file; break; }
     if (current !== this._currentMoment) { this._currentMoment = current; for (const tile of this.shadowRoot.querySelectorAll(".moment")) tile.setAttribute("aria-current", String(current && Number(tile.dataset.at) === current[1])); }
@@ -317,24 +332,21 @@ class EdgeRecordingsCard extends EdgeDashCard {
     if (target.dataset.at) { this._seek(Number(target.dataset.at), true); if (target.classList.contains("moment")) this._$(".player").scrollIntoView({block:"nearest", behavior:"smooth"}); return; }
     const action = target.dataset.action;
     if (action === "refresh") this._load(this._day);
-    else if (action === "toggle") { if (this._index >= 0 && !this._front.paused) { this._wantPlay = false; this._front.pause(); } else if (this._index >= 0 && this._front.readyState >= 2 && !this._front.ended) { this._wantPlay = true; this._play(this._front); } else this._seek(this._position, true); this._paint(); }
+    else if(action==='toggle'){if(this._wantPlay){this._wantPlay=false;this._dvr?.pause();}else this._seek(this._position,true);this._paint();}
     else if (action === "back" || action === "forward") this._seek(this._position + (action === "back" ? -10 : 10));
     else if (action === "earlier" || action === "later") { this._window = Math.max(0, Math.min(86400 - this._zoom, this._window + (action === "earlier" ? -1 : 1) * this._zoom)); this._paint(); }
-    else if (action === "sound") { this._muted = !this._muted; for (const video of this._videos) video.muted = this._muted; this._paint(); }
-    else if (action === "full") { const player = this._$(".player"); try { if (document.fullscreenElement || this.shadowRoot.fullscreenElement) await document.exitFullscreen(); else if (player.requestFullscreen) await player.requestFullscreen(); else this._front.webkitEnterFullscreen?.(); } catch (_) { this._front.webkitEnterFullscreen?.(); } }
+    else if (action === "sound") { this._muted = !this._muted; this._dvr?.setAudio(.6,this._muted); this._paint(); }
+    else if (action === "full") { const player = this._$(".player"); try { if (document.fullscreenElement || this.shadowRoot.fullscreenElement) await document.exitFullscreen(); else if (player.requestFullscreen) await player.requestFullscreen();  } catch (_) {  } }
     else if (action === "download") this._download();
   }
   async _download() {
     const file = this._files[this._index >= 0 ? this._index : this._find(this._position)]; if (!file) return;
-    try { const response = await this._hass.fetchWithAuth(this._media.path(this._entity, "video", file[0])); if (!response.ok) throw new Error(); const url = URL.createObjectURL(await response.blob()); const link = document.createElement("a"); link.href = url; link.download = `${this._hass.states[this._entity]?.attributes?.edge_camera_id || "edge"}-${file[0]}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 2000); }
+    try {const link=document.createElement('a');link.href=await this._media.signed(this._entity,'video',file[0]);link.download=`${this._hass.states[this._entity]?.attributes?.edge_camera_id||'edge'}-${file[0]}`;link.click();}
     catch (_) { this._note(this._t("unreachable")); }
   }
-  _stop() { this._token++; this._wantPlay = false; this._index = -1; this._ready = -1; for (const video of this._videos) { video.pause(); video.removeAttribute("src"); video.load(); } this._note(""); }
-  async _play(video) {
-    video.muted = this._muted; video.playbackRate = this._rate;
-    try { await video.play(); } catch (error) { if (error?.name === "NotAllowedError" && !this._muted) { this._muted = true; video.muted = true; try { await video.play(); } catch (_) { this._wantPlay = false; } } }
-    this._paint();
-  }
+  _stop(){this._token++;this._wantPlay=false;this._index=-1;this._dvr?.close();this._dvr=null;clearTimeout(this._scrubTimer);this._note('');}
+  _suspendMedia(){if(this._dvr){this._dvr.close();this._dvr=null;}}
+  _resumeMedia(){if(this._connected&&this._inView&&!document.hidden&&this._index>=0&&!this._dvr)this._show(this._index,Math.max(0,this._position-this._files[this._index][1]));}
   async _seek(stamp, play = this._wantPlay) {
     if (!this._files.length) return;
     let index = this._find(stamp); if (index >= this._files.length) index = this._files.length - 1;
@@ -342,41 +354,26 @@ class EdgeRecordingsCard extends EdgeDashCard {
     this._wantPlay = Boolean(play); this._position = file[1] + offset; this._retries = 0; this._follow(); this._paint();
     await this._show(index, offset);
   }
-  async _show(index, offset) {
-    const token = ++this._token; const file = this._files[index]; const video = this._front; this._index = index; this._ready = -1;
-    if (video.dataset.name === file[0] && video.readyState >= 1 && !video.error) { video.currentTime = offset; }
-    else {
-      let url; try { url = await this._media.signed(this._entity, "video", file[0]); } catch (_) { if (token === this._token) { this._wantPlay = false; this._note(this._t("unreachable")); this._paint(); } return; }
-      if (token !== this._token) return;
-      video.dataset.name = file[0]; video.src = url;
-      if (offset > 0.05) video.addEventListener("loadedmetadata", () => { if (token === this._token) video.currentTime = offset; }, {once:true});
-    }
-    if (this._wantPlay) await this._play(video);
-    if (token === this._token) this._prepare(index + 1, token);
+  async _show(index,offset){
+    const token=++this._token,file=this._files[index];if(!file)return;this._index=index;
+    if(document.hidden||this._inView===false)return;
+    try{
+      if(!this._dvr||this._dvr.closed){
+        const {EdgeDVRClient}=await edgeDVRModule();if(token!==this._token||!this.isConnected)return;
+        const client=new EdgeDVRClient({hass:this._hass,entity:this._entity,canvas:this._canvas,
+          onWaiting:waiting=>{if(this._dvr===client)this._note(waiting?this._t('preparing'):'');},
+          onFrame:frame=>{if(this._dvr!==client||this._index<0)return;this._position=this._files[this._index][1]+frame.seconds;this._$('.poster').hidden=true;const now=performance.now();if(client.paused||now-(this._lastPaint||0)>=100){this._lastPaint=now;this._paint();}},
+          onAudioUnavailable:()=>{this._muted=true;this._paint();},onEnded:()=>{if(this._dvr===client)this._advance();},
+          onError:()=>{if(this._dvr===client){this._wantPlay=false;this._note(this._t('playError'));this._paint();}}});
+        this._dvr=client;client.setAudio(.6,this._muted);client.seek(file[0],offset,{paused:!this._wantPlay,rate:this._rate});await client.start();
+      }else this._dvr.seek(file[0],offset,{paused:!this._wantPlay,rate:this._rate});
+    }catch(_){if(token===this._token){this._wantPlay=false;this._note(this._t('playError'));this._paint();}}
   }
-  /* Load the following fragment in the hidden player so the hand-over has no gap. */
-  async _prepare(index, token) {
-    const file = this._files[index]; if (!file) return;
-    try { const url = await this._media.signed(this._entity, "video", file[0]); if (token !== this._token) return; this._back.dataset.name = file[0]; this._back.muted = this._muted; this._back.playbackRate = this._rate; this._back.src = url; this._ready = index; } catch (_) { this._ready = -1; }
+  async _advance(){
+    const next=this._index+1;
+    if(next>=this._files.length){if(this._day===this._days?.[0]?.day){await this._load(this._day,true);if(this._index+1<this._files.length)return this._advance();}this._wantPlay=false;this._paint();return;}
+    this._position=this._files[next][1];await this._show(next,0);this._paint();
   }
-  async _advance() {
-    const next = this._index + 1;
-    if (next >= this._files.length) { if (this._day === this._days?.[0]?.day) { await this._load(this._day, true); if (this._index + 1 < this._files.length) return this._advance(); } this._wantPlay = false; this._paint(); return; }
-    this._position = this._files[next][1];
-    if (this._ready === next && !this._back.error) {
-      const token = ++this._token; [this._front, this._back] = [this._back, this._front]; this._front.classList.add("front"); this._back.classList.remove("front"); this._index = next; this._ready = -1;
-      if (this._wantPlay) await this._play(this._front); if (token === this._token) this._prepare(next + 1, token);
-    } else await this._show(next, 0);
-    this._paint();
-  }
-  /* The add-on may still be preparing a browser-compatible copy: retry briefly. */
-  _failed() {
-    const token = this._token; const index = this._index; const offset = Math.max(0, this._position - (this._files[index]?.[1] || 0));
-    if (this._retries++ < 4) { this._note(this._t("preparing")); setTimeout(() => { if (token === this._token && this._connected) { this._front.dataset.name = ""; this._show(index, offset); } }, 1200); }
-    else { this._wantPlay = false; this._note(this._t("playError")); this._paint(); }
-  }
-  /* Sound without a picture: this browser has no decoder for the recording codec. */
-  _unsupported() { this._token++; this._wantPlay = false; for (const video of this._videos) video.pause(); this._note(this._t("playError")); this._paint(); }
   async _openAt(detail) {
     if (!detail.entity_id || !this._cameras().includes(detail.entity_id) || !detail.day) return;
     this._stop(); this._entity = detail.entity_id; this._render(); await this._load(detail.day);
@@ -406,7 +403,7 @@ class EdgeEventsCard extends EdgeDashCard {
       dialog[open]{display:flex;flex-direction:column}dialog::backdrop{background:rgba(0,0,0,.45);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
       .view-head{display:flex;align-items:center;gap:10px;padding:10px 10px 10px 16px}.view-head div{flex:1;min-width:0}.view-head b{display:block;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.view-head small{color:var(--edge-muted);font-size:12px}
       .view-stage{position:relative;background:#000;aspect-ratio:16/9;min-height:0;flex:0 1 auto;display:grid;place-items:center;color:#b9c8d3;font-size:13px;text-align:center}
-      .view-stage video,.view-stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}.view-stage p{margin:0;padding:16px}
+      .view-stage canvas,.view-stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}.view-stage p{margin:0;padding:16px}
       .view-note{margin:0;padding:8px 16px 0;font-size:12px;color:var(--edge-muted)}
       .view-bar{display:flex;gap:8px;padding:10px;align-items:center}.view-bar .gap{flex:1}
       @container (max-width:430px){.strip .event{flex-basis:148px}.head{padding:12px 12px 8px}.chips,.filters,.list{padding-inline:12px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.more{margin-inline:12px}}
@@ -427,7 +424,7 @@ class EdgeEventsCard extends EdgeDashCard {
     root.addEventListener("click", event => this._click(event));
     this._$("[data-camera]").addEventListener("change", event => { this._entity = event.target.value; this._load(); });
     this._$("[data-day]").addEventListener("change", event => { this._day = event.target.value; this._load(); });
-    this._dialog.addEventListener("close", () => { this._$(".view-stage").innerHTML = ""; this._viewing = null; });
+    this._dialog.addEventListener("close", () => { this._clipClient?.close();this._clipClient=null;this._$(".view-stage").innerHTML="";this._viewing=null; });
     this._dialog.addEventListener("click", event => { if (event.target === this._dialog) this._dialog.close(); });
     this._dialog.addEventListener("keydown", event => { if (event.key === "ArrowLeft") this._step(-1); if (event.key === "ArrowRight") this._step(1); });
   }
@@ -497,6 +494,7 @@ class EdgeEventsCard extends EdgeDashCard {
   }
   _paint() {
     if (!this._config || !this._hass) return;
+    const signature=JSON.stringify([this.lang,this._kind,this._entity,this._config.layout,this._more,this._events]);if(signature===this._eventSignature)return;this._eventSignature=signature;
     const list = this._$(".list"); const many = this._cameras().length > 1; const strip = this._config.layout === "strip"; const groups = new Map();
     const tile = event => { const detail = many ? this._name(event.entity_id) : event.score ? Math.round(event.score * 100) + "%" : ""; const when = strip ? `${this._dayLabel(event.day)} ${event.time.slice(0, 5)}` : event.time;
       return `<button class="event" data-event="${event.id}" style="--kind:${EdgeEventsCard.COLORS[event.kind] || "#a3aab3"}"><span class="thumb">${edgeIcon(event.kind)}<span class="badge">${edgeIcon(event.kind)}${this._t(event.kind)}</span>${event.image ? '<img alt="">' : ""}</span><span class="meta"><b>${edgeEscape(when)}</b><span>${edgeEscape(detail)}</span></span></button>`; };
@@ -521,19 +519,23 @@ class EdgeEventsCard extends EdgeDashCard {
   _step(direction) { const index = this._events.indexOf(this._viewing) + direction; if (this._viewing && this._events[index]) this._view(this._events[index]); }
   async _view(event) {
     if (!event) return;
-    this._viewing = event; const stage = this._$(".view-stage"); const note = this._$(".view-note"); stage.innerHTML = ""; note.hidden = true;
+    this._clipClient?.close();this._clipClient=null;this._viewing = event; const stage = this._$(".view-stage"); const note = this._$(".view-note"); stage.innerHTML = ""; note.hidden = true;
     this._$(".view-head b").textContent = `${this._t(event.kind)} · ${this._name(event.entity_id)}`; this._$(".view-head small").textContent = `${this._dayLabel(event.day)} · ${event.time}${event.score ? " · " + Math.round(event.score * 100) + "%" : ""}`;
     const index = this._events.indexOf(event); this._$('[data-action="previous"]').disabled = index <= 0; this._$('[data-action="next"]').disabled = index >= this._events.length - 1;
     this._$('[data-action="recordings"]').hidden = ![...(window.__edgeRecordingCards || [])].some(card => card._cameras().includes(event.entity_id));
     if (!this._dialog.open) this._dialog.showModal();
-    const picture = async () => { if (!event.image) { stage.innerHTML = `<p>${this._t("noPicture")}</p>`; return; } try { const url = await this._media.fetch(this._media.path(event.entity_id, "event-image", event.id + ".jpg")); if (this._viewing === event) { const img = document.createElement("img"); img.alt = ""; img.src = url; stage.replaceChildren(img); } } catch (_) { if (this._viewing === event) stage.innerHTML = `<p>${this._t("noPicture")}</p>`; } };
+    const picture = async () => { if (!event.image) { stage.innerHTML = `<p>${this._t("noPicture")}</p>`; return; } try { const url = await this._media.fetch(this._media.path(event.entity_id, "event-image", event.id + ".jpg")); if (this._viewing === event) { const img = document.createElement("img"); img.alt="";stage.replaceChildren(img);this._media._show(img,url); } } catch (_) { if (this._viewing === event) stage.innerHTML = `<p>${this._t("noPicture")}</p>`; } };
     if (!event.clip) { await picture(); if (event.image && event.kind !== "motion") { note.textContent = this._t("clipPending"); note.hidden = false; } return; }
     try {
-      const url = await this._media.signed(event.entity_id, "event-clip", event.id + ".mp4"); if (this._viewing !== event) return;
-      const video = document.createElement("video"); video.controls = true; video.playsInline = true; video.autoplay = true; video.muted = true;
-      const start = Math.max(0, (event.clip_offset || 0) - 2); video.addEventListener("loadedmetadata", () => { if (!video.videoWidth) { video.pause(); if (this._viewing === event) picture().then(() => { note.textContent = this._t("playError"); note.hidden = false; }); } else if (start) video.currentTime = start; }, {once:true});
-      video.addEventListener("error", () => { if (this._viewing === event) picture(); }, {once:true});
-      video.src = url; stage.replaceChildren(video);
+      const {EdgeDVRClient}=await edgeDVRModule();if(this._viewing!==event)return;
+      const canvas=document.createElement('canvas'),controls=document.createElement('div');canvas.width=640;canvas.height=360;stage.replaceChildren(canvas);
+      controls.className='view-bar';const play=document.createElement('button'),sound=document.createElement('button');play.textContent=this._t('pause');sound.textContent=this._t('sound');controls.append(play,sound);stage.append(controls);controls.style.cssText='position:absolute;bottom:0;z-index:2';
+      let muted=true;const client=new EdgeDVRClient({hass:this._hass,entity:event.entity_id,clip:event.id,canvas,
+        onFrame:()=>{note.hidden=true;},onError:()=>{note.textContent=this._t('playError');note.hidden=false;},
+        onEnded:()=>{play.textContent=this._t('play');}});this._clipClient=client;
+      play.onclick=()=>{if(client.paused||client.ended){client.seek('event-'+event.id+'.mp4',client.ended?0:client.position,{paused:false});play.textContent=this._t('pause');}else{client.pause();play.textContent=this._t('play');}};
+      sound.onclick=()=>{muted=!muted;client.setAudio(.6,muted);sound.textContent=this._t(muted?'sound':'mute');};
+      client.seek('event-'+event.id+'.mp4',Math.max(0,(event.clip_offset||0)-2),{paused:false});await client.start();
     } catch (_) { await picture(); }
   }
 }

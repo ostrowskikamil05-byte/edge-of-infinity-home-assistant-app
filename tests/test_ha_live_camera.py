@@ -50,7 +50,7 @@ def native_module():
     modules['homeassistant.helpers.entity_platform'].AddEntitiesCallback = object
     modules['homeassistant.helpers.update_coordinator'].CoordinatorEntity = CoordinatorEntity
     modules['edge_native_test.const'].DOMAIN = 'edge'
-    modules['edge_native_test.const'].CARD_VERSION = '0.15.2'
+    modules['edge_native_test.const'].CARD_VERSION = '0.16.0'
     modules['edge_native_test.coordinator'].EdgeCoordinator = object
     modules['edge_native_test.client'] = load_client_module()
     with patch.dict(sys.modules, modules):
@@ -152,7 +152,7 @@ class CardRegistrationTests(unittest.IsolatedAsyncioTestCase):
         modules['homeassistant.core'].HomeAssistant = object
         register_js = modules['homeassistant.components.frontend'].add_extra_js_url = Mock()
         modules['edge_card_test.const'].DOMAIN = 'edge'
-        modules['edge_card_test.const'].CARD_VERSION = '0.15.2'
+        modules['edge_card_test.const'].CARD_VERSION = '0.16.0'
         with patch.dict(sys.modules, modules):
             spec = importlib.util.spec_from_file_location('edge_card_test.frontend', CAMERA_PATH.with_name('frontend.py'))
             module = importlib.util.module_from_spec(spec)
@@ -165,7 +165,7 @@ class CardRegistrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(resource.url_path, '/edge/edge-live-card.js')
             self.assertTrue(Path(resource.path).is_file())
             self.assertFalse(resource.cache_headers)
-            self.assertEqual([call.args[1] for call in register_js.call_args_list], ['/edge/edge-live-card.js?v=0.15.2', '/edge/edge-dashboard-cards.js?v=0.15.2'])
+            self.assertEqual([call.args[1] for call in register_js.call_args_list], ['/edge/edge-live-card.js?v=0.16.0', '/edge/edge-dashboard-cards.js?v=0.16.0'])
             served = {item.url_path: item for item in hass.http.async_register_static_paths.call_args.args[0]}
             self.assertTrue(Path(served['/edge/edge-dashboard-cards.js'].path).is_file())
             self.assertFalse(served['/edge/edge-dashboard-cards.js'].cache_headers)
@@ -178,9 +178,9 @@ class CardRegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_exports_card_capability_without_secrets(self):
         p = load_panel_module()
         p.commit_panel_config({'cameras': [{'id': 'front', 'host': '192.0.2.1', 'password': 'secret'}]})
-        p.write_json(p.HOME_DIR / 'ha-entities.json', {'card_type': 'custom:edge-live-card', 'card_version': '0.15.2', 'entities': []})
+        p.write_json(p.HOME_DIR / 'ha-entities.json', {'card_type': 'custom:edge-live-card', 'card_version': '0.16.0', 'entities': []})
         payload = p.home_assistant_dashboard_payload()
         self.assertTrue(payload['card_ready'])
-        self.assertEqual(payload['card_version'], '0.15.2')
+        self.assertEqual(payload['card_version'], '0.16.0')
         self.assertEqual(payload['card_resource'], '/edge/edge-live-card.js')
         self.assertNotIn('secret', json.dumps(payload))

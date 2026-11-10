@@ -1,0 +1,20 @@
+// Actual saved alert playback and phone decoder lifecycle; MP4 is download-only.
+const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict');
+(async()=>{const wk=process.env.EDGE_TEST_BROWSER==='webkit',browser=await(wk?webkit:chromium).launch({headless:true,executablePath:(wk?process.env.PLAYWRIGHT_WEBKIT_EXECUTABLE_PATH:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH)||undefined,args:wk?[]:['--no-sandbox']});
+try{
+ const page=await browser.newPage({viewport:{width:390,height:844},hasTouch:true,isMobile:true,userAgent:wk?'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/HomeAssistant':'Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/156 Mobile Safari/537.36'}),errors=[],mp4=[];page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(/\/(?:recordings\/|clip\.mp4)/.test(new URL(r.url()).pathname))mp4.push(r.url());});
+ await page.goto(process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18091');await page.locator('[data-camera-form]').first().waitFor({state:'attached'});
+ const nav=async name=>{if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator(`nav [data-page-target="${name}"]`).click();};await nav('nvr');
+ await page.waitForFunction(()=>archivePlayers.has('1'));const host=page.locator('[data-dvr-host="1"]');await host.locator('[data-dvr-action="toggle"]').click();await page.waitForFunction(()=>archivePlayers.get('1')?.client?.picture&&archivePlayers.get('1').wantPlay);
+ assert(await page.locator('#camera-grid iframe').evaluateAll(frames=>frames.every(frame=>frame.getAttribute('src')==='about:blank')),'Live kept decoding while NVR was open');
+ assert(await page.evaluate(()=>!archivePlayers.get('0').client),'inactive phone archive kept decoding');
+ await page.evaluate(()=>archivePlayers.get('1').pause());
+ const seek=async seconds=>{await host.locator('[data-dvr-seek]').evaluate((s,v)=>{s.value=String(v);s.dispatchEvent(new Event('input',{bubbles:true}));s.dispatchEvent(new Event('change',{bubbles:true}));},seconds);await page.waitForFunction(seconds=>{const p=archivePlayers.get('1');return p.client?.picture&&p.client.paused&&Math.abs(p.position-seconds)<.1;},seconds);};
+ await seek(2);const point=page.locator('[data-alert-point="1"]');await point.waitFor();assert.equal(await point.getAttribute('data-passed'),'false');const gray=await point.evaluate(n=>getComputedStyle(n,'::after').backgroundColor);
+ await seek(12);assert.equal(await point.getAttribute('data-passed'),'true');assert.notEqual(await point.evaluate(n=>getComputedStyle(n,'::after').backgroundColor),gray);
+ await point.click();const clip=page.locator('[data-alert-detail="1"] [data-alert-clip]');await clip.waitFor();await clip.click();await page.waitForFunction(()=>document.querySelector('dialog [data-dvr-host]')?.dataset.dvrPicture==='true');
+ assert.equal(await page.locator('dialog video').count(),0);assert(await page.locator('dialog canvas').evaluate(c=>{const small=document.createElement('canvas');small.width=80;small.height=45;const g=small.getContext('2d');g.drawImage(c,0,0,80,45);return [...g.getImageData(0,0,80,45).data].some((v,i)=>i%4!==3&&v>80);}),'saved alert picture is black');
+ const output=await page.locator('dialog [data-dvr-clock]').textContent();assert(!output.endsWith('00:00:01'),'clip retained placeholder duration');await page.locator('[data-close-clip]').click();assert.equal(mp4.length,0,'native playback requested MP4 HTTP bodies');
+ await nav('home');assert(await page.evaluate(()=>[...archivePlayers.values()].every(p=>!p.client)),'hidden DVR retained decoders');
+ assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);console.log(`PASS ${wk?'iPhone/WebKit':'Android/Chromium'}: native saved clip pixels/duration, gray/green alert points, one active phone decoder, hidden Live release, MP4 download-only`);
+}finally{await browser.close();}})().catch(e=>{console.error(e);process.exit(1);});

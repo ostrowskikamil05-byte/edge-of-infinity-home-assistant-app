@@ -64,8 +64,8 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
   assert.equal(await page.evaluate(()=>fixtureRestoreRace.creates),1,'cache restore and hydration both loaded the same image');
   await page.evaluate(()=>{galleryStore.loadThumbnail=fixtureRestoreRace.originalLoad;URL.createObjectURL=fixtureRestoreRace.create;fixtureRestoreRace.holder.remove();});
   assert.equal(await page.locator('[data-recording-day-load]:visible').count(),0,'failed refresh obscured a restored gallery');
-  await page.locator('[data-recording-toggle="0"]').click();
-  await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="0"]');return !v.paused&&v.videoWidth>0&&v.currentTime>.1;});
+  await page.locator('[data-dvr-host="0"] [data-dvr-action="toggle"]').click();
+  await page.waitForFunction(()=>{const p=archivePlayers.get('0');return p?.client?.picture&&p.wantPlay&&p.position>.1;});
   // Storage scope, secrets, TTL and count limits use native IDB, not a mock.
   const checks=await page.evaluate(async()=>{
    const scope=recordingGalleryScope(),saved=await galleryStore.loadSnapshot(scope);

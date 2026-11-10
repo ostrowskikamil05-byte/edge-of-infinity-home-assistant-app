@@ -15,14 +15,14 @@ const {chromium,webkit}=require('playwright');const assert=require('node:assert/
   await page.locator('nav [data-page-target="nvr"]').click();const response=await responsePromise;
   assert.equal(response.headers()['content-encoding'],'gzip','large index was sent without gzip');
   await page.waitForFunction(()=>{const s=recordingStatus[0];return s?.segments>=12000&&s.files?.length>3000;});
-  const video=page.locator('video[data-recording-player="0"]');await video.waitFor();await page.locator('[data-recording-toggle="0"]').click();
-  await page.waitForFunction(()=>{const v=document.querySelector('video[data-recording-player="0"]');return !v.paused&&v.videoWidth>0&&v.readyState>=2&&v.currentTime>.1;});
+  const video=page.locator('[data-dvr-host="0"]');await video.waitFor();await video.locator('[data-dvr-action="toggle"]').click();
+  await page.waitForFunction(()=>{const p=archivePlayers.get('0');return p?.client?.picture&&p.wantPlay&&p.position>.1;});
   assert.notEqual(await page.locator('.rec-badge').first().textContent(),'OFF');
   assert(!await page.locator('[data-storage-compact]').textContent().then(s=>s.includes('Odczyt')));
-  await page.evaluate(()=>window.archiveVideo=document.querySelector('video[data-recording-player="0"]'));
+  await page.evaluate(()=>window.archiveVideo=archivePlayers.get('0'));
   await page.route('**/api/recording/status*',route=>new URL(route.request().url()).searchParams.has('known')?route.abort('timedout'):route.continue());
   await page.evaluate(()=>loadRecordingStatus({reason:'timer'}));
-  assert(await video.evaluate(v=>v===archiveVideo&&!v.paused&&v.dataset.recordingWantsPlay==='true'),'background refresh stopped/replaced playback');
+  assert(await page.evaluate(()=>archivePlayers.get('0')===archiveVideo&&archiveVideo.wantPlay&&!archiveVideo.client.paused),'background refresh stopped/replaced playback');
   assert.equal(await page.locator('[data-recording-day-load]:visible').count(),0,'background polling displayed a false playback failure');
   assert.deepEqual(errors,[]);console.log(`PASS ${wk?'webkit':'chromium'} ${mobile?'phone':'desktop'}: lightweight Live boot, immediate 12000-file archive with gzip, actual playback and non-disruptive failed refresh`);
   await page.unrouteAll({behavior:'ignoreErrors'});await page.close();await context.close();
