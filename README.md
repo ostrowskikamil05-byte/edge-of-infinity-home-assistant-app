@@ -7,11 +7,11 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.14.2** speeds up indexed DVR startup and seeking with bounded encoded
-lookahead and cancellation of obsolete requests. It preserves original camera
-quality, source sharing, recordings and 14-day retention. Cellular Live keeps
-adaptive protection with fewer small refills. Transparent branding is bundled
-for the app, native HA card and repository.
+Version **0.15.1** improves indexed DVR startup and seeking, smooths cellular
+Live adaptation and adds transparent branding. It includes the theme-aware
+`custom:edge-recordings-card` and `custom:edge-events-card` from 0.15.0.
+Original camera quality, source sharing, recordings and 14-day retention
+are preserved.
 See [migration and setup](edge-of-infinity/DOCS.md).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:

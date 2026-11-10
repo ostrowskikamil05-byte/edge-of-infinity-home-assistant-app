@@ -25,7 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const version = "0.14.2"
+const version = "0.15.1"
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 

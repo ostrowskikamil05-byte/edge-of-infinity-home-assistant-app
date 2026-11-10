@@ -88,6 +88,21 @@ The local Linux WebKit decoder rejects raw Annex-B H264; H265 is used for its
 native Live test while AVC/HEVC MP4 remains covered by the DVR suites. These
 browser scenarios simulate delivery, not an actual mobile carrier or radio.
 
+## Dashboard cards
+
+```sh
+EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 python tests/browser/fixture_server.py
+python tests/browser/ha_bridge_fixture.py   # needs aiohttp
+node tests/browser/edge_dashboard_cards.cjs
+```
+
+`ha_bridge_fixture.py` runs the integration's actual `dashboard.py` bridge in a
+bare aiohttp app with Home Assistant's authentication, entity permissions and
+frontend host simulated. The test covers recordings days/moments, signed
+range playback with preloaded hand-over, timeline seeking, event filters,
+paging, the clip viewer, the hand-over to the recordings card, desktop, tablet
+and phone widths, and rejected unauthenticated, forbidden and malformed requests.
+
 ## Container smoke test
 
 ```sh

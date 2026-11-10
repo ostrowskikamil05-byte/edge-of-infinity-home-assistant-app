@@ -1,7 +1,12 @@
 # Changelog
 
-## 0.14.2
+## 0.15.1
 
+- Build on 0.15.0, retaining its recordings/events dashboard cards, authenticated
+  bridge and theme styling.
+- Retry temporarily busy dashboard thumbnails with bounded backoff and reuse
+  simultaneous requests for the same image. Preserve busy status/Retry-After
+  through the authenticated bridge instead of reporting a gateway failure.
 - Reduce DVR seek/start round trips with opt-in initial media, batches up to 64
   access units and two bounded batches of encoded lookahead. Preserve legacy
   clients/cores, the 24-picture decoder budget and the 600 ms AAC policy.
@@ -18,6 +23,27 @@
 - Compare legacy/fast archive delivery through a bounded TCP proxy at 200 ms RTT.
   Retain original-file, AAC, frame-step, fallback and source-sharing checks.
   No transcoding, retention or camera-profile changes.
+
+## 0.15.0
+
+- Add `custom:edge-recordings-card` for Home Assistant dashboards: camera and
+  day selection, 24 h / 6 h / 1 h timeline with detection markers, preview
+  moments, speed, sound, download and full screen. Consecutive fragments are
+  preloaded and handed over without reloading the player.
+- Add `custom:edge-events-card`: person, vehicle, animal and optional motion
+  history with pictures, filters, paging, a clip viewer and a hand-over to the
+  recordings card on the same view.
+- Both cards size themselves from their own width for phones, tablets and
+  desktops and use Polish or English from Home Assistant.
+- All three cards, Edge Live included, leave the card frame (background, blur,
+  radius, border, shadow) to the active theme. Inner controls are borderless
+  tints of the theme's text and accent colors, so light, dark and translucent
+  themes such as Frosted Glass look consistent.
+- Add an authenticated read-only bridge in the integration. Each request is
+  checked against the user's camera entity permission; file names and event IDs
+  are validated; video uses short-lived signed paths with byte ranges.
+- The Edge panel, recorder, Live path and settings are unchanged. Restart Home
+  Assistant Core after the update to load the new cards.
 
 ## 0.14.1
 
