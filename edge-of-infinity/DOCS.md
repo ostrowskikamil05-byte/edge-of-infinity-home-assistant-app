@@ -1,10 +1,10 @@
 # Edge of Infinity
 
-## 0.14.0: EdgeRTC Live and DVR
+## 0.14.1: EdgeRTC Live on variable networks
 
 EdgeRTC is the sole streaming core. Update the app, restart Home Assistant Core
 if the bundled integration is installed, and reopen Edge through the HA sidebar.
-The version/build is `0.14.0` / `native-dvr-v140`.
+The version/build is `0.14.1` / `cellular-live-v141`.
 
 The update removes Janus and MediaMTX binaries, packages, startup services,
 configuration generators, engine selection, public media ports and obsolete
@@ -30,6 +30,23 @@ and decode a keyframe; startup is not guaranteed to be instantaneous.
 
 Original H.264/H.265, resolution and FPS are retained. No generated frames or
 video re-encoding are added. Browser HEVC support depends on the device/profile.
+
+Live measures delivery gaps and adds a bounded playout reserve, up to 400 ms,
+when packets arrive in cellular-style bursts. Picture pacing and the continuous
+PCM worklet adapt together. A steady connection keeps the existing short-queue
+policy. Detection uses actual arrival/source timestamps and also works when
+iOS does not expose a connection type. It never changes a camera encoder.
+If decoding falls far behind, a newer complete keyframe can replace stale queued
+references on the same socket. Arbitrary encoded delta frames are not skipped.
+
+Device logs include `rtc_network_buffer`, `rtc_network_sample` and
+`rtc_network_recovery`, with delivery rate, jitter estimate, application round-trip
+time and bounded client/server queues. These are browser/stream observations,
+not cellular signal strength, link capacity or a traceroute. Timing feedback uses
+the same authenticated HA/Ingress socket; microphone permissions remain separate.
+Buffering trades some latency for continuity. It cannot sustain original-quality
+video when the server upload, relay or mobile downlink stays below the combined
+bitrate of the selected camera views. Choose fewer simultaneous views in that case.
 
 Open Home Assistant through **HTTPS**, including the Nabu Casa remote address.
 Live uses authenticated HTTPS/WebSocket connections and browser WebCodecs.
@@ -60,7 +77,7 @@ unsupported codec/profile or unavailable archive audio decoder.
 
 DVR sound uses a separate bounded PCM policy: up to 600 ms, with encoded AAC
 held until its picture time approaches. Decoder backpressure avoids silently
-losing AAC packets. Live retains its original short audio queue. Neither mode
+losing AAC packets. Live's separate policy adapts to delivery gaps. Neither mode
 adds extra saved recordings. Diagnostics expose audio queue, packet loss,
 underruns/overruns, worklet mode and buffer limit.
 

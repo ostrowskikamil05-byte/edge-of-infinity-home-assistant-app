@@ -248,6 +248,11 @@ jobs:
           pip install aiohttp==3.14.4
           go -C edge-of-infinity/edge-rtc test -c -o "${EDGE_RTC_TEST_BINARY}" .
           python tests/run_edge_rtc_bootstrap.py
+      - name: Test cellular Live on Android and iPhone
+        run: |
+          export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
+          export EDGE_RTC_TEST_BINARY="${RUNNER_TEMP}/edge-rtc-long-gop"
+          python tests/run_edge_rtc_cellular.py
 
   detection-media:
     runs-on: ubuntu-latest

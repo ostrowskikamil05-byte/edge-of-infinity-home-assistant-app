@@ -2,7 +2,7 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.14.0** uses EdgeRTC as the sole core for Live and indexed DVR.
+Version **0.14.1** uses EdgeRTC as the sole core for Live and indexed DVR.
 It removes the retired engines and their settings while preserving camera
 profiles, original recordings and 14-day retention. DVR AAC uses bounded audio
 queues and backpressure; Live keeps its existing audio policy.

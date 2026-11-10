@@ -26,6 +26,7 @@ export class EdgeRTCClient {
     const size=data.byteLength??data.length??0;this.receivedBytes+=size;this.lastPacketAt=performance.now();
     const bytes=data instanceof ArrayBuffer&&size>=10?new Uint8Array(data):null;
     const video=bytes?.[0]===1,stamp=video?Number(new DataView(data).getBigInt64(2)):null;
+    if(this.options.audioPlaybackMode!=='archive')this.observeDelivery(size,stamp);
     if(video&&this.firstVideoPacketAt==null)this.firstVideoPacketAt=performance.now();
     // A newly arrived IDR makes older queued references unnecessary. Prefer
     // it before decoding hundreds of cached 4K pictures; steady live is intact.
@@ -34,21 +35,61 @@ export class EdgeRTCClient {
       this.bootstrapFloorTimestamp=Math.max(this.bootstrapFloorTimestamp??stamp,stamp);
       this.bootstrapWake?.(true);
     }
+    // Recover only at a complete IDR. Dropping arbitrary encoded deltas would
+    // break their references and freeze a long-GOP camera until the next IDR.
+    if(this.caughtUp&&video&&(bytes[1]&1)&&stamp-(this.lastPresentedTimestamp??stamp)>1000000&&this.pendingMessages>24){
+      this.liveRecoveryKey=stamp;this.bootstrapWake?.(true);
+    }
     this.pendingMessages++;this.pendingBytes+=size;
     if(this.pendingMessages>(this.caughtUp?256:4096)||this.pendingBytes>24*1024*1024){this.pendingMessages--;this.pendingBytes-=size;this.fail('EdgeRTC decoder cannot keep up.');return;}
     this.messageChain=this.messageChain.then(()=>{
       if(this.firstFrameMS===null&&video&&this.latestBootstrapKey!=null&&stamp<this.latestBootstrapKey){this.bootstrapSkippedPackets=(this.bootstrapSkippedPackets||0)+1;return;}
+      if(bytes&&this.liveRecoveryKey!=null&&Number(new DataView(data).getBigInt64(2))<this.liveRecoveryKey){this.networkSupersededPackets=(this.networkSupersededPackets||0)+1;return;}
       return this.message(data);
     }).catch(error=>this.fail(error.message)).finally(()=>{this.pendingMessages--;this.pendingBytes-=size;});
+  }
+  observeDelivery(size,stamp){
+    const now=performance.now();
+    this.deliveryWindow??={at:now,bytes:0};this.deliveryWindow.bytes+=size;
+    if(now-this.deliveryWindow.at>=1000){this.deliveryBPS=Math.round(this.deliveryWindow.bytes*8000/(now-this.deliveryWindow.at));this.deliveryWindow={at:now,bytes:0};}
+    if(!this.caughtUp||stamp==null)return;
+    // Use increasing source timestamps so B-frame ordering is not mistaken
+    // for transport jitter. Ignore bootstrap and source clock discontinuities.
+    const previous=this.networkArrival;
+    if(previous&&stamp<=previous.stamp)return;
+    this.networkArrival={at:now,stamp};
+    if(!previous)return;
+    const sourceGap=(stamp-previous.stamp)/1000,arrivalGap=now-previous.at;
+    if(sourceGap<=0||sourceGap>1000||arrivalGap>5000)return;
+    const excess=Math.max(0,arrivalGap-sourceGap);
+    this.networkJitterMS=(this.networkJitterMS||0)*.9+Math.abs(arrivalGap-sourceGap)*.1;
+    if(excess>80)this.setNetworkBuffer(Math.ceil((excess+40)/20)*20,'delivery_gap');
+  }
+  setNetworkBuffer(milliseconds,reason){
+    if(this.closed||this.options.audioPlaybackMode==='archive')return;
+    const target=Math.min(400,Math.max(0,milliseconds));
+    if(target<=(this.networkBufferMS||0))return;
+    const delta=target-(this.networkBufferMS||0);this.networkBufferMS=target;
+    for(const item of this.frameQueue)item.due+=delta;
+    if(this.lastScheduled!=null)this.lastScheduled=this.frameQueue.length?this.lastScheduled+delta:Math.max(this.lastScheduled+delta,performance.now()+target-(this.frameInterval||0));
+    this.audioPlayback?.port.postMessage({type:'network',target_ms:target});
+    this.diagnostics?.note('rtc_network_buffer',{source:this.diagnosticKey,target_ms:target,reason,jitter_ms:Math.round(this.networkJitterMS||0),delivery_bps:this.deliveryBPS,video_changed:false});
+  }
+  networkPing(){
+    if(this.closed||this.ws?.readyState!==WebSocket.OPEN||this.ws.bufferedAmount>1024)return;
+    if(this.networkPingPending&&performance.now()-this.networkPingPending.at<15000)return;
+    const id=this.networkPingID=(this.networkPingID||0)%4294967295+1;
+    this.networkPingPending={id,at:performance.now()};this.ws.send(JSON.stringify({type:'network_ping',id}));
   }
   fail(message,retryable=true){if(this.closed)return;this.diagnostics?.note('rtc_error',{source:this.diagnosticKey,message,retryable});this.options.onError?.(message,{retryable});this.close();}
   diagnosticState(){return {state:this.closed?'closed':this.playing?'playing':this.connectionState,codec:this._codec,width:this.width,height:this.height,
     first_frame_ms:this.firstFrameMS,frames:this.frames,dropped_frames:this.droppedFrames,source_fps:this.frameInterval?1000/this.frameInterval:null,
-    decode_queue:this.video?.decodeQueueSize,render_queue:this.frameQueue.length,render_ahead_ms:Math.max(0,(this.frameQueue.at(-1)?.due||0)-performance.now()),render_limit_ms:250,message_queue:this.pendingMessages,received_bytes:this.receivedBytes,
+    decode_queue:this.video?.decodeQueueSize,render_queue:this.frameQueue.length,render_ahead_ms:Math.max(0,(this.frameQueue.at(-1)?.due||0)-performance.now()),render_limit_ms:250+2*(this.networkBufferMS||0),message_queue:this.pendingMessages,received_bytes:this.receivedBytes,
     last_packet_age_ms:this.lastPacketAt?performance.now()-this.lastPacketAt:null,websocket_outgoing_buffer_bytes:this.ws?.bufferedAmount,
     bootstrap_packets:this.bootstrapPackets||0,bootstrap_frames_skipped:this.bootstrapFrames,bootstrap_wait_ms:this.bootstrapWaitMS||0,source_metadata_wait_ms:this.sourceMetadataWaitMS||0,decoder_wait_ms:this.decoderWaitMS||0,message_bytes:this.pendingBytes||0,
     websocket_open_ms:this.websocketOpenAt==null?null:this.websocketOpenAt-this.started,decoder_configured_ms:this.decoderConfiguredAt==null?null:this.decoderConfiguredAt-this.started,first_video_packet_ms:this.firstVideoPacketAt==null?null:this.firstVideoPacketAt-this.started,bootstrap_decode_ms:this.decoderConfiguredAt==null||this.firstFrameMS===null?null:this.firstFrameMS-(this.decoderConfiguredAt-this.started),
     bootstrap_packets_superseded:this.bootstrapSkippedPackets||0,bootstrap_keyframe_replacements:this.bootstrapKeyReplacements||0,
+    network_buffer_ms:this.networkBufferMS||0,network_jitter_ms:Math.round(this.networkJitterMS||0),network_rtt_ms:this.networkRTTMS??null,delivery_bps:this.deliveryBPS??null,server_queue_bytes:this.networkServerQueueBytes??null,network_recoveries:this.networkRecoveries||0,network_superseded_packets:this.networkSupersededPackets||0,
     measured_end_to_end_latency_ms:null,audio_state:this.audio?.state||'muted_or_not_started',audio_codec:this.audioInfo?.codec,audio_rate:this.audioInfo?.sampleRate,
     audio_queue_ms:Math.round((this.audioQueuedSeconds||0)*1000)+(this.audioStats?.queued_ms||0),audio_scheduled_ms:0,audio_presentation:'continuous_pcm_worklet',audio_output_rate:this.audio?.sampleRate,audio_output_frames:this.audioStats?.output_frames||0,
     audio_packets:this.audioPackets||0,audio_dropped_packets:this.audioDroppedPackets||0,audio_underruns:this.audioStats?.underruns||0,audio_overruns:this.audioStats?.overruns||0,audio_dropped_frames:this.audioStats?.dropped_frames||0,audio_worklet_mode:this.audioStats?.mode,audio_buffer_limit_ms:this.audioStats?.buffer_limit_ms};}
@@ -56,7 +97,11 @@ export class EdgeRTCClient {
     if(this.closed)return;
     try{
       if(typeof data==='string'){
-        const msg=JSON.parse(data);if(msg.type==='error'){this.fail(`EdgeRTC: ${msg.code}`);return;}if(msg.type!=='hello'||msg.protocol!=='edgertc/1')return;
+        const msg=JSON.parse(data);if(msg.type==='error'){this.fail(`EdgeRTC: ${msg.code}`);return;}
+        if(msg.type==='network_pong'){
+          if(msg.id===this.networkPingPending?.id){this.networkRTTMS=Math.round(performance.now()-this.networkPingPending.at);this.networkPingPending=null;this.networkServerQueueBytes=msg.queue_bytes;this.diagnostics?.note('rtc_network_sample',{source:this.diagnosticKey,...this.diagnosticState()});}return;
+        }
+        if(msg.type!=='hello'||msg.protocol!=='edgertc/1')return;
         this.bootstrapTimestamp=Number.isFinite(msg.bootstrap_timestamp_us)?msg.bootstrap_timestamp_us:null;this.sourceMetadataWaitMS=Number(msg.metadata_wait_ms||0);this.audioInfo=msg.audio;this.microphoneSupported=Boolean(msg.microphone?.supported);
         this.bootstrapFloorTimestamp=this.latestBootstrapKey==null?this.bootstrapTimestamp:Math.max(this.bootstrapTimestamp??this.latestBootstrapKey,this.latestBootstrapKey);this.bootstrapPackets=Number(msg.bootstrap_packets||0);
         this.diagnostics?.note('rtc_bootstrap',{source:this.diagnosticKey,packets:this.bootstrapPackets,bytes:msg.bootstrap_bytes||0,refreshed_before_send:Boolean(msg.bootstrap_refreshed),has_keyframe:this.bootstrapTimestamp!==null});
@@ -70,12 +115,18 @@ export class EdgeRTCClient {
         this.decoderConfiguredAt=performance.now();this._codec=msg.video.codec;this.decoderConfiguration=configuration;this.videoCodecName=msg.video.codec_name||(/^(hev1|hvc1)\./.test(msg.video.codec)?'h265':'h264');this.video.configure(configuration);
         this.diagnostics?.note('rtc_decoder_configured',{source:this.diagnosticKey,codec:this._codec,requested_acceleration:configuration.hardwareAcceleration,audio_codec:msg.audio?.codec,audio_rate:msg.audio?.sampleRate,microphone_supported:this.microphoneSupported});
         this.connectionState='connected';this.options.onReady?.();
+        if(msg.network_feedback){this.networkPingTimer=setInterval(()=>this.networkPing(),5000);this.networkPing();}
         if(this.options.microphone){if(!msg.microphone?.active)throw new Error('Camera microphone is unavailable.');await this.startMicrophone();}
         return;
       }
       const bytes=new Uint8Array(data);if(bytes.length<10)return;const timestamp=Number(new DataView(data).getBigInt64(2));const payload=bytes.subarray(10);
       if(bytes[0]===1&&this.video?.state==='configured'){
         const key=Boolean(bytes[1]&1);if(key)this.waitKey=false;if(this.waitKey)return;
+        if(key&&this.liveRecoveryKey!=null&&timestamp>=this.liveRecoveryKey&&this.lastRecoveryKey!==this.liveRecoveryKey){
+          this.clearFrames();this.clearAudio();if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.audioDecoder=null;
+          this.video.reset();this.video.configure(this.decoderConfiguration);this.lastRecoveryKey=this.liveRecoveryKey;this.networkRecoveries=(this.networkRecoveries||0)+1;
+          this.diagnostics?.note('rtc_network_recovery',{source:this.diagnosticKey,keyframe_us:timestamp,skipped_packets:this.networkSupersededPackets||0});
+        }
         if(key&&this.firstFrameMS===null){
           if(this.decodedBootstrapKey!=null&&timestamp>this.decodedBootstrapKey){
             this.clearFrames();this.video.reset();this.video.configure(this.decoderConfiguration);this.bootstrapKeyReplacements=(this.bootstrapKeyReplacements||0)+1;
@@ -100,6 +151,7 @@ export class EdgeRTCClient {
     const started=performance.now();
     while(!this.closed&&this.video?.state==='configured'&&this.video.decodeQueueSize>=8){
       if(this.firstFrameMS===null&&timestamp!=null&&this.latestBootstrapKey!=null&&timestamp<this.latestBootstrapKey)return false;
+      if(timestamp!=null&&this.liveRecoveryKey!=null&&timestamp<this.liveRecoveryKey)return false;
       const ready=await new Promise(resolve=>{
         const decoder=this.video;let timer;
         const finish=value=>{clearTimeout(timer);decoder.removeEventListener('dequeue',dequeue);if(this.bootstrapWake===finish)this.bootstrapWake=null;resolve(value);};
@@ -109,27 +161,29 @@ export class EdgeRTCClient {
       if(!ready){if(!this.closed)throw Error('EdgeRTC video decoder stalled.');return false;}
     }
     if(this.firstFrameMS===null)this.bootstrapWaitMS=(this.bootstrapWaitMS||0)+performance.now()-started;else this.decoderWaitMS=(this.decoderWaitMS||0)+performance.now()-started;
-    return !this.closed&&this.video?.state==='configured'&&!(this.firstFrameMS===null&&timestamp!=null&&this.latestBootstrapKey!=null&&timestamp<this.latestBootstrapKey);
+    return !this.closed&&this.video?.state==='configured'&&!(this.firstFrameMS===null&&timestamp!=null&&this.latestBootstrapKey!=null&&timestamp<this.latestBootstrapKey)&&!(timestamp!=null&&this.liveRecoveryKey!=null&&timestamp<this.liveRecoveryKey);
   }
   render(frame){
     if(this.closed){frame.close();return;}
-    const floor=this.bootstrapFloorTimestamp??this.bootstrapTimestamp;
+    const floor=this.liveRecoveryKey??this.bootstrapFloorTimestamp??this.bootstrapTimestamp;
     if(floor!==null&&floor!==undefined&&frame.timestamp<floor){this.bootstrapFrames++;frame.close();return;}
     this.bootstrapTimestamp=null;
     const now=performance.now(),timestamp=Number(frame.timestamp);
     const interval=this.lastTimestamp==null?0:(timestamp-this.lastTimestamp)/1000;
     if(interval>0&&interval<1000)this.frameInterval=this.frameInterval==null?interval:this.frameInterval*.9+interval*.1;
-    const due=interval>0&&interval<1000?Math.max(now,(this.lastScheduled??now)+interval):now;
+    const target=this.networkBufferMS||0,limit=250+2*target;
+    const due=interval>0&&interval<1000?Math.max(now,(this.lastScheduled??now+target)+interval):now+target;
     this.lastTimestamp=timestamp;this.lastScheduled=due;
     this.frameQueue.push({frame,due});
     // Normal 20/30 FPS bursts are paced by camera timestamps. Bound latency
     // when the tab/device falls behind; never synthesize or resize a frame.
-    while(this.frameQueue.length>8||this.frameQueue.length>1&&(this.frameQueue.at(-1).due-this.frameQueue[0].due>251||this.frameQueue[0].due<now-250)){this.frameQueue.shift().frame.close();this.droppedFrames++;}
-    if(this.frameQueue.length&&this.frameQueue.at(-1).due>now+251){
+    const frameLimit=target?Math.min(32,Math.max(8,Math.ceil(limit/(this.frameInterval||33))+1)):8;
+    while(this.frameQueue.length>frameLimit||this.frameQueue.length>1&&(this.frameQueue.at(-1).due-this.frameQueue[0].due>limit+1||this.frameQueue[0].due<now-limit)){this.frameQueue.shift().frame.close();this.droppedFrames++;}
+    if(this.frameQueue.length&&this.frameQueue.at(-1).due>now+limit+1){
       // Rebase the retained window without compressing its frame intervals.
       // Four 20 FPS pictures span 150 ms: moving the newest one to "now"
       // used to play the whole burst at display refresh speed, then freeze.
-      const shift=this.frameQueue[0].due-now;
+      const shift=target?this.frameQueue.at(-1).due-now-limit:this.frameQueue[0].due-now;
       for(const item of this.frameQueue)item.due-=shift;this.lastScheduled-=shift;
     }
     if(this.renderRequest==null)this.renderRequest=requestAnimationFrame(()=>this.drawFrame());
@@ -138,7 +192,7 @@ export class EdgeRTCClient {
     this.renderRequest=null;if(this.closed)return;
     const now=performance.now();
     while(this.frameQueue.length&&this.firstFrameMS===null&&this.bootstrapFloorTimestamp!=null&&this.frameQueue[0].frame.timestamp<this.bootstrapFloorTimestamp){this.frameQueue.shift().frame.close();this.bootstrapFrames++;}
-    while(this.frameQueue.length>1&&this.frameQueue[0].due<now-250){this.frameQueue.shift().frame.close();this.droppedFrames++;}
+    while(this.frameQueue.length>1&&this.frameQueue[0].due<now-250-2*(this.networkBufferMS||0)){this.frameQueue.shift().frame.close();this.droppedFrames++;}
     const item=this.frameQueue[0];
     if(item&&item.due<=now+1){
       this.frameQueue.shift();const current=item.frame;
@@ -148,7 +202,7 @@ export class EdgeRTCClient {
         this.context??=this.canvas.getContext('2d',{alpha:false,desynchronized:true});
         this.context.drawImage(current,0,0,this.width,this.height);
       }finally{current.close();}
-      clearTimeout(this.connectTimer);this.playing=true;this.frames++;
+      clearTimeout(this.connectTimer);this.playing=true;this.frames++;this.lastPresentedTimestamp=Number(current.timestamp);
       if((this.video?.decodeQueueSize??0)<3&&(this.pendingMessages??0)<32)this.caughtUp=true;
       if(this.firstFrameMS===null)this.firstFrameMS=now-this.started;
       if(this.diagnostics&&(!this.lastDiagnosticAt||now-this.lastDiagnosticAt>=1000)){
@@ -173,14 +227,14 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   audioModule(){
-    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.14.0',import.meta.url).href);
+    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.14.1',import.meta.url).href);
   }
   startAudioPlayback(){
     if(this.audioPlaybackPromise||this.closed||this.audioDisabled)return;
     const started=performance.now();
     this.audioPlaybackPromise=Promise.resolve().then(()=>this.audioModule()).then(()=>{
       if(this.closed)return;
-      this.audioPlayback=new AudioWorkletNode(this.audio,'edge-playback',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2],processorOptions:{mode:this.options.audioPlaybackMode==='archive'?'archive':'live'}});
+      this.audioPlayback=new AudioWorkletNode(this.audio,'edge-playback',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2],processorOptions:{mode:this.options.audioPlaybackMode==='archive'?'archive':'live',network_target_ms:this.networkBufferMS||0}});
       this.audioPlayback.connect(this.gain);
       this.audioPlayback.port.onmessage=event=>{
         if(this.closed)return;const data=event.data;
@@ -202,10 +256,10 @@ export class EdgeRTCClient {
     this.audioPackets=(this.audioPackets||0)+1;const packet={type:'pcm',channels,rate,timestamp};
     if(this.audioPlayback){this.sendPCM(packet);return;}
     this.audioPending??=[];this.audioPending.push(packet);this.audioQueuedSeconds=(this.audioQueuedSeconds||0)+duration;
-    const limit=this.options.audioPlaybackMode==='archive' ? .6 : .24;
+    const limit=this.options.audioPlaybackMode==='archive' ? .6 : .24+2*(this.networkBufferMS||0)/1000;
     while(this.audioPending.length>1&&(this.audioQueuedSeconds>limit||this.audioPending.length>48)){const old=this.audioPending.shift();this.audioQueuedSeconds-=old.channels[0].length/old.rate;this.audioDroppedPackets=(this.audioDroppedPackets||0)+1;}
     this.startAudioPlayback();
   }
   async startMicrophone(){this.micTimer=setTimeout(()=>this.fail('Microphone initialization timed out.'),10000);for(const track of this.options.microphone.getTracks())track.addEventListener('ended',()=>this.fail('Microphone device disconnected.'),{once:true});const audio=this.ensureAudio();await this.audioModule();if(this.closed)return;this.micSource=audio.createMediaStreamSource(this.options.microphone);this.worklet=new AudioWorkletNode(audio,'edge-pcm');this.silence=audio.createGain();this.silence.gain.value=0;this.micSource.connect(this.worklet);this.worklet.connect(this.silence);this.silence.connect(audio.destination);this.worklet.port.onmessage=event=>{if(this.closed||this.ws.readyState!==WebSocket.OPEN)return;if(this.ws.bufferedAmount>6400){this.fail('Microphone connection is too slow.');return;}const packet=new Uint8Array(321);packet[0]=3;packet.set(new Uint8Array(event.data),1);this.ws.send(packet);};clearTimeout(this.micTimer);this.options.onMicrophone?.(true);}
-  close(){if(this.closed)return;this.diagnostics?.unregisterSource(this.diagnosticKey);this.diagnostics?.source(this.diagnosticKey,{state:'closed',frames:this.frames,dropped_frames:this.droppedFrames,first_frame_ms:this.firstFrameMS});this.diagnostics?.note('rtc_client_closed',{source:this.diagnosticKey,frames:this.frames});this.closed=true;this.bootstrapWake?.(false);clearTimeout(this.connectTimer);clearTimeout(this.micTimer);this.options.microphone?.getTracks().forEach(track=>track.stop());this.playing=false;this.connectionState='closed';this.ws?.close();if(this.video?.state!=='closed')this.video?.close();if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.clearFrames();this.clearAudio();this.audioPlayback?.disconnect();this.audioPlayback?.port.close();this.worklet?.port.close();this.micSource?.disconnect();this.worklet?.disconnect();this.silence?.disconnect();this.audio?.close().catch(()=>{});}
+  close(){if(this.closed)return;this.diagnostics?.unregisterSource(this.diagnosticKey);this.diagnostics?.source(this.diagnosticKey,{state:'closed',frames:this.frames,dropped_frames:this.droppedFrames,first_frame_ms:this.firstFrameMS});this.diagnostics?.note('rtc_client_closed',{source:this.diagnosticKey,frames:this.frames});this.closed=true;this.bootstrapWake?.(false);clearTimeout(this.connectTimer);clearTimeout(this.micTimer);clearInterval(this.networkPingTimer);this.options.microphone?.getTracks().forEach(track=>track.stop());this.playing=false;this.connectionState='closed';this.ws?.close();if(this.video?.state!=='closed')this.video?.close();if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.clearFrames();this.clearAudio();this.audioPlayback?.disconnect();this.audioPlayback?.port.close();this.worklet?.port.close();this.micSource?.disconnect();this.worklet?.disconnect();this.silence?.disconnect();this.audio?.close().catch(()=>{});}
 }

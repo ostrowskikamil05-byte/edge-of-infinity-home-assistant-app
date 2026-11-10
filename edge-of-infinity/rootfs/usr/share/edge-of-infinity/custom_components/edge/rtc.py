@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import suppress
 import re
+import json
 
 from aiohttp import ClientError, WSMsgType, web
 from homeassistant.auth.permissions.const import POLICY_CONTROL, POLICY_READ
@@ -11,6 +12,19 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN
 from .client import EdgeClientError
+
+
+def network_ping(data):
+    """Read-only timing feedback; never accept arbitrary upstream controls."""
+    if len(data) > 128:
+        return False
+    try:
+        payload = json.loads(data)
+        return (isinstance(payload, dict) and set(payload) == {'type', 'id'}
+                and payload['type'] == 'network_ping' and type(payload['id']) is int
+                and 1 <= payload['id'] <= 4294967295)
+    except (ValueError, TypeError):
+        return False
 
 
 class EdgeRTCView(HomeAssistantView):
@@ -47,7 +61,7 @@ class EdgeRTCView(HomeAssistantView):
             return web.Response(status=503)
         if not token:
             return web.Response(status=503)
-        endpoint = route['api'].replace('http://', 'ws://', 1).replace('https://', 'wss://', 1) + '/api/stream/' + route['path'] + ('?microphone=1' if microphone else '')
+        endpoint = route['api'].replace('http://', 'ws://', 1).replace('https://', 'wss://', 1) + '/api/stream/' + route['path'] + '?network_feedback=1' + ('&microphone=1' if microphone else '')
         front = web.WebSocketResponse(heartbeat=20, compress=False, max_msg_size=8*1024*1024)
         if not front.can_prepare(request).ok:return web.Response(status=400)
         await front.prepare(request)
@@ -66,7 +80,7 @@ class EdgeRTCView(HomeAssistantView):
                                 break
                             await destination.send_bytes(message.data)
                         elif message.type == WSMsgType.TEXT:
-                            if upstream:
+                            if upstream and not network_ping(message.data):
                                 break
                             await destination.send_str(message.data)
                         else:

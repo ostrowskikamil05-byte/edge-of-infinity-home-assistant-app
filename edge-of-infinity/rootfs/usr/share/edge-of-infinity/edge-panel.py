@@ -101,7 +101,7 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.14.0"
+APP_VERSION = "0.14.1"
 APP_RELEASE_FEATURES=['EdgeRTC-only Live, recording and DVR; retired engines and options removed with bounded migration',
                       'DVR AAC uses timestamp lookahead, bounded PCM and decoder backpressure; original Live policy retained',
                       'UNV malformed optional talk AAC compatibility; valid forward H265/AAC and G711 mic share one connection',
@@ -117,7 +117,7 @@ APP_RELEASE_FEATURES=['EdgeRTC-only Live, recording and DVR; retired engines and
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "native-dvr-v140"
+UI_BUILD = "cellular-live-v141"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -10355,7 +10355,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.send_bytes(body,'application/json',status,headers)
 
     def serve_edge_rtc_stream(self, stream_path: str, archive=False) -> None:
-        """Read-only binary tunnel; microphone is available only through HA ACLs."""
+        """Read-only media/timing tunnel; microphone requires the HA ACL bridge."""
         import socket
         import select
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", stream_path) or self.headers.get("Upgrade", "").lower() != "websocket":
@@ -10372,7 +10372,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
             if not re.fullmatch(r"[A-Za-z0-9+/=]{20,32}", key):
                 raise ValueError("invalid_websocket_key")
             endpoint='archive' if archive else 'stream'
-            header = f"GET /api/{endpoint}/{stream_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            feedback='' if archive else '?network_feedback=1'
+            header = f"GET /api/{endpoint}/{stream_path}{feedback} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
             backend.sendall(header.encode())
             response = bytearray()
             while not response.endswith(b"\r\n\r\n") and len(response) < 16384:

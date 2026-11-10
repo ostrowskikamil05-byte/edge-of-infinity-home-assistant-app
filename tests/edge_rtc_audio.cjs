@@ -45,6 +45,20 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
   assert.equal(archive.overruns,0,'DVR ahead-of-video audio was discarded');assert.equal(archive.underruns,0,'DVR burst delivery interrupted PCM');assert.equal(archive.droppedFrames,0);assert((archive.write-archive.read)/rate<=.6);assert(archive.outputFrames>90000);
   archive.port.onmessage({data:{type:'clear'}});assert.equal(archive.write,0);assert.equal(quantum(archive),0);
  }
+ // Cellular delivery retains a complete 360 ms burst while the playout
+ // reserve is being filled, including high-rate PCM. DVR ignores this policy.
+ for(const rate of[8000,16000,48000,96000]){
+  const mobile=new Processor({processorOptions:{mode:'live',network_target_ms:180}});let delivered=0,nextBatch=0;
+  for(let tick=0;tick<Math.ceil(6*48000/128);tick++){
+   const seconds=tick*128/48000;
+   if(seconds>=.35&&mobile.networkTarget<280)mobile.port.onmessage({data:{type:'network',target_ms:280}});
+   if(seconds>=.7&&mobile.networkTarget<400)mobile.port.onmessage({data:{type:'network',target_ms:400}});
+   if(seconds>=nextBatch){const until=Math.round((nextBatch+.36)*rate);while(delivered<until){packet(mobile,rate,delivered,rate*.02);delivered+=rate*.02;}nextBatch+=.36;}
+   quantum(mobile);
+  }
+  assert.equal(mobile.overruns,0,'cellular bursts overfilled PCM');assert.equal(mobile.underruns,0,'cellular bursts starved PCM');assert.equal(mobile.droppedFrames,0);assert(mobile.outputFrames>48000*5.2);assert((mobile.write-mobile.read)/rate<=1.04);
+ }
+ const unaffectedArchive=new Processor({processorOptions:{mode:'archive'}});unaffectedArchive.port.onmessage({data:{type:'network',target_ms:400}});assert.equal(unaffectedArchive.bufferSeconds,.6);assert.equal(unaffectedArchive.startSeconds,.12);
  const dvrCode=fs.readFileSync(path.join(__dirname,'../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-dvr-client.js'),'utf8').replace(/from '\.\/client\.js\?[^']+'/,"from 'data:text/javascript;base64,"+Buffer.from(code).toString('base64')+"'");
  const {EdgeDVRClient}=await import('data:text/javascript;base64,'+Buffer.from(dvrCode).toString('base64'));
  const archiveClient=new EdgeDVRClient({canvas:{}}),decoded=[];archiveClient.picture=true;archiveClient.paused=false;archiveClient.muted=false;archiveClient.epoch=1;archiveClient.position=1;archiveClient.audioDecoder=new EventTarget();archiveClient.audioDecoder.decodeQueueSize=0;

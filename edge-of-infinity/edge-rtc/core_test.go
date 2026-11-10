@@ -175,8 +175,11 @@ func TestSharedSourceAndMicrophone(t *testing.T) {
 	}
 	for i := 0; i < 4; i++ {
 		suffix := ""
+		if i > 0 {
+			suffix = "?network_feedback=1"
+		}
 		if i == 3 {
-			suffix = "?microphone=1"
+			suffix = "?network_feedback=1&microphone=1"
 		}
 		ws, _, e := websocket.DefaultDialer.Dial("ws://"+cfg.HTTP+"/api/stream/front_main"+suffix, headers)
 		if e != nil {
@@ -204,6 +207,34 @@ func TestSharedSourceAndMicrophone(t *testing.T) {
 			if e = ws.WriteMessage(websocket.BinaryMessage, pcm); e != nil {
 				t.Fatal(e)
 			}
+		}
+		// Timing feedback is read-only, shares this socket, and must not
+		// interfere with microphone ownership or encoded media delivery.
+		if i == 0 {
+			if hello["network_feedback"] != false {
+				t.Fatal("legacy bridge was offered unsupported upstream text")
+			}
+			continue
+		}
+		if hello["network_feedback"] != true {
+			t.Fatal("missing network feedback capability")
+		}
+		if e = ws.WriteJSON(map[string]any{"type": "network_ping", "id": uint32(i + 1)}); e != nil {
+			t.Fatal(e)
+		}
+		for {
+			kind, packet, err := ws.ReadMessage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind != websocket.TextMessage {
+				continue
+			}
+			var pong map[string]any
+			if json.Unmarshal(packet, &pong) != nil || pong["type"] != "network_pong" || pong["id"] != float64(i+1) {
+				t.Fatalf("invalid timing reply: %s", packet)
+			}
+			break
 		}
 	}
 	eventually(t, func() bool { return c.mic.Load() > 0 })
