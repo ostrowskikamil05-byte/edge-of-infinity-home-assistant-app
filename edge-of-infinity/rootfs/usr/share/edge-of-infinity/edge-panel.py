@@ -101,7 +101,7 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.14.1"
+APP_VERSION = "0.15.0"
 APP_RELEASE_FEATURES=['EdgeRTC-only Live, recording and DVR; retired engines and options removed with bounded migration',
                       'DVR AAC uses timestamp lookahead, bounded PCM and decoder backpressure; original Live policy retained',
                       'UNV malformed optional talk AAC compatibility; valid forward H265/AAC and G711 mic share one connection',
