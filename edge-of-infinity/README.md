@@ -1,5 +1,10 @@
 # Edge of Infinity
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="logo.png">
+  <img src="logo-light.png" alt="Edge of Infinity — CCTV &amp; Live Stream" width="280">
+</picture>
+
 Native EdgeRTC Live, recording and indexed DVR for Home Assistant.
 
 - One shared camera source for Live, recording, compatible microphone and analysis.
@@ -9,7 +14,7 @@ Native EdgeRTC Live, recording and indexed DVR for Home Assistant.
 - Optional camera/local detection, zones, alert clips and phone notifications.
 - Native card with 1–4 views and separate microphone permissions.
 
-Version 0.14.1 removes retired streaming engines and migrates their settings while
+Version 0.14.2 removes retired streaming engines and migrates their settings while
 preserving cameras and saved recordings. DVR AAC uses bounded buffering and
 backpressure without changing Live audio behavior.
 

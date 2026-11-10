@@ -1,10 +1,10 @@
 # Edge of Infinity
 
-## 0.14.1: EdgeRTC Live on variable networks
+## 0.14.2: faster DVR previews and transparent branding
 
 EdgeRTC is the sole streaming core. Update the app, restart Home Assistant Core
 if the bundled integration is installed, and reopen Edge through the HA sidebar.
-The version/build is `0.14.1` / `cellular-live-v141`.
+The version/build is `0.14.2` / `dvr-preview-v142`.
 
 The update removes Janus and MediaMTX binaries, packages, startup services,
 configuration generators, engine selection, public media ports and obsolete
@@ -68,6 +68,19 @@ persistent authenticated socket. It seeks from the preceding keyframe, discards
 outdated seek results and keeps bounded video/audio queues. It does not connect
 to the camera, download a whole day or modify original files. Pause stops pulls;
 leaving Recordings releases the viewer's decoder and socket.
+
+New cores can deliver the first encoded batch with the seek response, removing
+one request round trip. The client negotiates up to 64 access units per batch
+and at most two bounded batches of encoded lookahead. The existing per-picture,
+24-picture decoder and 24 MiB pending-message limits remain; a batch's 2 MiB
+budget is soft for a single larger access unit. This does not download a whole
+day. Legacy cores/clients keep their earlier explicit-pull behavior.
+
+The latest seek cancels stale batches at access-unit boundaries and replaces old
+decoder work. Duplicate scrub previews/commits are coalesced. Once a paused
+preview is displayed, later pictures in its batch need no GPU decoding. DVR
+scripts are preloaded without creating hidden recording viewers. Diagnostics
+expose batch count, transfer/read time, pending pulls and queued batches.
 
 The DVR offers frame steps, speed 0.5–2×, sound, full screen and event markers.
 Gray event points turn green behind the playback position. Selecting an event

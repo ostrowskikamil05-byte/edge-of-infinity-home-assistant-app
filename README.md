@@ -1,11 +1,17 @@
 # Edge of Infinity Home Assistant App
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="edge-of-infinity/logo.png">
+  <img src="edge-of-infinity/logo-light.png" alt="Edge of Infinity — CCTV &amp; Live Stream" width="280">
+</picture>
+
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.14.1** uses EdgeRTC as the sole core for Live and indexed DVR.
-It removes the retired engines and their settings while preserving camera
-profiles, original recordings and 14-day retention. DVR AAC uses bounded audio
-queues and backpressure; Live keeps its existing audio policy.
+Version **0.14.2** speeds up indexed DVR startup and seeking with bounded encoded
+lookahead and cancellation of obsolete requests. It preserves original camera
+quality, source sharing, recordings and 14-day retention. Cellular Live keeps
+adaptive protection with fewer small refills. Transparent branding is bundled
+for the app, native HA card and repository.
 See [migration and setup](edge-of-infinity/DOCS.md).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:

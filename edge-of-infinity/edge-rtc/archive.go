@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -16,12 +17,19 @@ import (
 
 var archiveName = regexp.MustCompile(`^(?:[0-9]{8}-[0-9]{6}|[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}(?:-[0-9]{1,9})?)\.mp4$`)
 
+const archiveBatchPackets = 64
+const archiveBatchBytes = 2 * 1024 * 1024
+
 type archiveCommand struct {
 	Type  string  `json:"type"`
 	Epoch uint32  `json:"epoch"`
 	File  string  `json:"file"`
 	At    float64 `json:"at"`
 	Count int     `json:"count"`
+}
+
+func validArchiveSeek(command archiveCommand) bool {
+	return command.Epoch != 0 && !math.IsNaN(command.At) && !math.IsInf(command.At, 0) && command.At >= 0 && command.At <= 172800 && command.Count >= 0 && command.Count <= archiveBatchPackets && archiveName.MatchString(command.File)
 }
 
 func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
@@ -72,7 +80,7 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 		ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		return ws.WriteJSON(value)
 	}
-	if write(map[string]any{"type": "archive_ready", "protocol": "edgertc/archive/1", "batch_packets": 16, "batch_bytes": 2 * 1024 * 1024}) != nil {
+	if write(map[string]any{"type": "archive_ready", "protocol": "edgertc/archive/1", "batch_packets": archiveBatchPackets, "batch_bytes": archiveBatchBytes, "initial_batch": true, "pipeline_batches": 2}) != nil {
 		return
 	}
 	var file *os.File
@@ -85,29 +93,114 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 	var signature os.FileInfo
 	var name string
 	var epoch uint32
+	var latestEpoch atomic.Uint32
 	video, audio := 0, 0
-	window := time.Now()
-	commands := 0
-	for {
-		var command archiveCommand
-		if ws.ReadJSON(&command) != nil {
-			return
+	sendBatch := func(limit int) error {
+		started := time.Now()
+		var readTime time.Duration
+		bytes, packets := 0, 0
+		for count := 0; count < limit; count++ {
+			// A newly received seek cancels old delivery at an access-unit
+			// boundary. Never queue several stale batches ahead of the cursor.
+			if latestEpoch.Load() != epoch {
+				return nil
+			}
+			var track *archiveTrack
+			var sample archiveSample
+			kind := byte(1)
+			if video < len(index.video.samples) {
+				track = index.video
+				sample = track.samples[video]
+			}
+			if index.audio != nil && audio < len(index.audio.samples) && (track == nil || index.audio.samples[audio].dts < sample.dts) {
+				track = index.audio
+				sample = track.samples[audio]
+				kind = 2
+			}
+			if track == nil {
+				break
+			}
+			readStarted := time.Now()
+			payload, e := archivePayload(file, track, sample)
+			readTime += time.Since(readStarted)
+			if e != nil {
+				index = nil
+				return write(map[string]any{"type": "archive_error", "epoch": epoch, "code": "archive_read_failed"})
+			}
+			packet := make([]byte, 14+len(payload))
+			packet[0] = kind
+			if sample.key {
+				packet[1] = 1
+			}
+			binary.BigEndian.PutUint64(packet[2:10], uint64(sample.pts))
+			binary.BigEndian.PutUint32(packet[10:14], epoch)
+			copy(packet[14:], payload)
+			ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if e = ws.WriteMessage(websocket.BinaryMessage, packet); e != nil {
+				return e
+			}
+			if kind == 1 {
+				video++
+			} else {
+				audio++
+			}
+			bytes += len(packet)
+			packets++
+			// A single access unit may exceed the soft batch budget, but keeps
+			// the existing per-packet limit. Never split an encoded picture.
+			if bytes >= archiveBatchBytes {
+				break
+			}
 		}
-		ws.SetReadDeadline(time.Now().Add(65 * time.Second))
-		if time.Since(window) > time.Second {
-			window = time.Now()
-			commands = 0
+		end := video >= len(index.video.samples) && (index.audio == nil || audio >= len(index.audio.samples))
+		return write(map[string]any{"type": "batch", "epoch": epoch, "end": end, "bytes": bytes, "packets": packets, "read_ms": float64(readTime.Microseconds()) / 1000, "server_ms": float64(time.Since(started).Microseconds()) / 1000})
+	}
+	commands := make(chan archiveCommand, 32)
+	go func() {
+		defer close(commands)
+		defer ws.Close()
+		window, count := time.Now(), 0
+		for {
+			var command archiveCommand
+			if ws.ReadJSON(&command) != nil {
+				return
+			}
+			ws.SetReadDeadline(time.Now().Add(65 * time.Second))
+			if time.Since(window) > time.Second {
+				window, count = time.Now(), 0
+			}
+			count++
+			if count > 240 {
+				return
+			}
+			if command.Type == "seek" && validArchiveSeek(command) {
+				latestEpoch.Store(command.Epoch)
+				// Coalesce queued seeks/pulls. Only the most recent requested
+				// position should spend disk/network/decoder work.
+				for len(commands) > 0 {
+					select {
+					case <-commands:
+					default:
+					}
+				}
+			}
+			select {
+			case commands <- command:
+			case <-done:
+				return
+			}
 		}
-		commands++
-		if commands > 240 {
-			return
-		}
+	}()
+	for command := range commands {
 		switch command.Type {
 		case "seek":
-			if command.Epoch == 0 || math.IsNaN(command.At) || math.IsInf(command.At, 0) || command.At < 0 || command.At > 172800 || !archiveName.MatchString(command.File) {
+			if !validArchiveSeek(command) {
 				if write(map[string]any{"type": "archive_error", "epoch": command.Epoch, "code": "invalid_archive_seek"}) != nil {
 					return
 				}
+				continue
+			}
+			if command.Epoch != latestEpoch.Load() {
 				continue
 			}
 			epoch = command.Epoch
@@ -181,65 +274,21 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 				return
 			}
 			log.Printf("archive seek key=%s epoch=%d target_ms=%d keyframe_ms=%d index_hit=%t index_ms=%d", key, epoch, target/1000, index.video.samples[video].pts/1000, hit, time.Since(started).Milliseconds())
-		case "pull":
-			if index == nil || command.Epoch != epoch {
-				continue
-			}
-			if command.Count < 1 || command.Count > 16 {
-				return
-			}
-			bytes := 0
-			for count := 0; count < command.Count; count++ {
-				var track *archiveTrack
-				var sample archiveSample
-				kind := byte(1)
-				if video < len(index.video.samples) {
-					track = index.video
-					sample = track.samples[video]
-				}
-				if index.audio != nil && audio < len(index.audio.samples) && (track == nil || index.audio.samples[audio].dts < sample.dts) {
-					track = index.audio
-					sample = track.samples[audio]
-					kind = 2
-				}
-				if track == nil {
-					break
-				}
-				payload, e := archivePayload(file, track, sample)
-				if e != nil {
-					if write(map[string]any{"type": "archive_error", "epoch": epoch, "code": "archive_read_failed"}) != nil {
-						return
-					}
-					index = nil
-					break
-				}
-				packet := make([]byte, 14+len(payload))
-				packet[0] = kind
-				if sample.key {
-					packet[1] = 1
-				}
-				binary.BigEndian.PutUint64(packet[2:10], uint64(sample.pts))
-				binary.BigEndian.PutUint32(packet[10:14], epoch)
-				copy(packet[14:], payload)
-				ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				if ws.WriteMessage(websocket.BinaryMessage, packet) != nil {
+			// Opt-in initial delivery removes a full request round trip after
+			// every seek. Legacy clients leave Count at zero and still pull.
+			if command.Count > 0 {
+				if sendBatch(command.Count) != nil {
 					return
 				}
-				if kind == 1 {
-					video++
-				} else {
-					audio++
-				}
-				bytes += len(packet)
-				if bytes >= 2*1024*1024 {
-					break
-				}
 			}
-			if index == nil {
+		case "pull":
+			if index == nil || command.Epoch != epoch || command.Epoch != latestEpoch.Load() {
 				continue
 			}
-			end := video >= len(index.video.samples) && (index.audio == nil || audio >= len(index.audio.samples))
-			if write(map[string]any{"type": "batch", "epoch": epoch, "end": end, "bytes": bytes}) != nil {
+			if command.Count < 1 || command.Count > archiveBatchPackets {
+				return
+			}
+			if sendBatch(command.Count) != nil {
 				return
 			}
 		default:

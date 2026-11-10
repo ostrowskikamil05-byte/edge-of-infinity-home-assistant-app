@@ -62,6 +62,14 @@ frame steps, pause/download bounds, same-socket file transitions, original-file
 hashes and native MP4 fallback. `nvr_dvr_fallback.cjs` covers unsupported profiles.
 Archive playback must leave the core's physical camera-source list empty.
 
+`nvr_dvr_latency.cjs` uses `network_latency_proxy.py`, a bounded loopback TCP
+proxy with 100 ms delay each way. It compares legacy 16-packet explicit pulls
+with negotiated initial delivery and a two-batch window, using the same decoder
+and original samples. It also checks rapid seek replacement and queue bounds.
+Run in WebKit and Chromium against the multi-camera 24 s long-GOP fixture.
+`brand_assets.cjs` checks real transparent PNG delivery, conditional caching and
+the branded layout on desktop, tablet and phone widths.
+
 `nvr_phone_native.cjs`, `nvr_aac_resume.cjs`, `nvr_seek_direct.cjs` and
 `nvr_ready_playback.cjs` cover the native MP4 compatibility path. The 12000-file
 archive scenario uses `nvr_archive_start.cjs`, `nvr_gallery_cache.cjs` and

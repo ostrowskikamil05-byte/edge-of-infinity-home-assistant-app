@@ -50,7 +50,7 @@ def native_module():
     modules['homeassistant.helpers.entity_platform'].AddEntitiesCallback = object
     modules['homeassistant.helpers.update_coordinator'].CoordinatorEntity = CoordinatorEntity
     modules['edge_native_test.const'].DOMAIN = 'edge'
-    modules['edge_native_test.const'].CARD_VERSION = '0.14.1'
+    modules['edge_native_test.const'].CARD_VERSION = '0.14.2'
     modules['edge_native_test.coordinator'].EdgeCoordinator = object
     modules['edge_native_test.client'] = load_client_module()
     with patch.dict(sys.modules, modules):
@@ -152,7 +152,7 @@ class CardRegistrationTests(unittest.IsolatedAsyncioTestCase):
         modules['homeassistant.core'].HomeAssistant = object
         register_js = modules['homeassistant.components.frontend'].add_extra_js_url = Mock()
         modules['edge_card_test.const'].DOMAIN = 'edge'
-        modules['edge_card_test.const'].CARD_VERSION = '0.14.1'
+        modules['edge_card_test.const'].CARD_VERSION = '0.14.2'
         with patch.dict(sys.modules, modules):
             spec = importlib.util.spec_from_file_location('edge_card_test.frontend', CAMERA_PATH.with_name('frontend.py'))
             module = importlib.util.module_from_spec(spec)
@@ -165,14 +165,17 @@ class CardRegistrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(resource.url_path, '/edge/edge-live-card.js')
             self.assertTrue(Path(resource.path).is_file())
             self.assertFalse(resource.cache_headers)
-            register_js.assert_called_once_with(hass, '/edge/edge-live-card.js?v=0.14.1')
+            brand=next(row for row in hass.http.async_register_static_paths.call_args.args[0] if row.url_path=='/edge/edge-brand.png')
+            self.assertTrue(Path(brand.path).is_file())
+            self.assertTrue(brand.cache_headers)
+            register_js.assert_called_once_with(hass, '/edge/edge-live-card.js?v=0.14.2')
 
     async def test_exports_card_capability_without_secrets(self):
         p = load_panel_module()
         p.commit_panel_config({'cameras': [{'id': 'front', 'host': '192.0.2.1', 'password': 'secret'}]})
-        p.write_json(p.HOME_DIR / 'ha-entities.json', {'card_type': 'custom:edge-live-card', 'card_version': '0.14.1', 'entities': []})
+        p.write_json(p.HOME_DIR / 'ha-entities.json', {'card_type': 'custom:edge-live-card', 'card_version': '0.14.2', 'entities': []})
         payload = p.home_assistant_dashboard_payload()
         self.assertTrue(payload['card_ready'])
-        self.assertEqual(payload['card_version'], '0.14.1')
+        self.assertEqual(payload['card_version'], '0.14.2')
         self.assertEqual(payload['card_resource'], '/edge/edge-live-card.js')
         self.assertNotIn('secret', json.dumps(payload))

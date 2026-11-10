@@ -63,7 +63,9 @@ export class EdgeRTCClient {
     if(sourceGap<=0||sourceGap>1000||arrivalGap>5000)return;
     const excess=Math.max(0,arrivalGap-sourceGap);
     this.networkJitterMS=(this.networkJitterMS||0)*.9+Math.abs(arrivalGap-sourceGap)*.1;
-    if(excess>80)this.setNetworkBuffer(Math.ceil((excess+40)/20)*20,'delivery_gap');
+    // Leave headroom in fewer steps: chasing each 20 ms fluctuation causes
+    // repeated tiny refills on cellular links even though the trend is stable.
+    if(excess>80)this.setNetworkBuffer(Math.ceil((excess+40)/80)*80,'delivery_gap');
   }
   setNetworkBuffer(milliseconds,reason){
     if(this.closed||this.options.audioPlaybackMode==='archive')return;
@@ -227,7 +229,7 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   audioModule(){
-    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.14.1',import.meta.url).href);
+    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.14.2',import.meta.url).href);
   }
   startAudioPlayback(){
     if(this.audioPlaybackPromise||this.closed||this.audioDisabled)return;

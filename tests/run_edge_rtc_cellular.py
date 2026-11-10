@@ -31,6 +31,9 @@ for codec, browser in (('h264', 'chromium'), ('h265', 'webkit')):
                         time.sleep(.1)
                 subprocess.run(['node', 'tests/browser/edge_rtc_cellular.cjs'], cwd=root, env=env,
                                check=True, timeout=90)
+                if browser == 'chromium':
+                    subprocess.run(['node', 'tests/browser/edge_rtc_native.cjs'], cwd=root, env=env,
+                                   check=True, timeout=120)
             except BaseException:
                 print(path.read_text()[-4000:])
                 raise

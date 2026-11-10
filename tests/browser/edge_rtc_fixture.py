@@ -85,9 +85,9 @@ async def main():
                     return web.Response(text='<html><body style="margin:8px;background:#0d151e;--primary-text-color:#edf5f7;--card-background-color:#111d28"></body></html>',content_type='text/html')
                 async def asset(request):
                     name=request.match_info['name']
-                    if name not in ['edge-live-card.js','edge-rtc-client.js','edge-pcm-worklet.js','edge-device-diagnostics.js']:
+                    if name not in ['edge-live-card.js','edge-rtc-client.js','edge-pcm-worklet.js','edge-device-diagnostics.js','edge-brand.png']:
                         raise web.HTTPNotFound()
-                    return web.Response(body=(ASSETS/name).read_bytes(),content_type='text/javascript')
+                    return web.Response(body=(ASSETS/name).read_bytes(),content_type='image/png' if name.endswith('.png') else 'text/javascript')
                 sys.path.insert(0, str(ROOT/'tests'))
                 from test_edge_panel_config import load_panel_module
                 os.environ['EDGE_CORE_ENGINE']='edge_rtc'
