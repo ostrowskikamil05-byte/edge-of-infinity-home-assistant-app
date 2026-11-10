@@ -21,7 +21,7 @@ class ConfigPersistenceTests(unittest.TestCase):
     def test_settings_and_cameras_survive_stale_files_and_reload(self):
         p = self.panel
         new = {**self.config, 'storage': {**self.config['storage'], 'retention_days': 21},
-               'live': {**self.config['live'], 'tile_fps': 8},
+               'server': {**self.config['server'], 'public_url': 'https://edge.example.test'},
                'nvr': {**self.config['nvr'], 'retention_days': 21}}
         new['cameras'] = [{**self.config['cameras'][0], 'name': 'New name', 'record_stream': 'sub'}]
         saved = p.persist_config_payload(new)[-1]
@@ -30,7 +30,7 @@ class ConfigPersistenceTests(unittest.TestCase):
         loaded = p.load_config()
         self.assertEqual(loaded, saved)
         self.assertEqual(loaded['storage']['retention_days'], 21)
-        self.assertEqual(loaded['live']['tile_fps'], 8)
+        self.assertEqual(loaded['server']['public_url'], 'https://edge.example.test')
         self.assertEqual(loaded['cameras'][0]['record_stream'], 'sub')
         self.assertEqual(p.read_json(p.PANEL_CONFIG_PATH, {}), saved)
 
@@ -54,24 +54,23 @@ class ConfigPersistenceTests(unittest.TestCase):
             for _ in range(20):
                 self.assertIn('cameras', p.load_config())
         def save_many():
-            for fps in range(1, 10):
-                p.persist_config_payload({**self.config, 'live': {**self.config['live'], 'tile_fps': fps}})
+            for retention in range(15, 24):
+                p.persist_config_payload({**self.config, 'storage': {**self.config['storage'], 'retention_days': retention}})
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(read_many) for _ in range(4)] + [executor.submit(save_many)]
             for future in futures:
                 future.result(timeout=15)
         expected = p.read_json(p.CONFIG_PATH, {})
-        self.assertEqual(expected['live']['tile_fps'], 9)
+        self.assertEqual(expected['storage']['retention_days'], 23)
         self.assertEqual(p.read_json(p.PANEL_CONFIG_PATH, {}), expected)
         self.assertEqual(p.read_json(p.ADDON_CONFIG_PATH, {}), expected)
         self.assertFalse(list(p.CONFIG_PATH.parent.glob('*.tmp')))
 
-    def test_optional_live_settings_can_be_cleared(self):
+    def test_old_live_transport_options_are_removed_on_save(self):
         p = self.panel
-        with patch.object(p, 'MEDIAMTX_WEBRTC_TURN_URL', 'turn:old.example.com'):
-            saved = p.persist_config_payload({**self.config, 'live': {**self.config['live'], 'mobile_webrtc_turn_url': ''}})[-1]
-            self.assertEqual(saved['live']['mobile_webrtc_turn_url'], '')
-            self.assertEqual(p.load_config()['live']['mobile_webrtc_turn_url'], '')
+        saved = p.persist_config_payload({**self.config, 'live': {'engine': 'mediamtx', 'mobile_webrtc_turn_url': 'turn:old.example.test'}})[-1]
+        self.assertEqual(saved['live'], {'engine': 'edge_rtc'})
+        self.assertEqual(p.load_config()['live'], saved['live'])
 
 
 class FullDayTests(unittest.TestCase):

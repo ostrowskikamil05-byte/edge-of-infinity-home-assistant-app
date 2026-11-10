@@ -2,14 +2,14 @@ const {chromium}=require('playwright');
 const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');
 const info=JSON.parse(fs.readFileSync(process.env.EDGE_NVR_FIXTURE_INFO || '/tmp/edge-nvr-browser-fixture.json','utf8'));
 const map=path.resolve(info.recordings_dir,'..','..','ha-entities.json');
-const payload={card_version:'0.13.3',card_type:'custom:edge-live-card',entities:[{camera_id:'front',entity_id:'camera.user_renamed_front',name:'Front',local:true}]};
+const payload={card_version:'0.14.0',card_type:'custom:edge-live-card',entities:[{camera_id:'front',entity_id:'camera.user_renamed_front',name:'Front',local:true}]};
 fs.writeFileSync(map,JSON.stringify(payload));
 (async()=>{const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,args:['--no-sandbox']});
 try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],['phone',390,844],['small-phone',320,740]]){
  const context=await browser.newContext({viewport:{width,height},isMobile:width<=820,hasTouch:width<=820});
  await context.grantPermissions(['clipboard-read','clipboard-write']);
  const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.goto(process.env.EDGE_NVR_TEST_URL || 'http://127.0.0.1:18088');await page.locator('[data-camera-form]').waitFor({state:'attached'});
+ await page.goto(process.env.EDGE_NVR_TEST_URL || 'http://127.0.0.1:18088');await page.locator('[data-camera-form]').first().waitFor({state:'attached'});
  const nav=async target=>{if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator(`nav [data-page-target="${target}"]`).click();};
  assert.equal(await page.locator('#camera-overview .overview-stat').count(),3);
  await nav('camera-settings');
@@ -20,7 +20,7 @@ try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],
  if(process.env.EDGE_NVR_SCREENSHOT_DIR) await page.screenshot({path:`${process.env.EDGE_NVR_SCREENSHOT_DIR}/ui-${name}-cameras.png`,fullPage:true});
  await nav('edge-settings');
  assert(await page.locator('[name="nvr-retention-days"]').isVisible());
- assert(!(await page.locator('[name="live-mobile-turn-password"]').isVisible()));
+ assert.equal(await page.locator('[name="live-mobile-turn-password"]').count(),0);
  await page.locator('[name="nvr-retention-days"]').fill('21');
  await page.locator('#save-edge-settings').click();await page.waitForFunction(()=>document.getElementById('edge-save-state').textContent.startsWith('Saved and verified.'));
  let saved=await page.evaluate(()=>fetch('api/config').then(r=>r.json()));
@@ -31,7 +31,7 @@ try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],
  await nav('ha-dashboard');
  await page.waitForFunction(()=>document.getElementById('ha-camera-entity').value==='camera.user_renamed_front');
  const yaml=await page.locator('#ha-card-yaml').inputValue();
- assert(yaml.includes('type: custom:edge-live-card'));assert(yaml.includes('microphone: true'));assert((await page.locator('#ha-card-resource-status').textContent()).includes('0.13.3'));assert(yaml.includes('entity: camera.user_renamed_front'));assert(!yaml.includes('rtsp://')&&!yaml.includes('secret')&&!yaml.includes('192.0.2'));
+ assert(yaml.includes('type: custom:edge-live-card'));assert(yaml.includes('microphone: true'));assert((await page.locator('#ha-card-resource-status').textContent()).includes('0.14.0'));assert(yaml.includes('entity: camera.user_renamed_front'));assert(!yaml.includes('rtsp://')&&!yaml.includes('secret')&&!yaml.includes('192.0.2'));
  assert.equal(JSON.parse(yaml.split("\n").find(line=>line.startsWith("name: ")).slice(6)), 'Front door: "East"');
  await page.locator('#ha-copy-card').click();await page.waitForFunction(()=>document.getElementById('ha-copy-status').textContent.startsWith('Copied.'));
  assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),yaml);
@@ -56,7 +56,8 @@ try{for(const [name,width,height] of [['desktop',1440,1000],['tablet',820,1180],
  await nav('ha-dashboard');await page.locator('#ha-refresh-entities').click();await page.waitForFunction(()=>document.getElementById('ha-camera-select').options.length===4);
  await page.locator('#ha-card-type').selectOption('edge');
  for(const count of [2,3,4]){await page.locator('#ha-camera-count').selectOption(String(count));const yaml=await page.locator('#ha-card-yaml').inputValue();assert.equal(yaml.split('  - entity: ').length-1,count);assert(yaml.includes('quality: nvr'));assert(!(await page.locator('#ha-copy-card').isDisabled()));}
- await page.locator('#ha-card-quality').selectOption('main');assert.equal((await page.locator('#ha-card-yaml').inputValue()).split('quality: main').length-1,4);
+ assert(await page.locator('#ha-card-quality').isDisabled(),'native card must share the recording profile');
+ assert.equal(await page.locator('#ha-card-quality').inputValue(),'nvr');assert.equal((await page.locator('#ha-card-yaml').inputValue()).split('quality: nvr').length-1,4);
  await page.locator('#ha-card-type').selectOption('native');assert((await page.locator('#ha-card-yaml').inputValue()).startsWith('type: grid'));assert.equal((await page.locator('#ha-card-yaml').inputValue()).split('type: picture-entity').length-1,4);
  await page.locator('[data-ha-extra-slot="1"] select').selectOption('front');assert(await page.locator('#ha-copy-card').isDisabled(),'duplicate cameras allowed');
  await page.evaluate(async original=>{const response=await fetch('api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(original)});if(!response.ok)throw new Error('Fixture restore failed');},original);fs.writeFileSync(map,JSON.stringify(payload));

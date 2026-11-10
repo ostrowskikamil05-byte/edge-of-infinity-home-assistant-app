@@ -89,12 +89,15 @@ class CameraSupportTests(unittest.TestCase):
         stop.assert_called_once_with(old['cameras'][0], 0)
         self.assertEqual(stopped, [p.recording_key(old['cameras'][0], 0)])
 
-    def test_janus_reload_is_only_requested_on_config_change(self):
+    def test_native_sync_publishes_the_current_authoritative_camera(self):
         p = self.p
-        with patch.object(p, 'write_mediamtx_runtime_config', return_value={}), patch.object(p, 'write_janus_streaming_runtime_config', side_effect=[{'written': True}, {'written': False}]), patch.object(p, 'reload_managed_janus', return_value={'applied': True}) as reload:
-            p.sync_runtime_engine_config({}, 'save')
-            p.sync_runtime_engine_config({}, 'save')
-        reload.assert_called_once()
+        current = p.normalize_config({'cameras': [camera('front', '192.0.2.10', 'sub')]})
+        stale = p.normalize_config({'cameras': [camera('front', '192.0.2.20', 'main')]})
+        p.commit_panel_config(current)
+        p.sync_runtime_engine_config(stale, 'save')
+        runtime = json.loads(p.EDGE_RTC_CONFIG_PATH.read_text())
+        self.assertEqual(runtime['sources'][0]['url'], current['cameras'][0]['rtsp_main'])
+        self.assertEqual(len(runtime['sources']), 1)
 
     def test_pending_status_uses_new_host_without_plaintext_password(self):
         p = self.p
@@ -167,7 +170,9 @@ class SupervisorOptionsTests(unittest.TestCase):
 
     def test_projection_keeps_other_options_and_updates_both_views(self):
         options = self.p.addon_options_from_config(self.config, {'janus_enabled': True, 'log_level': 'info'})
-        self.assertTrue(options['janus_enabled'])
+        self.assertNotIn('janus_enabled', options)
+        self.assertEqual(options['log_level'], 'info')
+        self.assertEqual(options['edge_rtc_rtsp_port'], 8556)
         self.assertEqual(options['cameras'][0]['vendor'], 'reolink')
         self.assertEqual(options['hikvision_1_host'], '192.0.2.8')
         self.assertEqual(options['hikvision_1_password'], 'secret')

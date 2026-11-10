@@ -72,7 +72,7 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 		ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		return ws.WriteJSON(value)
 	}
-	if write(map[string]any{"type": "archive_ready", "protocol": "edgertc/archive/1", "batch_packets": 8, "batch_bytes": 2 * 1024 * 1024}) != nil {
+	if write(map[string]any{"type": "archive_ready", "protocol": "edgertc/archive/1", "batch_packets": 16, "batch_bytes": 2 * 1024 * 1024}) != nil {
 		return
 	}
 	var file *os.File

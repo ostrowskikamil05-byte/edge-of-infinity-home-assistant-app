@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.13.3"
+version: "0.14.0"
 slug: edge_of_infinity
 description: Local live and NVR core for Hikvision, Uniview, Reolink and ONVIF/RTSP cameras
 url: https://github.com/edge-of-infinity/home-assistant-app
@@ -25,24 +25,10 @@ webui: http://[HOST]:[PORT:8088]/
 ports:
   8088/tcp: 8088
   8556/tcp: null
-  8888/tcp: 8888
-  8889/tcp: 8889
-  8189/tcp: 8189
-  8189/udp: 8189
-  8192/tcp: 8192
-  8193/tcp: 8193
-  8890/udp: null
   9997/tcp: null
 ports_description:
   8088/tcp: Edge Core API and web interface
   8556/tcp: Shared core RTSP feed, host exposure disabled by default
-  8888/tcp: MediaMTX low-latency HLS
-  8889/tcp: MediaMTX WebRTC WHEP/WHIP
-  8189/tcp: MediaMTX WebRTC ICE TCP fallback
-  8189/udp: MediaMTX WebRTC ICE UDP
-  8192/tcp: Janus HTTP API (changed from 8188 to avoid conflict)
-  8193/tcp: Janus WebSocket API (changed from 8190 to avoid conflict)
-  8890/udp: MediaMTX SRT relay disabled by default
   9997/tcp: Private streaming core API, host exposure disabled by default
 map:
   - type: homeassistant_config
@@ -62,8 +48,9 @@ options:
   retention_days: 14
   install_custom_component: true
   sync_addon_options: false
+  edge_rtc_rtsp_port: 8556
+  edge_rtc_api_port: 9997
   cameras: []
-  core_engine: mediamtx_janus
   camera_events_enabled: false
   local_detection_enabled: false
   detection_fps: 1
@@ -81,30 +68,6 @@ options:
   detection_notify_service: ""
   detection_notify_cooldown: 30
   detection_notify_path: ""
-  mediamtx_enabled: true
-  mediamtx_rtsp_port: 8556
-  mediamtx_hls_port: 8888
-  mediamtx_hls_always_remux: false
-  mediamtx_webrtc_port: 8889
-  mediamtx_webrtc_udp_port: 8189
-  mediamtx_remote_access_mode: local_only
-  mediamtx_webrtc_public_url: ""
-  mediamtx_webrtc_public_hosts: homeassistant.local,192.168.33.17
-  mediamtx_webrtc_stun_url: stun:stun.l.google.com:19302
-  mediamtx_webrtc_turn_url: ""
-  mediamtx_webrtc_turn_username: ""
-  mediamtx_webrtc_turn_password: ""
-  mediamtx_webrtc_ice_transport: auto
-  mediamtx_webrtc_tcp_only: false
-  mediamtx_always_on_live: true
-  mediamtx_always_on_stream_scope: tile
-  mediamtx_srt_port: 8890
-  mediamtx_api_port: 9997
-  mediamtx_record: false
-  janus_enabled: true
-  janus_http_port: 8192
-  janus_ws_port: 8193
-  janus_bufferkf_ms: 2000
   hikvision_1_enabled: false
   hikvision_1_name: Hikvision 1
   hikvision_1_host: ""
@@ -178,7 +141,8 @@ schema:
   retention_days: int(1,365)
   install_custom_component: bool
   sync_addon_options: bool
-  core_engine: list(edge_rtc|mediamtx_janus|mediamtx)
+  edge_rtc_rtsp_port: port
+  edge_rtc_api_port: port
   camera_events_enabled: bool?
   local_detection_enabled: bool?
   detection_fps: float(0.2,3)?
@@ -196,30 +160,6 @@ schema:
   detection_notify_service: str?
   detection_notify_cooldown: int(5,3600)?
   detection_notify_path: str?
-  mediamtx_enabled: bool
-  mediamtx_rtsp_port: port
-  mediamtx_hls_port: port
-  mediamtx_hls_always_remux: bool
-  mediamtx_webrtc_port: port
-  mediamtx_webrtc_udp_port: port
-  mediamtx_remote_access_mode: list(local_only|direct_public|vps_relay|turn_relay)
-  mediamtx_webrtc_public_url: str?
-  mediamtx_webrtc_public_hosts: str?
-  mediamtx_webrtc_stun_url: str?
-  mediamtx_webrtc_turn_url: str?
-  mediamtx_webrtc_turn_username: str?
-  mediamtx_webrtc_turn_password: password?
-  mediamtx_webrtc_ice_transport: list(auto|udp|tcp)
-  mediamtx_webrtc_tcp_only: bool
-  mediamtx_always_on_live: bool
-  mediamtx_always_on_stream_scope: list(tile|live|tile_live|all)
-  mediamtx_srt_port: port
-  mediamtx_api_port: port
-  mediamtx_record: bool
-  janus_enabled: bool
-  janus_http_port: port
-  janus_ws_port: port
-  janus_bufferkf_ms: int(0,10000)
   hikvision_1_enabled: bool
   hikvision_1_name: str?
   hikvision_1_host: str?

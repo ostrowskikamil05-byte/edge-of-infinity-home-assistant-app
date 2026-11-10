@@ -5,6 +5,15 @@ on:
   pull_request:
 
 jobs:
+  container-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native-only app image
+        run: docker build --tag edge-native-smoke edge-of-infinity
+      - name: Test real startup, migration and installed engines
+        run: bash tests/container_smoke.sh edge-native-smoke
+
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -43,7 +52,7 @@ jobs:
         run: |
           npm install --prefix "${RUNNER_TEMP}/edge-browser-tests" --no-save playwright@1.62.1
           "${RUNNER_TEMP}/edge-browser-tests/node_modules/.bin/playwright" install --with-deps chromium webkit
-      - name: Test native and legacy remote routing and browser requirements
+      - name: Test native remote routing and browser requirements
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
           node tests/browser/remote_live.cjs
@@ -93,7 +102,7 @@ jobs:
       - name: Test native phone recording decoders and camera switching
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
-          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_NVR_TEST_PORT=18091 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/phone-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/phone-ui.log" 2>&1 &
+          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_NVR_TEST_PORT=18091 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/phone-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/phone-ui.log" 2>&1 &
           edge_phone_fixture_pid=$!
           trap 'kill "${edge_phone_fixture_pid}" || true' EXIT
           python - <<'PY'
@@ -122,7 +131,7 @@ jobs:
       - name: Test latest seek and direct transitions with long-GOP recordings
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
-          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1 EDGE_NVR_TEST_PORT=18093 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/seek-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/seek-ui.log" 2>&1 &
+          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1 EDGE_NVR_TEST_PORT=18093 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/seek-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/seek-ui.log" 2>&1 &
           edge_seek_fixture_pid=$!
           trap 'kill "${edge_seek_fixture_pid}" || true' EXIT
           python - <<'PY'
@@ -144,7 +153,7 @@ jobs:
       - name: Test composed 4K WebKit recording picture
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
-          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1 EDGE_TEST_RECORDING_4K=1 EDGE_NVR_TEST_PORT=18094 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/4k-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/4k-ui.log" 2>&1 &
+          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1 EDGE_TEST_RECORDING_4K=1 EDGE_NVR_TEST_PORT=18094 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/4k-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/4k-ui.log" 2>&1 &
           edge_4k_fixture_pid=$!
           trap 'kill "${edge_4k_fixture_pid}" || true' EXIT
           python - <<'PY'
@@ -163,7 +172,7 @@ jobs:
       - name: Test cold phone archive with twelve thousand saved files
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
-          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_ARCHIVE_FILES=12000 EDGE_CORE_ENGINE=edge_rtc EDGE_NVR_TEST_PORT=18092 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/archive-ui.log" 2>&1 &
+          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_ARCHIVE_FILES=12000 EDGE_NVR_TEST_PORT=18092 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/archive-ui.log" 2>&1 &
           edge_archive_fixture_pid=$!
           trap 'kill "${edge_archive_fixture_pid}" || true' EXIT
           python - <<'PY'
@@ -192,7 +201,7 @@ jobs:
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
           go -C edge-of-infinity/edge-rtc build -o "${RUNNER_TEMP}/edge-rtc-archive" .
-          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1 EDGE_TEST_ARCHIVE_RTC_BINARY="${RUNNER_TEMP}/edge-rtc-archive" EDGE_NVR_TEST_PORT=18095 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-rtc-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/archive-rtc.log" 2>&1 &
+          EDGE_TEST_DETECTION_FIXTURE=1 EDGE_TEST_MULTI_CAMERA=1 EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_LONG_GOP=1 EDGE_TEST_ARCHIVE_RTC_BINARY="${RUNNER_TEMP}/edge-rtc-archive" EDGE_NVR_TEST_PORT=18095 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-rtc-fixture.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/archive-rtc.log" 2>&1 &
           edge_archive_pid=$!
           trap 'kill "${edge_archive_pid}" || true' EXIT
           python - <<'PY'
@@ -215,7 +224,7 @@ jobs:
       - name: Test original 4K frames through EdgeRTC DVR
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
-          EDGE_TEST_MULTI_CAMERA=1 EDGE_CORE_ENGINE=edge_rtc EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_4K=1 EDGE_TEST_ARCHIVE_RTC_BINARY="${RUNNER_TEMP}/edge-rtc-archive" EDGE_NVR_TEST_PORT=18096 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-rtc-4k.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/archive-rtc-4k.log" 2>&1 &
+          EDGE_TEST_MULTI_CAMERA=1 EDGE_TEST_RECORDING_DURATION=24 EDGE_TEST_RECORDING_4K=1 EDGE_TEST_ARCHIVE_RTC_BINARY="${RUNNER_TEMP}/edge-rtc-archive" EDGE_NVR_TEST_PORT=18096 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/archive-rtc-4k.json" python tests/browser/fixture_server.py > "${RUNNER_TEMP}/archive-rtc-4k.log" 2>&1 &
           edge_archive_4k_pid=$!
           trap 'kill "${edge_archive_4k_pid}" || true' EXIT
           python - <<'PY'

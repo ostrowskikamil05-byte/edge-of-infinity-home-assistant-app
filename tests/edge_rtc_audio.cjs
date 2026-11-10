@@ -33,8 +33,32 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
  assert(p.overruns>0&&p.droppedFrames>0);assert((p.write-p.read)/8000<=.24);
  for(let i=0;i<130;i++)assert(quantum(p)<.16);
  p.port.onmessage({data:{type:'clear'}});assert.equal(p.write,0);assert.equal(p.read,0);assert.equal(quantum(p),0);
+ // DVR video is allowed to queue 400 ms ahead. Preserve those AAC samples
+ // rather than applying Live's 240 ms latest-frame policy to saved footage.
+ for(const rate of[24000,48000,96000]){
+  const archive=new Processor({processorOptions:{mode:'archive'}});let delivered=0,nextBatch=0;
+  for(let tick=0;tick<Math.ceil(2.1*48000/128);tick++){
+   const seconds=tick*128/48000;
+   if(seconds>=nextBatch){const until=Math.floor((seconds+.4)*rate/(rate*.02))*(rate*.02);while(delivered<until){packet(archive,rate,delivered,rate*.02,true);delivered+=rate*.02;}nextBatch+=.16;}
+   quantum(archive);
+  }
+  assert.equal(archive.overruns,0,'DVR ahead-of-video audio was discarded');assert.equal(archive.underruns,0,'DVR burst delivery interrupted PCM');assert.equal(archive.droppedFrames,0);assert((archive.write-archive.read)/rate<=.6);assert(archive.outputFrames>90000);
+  archive.port.onmessage({data:{type:'clear'}});assert.equal(archive.write,0);assert.equal(quantum(archive),0);
+ }
+ const dvrCode=fs.readFileSync(path.join(__dirname,'../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-dvr-client.js'),'utf8').replace(/from '\.\/client\.js\?[^']+'/,"from 'data:text/javascript;base64,"+Buffer.from(code).toString('base64')+"'");
+ const {EdgeDVRClient}=await import('data:text/javascript;base64,'+Buffer.from(dvrCode).toString('base64'));
+ const archiveClient=new EdgeDVRClient({canvas:{}}),decoded=[];archiveClient.picture=true;archiveClient.paused=false;archiveClient.muted=false;archiveClient.epoch=1;archiveClient.position=1;archiveClient.audioDecoder=new EventTarget();archiveClient.audioDecoder.decodeQueueSize=0;
+ archiveClient.decodeAudio=(payload,timestamp)=>{assert(archiveClient.audioDecoder.decodeQueueSize<8);decoded.push(timestamp);archiveClient.audioDecoder.decodeQueueSize++;setTimeout(()=>{archiveClient.audioDecoder.decodeQueueSize--;archiveClient.audioDecoder.dispatchEvent(new Event('dequeue'));},2);};
+ archiveClient.archiveAudio=Array.from({length:40},(_,i)=>({payload:new Uint8Array([i]),timestamp:i*21333}));await archiveClient.drainArchiveAudio();assert.deepEqual(decoded,Array.from({length:40},(_,i)=>i*21333));assert.equal(archiveClient.archiveAudio.length,0);
+ // Encoded audio waits for picture time, and a replaced seek cancels that
+ // wait instead of decoding the old epoch into the new sound queue.
+ archiveClient.position=0;archiveClient.archiveAudio=[{payload:new Uint8Array([1]),timestamp:1000000}];
+ const future=archiveClient.drainArchiveAudio();await new Promise(resolve=>setTimeout(resolve,25));assert.equal(decoded.length,40);
+ archiveClient.position=.8;await future;assert.equal(decoded.at(-1),1000000);
+ archiveClient.position=0;archiveClient.archiveAudio=[{payload:new Uint8Array([2]),timestamp:2000000}];
+ const canceled=archiveClient.drainArchiveAudio();archiveClient.epoch++;archiveClient.archiveAudio=[];archiveClient.audioDrainEpoch=null;await canceled;assert.equal(decoded.length,41);
  // Closing the panel during module fetch is intentional cancellation. A
  // genuine failure while the player is open must still be reported.
  for(const closed of[true,false]){const c=new EdgeRTCClient({canvas:{}}),notes=[];let reject;c.diagnostics={note:event=>notes.push(event)};c.audioModule=()=>new Promise((resolve,fail)=>{reject=fail;});c.startAudioPlayback();await Promise.resolve();c.closed=closed;reject(Error('module download failed'));await c.audioPlaybackPromise;assert.equal(notes.includes('rtc_audio_error'),!closed);assert.equal(Boolean(c.audioDisabled),!closed);}
- console.log('PASS: PCMA/PCMU match FFmpeg; continuous mono/stereo 8/16/48 kHz PCM, bounded jitter, no boundary peaks, backlog/clear cleanup');
+ console.log('PASS: G711 matches FFmpeg; continuous Live PCM; DVR 400 ms AAC bursts at 0.5/1/2x without sample loss, bounded queues and decoder backpressure');
 })().catch(error=>{console.error(error);process.exit(1);});

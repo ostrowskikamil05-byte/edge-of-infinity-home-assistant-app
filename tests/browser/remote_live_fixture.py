@@ -8,8 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from test_edge_panel_config import camera, load_panel_module
 
 fixtures = {}
-for mode, engine in [('native', 'edge_rtc'), ('legacy', 'mediamtx_janus')]:
-    os.environ['EDGE_CORE_ENGINE'] = engine
+for mode, engine in [('native', 'edge_rtc')]:
     panel = load_panel_module()
     document=json.dumps(panel.EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',panel.APP_VERSION)).replace('<','\\u003c')
     panel.INDEX_HTML=panel.INDEX_HTML.replace(document,json.dumps('<p>Inline player routing fixture</p>').replace('<','\\u003c'))

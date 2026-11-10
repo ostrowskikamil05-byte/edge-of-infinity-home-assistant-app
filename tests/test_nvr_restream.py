@@ -14,7 +14,6 @@ from test_ha_live_camera import native_module
 class RestreamMetadataTests(unittest.TestCase):
     def test_discovers_internal_addon_dns_and_exports_only_proxy_paths(self):
         p = load_panel_module()
-        p.MEDIAMTX_ENABLED = True
         config = p.normalize_config({'cameras': [camera('front door', '192.0.2.9', 'sub')]})
         with patch.dict(p.os.environ, {'SUPERVISOR_TOKEN': 'test-token', 'EDGE_HA_RTSP_HOST': ''}), patch.object(p, 'supervisor_self_request', return_value={'hostname': 'abcd-edge-of-infinity'}) as request:
             payload = p.home_assistant_restream_payload(config)
@@ -22,11 +21,11 @@ class RestreamMetadataTests(unittest.TestCase):
         request.assert_called_once_with('/addons/self/info')
         paths = payload['cameras'][0]['streams']
         self.assertEqual(paths['nvr'], paths['main'])
-        self.assertEqual(paths['sub'], 'rtsp://abcd-edge-of-infinity:8556/front_door_sub')
+        self.assertNotIn('sub', paths)
         for private in ('secret', 'admin', '192.0.2.9', 'test-token'):
             self.assertNotIn(private, json.dumps(payload))
         config['cameras'][0]['record_stream'] = 'sub'
-        self.assertEqual(p.home_assistant_restream_payload(config)['cameras'][0]['streams']['nvr'], paths['sub'])
+        self.assertEqual(p.home_assistant_restream_payload(config)['cameras'][0]['streams']['nvr'], 'rtsp://abcd-edge-of-infinity:8556/front_door_sub')
 
     def test_disabled_or_missing_profiles_do_not_advertise_direct_camera(self):
         p = load_panel_module()
@@ -34,20 +33,21 @@ class RestreamMetadataTests(unittest.TestCase):
         config = {'cameras': [{'id': 'front', 'enabled': True, 'record_stream': 'sub', 'rtsp_main': 'rtsp://user:secret@192.0.2.1/main'}]}
         self.assertEqual(p.home_assistant_restream_payload(config)['cameras'][0]['streams']['nvr'], 'rtsp://edge-addon:8556/front_main')
         self.assertNotIn('sub', p.home_assistant_restream_payload(config)['cameras'][0]['streams'])
-        p.MEDIAMTX_ENABLED = False
-        self.assertFalse(p.home_assistant_restream_payload(config)['available'])
+        config['cameras'][0]['enabled'] = False
+        self.assertTrue(p.home_assistant_restream_payload(config)['available'])
         self.assertEqual(p.home_assistant_restream_payload(config)['cameras'][0]['streams'], {'nvr': ''})
 
-    def test_status_probes_share_the_recording_proxy(self):
+    def test_status_uses_existing_registry_without_extra_camera_probes(self):
         p = load_panel_module()
         config = p.normalize_config({'cameras': [camera('front', '192.0.2.9', 'sub')]})
-        config['cameras'][0]['live_stream'] = 'sub'
         p.commit_panel_config(config)
-        p.MEDIAMTX_ENABLED = True
-        with patch.object(p, 'probe_rtsp_stream', return_value={'video': {'codec_name': 'h264'}}) as probe:
-            p.refresh_status()
-        self.assertEqual([call.args[0] for call in probe.call_args_list], ['rtsp://127.0.0.1:8556/front_main', 'rtsp://127.0.0.1:8556/front_sub'])
-        self.assertEqual(p.recording_source_stream(config['cameras'][0], 0, 'main')[0], probe.call_args_list[0].args[0])
+        registry = {'api_reachable': True, 'sources': [{'camera_id': 'front', 'paths': ['front_main', 'front_sub'], 'ready': True, 'upstream_connections': 1, 'video': {'codec_name': 'h265', 'width': 3840, 'height': 2160, 'fps': 20}, 'audio': {'codec': 'mp4a.40.2', 'sampleRate': 48000, 'channels': 1}}]}
+        with patch.object(p, 'edge_rtc_status', return_value=registry), patch.object(p, 'probe_rtsp_stream') as probe:
+            result = p.refresh_status()
+        probe.assert_not_called()
+        self.assertEqual(result['cameras'][0]['status'], 'online')
+        self.assertEqual(result['cameras'][0]['audio_codec'], 'aac')
+        self.assertEqual(p.recording_source_stream(config['cameras'][0], 0, 'main'), ('rtsp://127.0.0.1:8556/front_main', 'edge_rtc_shared'))
 
 
 class RestreamClientTests(unittest.IsolatedAsyncioTestCase):

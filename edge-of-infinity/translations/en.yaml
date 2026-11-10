@@ -1,7 +1,10 @@
 configuration:
-  core_engine:
-    name: Streaming engine
-    description: EdgeRTC beta uses native H264 frames over WebSocket/WebCodecs, with one recording profile per camera. Requires HTTPS and a compatible browser. Restart the add-on and Home Assistant Core after changing engines.
+  edge_rtc_rtsp_port:
+    name: EdgeRTC shared RTSP port
+    description: Internal shared source for recording and integration. Restart the app after changing the port.
+  edge_rtc_api_port:
+    name: EdgeRTC private API port
+    description: Authenticated internal Live/DVR API. Restart the app after changing the port.
   log_level:
     name: Log level
     description: Controls how much Edge Core writes to the app logs.
@@ -20,9 +23,6 @@ configuration:
   install_custom_component:
     name: Install custom component
     description: Automatically install or update /homeassistant/custom_components/edge when the app starts.
-  mediamtx_webrtc_public_hosts:
-    name: WebRTC public hosts
-    description: Comma-separated hostnames or LAN IP addresses advertised by MediaMTX for WebRTC ICE.
   hikvision_1_enabled:
     name: Camera 1 enabled
     description: Enables the first Hikvision camera in Edge.
