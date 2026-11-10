@@ -34,25 +34,33 @@ const edgeClock = seconds => { const s = Math.max(0, Math.floor(seconds)); retur
 const edgeEscape = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const edgeDayKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 const edgeCameraIds = hass => Object.entries(hass?.states || {}).filter(([id, s]) => id.startsWith("camera.") && s.attributes?.edge_camera_id && (s.attributes.edge_stream_role || "nvr") === "nvr").map(([id]) => id);
+/* The card frame (background, blur, radius, border, shadow) is left to the active
+   Home Assistant theme. Inner controls are borderless tints of the theme's own text
+   and accent colors, so they follow light, dark and translucent themes alike. */
 const EDGE_SHARED_STYLE = `
-  :host{display:block;container-type:inline-size;--edge-accent:var(--primary-color,#65dfc0);--edge-line:var(--divider-color,#2c4051);--edge-muted:var(--secondary-text-color,#a8bccb);--edge-soft:var(--secondary-background-color,#192c3b);font-family:var(--paper-font-body1_-_font-family,system-ui,sans-serif)}
+  :host{display:block;container-type:inline-size;--edge-text:var(--primary-text-color,#edf5f7);--edge-muted:var(--secondary-text-color,#a8bccb);--edge-accent:var(--primary-color,#65dfc0);
+    --edge-fill:color-mix(in srgb,var(--edge-text) 8%,transparent);--edge-fill-strong:color-mix(in srgb,var(--edge-text) 15%,transparent);--edge-tint:color-mix(in srgb,var(--edge-accent) 22%,transparent);
+    --edge-radius:var(--ha-card-border-radius,12px);--edge-inner:min(calc(var(--edge-radius) * .7),14px);font-family:var(--paper-font-body1_-_font-family,system-ui,sans-serif)}
   *{box-sizing:border-box}
-  ha-card{display:block;overflow:hidden;background:var(--ha-card-background,var(--card-background-color,#111d28));color:var(--primary-text-color,#edf5f7);border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--edge-line))}
+  ha-card{display:block;overflow:hidden;color:var(--edge-text)}
+  ha-card:not(:defined){background:var(--ha-card-background,var(--card-background-color,#111d28));border-radius:var(--edge-radius)}
   [hidden]{display:none!important}
   .head{display:flex;align-items:center;gap:10px;padding:14px 16px 10px;flex-wrap:wrap}
   h2{font:600 17px/1.3 inherit;margin:0;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   button,select,input{font:inherit;color:inherit}
-  button{cursor:pointer;border:1px solid var(--edge-line);background:var(--edge-soft);border-radius:10px;min-height:40px;padding:0 12px;display:inline-flex;align-items:center;justify-content:center;gap:6px;-webkit-tap-highlight-color:transparent}
+  button{cursor:pointer;border:0;background:var(--edge-fill);border-radius:var(--edge-inner);min-height:40px;padding:0 12px;display:inline-flex;align-items:center;justify-content:center;gap:6px;-webkit-tap-highlight-color:transparent;transition:background .15s}
+  @media (hover:hover){button:hover:not(:disabled){background:var(--edge-fill-strong)}}
   button:focus-visible,select:focus-visible,input:focus-visible,.track:focus-visible{outline:2px solid var(--edge-accent);outline-offset:2px}
-  button:disabled{opacity:.45;cursor:default}
+  button:disabled{opacity:.4;cursor:default}
   button.icon{width:40px;padding:0;flex:0 0 auto}
   svg{width:20px;height:20px;flex:0 0 auto}
-  select,input[type=date]{min-height:40px;border:1px solid var(--edge-line);background:var(--edge-soft);border-radius:10px;padding:0 10px;min-width:0;color-scheme:light dark}
+  select,input[type=date]{min-height:40px;border:0;background:var(--edge-fill);border-radius:var(--edge-inner);padding:0 10px;min-width:0}
+  select option{background:var(--card-background-color,#1c2530);color:var(--primary-text-color,#edf5f7)}
   .chips{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding:0 16px 10px}.chips::-webkit-scrollbar{display:none}
   .chip{flex:0 0 auto;border-radius:999px;min-height:36px;padding:0 14px;font-size:13px;white-space:nowrap}
-  .chip[aria-pressed=true],.chip[aria-selected=true]{border-color:var(--edge-accent);background:color-mix(in srgb,var(--edge-accent) 18%,transparent);color:var(--edge-accent)}
+  .chip[aria-pressed=true],.chip[aria-selected=true]{background:var(--edge-tint);color:var(--edge-accent);font-weight:600}
   .status{margin:0;padding:0 16px 14px;font-size:13px;line-height:1.5;color:var(--edge-muted)}.status.error{color:var(--error-color,#f28b8b)}
-  .thumb{position:relative;display:block;aspect-ratio:16/9;background:#080e15;overflow:hidden;color:#6f8799}
+  .thumb{position:relative;display:block;aspect-ratio:16/9;background:var(--edge-fill);overflow:hidden;color:var(--edge-muted)}
   .thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .15s}.thumb.loaded img{opacity:1}
   .thumb>svg{position:absolute;inset:0;margin:auto;width:28px;height:28px}.thumb.loaded>svg{display:none}
 `;
@@ -122,34 +130,32 @@ class EdgeRecordingsCard extends EdgeDashCard {
     this.shadowRoot.innerHTML = `<style>${EDGE_SHARED_STYLE}
       .days{display:flex;gap:8px;overflow-x:auto;padding:0 16px 12px;scrollbar-width:thin;overscroll-behavior-inline:contain}
       .day{flex:0 0 auto;display:grid;grid-template-columns:64px auto;align-items:center;gap:10px;padding:6px 12px 6px 6px;text-align:left;min-height:48px}
-      .day .thumb{width:64px;border-radius:6px}.day b{display:block;font-size:13px;font-weight:600;white-space:nowrap}.day small{display:block;font-size:11px;color:var(--edge-muted);white-space:nowrap}
-      .day[aria-selected=true]{border-color:var(--edge-accent);background:color-mix(in srgb,var(--edge-accent) 14%,transparent)}
-      .player{background:#05090d;color:#fff}
-      .stage{position:relative;aspect-ratio:16/9;max-height:72vh;background:#000;overflow:hidden}
+      .day .thumb{width:64px;border-radius:calc(var(--edge-inner) * .6)}.day b{display:block;font-size:13px;font-weight:600;white-space:nowrap}.day small{display:block;font-size:11px;color:var(--edge-muted);white-space:nowrap}
+      .day[aria-selected=true]{background:var(--edge-tint)}.day[aria-selected=true] b{color:var(--edge-accent)}
+      .stage{position:relative;aspect-ratio:16/9;max-height:72vh;background:#000;color:#fff;overflow:hidden}
       .stage video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0;background:#000}.stage video.front{opacity:1;z-index:1}
       .poster{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;z-index:2}
-      .big{position:absolute;inset:0;margin:auto;z-index:3;width:68px;height:68px;border-radius:50%;border:0;background:rgba(0,0,0,.55);color:#fff;backdrop-filter:blur(6px)}.big svg{width:30px;height:30px}
+      .big,.big:hover:not(:disabled){position:absolute;inset:0;margin:auto;z-index:3;width:68px;height:68px;border-radius:50%;background:rgba(0,0,0,.5);color:#fff;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}.big svg{width:30px;height:30px}
       .note{position:absolute;left:10px;right:10px;bottom:10px;z-index:4;margin:0;padding:8px 10px;border-radius:8px;background:rgba(6,16,24,.86);font-size:13px;line-height:1.4}
       .live{position:absolute;top:10px;left:10px;z-index:4;display:flex;align-items:center;gap:6px;padding:4px 9px;border-radius:999px;background:rgba(6,16,24,.7);font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}.live::before{content:"";width:7px;height:7px;border-radius:50%;background:#f25f5c}
-      .scale{display:flex;align-items:center;gap:6px;padding:10px 12px 4px;font-size:12px;color:#b9c8d3}
+      .scale{display:flex;align-items:center;gap:6px;padding:10px 12px 4px;font-size:12px;color:var(--edge-muted)}
       .scale output{flex:1;text-align:center;font-variant-numeric:tabular-nums}
-      .scale button,.bar button,.bar select{border-color:transparent;background:rgba(255,255,255,.08);color:#fff}
-      .scale button{min-height:32px;padding:0 10px;font-size:12px}.scale button.icon{width:32px}.scale button[aria-pressed=true]{background:var(--edge-accent);color:#04211a;font-weight:600}
+      .scale button{min-height:32px;padding:0 10px;font-size:12px}.scale button.icon{width:32px}.scale button{color:var(--edge-text)}.scale button[aria-pressed=true]{background:var(--edge-tint);color:var(--edge-accent);font-weight:600}
       .track{position:relative;height:44px;margin:0 12px;cursor:pointer;touch-action:none;border-radius:6px}
-      .track::before{content:"";position:absolute;left:0;right:0;top:17px;height:10px;border-radius:5px;background:rgba(255,255,255,.12)}
-      .range{position:absolute;top:17px;height:10px;min-width:2px;border-radius:5px;background:color-mix(in srgb,var(--edge-accent) 70%,#fff 0%)}
-      .dot{position:absolute;top:2px;width:22px;height:22px;min-height:0;margin-left:-11px;padding:0;border:0;background:transparent;z-index:2}.dot::after{content:"";display:block;margin:auto;width:9px;height:9px;border-radius:50%;background:var(--kind);box-shadow:0 0 0 2px #05090d}
-      .cursor{position:absolute;top:8px;width:4px;height:28px;margin-left:-2px;border-radius:2px;background:#fff;box-shadow:0 0 0 2px rgba(0,0,0,.5);z-index:3;pointer-events:none}
-      .ticks{display:flex;justify-content:space-between;padding:0 12px;font-size:11px;color:#8da2b3;font-variant-numeric:tabular-nums}
+      .track::before{content:"";position:absolute;left:0;right:0;top:17px;height:10px;border-radius:5px;background:var(--edge-fill-strong)}
+      .range{position:absolute;top:17px;height:10px;min-width:2px;border-radius:5px;background:var(--edge-accent)}
+      .dot{position:absolute;top:2px;width:22px;height:22px;min-height:0;margin-left:-11px;padding:0;border:0;background:transparent;z-index:2}.dot::after{content:"";display:block;margin:auto;width:9px;height:9px;border-radius:50%;background:var(--kind);box-shadow:0 0 0 2px rgba(0,0,0,.35)}
+      .cursor{position:absolute;top:8px;width:4px;height:28px;margin-left:-2px;border-radius:2px;background:var(--edge-text);box-shadow:0 0 0 2px color-mix(in srgb,var(--edge-text) 25%,transparent);z-index:3;pointer-events:none}
+      .ticks{display:flex;justify-content:space-between;padding:0 12px;font-size:11px;color:var(--edge-muted);font-variant-numeric:tabular-nums}
       .bar{display:flex;align-items:center;gap:6px;padding:8px 12px 12px}
       .bar .time{font-size:14px;font-variant-numeric:tabular-nums;padding:0 6px;white-space:nowrap}.bar .gap{flex:1}
       .bar select{min-height:40px;padding:0 6px}
-      .player:fullscreen{display:grid;grid-template-rows:minmax(0,1fr) auto auto auto auto;width:100vw;height:100dvh}.player:fullscreen .stage{aspect-ratio:auto;min-height:0}
+      .player:fullscreen{display:grid;grid-template-rows:minmax(0,1fr) auto auto auto auto;width:100vw;height:100dvh;background:#000;color:#fff;--edge-text:#fff;--edge-muted:#b9c8d3;--edge-fill:rgba(255,255,255,.1);--edge-fill-strong:rgba(255,255,255,.2)}.player:fullscreen .stage{max-height:none}.player:fullscreen .stage{aspect-ratio:auto;min-height:0}
       .moments{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px;padding:12px 16px 16px;max-height:330px;overflow-y:auto;overscroll-behavior:contain}
-      .moment{display:block;padding:0;overflow:hidden;min-height:0;text-align:left;background:transparent}.moment span.label{display:block;padding:5px 8px;font-size:12px;font-variant-numeric:tabular-nums}
-      .moment[aria-current=true]{border-color:var(--edge-accent)}.moment[aria-current=true] .label{color:var(--edge-accent);font-weight:600}
+      .moment{display:block;padding:0;overflow:hidden;min-height:0;text-align:left}.moment span.label{display:block;padding:5px 8px;font-size:12px;font-variant-numeric:tabular-nums}
+      .moment[aria-current=true]{background:var(--edge-tint)}.moment[aria-current=true] .label{color:var(--edge-accent);font-weight:600}
       @container (min-width:900px){.body{display:grid;grid-template-columns:minmax(0,1fr) 300px;align-items:stretch}.body .player[hidden]+.moments{grid-column:1/-1}
-        .body .moments{grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;height:0;min-height:100%;max-height:none;padding:12px;border-left:1px solid var(--edge-line)}}
+        .body .moments{grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;height:0;min-height:100%;max-height:none;padding:0 12px 12px}}
       @container (min-width:1300px){.body{grid-template-columns:minmax(0,1fr) 420px}.body .moments{grid-template-columns:repeat(3,minmax(0,1fr))}}
       @container (max-width:430px){.head{padding:12px 12px 8px}.days,.chips{padding-inline:12px}.bar{gap:4px;padding-inline:8px}.bar button.icon{width:38px}.bar [data-action=download],.bar .time small{display:none}.moments{grid-template-columns:repeat(3,minmax(0,1fr));padding-inline:12px;max-height:260px}.track{margin-inline:14px}.ticks{padding-inline:14px}}
       @container (max-width:330px){.bar select{display:none}.moments{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -368,9 +374,9 @@ class EdgeEventsCard extends EdgeDashCard {
     this.shadowRoot.innerHTML = `<style>${EDGE_SHARED_STYLE}
       .filters{display:flex;gap:8px;padding:0 16px 12px;flex-wrap:wrap}.filters select,.filters input{flex:1 1 130px;font-size:13px}
       .list{padding:0 16px 4px;overflow-y:auto;overscroll-behavior:contain}
-      .group{margin:0;padding:8px 0 6px;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--edge-muted);position:sticky;top:0;z-index:2;background:var(--ha-card-background,var(--card-background-color,#111d28))}
+      .group{margin:0;padding:8px 0 6px;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--edge-muted);}
       .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;padding-bottom:10px}
-      .event{display:block;padding:0;min-height:0;overflow:hidden;text-align:left;background:transparent}
+      .event{display:block;padding:0;min-height:0;overflow:hidden;text-align:left}
       .event .thumb>svg{color:var(--kind)}
       .badge{position:absolute;left:6px;top:6px;z-index:1;display:flex;align-items:center;gap:4px;padding:3px 8px 3px 5px;border-radius:999px;background:rgba(6,16,24,.78);color:var(--kind);font-size:11px;font-weight:600}.badge svg{width:14px;height:14px}
       .meta{display:flex;justify-content:space-between;gap:6px;padding:6px 8px 7px;font-size:12px}.meta b{font-weight:600;font-variant-numeric:tabular-nums}.meta span{color:var(--edge-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -378,10 +384,10 @@ class EdgeEventsCard extends EdgeDashCard {
       .strip .list{display:flex;gap:10px;overflow-x:auto;overflow-y:hidden;padding-bottom:14px;scrollbar-width:thin;overscroll-behavior-inline:contain;scroll-snap-type:x proximity}
       .strip .event,.strip .next{flex:0 0 172px;scroll-snap-align:start}.strip .next{min-height:0;align-self:stretch;flex-basis:120px;font-size:13px}
       .strip .meta{display:block}.strip .meta b,.strip .meta span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.strip .meta span:empty{display:none}
-      dialog{border:1px solid var(--edge-line);padding:0;border-radius:16px;width:min(960px,calc(100vw - 20px));max-height:calc(100dvh - 20px);background:var(--ha-card-background,var(--card-background-color,#111d28));color:var(--primary-text-color,#edf5f7);overflow:hidden}
-      dialog[open]{display:flex;flex-direction:column}dialog::backdrop{background:rgba(0,0,0,.72)}
+      dialog{border:0;padding:0;border-radius:var(--ha-dialog-border-radius,var(--edge-radius));width:min(960px,calc(100vw - 20px));max-height:calc(100dvh - 20px);background:var(--ha-card-background,var(--card-background-color,#111d28));color:var(--edge-text);overflow:hidden;-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);box-shadow:0 18px 60px rgba(0,0,0,.35)}
+      dialog[open]{display:flex;flex-direction:column}dialog::backdrop{background:rgba(0,0,0,.45);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
       .view-head{display:flex;align-items:center;gap:10px;padding:10px 10px 10px 16px}.view-head div{flex:1;min-width:0}.view-head b{display:block;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.view-head small{color:var(--edge-muted);font-size:12px}
-      .view-stage{position:relative;background:#000;aspect-ratio:16/9;min-height:0;flex:0 1 auto;display:grid;place-items:center;color:#8da2b3;font-size:13px;text-align:center}
+      .view-stage{position:relative;background:#000;aspect-ratio:16/9;min-height:0;flex:0 1 auto;display:grid;place-items:center;color:#b9c8d3;font-size:13px;text-align:center}
       .view-stage video,.view-stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}.view-stage p{margin:0;padding:16px}
       .view-note{margin:0;padding:8px 16px 0;font-size:12px;color:var(--edge-muted)}
       .view-bar{display:flex;gap:8px;padding:10px;align-items:center}.view-bar .gap{flex:1}

@@ -154,7 +154,9 @@ Both show every Edge camera by default. Optional settings:
 | `limit` | events | Events per page, 4–60 (default 12) |
 | `max_height` | events | Scroll the list inside this height in pixels |
 
-The cards lay themselves out from their own width, so the same YAML works in a
+The cards take their frame from the active Home Assistant theme and add no
+borders of their own, so translucent themes such as Frosted Glass apply as they
+do to built-in cards. The cards lay themselves out from their own width, so the same YAML works in a
 narrow phone column and a wide desktop section. In a sections view, give the
 recordings card `grid_options: {columns: full}`. "Show in recordings" in the
 event viewer moves the recordings card on the same view to that moment.

@@ -56,7 +56,13 @@ PAGE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="viewp
 <style>html{--primary-text-color:#e6edf3;--secondary-text-color:#9fb0bf;--card-background-color:#1c2530;--secondary-background-color:#27323f;--divider-color:#334150;--primary-color:#03a9f4}
 body{margin:0;padding:12px;background:#111820;font-family:system-ui,sans-serif}main{display:grid;gap:12px;grid-template-columns:repeat(4,minmax(0,1fr));max-width:1500px;margin:auto}
 main>*{grid-column:1/-1;min-width:0}@media(min-width:1000px){main.split>edge-events-card{grid-column:4}main.split>edge-recordings-card{grid-column:1/4;grid-row:1}}</style>
-<main></main><script src="/edge/edge-dashboard-cards.js"></script><script>
+<main></main><script>
+// Like Home Assistant's own ha-card: the frame comes only from theme variables.
+customElements.define('ha-card',class extends HTMLElement{constructor(){super();this.attachShadow({mode:'open'}).innerHTML='<style>:host{display:block;background:var(--ha-card-background,var(--card-background-color,#fff));-webkit-backdrop-filter:var(--ha-card-backdrop-filter,none);backdrop-filter:var(--ha-card-backdrop-filter,none);box-shadow:var(--ha-card-box-shadow,none);border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color,#e0e0e0));color:var(--primary-text-color)}</style><slot></slot>';}});
+const THEMES={glass:{'--ha-card-background':'rgba(255,255,255,0.10)','--ha-card-backdrop-filter':'blur(22px)','--ha-card-border-width':'0px','--ha-card-border-radius':'24px','--ha-card-box-shadow':'0 8px 32px rgba(0,0,0,.18)','--primary-text-color':'#ffffff','--secondary-text-color':'rgba(255,255,255,.7)','--primary-color':'#ffd08a','--card-background-color':'#3b3550',page:'linear-gradient(135deg,#3a4d8f,#8a4f9e 50%,#d9825b)'},
+ light:{'--ha-card-background':'#ffffff','--card-background-color':'#ffffff','--ha-card-border-radius':'12px','--primary-text-color':'#1c1c1e','--secondary-text-color':'#6b7280','--primary-color':'#0b7bd3','--divider-color':'#e0e0e0',page:'#f2f3f5'}};
+{const theme=THEMES[new URLSearchParams(location.search).get('theme')];if(theme)for(const [name,value] of Object.entries(theme)){if(name==='page'){document.documentElement.style.background=value;document.documentElement.style.minHeight='100%';document.body.style.background='transparent';}else document.documentElement.style.setProperty(name,value);}}
+</script><script src="/edge/edge-dashboard-cards.js"></script><script>
 const query=new URLSearchParams(location.search);window.fixture={signed:[],api:[]};
 const camera=(id,name)=>({state:'idle',attributes:{friendly_name:name,edge_camera_id:id,edge_stream_role:'nvr'}});
 window.hass={locale:{language:query.get('lang')||'pl'},states:{'camera.front':camera('front','Front'),'camera.back':camera('back','Ogród'),
