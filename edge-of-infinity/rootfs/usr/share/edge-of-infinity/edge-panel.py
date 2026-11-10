@@ -6589,68 +6589,6 @@ INDEX_HTML = r"""<!doctype html>
         return { timeline, target: first, requested: first.offset, input: first.offset, seek: 0, playbackSeek: Number(first.playbackOffset || 0) };
       }
 
-      // One browser decoder shared by hover and tile previews. No camera reads,
-      // server transcoding, autoplay or persistent preview files.
-      const recordedPreviewCache=new Map(),recordedPreviewJobs=[];
-      let recordedPreviewVideo=null,recordedPreviewBusy=false,recordedPreviewReleaseTimer=null;
-      function releaseRecordedPreviewDecoder() {
-        if(recordedPreviewBusy||!recordedPreviewVideo)return;
-        recordedPreviewVideo.pause();recordedPreviewVideo.removeAttribute('src');recordedPreviewVideo.load();
-      }
-      function previewFileUrl(thumbnail) {
-        const url=new URL(thumbnail,location.href);
-        url.pathname=url.pathname.replace('/recording-thumbs/','/recordings/').replace(/\.jpg$/,'');
-        url.searchParams.delete('at');return url.href;
-      }
-      function recordedPreview(url,second=0,priority=false) {
-        // On phones keep the hardware decoder for the watched recording.
-        // Hover falls back to a small server JPEG; tiles already prefer JPEG.
-        if(phonePlayback())return Promise.reject(new Error('phone_preview_uses_jpeg'));
-        if(activePage!=='nvr')return Promise.reject(new Error('preview_not_visible'));
-        const key=`${url}|${Math.round(Number(second)*10)/10}`;
-        if(recordedPreviewCache.has(key))return Promise.resolve(recordedPreviewCache.get(key));
-        return new Promise((resolve,reject)=>{
-          const job={url,second,key,resolve,reject};
-          if(priority)recordedPreviewJobs.unshift(job);else recordedPreviewJobs.push(job);
-          pumpRecordedPreviews();
-        });
-      }
-      async function pumpRecordedPreviews() {
-        if(recordedPreviewBusy||!recordedPreviewJobs.length)return;
-        clearTimeout(recordedPreviewReleaseTimer);
-        recordedPreviewBusy=true;const job=recordedPreviewJobs.shift();
-        try {
-          if(recordedPreviewCache.has(job.key)){job.resolve(recordedPreviewCache.get(job.key));return;}
-          const video=recordedPreviewVideo||(recordedPreviewVideo=document.createElement('video'));
-          video.muted=true;video.playsInline=true;video.preload='auto';
-          await new Promise((resolve,reject)=>{
-            let seeked=false;
-            const cleanup=()=>{clearTimeout(timeout);for(const type of ['loadedmetadata','loadeddata','seeked','error'])video.removeEventListener(type,progress);};
-            const fail=()=>{cleanup();reject(new Error('browser_preview_unavailable'));};
-            const progress=event=>{
-              if(event?.type==='error'){fail();return;}
-              if(video.readyState<1)return;
-              const target=Math.min(Math.max(0,job.second),Math.max(0,video.duration-.05));
-              if(!seeked){seeked=true;video.currentTime=target;}
-              if(video.readyState>=2&&!video.seeking&&Math.abs(video.currentTime-target)<.11){cleanup();resolve();}
-            };
-            const timeout=setTimeout(fail,5000);
-            for(const type of ['loadedmetadata','loadeddata','seeked','error'])video.addEventListener(type,progress);
-            if(video.src!==job.url){video.src=job.url;video.load();}else progress();
-          });
-          const canvas=document.createElement('canvas');canvas.width=480;canvas.height=Math.max(2,Math.round(480*video.videoHeight/video.videoWidth));
-          canvas.getContext('2d',{alpha:false}).drawImage(video,0,0,canvas.width,canvas.height);
-          const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.85));if(!blob)throw new Error('preview_encoding_failed');
-          const image=URL.createObjectURL(blob);recordedPreviewCache.set(job.key,image);
-          while(recordedPreviewCache.size>64){const oldest=recordedPreviewCache.keys().next().value,url=recordedPreviewCache.get(oldest);URL.revokeObjectURL(url);recordedPreviewCache.delete(oldest);}
-          job.resolve(image);
-        }catch(error){job.reject(error);}finally{
-          recordedPreviewBusy=false;pumpRecordedPreviews();
-          if(!recordedPreviewBusy)recordedPreviewReleaseTimer=setTimeout(releaseRecordedPreviewDecoder,500);
-        }
-      }
-      window.addEventListener('pagehide',()=>{recordedPreviewVideo?.pause();if(recordedPreviewVideo){recordedPreviewVideo.removeAttribute('src');recordedPreviewVideo.load();}for(const job of recordedPreviewJobs.splice(0))job.reject(new Error('page_closed'));for(const url of recordedPreviewCache.values())URL.revokeObjectURL(url);recordedPreviewCache.clear();});
-
       const recordingThumbnailQueue = [];
       let recordingThumbnailActive = 0;
       const recordingThumbnailUrls = new Map();
@@ -6698,8 +6636,7 @@ INDEX_HTML = r"""<!doctype html>
           recordingThumbnailFinishes.set(image,finish);
           let expectedUrl = new URL(source, window.location.href).href;
           image.onload = () => { if (image.currentSrc === expectedUrl && image.naturalWidth > 1) finish(true); };
-          let fallback=false;
-          image.onerror = () => { if (image.currentSrc !== expectedUrl)return;releaseRecordingThumbnail(image);if(fallback){finish(false);return;}fallback=true;image.dataset.recordingThumbBackend='browser';recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>finish(false)); };
+          image.onerror=()=>{if(image.currentSrc===expectedUrl)finish(false);};
           image.loading = 'eager';
           // A small cached JPEG avoids downloading/decoding full 4K clips for
           // every film tile, especially through Nabu Casa.
@@ -6721,7 +6658,7 @@ INDEX_HTML = r"""<!doctype html>
             if(galleryScope)void galleryStore.saveThumbnail(galleryScope,source,blob);
             expectedUrl=recordingThumbnailBlob(image,blob);image.dataset.recordingThumbBackend='jpeg';image.src=expectedUrl;
           }).catch(()=>{
-            if(finished)return;fallback=true;image.dataset.recordingThumbBackend='browser';recordedPreview(previewFileUrl(source),0).then(url=>{expectedUrl=url;image.src=url;}).catch(()=>finish(false));
+            if(!finished)finish(false);
           });
         }
       }
@@ -9639,7 +9576,6 @@ INDEX_HTML = r"""<!doctype html>
         if(pageName!=='nvr')suspendArchivePlayers();
         if(pageName!=='nvr'){for(const state of recordingScrubs.values())discardRecordingScrub(state.index);nvrGrid.querySelectorAll('video[data-recording-player]').forEach(pauseRecording);}
         if(pageName!=='nvr')releaseInactiveRecordingPlayers(null,true);
-        if(pageName!=='nvr')releaseRecordedPreviewDecoder();
         activePage = pageName;
         updateLivePlaybackVisibility();
         if(pageName==='edge-settings'){void loadPhoneServices();void loadStorageUsage();}

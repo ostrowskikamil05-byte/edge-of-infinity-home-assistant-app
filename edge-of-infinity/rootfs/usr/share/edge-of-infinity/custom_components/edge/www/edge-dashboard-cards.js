@@ -11,12 +11,12 @@ const EDGE_DEFAULT_KINDS = ["person", "vehicle", "animal"];
 const EDGE_DASH_TEXT = {
   en: {recordings:"Recordings",events:"Events",refresh:"Refresh",play:"Play",pause:"Pause",back:"Back 10 seconds",forward:"Forward 10 seconds",sound:"Sound on",mute:"Mute",full:"Fullscreen",download:"Download this fragment",speed:"Playback speed",earlier:"Earlier",later:"Later",zoom:"Timeline range",timeline:"Recording timeline",
     loading:"Loading…",noCamera:"No Edge camera found. Add the Edge of Infinity integration first.",noRecordings:"No recordings for this camera yet.",noDay:"No recordings on this day.",unreachable:"Edge add-on is not responding. Check that it is running.",forbidden:"You do not have access to this camera.",outdated:"Update the Edge of Infinity add-on and restart Home Assistant to use this card.",
-    playError:"This fragment cannot be played here. The browser may not support the recording codec (for example H.265) — open it in the Edge panel.",preparing:"Preparing the recording…",recording:"Recording",today:"Today",yesterday:"Yesterday",all:"All",person:"Person",vehicle:"Vehicle",animal:"Animal",motion:"Motion",
+    playError:"Cannot decode this recording on this device. Download the original file or use a browser that supports its video codec.",preparing:"Preparing the recording…",recording:"Recording",today:"Today",yesterday:"Yesterday",all:"All",person:"Person",vehicle:"Vehicle",animal:"Animal",motion:"Motion",
     allCameras:"All cameras",camera:"Camera",day:"Day",allDays:"All days",older:"Show older",noEvents:"No events match these filters.",close:"Close",previous:"Previous event",next:"Next event",inRecordings:"Show in recordings",noPicture:"No picture saved for this event",clipPending:"The clip is still being prepared — showing the picture.",
     title:"Title",layout:"Layout: grid or one swipeable row",cameras:"Cameras (empty = all Edge cameras)",kinds:"Event types",limit:"Events per page",maxHeight:"Maximum list height (px, 0 = no limit)",muted:"Start muted",hours:"h",minutes:"min"},
   pl: {recordings:"Nagrania",events:"Zdarzenia",refresh:"Odśwież",play:"Odtwórz",pause:"Pauza",back:"Cofnij 10 sekund",forward:"Do przodu 10 sekund",sound:"Włącz dźwięk",mute:"Wycisz",full:"Pełny ekran",download:"Pobierz ten fragment",speed:"Prędkość odtwarzania",earlier:"Wcześniej",later:"Później",zoom:"Zakres osi czasu",timeline:"Oś czasu nagrań",
     loading:"Wczytywanie…",noCamera:"Nie znaleziono kamery Edge. Najpierw dodaj integrację Edge of Infinity.",noRecordings:"Ta kamera nie ma jeszcze nagrań.",noDay:"Brak nagrań z tego dnia.",unreachable:"Dodatek Edge nie odpowiada. Sprawdź, czy jest uruchomiony.",forbidden:"Nie masz dostępu do tej kamery.",outdated:"Zaktualizuj dodatek Edge of Infinity i uruchom ponownie Home Assistant, aby używać tej karty.",
-    playError:"Nie można odtworzyć tego fragmentu. Przeglądarka może nie obsługiwać kodeka nagrania (np. H.265) — otwórz je w panelu Edge.",preparing:"Przygotowywanie nagrania…",recording:"Nagrywanie",today:"Dziś",yesterday:"Wczoraj",all:"Wszystkie",person:"Osoba",vehicle:"Pojazd",animal:"Zwierzę",motion:"Ruch",
+    playError:"To urządzenie nie dekoduje tego nagrania. Pobierz oryginalny plik lub użyj przeglądarki obsługującej jego kodek wideo.",preparing:"Przygotowywanie nagrania…",recording:"Nagrywanie",today:"Dziś",yesterday:"Wczoraj",all:"Wszystkie",person:"Osoba",vehicle:"Pojazd",animal:"Zwierzę",motion:"Ruch",
     allCameras:"Wszystkie kamery",camera:"Kamera",day:"Dzień",allDays:"Wszystkie dni",older:"Pokaż starsze",noEvents:"Brak zdarzeń dla tych filtrów.",close:"Zamknij",previous:"Poprzednie zdarzenie",next:"Następne zdarzenie",inRecordings:"Pokaż w nagraniach",noPicture:"Brak zapisanego zdjęcia tego zdarzenia",clipPending:"Klip jest jeszcze przygotowywany — widzisz zdjęcie.",
     title:"Tytuł",layout:"Układ: siatka lub jeden przewijany rząd",cameras:"Kamery (puste = wszystkie kamery Edge)",kinds:"Rodzaje zdarzeń",limit:"Zdarzeń na stronę",maxHeight:"Maksymalna wysokość listy (px, 0 = bez limitu)",muted:"Zaczynaj bez dźwięku",hours:"h",minutes:"min"},
 };
@@ -191,7 +191,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
       @container (max-width:430px){.head{padding:12px 12px 8px}.days,.chips{padding-inline:12px}.bar{gap:4px;padding-inline:8px}.bar button.icon{width:38px}.bar [data-action=download],.bar .time small{display:none}.moments{grid-template-columns:repeat(3,minmax(0,1fr));padding-inline:12px;max-height:260px}.track{margin-inline:14px}.ticks{padding-inline:14px}}
       @container (max-width:330px){.bar select{display:none}.moments{grid-template-columns:repeat(2,minmax(0,1fr))}}
     </style><ha-card>
-      <div class="head"><h2></h2><button class="icon" data-action="refresh">${edgeIcon("refresh")}</button></div>
+      <div class="head"><h2></h2><button class="icon" data-action="download">${edgeIcon("download")}</button><button class="icon" data-action="refresh">${edgeIcon("refresh")}</button></div>
       <div class="chips cams" role="tablist"></div>
       <div class="days" role="tablist"></div>
       <div class="body"><div class="player" hidden>
@@ -200,7 +200,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
         <div class="track" role="slider" tabindex="0"><div class="ranges"></div><div class="dots"></div><div class="cursor"></div></div>
         <div class="ticks"></div>
         <div class="bar"><button class="icon" data-action="back">${edgeIcon("back")}</button><button class="icon" data-action="toggle" data-toggle></button><button class="icon" data-action="forward">${edgeIcon("forward")}</button><span class="time"></span><span class="gap"></span>
-          <select data-speed><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select><button class="icon" data-action="sound"></button><button class="icon" data-action="download">${edgeIcon("download")}</button><button class="icon" data-action="full">${edgeIcon("full")}</button></div>
+          <select data-speed><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select><button class="icon" data-action="sound"></button><button class="icon" data-action="full">${edgeIcon("full")}</button></div>
       </div>
       <div class="moments"></div></div><p class="status" role="status"></p>
     </ha-card>`;
@@ -302,6 +302,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
     this._$(".live").hidden = !(this._recording && this._day === this._days?.[0]?.day);
     for (const button of this.shadowRoot.querySelectorAll("[data-zoom]")) button.setAttribute("aria-pressed", String(Number(button.dataset.zoom) === this._zoom));
     for (const tab of this.shadowRoot.querySelectorAll("[data-camera]")) tab.setAttribute("aria-selected", String(tab.dataset.camera === this._entity));
+    this._$('[data-action="download"]').disabled=!this._files.length;
     if (!this._files.length) return;
     const offset = this._position - this._dayStart; if (!this._dragging && this._index >= 0 && (offset < this._window || offset >= this._window + this._zoom)) this._follow();
     const from = this._dayStart + this._window; const percent = value => ((value - from) / this._zoom * 100).toFixed(3);
@@ -416,7 +417,7 @@ class EdgeEventsCard extends EdgeDashCard {
       <div class="list"></div>
       <div class="more" hidden><button data-action="older"></button></div>
       <p class="status" role="status"></p>
-      <dialog><div class="view-head"><div><b></b><small></small></div><button class="icon" data-action="close">${edgeIcon("close")}</button></div>
+      <dialog><div class="view-head"><div><b></b><small></small></div><button class="icon" data-action="clip-download" hidden>${edgeIcon("download")}</button><button class="icon" data-action="close">${edgeIcon("close")}</button></div>
         <div class="view-stage"></div><p class="view-note" hidden></p>
         <div class="view-bar"><button class="icon" data-action="previous">${edgeIcon("left")}</button><button class="icon" data-action="next">${edgeIcon("right")}</button><span class="gap"></span><button data-action="recordings">${edgeIcon("film")}<span></span></button></div></dialog>
     </ha-card>`;
@@ -458,7 +459,7 @@ class EdgeEventsCard extends EdgeDashCard {
     if (!this._config || !this._hass) return;
     this.lang=edgeLang(this._hass,this._config.language);
     this._$("h2").textContent = this._config.title || this._t("events");
-    for (const [action, key] of [["refresh", "refresh"], ["close", "close"], ["previous", "previous"], ["next", "next"]]) { const node = this._$(`[data-action="${action}"]`); node.title = this._t(key); node.setAttribute("aria-label", this._t(key)); }
+    for (const [action, key] of [["refresh", "refresh"], ["clip-download", "download"], ["close", "close"], ["previous", "previous"], ["next", "next"]]) { const node = this._$(`[data-action="${action}"]`); node.title = this._t(key); node.setAttribute("aria-label", this._t(key)); }
     this._$('[data-action="older"]').textContent = this._t("older"); this._$('[data-action="recordings"] span').textContent = this._t("inRecordings");
     const chips = this._$(".kinds"); chips.hidden = this._kinds.length < 2;
     chips.innerHTML = ["", ...this._kinds].map(kind => `<button class="chip" data-kind="${kind}" aria-pressed="${kind === this._kind}">${kind ? this._t(kind) : this._t("all")}</button>`).join("");
@@ -513,6 +514,7 @@ class EdgeEventsCard extends EdgeDashCard {
     if (target.dataset.event) { this._view(this._events.find(row => String(row.id) === target.dataset.event)); return; }
     const action = target.dataset.action;
     if (action === "refresh") this._load(); else if (action === "older") this._load(true); else if (action === "close") this._dialog.close();
+    else if(action==='clip-download'&&this._viewing?.clip){const event=this._viewing;this._media.signed(event.entity_id,'event-clip',event.id+'.mp4').then(url=>{const link=document.createElement('a');link.href=url;link.download='edge-event-'+event.id+'.mp4';link.click();}).catch(()=>{this._$('.view-note').hidden=false;this._$('.view-note').textContent=this._t('unreachable');});}
     else if (action === "previous") this._step(-1); else if (action === "next") this._step(1);
     else if (action === "recordings" && this._viewing) { const detail = {entity_id:this._viewing.entity_id, timestamp:this._viewing.timestamp, day:this._viewing.day}; this._dialog.close(); window.dispatchEvent(new CustomEvent(EDGE_DASH_OPEN, {detail})); }
   }
@@ -521,6 +523,7 @@ class EdgeEventsCard extends EdgeDashCard {
     if (!event) return;
     this._clipClient?.close();this._clipClient=null;this._viewing = event; const stage = this._$(".view-stage"); const note = this._$(".view-note"); stage.innerHTML = ""; note.hidden = true;
     this._$(".view-head b").textContent = `${this._t(event.kind)} · ${this._name(event.entity_id)}`; this._$(".view-head small").textContent = `${this._dayLabel(event.day)} · ${event.time}${event.score ? " · " + Math.round(event.score * 100) + "%" : ""}`;
+    this._$('[data-action="clip-download"]').hidden=!event.clip;
     const index = this._events.indexOf(event); this._$('[data-action="previous"]').disabled = index <= 0; this._$('[data-action="next"]').disabled = index >= this._events.length - 1;
     this._$('[data-action="recordings"]').hidden = ![...(window.__edgeRecordingCards || [])].some(card => card._cameras().includes(event.entity_id));
     if (!this._dialog.open) this._dialog.showModal();

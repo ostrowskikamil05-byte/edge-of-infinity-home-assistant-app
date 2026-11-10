@@ -2,7 +2,7 @@
 const {chromium}=require('playwright'),assert=require('node:assert/strict');
 (async()=>{const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH||undefined,args:['--no-sandbox']});
 try{for(const [width,height] of [[1440,1000],[820,1180],[390,844],[320,740]]){
- const context=await browser.newContext({viewport:{width,height},hasTouch:width<1000,isMobile:width<1000}),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));page.setDefaultTimeout(15000);
+ const context=await browser.newContext({viewport:{width,height},hasTouch:width<1000,isMobile:width<1000}),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));page.setDefaultTimeout(15000);const mp4=[];page.on('request',r=>{if(new URL(r.url()).pathname.startsWith('/recordings/'))mp4.push(r.url());});if(width===1440)await page.route('**/recording-thumbs/**',r=>r.abort('failed'));
  await page.goto(process.env.EDGE_NVR_TEST_URL||'http://127.0.0.1:18088');await page.locator('[name="camera-0-name"]').waitFor({state:'attached'});
  if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();
  await page.waitForFunction(()=>document.querySelector('[data-nvr-day]')?.dataset.nvrDay==='2026-07-28');
@@ -19,5 +19,5 @@ try{for(const [width,height] of [[1440,1000],[820,1180],[390,844],[320,740]]){
  assert.equal(await page.locator('[data-recording-scrub-preview]').count(),0);
  await host.locator('[data-dvr-action="fullscreen"]').click();await page.waitForFunction(()=>document.fullscreenElement||document.querySelector('.edge-soft-fullscreen'));await frame(5);
  assert(await slider.evaluate(s=>(document.fullscreenElement||document.querySelector('.edge-soft-fullscreen')).contains(s)));await page.evaluate(()=>document.fullscreenElement?document.exitFullscreen():exitSoftFullscreen('test'));
- assert.deepEqual(errors,[]);await page.unrouteAll({behavior:'ignoreErrors'});await context.close();console.log(`PASS native ${width}px: hung refresh preemption, rapid day selection, actual forward/back pictures, persistent paused socket, fullscreen seek`);
+ assert.equal(mp4.length,0,'JPEG failure caused a hidden MP4 decoder/download');assert.deepEqual(errors,[]);await page.unrouteAll({behavior:'ignoreErrors'});await context.close();console.log(`PASS native ${width}px: hung refresh preemption, rapid day selection, actual forward/back pictures, persistent paused socket, fullscreen seek`);
 }}finally{await browser.close();}})().catch(e=>{console.error(e);process.exit(1);});
