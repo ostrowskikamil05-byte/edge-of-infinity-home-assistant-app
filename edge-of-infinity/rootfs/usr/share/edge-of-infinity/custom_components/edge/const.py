@@ -6,7 +6,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "edge"
 NAME = "Edge of Infinity"
-CARD_VERSION = "0.13.3"
+CARD_VERSION = "0.14.0"
 
 CONF_API_KEY = "api_key"
 

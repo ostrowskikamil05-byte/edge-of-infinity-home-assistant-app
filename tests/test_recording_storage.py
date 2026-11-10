@@ -156,10 +156,9 @@ class RecordingStorageTests(unittest.TestCase):
         self.assertEqual(saved['nvr']['thumbnail_cache_mb'],16)
         self.assertEqual(self.p.load_config()['nvr']['playback_cache_mb'],0)
 
-    def test_mediamtx_does_not_write_second_archive(self):
-        lines = []
-        with patch.object(self.p,'MEDIAMTX_RECORD',True):
-            self.p.add_mediamtx_path(lines,'front_main','rtsp://test',True,True,'/media/recordings',14)
-        self.assertIn('    record: no',lines)
-        self.assertNotIn('    record: yes',lines)
-        self.assertFalse(any('recordPath:' in line for line in lines))
+    def test_native_package_does_not_install_a_second_recording_engine(self):
+        docker = (Path(__file__).resolve().parents[1] / 'edge-of-infinity/Dockerfile').read_text()
+        self.assertNotIn('janus-gateway', docker)
+        self.assertNotIn('bluenviron/mediamtx', docker)
+        self.assertIn('ffmpeg', docker)
+        self.assertIn('COPY --from=edge_rtc', docker)

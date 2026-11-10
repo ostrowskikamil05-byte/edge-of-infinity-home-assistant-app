@@ -39,7 +39,7 @@ class NativeRegistryTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text())['sources'][0]['url'],config['cameras'][0]['rtsp_sub'])
 
     def test_native_metadata_does_not_advertise_second_profile_or_token(self):
-        p=load_panel_module();p.EDGE_RTC_ENABLED=True;p.MEDIAMTX_ENABLED=False;p._HA_RESTREAM_HOST='edge-addon'
+        p=load_panel_module();p.EDGE_RTC_ENABLED=True;p._HA_RESTREAM_HOST='edge-addon'
         config=p.normalize_config({'cameras':[camera('front','192.0.2.10','sub')]})
         payload=p.home_assistant_restream_payload(config)
         self.assertEqual(payload['source'],'edge_rtc')

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.14.0
+
+- Make EdgeRTC the sole core. Remove Janus/MediaMTX binaries, dependencies,
+  services, generators, listener mappings, engine selectors and network options.
+- Migrate retired options and exact generated artifacts. Preserve camera secrets,
+  selected profiles, recording/database paths, original files, tokens and cache
+  budgets. Carry custom shared RTSP/API ports to native option names. Keep mirror
+  timestamps and camera contents so stale settings cannot become authoritative.
+- Batch up to 16 interleaved archive packets within the existing 2 MiB limit
+  to reduce pull round trips. Reserve picture capacity for submitted frames,
+  including decoder reordering, so delayed output cannot stop DVR playback.
+- Stabilize DVR AAC with a separate bounded 600 ms PCM policy, encoded audio
+  lookahead limited against picture time, and decoder backpressure instead of
+  silently dropping packets. Keep Live's existing short queue.
+- Test sustained actual DVR AAC, native-only routing/settings on phone/tablet/PC,
+  migration idempotence, secrets, symlink confinement and source sharing.
+- Keep the UNV optional-talk AAC compatibility fix, native MP4 fallback, full-day
+  archives, 14-day retention and original video resolution/FPS/audio settings.
+
 ## 0.13.3
 
 - Fix RTSP DESCRIBE failure when a camera advertises optional backchannel AAC

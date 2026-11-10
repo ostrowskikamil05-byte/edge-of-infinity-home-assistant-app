@@ -38,6 +38,7 @@ from edge_recording_compat import CompatibleRecordings
 from edge_metrics import CpuSampler, cpu_load_severity, hardware_inventory
 from edge_camera_keyframes import CameraKeyframes
 from edge_camera_gop import set_onvif_gop
+from edge_native_migration import native_options
 sys.path.insert(0,str(Path(__file__).parent/'custom_components/edge'))
 from _device_logs import DeviceLogs, safe_url
 
@@ -100,8 +101,10 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.13.3"
-APP_RELEASE_FEATURES=['UNV malformed optional talk AAC compatibility; valid forward H265/AAC and G711 mic share one connection',
+APP_VERSION = "0.14.0"
+APP_RELEASE_FEATURES=['EdgeRTC-only Live, recording and DVR; retired engines and options removed with bounded migration',
+                      'DVR AAC uses timestamp lookahead, bounded PCM and decoder backpressure; original Live policy retained',
+                      'UNV malformed optional talk AAC compatibility; valid forward H265/AAC and G711 mic share one connection',
                       'Optional EdgeRTC DVR: indexed original H264/H265/AAC, epoch seeks and one bounded persistent socket',
                       'RTSP connection phases, response codes and safe advertised codec diagnostics',
                       'Same-connection optional microphone fallback and explicit missing-recorder diagnostics',
@@ -114,7 +117,7 @@ APP_RELEASE_FEATURES=['UNV malformed optional talk AAC compatibility; valid forw
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "unv-sdp-v133"
+UI_BUILD = "native-dvr-v140"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -170,8 +173,6 @@ CONFIG_LOCK = threading.RLock()
 SUPERVISOR_OPTIONS_LOCK = threading.RLock()
 CONFIG_SAVE_LOCK = threading.Lock()
 RECORDING_CONTROL_LOCK = threading.RLock()
-JANUS_RELOAD_LOCK = threading.Lock()
-JANUS_MANAGED_PID = int(os.environ.get("EDGE_JANUS_PID", "0"))
 RECORDING_DURATION_CACHE: dict[str, tuple[int, int, int]] = {}
 RECORDING_DURATION_LOCK = threading.Lock()
 RECORDING_CACHE_LOCK = threading.Lock()
@@ -212,45 +213,10 @@ CAMERA_OVERRIDE_FIELDS = (
     "low_latency",
     *STREAM_ROLE_FIELDS,
 )
-STREAM_ENGINES = ("janus_webrtc", "mediamtx", "ll_hls", "srt")
-CORE_ENGINES = ("edge_rtc", "mediamtx_janus", "mediamtx")
-REMOTE_ACCESS_MODES = ("local_only", "direct_public", "vps_relay", "turn_relay")
-ALWAYS_ON_STREAM_SCOPES = ("tile", "live", "tile_live", "all")
-EDGE_RTC_ENABLED = os.environ.get("EDGE_CORE_ENGINE", "") == "edge_rtc"
+EDGE_RTC_ENABLED = True
 EDGE_RTC_CONFIG_PATH = Path(os.environ.get("EDGE_RTC_CONFIG", "/tmp/edge-runtime/edge-rtc.json"))
-MEDIAMTX_ENABLED = os.environ.get("EDGE_MEDIAMTX_ENABLED", "true").lower() == "true"
-MEDIAMTX_HOST = os.environ.get("EDGE_MEDIAMTX_HOST", "127.0.0.1")
-MEDIAMTX_RTSP_PORT = int(os.environ.get("EDGE_MEDIAMTX_RTSP_PORT", "8556"))
-MEDIAMTX_HLS_PORT = int(os.environ.get("EDGE_MEDIAMTX_HLS_PORT", "8888"))
-MEDIAMTX_HLS_ALWAYS_REMUX = os.environ.get("EDGE_MEDIAMTX_HLS_ALWAYS_REMUX", "false").lower() == "true"
-MEDIAMTX_WEBRTC_PORT = int(os.environ.get("EDGE_MEDIAMTX_WEBRTC_PORT", "8889"))
-MEDIAMTX_WEBRTC_UDP_PORT = int(os.environ.get("EDGE_MEDIAMTX_WEBRTC_UDP_PORT", "8189"))
-MEDIAMTX_WEBRTC_PUBLIC_HOSTS = [
-    item.strip()
-    for item in os.environ.get("EDGE_MEDIAMTX_WEBRTC_PUBLIC_HOSTS", "homeassistant.local,192.168.33.17").split(",")
-    if item.strip()
-]
-MEDIAMTX_WEBRTC_PUBLIC_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_PUBLIC_URL", "")
-MEDIAMTX_REMOTE_ACCESS_MODE = os.environ.get("EDGE_MEDIAMTX_REMOTE_ACCESS_MODE", "local_only")
-MEDIAMTX_WEBRTC_STUN_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_STUN_URL", "stun:stun.l.google.com:19302")
-MEDIAMTX_WEBRTC_TURN_URL = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TURN_URL", "")
-MEDIAMTX_WEBRTC_TURN_USERNAME = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TURN_USERNAME", "")
-MEDIAMTX_WEBRTC_TURN_PASSWORD = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TURN_PASSWORD", "")
-MEDIAMTX_WEBRTC_TCP_ONLY = os.environ.get("EDGE_MEDIAMTX_WEBRTC_TCP_ONLY", "false").lower() == "true"
-MEDIAMTX_WEBRTC_ICE_TRANSPORT = os.environ.get(
-    "EDGE_MEDIAMTX_WEBRTC_ICE_TRANSPORT",
-    "tcp" if MEDIAMTX_WEBRTC_TCP_ONLY else "auto",
-)
-MEDIAMTX_SRT_PORT = int(os.environ.get("EDGE_MEDIAMTX_SRT_PORT", "8890"))
-MEDIAMTX_API_PORT = int(os.environ.get("EDGE_MEDIAMTX_API_PORT", "9997"))
-MEDIAMTX_CONFIG_PATH = Path(os.environ.get("EDGE_MEDIAMTX_CONFIG", "/tmp/edge-runtime/mediamtx.yml"))
-MEDIAMTX_RECORD = os.environ.get("EDGE_MEDIAMTX_RECORD", "false").lower() == "true"
-JANUS_ENABLED = os.environ.get("EDGE_JANUS_ENABLED", "true").lower() == "true"
-JANUS_HOST = os.environ.get("EDGE_JANUS_HOST", "127.0.0.1")
-JANUS_HTTP_PORT = int(os.environ.get("EDGE_JANUS_HTTP_PORT", "8192"))
-JANUS_WS_PORT = int(os.environ.get("EDGE_JANUS_WS_PORT", "8193"))
-JANUS_CONFIG_DIR = Path(os.environ.get("EDGE_JANUS_CONFIG_DIR", "/tmp/edge-runtime/janus"))
-STUN_SERVERS = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
+EDGE_RTC_RTSP_PORT = int(os.environ.get("EDGE_RTC_RTSP_PORT", "8556"))
+EDGE_RTC_API_PORT = int(os.environ.get("EDGE_RTC_API_PORT", "9997"))
 
 
 def safe_id(value: str) -> str:
@@ -483,11 +449,6 @@ def build_hikvision_rtsp(host: str, username: str, password: str, channel: str) 
     return ""
 
 
-def url_host(value: str) -> str:
-    try:
-        return urlparse(value or "").hostname or ""
-    except ValueError:
-        return ""
 
 
 def refresh_hikvision_onvif_url(value: str, host: str) -> str:
@@ -608,26 +569,10 @@ def normalize_rtsp_transport(value: str | None) -> str:
     return value if value in ("tcp", "udp", "auto") else "tcp"
 
 
-def normalize_webrtc_ice_transport(value: str | None, tcp_only: object = None) -> str:
-    if value in ("auto", "udp", "tcp"):
-        return value
-    if safe_bool(tcp_only, False):
-        return "tcp"
-    if MEDIAMTX_WEBRTC_ICE_TRANSPORT in ("auto", "udp", "tcp"):
-        return MEDIAMTX_WEBRTC_ICE_TRANSPORT
-    return "auto"
 
 
-def normalize_remote_access_mode(value: str | None) -> str:
-    if value in REMOTE_ACCESS_MODES:
-        return value
-    if MEDIAMTX_REMOTE_ACCESS_MODE in REMOTE_ACCESS_MODES:
-        return MEDIAMTX_REMOTE_ACCESS_MODE
-    return "local_only"
 
 
-def normalize_always_on_stream_scope(value: str | None) -> str:
-    return value if value in ALWAYS_ON_STREAM_SCOPES else "tile"
 
 
 def stream_channel(camera: dict, stream_name: str) -> str:
@@ -992,10 +937,6 @@ def normalize_config(payload: dict) -> dict:
     storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
     live = payload.get("live") if isinstance(payload.get("live"), dict) else {}
     nvr = payload.get("nvr") if isinstance(payload.get("nvr"), dict) else {}
-    webrtc_ice_transport = normalize_webrtc_ice_transport(
-        live.get("mobile_webrtc_ice_transport"),
-        live.get("mobile_webrtc_tcp_only"),
-    )
     return {
         "server": {
             "listen": server.get("listen") or "0.0.0.0:8088",
@@ -1006,26 +947,7 @@ def normalize_config(payload: dict) -> dict:
             "database_path": storage.get("database_path") or "/homeassistant/edge/edge.db",
             "retention_days": safe_int(storage.get("retention_days"), 14),
         },
-        "live": {
-            "engine": live.get("engine") if live.get("engine") in STREAM_ENGINES else "janus_webrtc",
-            "remote_access_mode": normalize_remote_access_mode(live.get("remote_access_mode")),
-            "frame_interval_ms": safe_int(live.get("frame_interval_ms"), 1200),
-            "tile_fps": clamp_int(live.get("tile_fps"), 5, 1, 10),
-            "tile_max_width": clamp_int(live.get("tile_max_width"), 960, 320, 1920),
-            "prebuffer_enabled": safe_bool(live.get("prebuffer_enabled"), True),
-            "always_on_enabled": safe_bool(live.get("always_on_enabled"), True),
-            "always_on_stream_scope": normalize_always_on_stream_scope(live.get("always_on_stream_scope")),
-            "prebuffer_local_ms": clamp_int(live.get("prebuffer_local_ms"), 4000, 0, 10000),
-            "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
-            "mobile_webrtc_public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
-            "mobile_webrtc_public_url": (live.get("mobile_webrtc_public_url", MEDIAMTX_WEBRTC_PUBLIC_URL)).rstrip("/"),
-            "mobile_webrtc_stun_url": live.get("mobile_webrtc_stun_url") if live.get("mobile_webrtc_stun_url") is not None else MEDIAMTX_WEBRTC_STUN_URL,
-            "mobile_webrtc_turn_url": live.get("mobile_webrtc_turn_url", MEDIAMTX_WEBRTC_TURN_URL),
-            "mobile_webrtc_turn_username": live.get("mobile_webrtc_turn_username", MEDIAMTX_WEBRTC_TURN_USERNAME),
-            "mobile_webrtc_turn_password": live.get("mobile_webrtc_turn_password", MEDIAMTX_WEBRTC_TURN_PASSWORD),
-            "mobile_webrtc_ice_transport": webrtc_ice_transport,
-            "mobile_webrtc_tcp_only": webrtc_ice_transport == "tcp",
-        },
+        "live": {"engine": "edge_rtc"},
         "nvr": {
             "segment_seconds": clamp_int(nvr.get("segment_seconds"), 10, 2, 300),
             "retention_days": clamp_int(nvr.get("retention_days"), safe_int(storage.get("retention_days"), 14), 1, 365),
@@ -1448,17 +1370,7 @@ def runtime_parameters_payload(config: dict, hardware: dict, recordings_dir: Pat
                 "recording_cache_backlog": hardware.get("recording_cache_backlog"),
                 "recording_cache_workers": hardware.get("recording_cache_workers"),
             },
-            "engines": {
-                "mediamtx_enabled": MEDIAMTX_ENABLED,
-                "mediamtx_record": MEDIAMTX_RECORD,
-                "janus_enabled": JANUS_ENABLED,
-                "rtsp_port": MEDIAMTX_RTSP_PORT,
-                "hls_port": MEDIAMTX_HLS_PORT,
-                "webrtc_whep_port": MEDIAMTX_WEBRTC_PORT,
-                "webrtc_ice_udp_port": MEDIAMTX_WEBRTC_UDP_PORT,
-                "srt_port": MEDIAMTX_SRT_PORT,
-                "api_port": MEDIAMTX_API_PORT,
-            },
+            "engines": {"edge_rtc": True, "rtsp_port": EDGE_RTC_RTSP_PORT, "api_port": EDGE_RTC_API_PORT},
         }
     )
 
@@ -1634,8 +1546,7 @@ def collect_panel_logs() -> dict:
         "panel_config": safe_json_file(PANEL_CONFIG_PATH),
         "runtime_config_file": safe_json_file(CONFIG_PATH),
         "runtime_config": runtime,
-        "runtime_mediamtx_config": redact_rtsp(read_text_tail(MEDIAMTX_CONFIG_PATH, 20000)),
-        "runtime_janus_streaming_config": redact_rtsp(read_text_tail(JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg", 20000)),
+        "native_migration": safe_json_file(HOME_DIR / "native-migration.json"),
         "recording_stream_log": tails["Recording stream"],
         "recording_cache_log": tails["Recording cache"],
         "recording_cache_enabled":recording_cache_budget(config)>0,
@@ -2033,14 +1944,14 @@ def recording_key(camera: dict, index: int) -> str:
     return f"{safe_id(camera.get('id') or 'camera')}_{index}"
 
 
-def mediamtx_path(camera: dict, index: int, stream_name: str) -> str:
+def edge_stream_path(camera: dict, index: int, stream_name: str) -> str:
     camera_id = safe_id(camera.get("id") or f"camera_{index + 1}")
     stream_name = normalize_stream_name(stream_name, "sub")
     return f"{camera_id}_{stream_name}"
 
 
-def mediamtx_rtsp_url(camera: dict, index: int, stream_name: str) -> str:
-    return f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}/{mediamtx_path(camera, index, stream_name)}"
+def edge_rtsp_url(camera: dict, index: int, stream_name: str) -> str:
+    return f"rtsp://127.0.0.1:{EDGE_RTC_RTSP_PORT}/{edge_stream_path(camera, index, stream_name)}"
 
 
 _HA_RESTREAM_HOST = None
@@ -2060,7 +1971,7 @@ def home_assistant_restream_payload(config: dict) -> dict:
             import socket
             host = socket.gethostname().replace("_", "-")
         _HA_RESTREAM_HOST = host if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", host) else ""
-    available = bool((MEDIAMTX_ENABLED or EDGE_RTC_ENABLED) and _HA_RESTREAM_HOST)
+    available = bool(_HA_RESTREAM_HOST)
     cameras = []
     for index, camera in enumerate(config.get("cameras", [])):
         streams = {}
@@ -2069,46 +1980,28 @@ def home_assistant_restream_payload(config: dict) -> dict:
             recording = "main"
         if available and camera.get("enabled"):
             for profile in ("main", "sub"):
-                if EDGE_RTC_ENABLED and profile != recording:
+                if profile != recording:
                     continue
                 if camera.get("rtsp_" + profile):
-                    streams[profile] = f"rtsp://{_HA_RESTREAM_HOST}:{MEDIAMTX_RTSP_PORT}/{mediamtx_path(camera, index, profile)}"
+                    streams[profile] = f"rtsp://{_HA_RESTREAM_HOST}:{EDGE_RTC_RTSP_PORT}/{edge_stream_path(camera, index, profile)}"
         streams["nvr"] = streams.get(recording) or streams.get("main") or ""
         row = {"camera_id": camera.get("id"), "streams": streams}
-        if EDGE_RTC_ENABLED and available:
-            row["edge_rtc"] = {"api": f"http://{_HA_RESTREAM_HOST}:{MEDIAMTX_API_PORT}", "path": mediamtx_path(camera, index, recording), "profile": recording,"keyframe_api":f"http://{_HA_RESTREAM_HOST}:{PORT}/api/edge-rtc/keyframe/{safe_id(camera.get('id','camera'))}"}
+        if available:
+            row["edge_rtc"] = {"api": f"http://{_HA_RESTREAM_HOST}:{EDGE_RTC_API_PORT}", "path": edge_stream_path(camera, index, recording), "profile": recording,"keyframe_api":f"http://{_HA_RESTREAM_HOST}:{PORT}/api/edge-rtc/keyframe/{safe_id(camera.get('id','camera'))}"}
         cameras.append(row)
-    return {"available": available, "cameras": cameras, "source": "edge_rtc" if EDGE_RTC_ENABLED else "edge_nvr", "version": APP_VERSION}
+    return {"available": available, "cameras": cameras, "source": "edge_rtc", "version": APP_VERSION}
 
 
 def recording_source_stream(camera: dict, index: int, stream_name: str) -> tuple[str, str]:
-    if MEDIAMTX_ENABLED or EDGE_RTC_ENABLED:
-        return mediamtx_rtsp_url(camera, index, stream_name), ("edge_rtc_shared" if EDGE_RTC_ENABLED else "mediamtx_rebroadcast")
-    return camera_stream(camera, stream_name), "camera_direct"
+    return edge_rtsp_url(camera, index, stream_name), ("edge_rtc_shared")
 
 
-def janus_mount_id(index: int, stream_name: str) -> int:
-    stream_offset = 1 if normalize_stream_name(stream_name, "sub") == "main" else 2
-    return 10000 + (index * 10) + stream_offset
 
 
-def yaml_string(value: str) -> str:
-    return json.dumps(str(value or ""))
 
 
-def bool_yaml(value: bool) -> str:
-    return "true" if bool(value) else "false"
 
 
-def csv_values(value: str) -> list[str]:
-    seen = set()
-    values = []
-    for item in str(value or "").split(","):
-        cleaned = item.strip()
-        if cleaned and cleaned not in seen:
-            values.append(cleaned)
-            seen.add(cleaned)
-    return values
 
 
 def append_unique(values: list[str], value: str) -> list[str]:
@@ -2117,317 +2010,22 @@ def append_unique(values: list[str], value: str) -> list[str]:
     return values
 
 
-def live_value(config: dict, key: str, fallback=""):
-    live = config.get("live") if isinstance(config.get("live"), dict) else {}
-    value = live.get(key)
-    return fallback if value in (None, "") else value
 
 
-def mediamtx_ice_servers_yaml(config: dict) -> list[str]:
-    stun_url = str(live_value(config, "mobile_webrtc_stun_url", MEDIAMTX_WEBRTC_STUN_URL) or "")
-    turn_url = str(live_value(config, "mobile_webrtc_turn_url", MEDIAMTX_WEBRTC_TURN_URL) or "")
-    turn_username = str(live_value(config, "mobile_webrtc_turn_username", MEDIAMTX_WEBRTC_TURN_USERNAME) or "")
-    turn_password = str(live_value(config, "mobile_webrtc_turn_password", MEDIAMTX_WEBRTC_TURN_PASSWORD) or "")
-    if not stun_url and not turn_url:
-        return ["webrtcICEServers2: []"]
-    lines = ["webrtcICEServers2:"]
-    if stun_url:
-        lines += [
-            f"  - url: {yaml_string(stun_url)}",
-            '    username: ""',
-            '    password: ""',
-            "    clientOnly: false",
-        ]
-    if turn_url:
-        lines += [
-            f"  - url: {yaml_string(turn_url)}",
-            f"    username: {yaml_string(turn_username)}",
-            f"    password: {yaml_string(turn_password)}",
-            "    clientOnly: false",
-        ]
-    return lines
 
 
-def mediamtx_ice_addresses(config: dict) -> tuple[str, str]:
-    live = config.get("live") if isinstance(config.get("live"), dict) else {}
-    ice_transport = normalize_webrtc_ice_transport(
-        live.get("mobile_webrtc_ice_transport"),
-        live.get("mobile_webrtc_tcp_only"),
-    )
-    if ice_transport == "tcp":
-        return "", f":{MEDIAMTX_WEBRTC_UDP_PORT}"
-    if ice_transport == "udp":
-        return f":{MEDIAMTX_WEBRTC_UDP_PORT}", ""
-    return f":{MEDIAMTX_WEBRTC_UDP_PORT}", f":{MEDIAMTX_WEBRTC_UDP_PORT}"
 
 
-def mediamtx_public_hosts(config: dict) -> list[str]:
-    public_hosts = csv_values(str(live_value(config, "mobile_webrtc_public_hosts", ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS)) or ""))
-    public_url_host = url_host(str(live_value(config, "mobile_webrtc_public_url", MEDIAMTX_WEBRTC_PUBLIC_URL) or ""))
-    return append_unique(public_hosts, public_url_host)
 
 
-def add_mediamtx_path(lines: list[str], path_name: str, source_url: str, should_record: bool, keep_warm: bool, recordings_dir: str, retention_days: int) -> None:
-    if not source_url:
-        return
-    lines += [
-        f"  {path_name}:",
-        f"    source: {yaml_string(source_url)}",
-        "    rtspTransport: tcp",
-    ]
-    if should_record and MEDIAMTX_RECORD:
-        lines += [
-            "    sourceOnDemand: no",
-            "    record: no",  # Edge recorder owns archival video; avoid a second copy.
-        ]
-    elif keep_warm:
-        lines += [
-            "    sourceOnDemand: no",
-            "    record: no",
-        ]
-    else:
-        lines += [
-            "    sourceOnDemand: yes",
-            "    sourceOnDemandStartTimeout: 15s",
-            "    sourceOnDemandCloseAfter: 30s",
-            "    record: no",
-        ]
 
 
-def write_runtime_config_if_changed(path: Path, content: str) -> bool:
-    try:
-        if path.exists() and path.read_text(encoding="utf-8", errors="replace") == content:
-            return False
-    except OSError:
-        pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(path)
-    return True
 
 
-def write_mediamtx_runtime_config(config: dict) -> dict:
-    if not MEDIAMTX_ENABLED:
-        return {"enabled": False, "written": False, "path_count": 0}
-    storage = config.get("storage") if isinstance(config.get("storage"), dict) else {}
-    live = config.get("live") if isinstance(config.get("live"), dict) else {}
-    recordings_dir = str(storage.get("recordings_dir") or "/media/edge-of-infinity/recordings").rstrip("/")
-    retention_days = clamp_int(
-        (config.get("nvr") if isinstance(config.get("nvr"), dict) else {}).get("retention_days"),
-        safe_int(storage.get("retention_days"), 14),
-        1,
-        365,
-    )
-    segment_seconds = clamp_int(
-        (config.get("nvr") if isinstance(config.get("nvr"), dict) else {}).get("segment_seconds"),
-        10,
-        2,
-        300,
-    )
-    prebuffer_enabled = safe_bool(live.get("prebuffer_enabled"), True)
-    always_on_enabled = safe_bool(live.get("always_on_enabled"), True)
-    always_on_scope = normalize_always_on_stream_scope(live.get("always_on_stream_scope"))
-    udp_address, tcp_address = mediamtx_ice_addresses(config)
-    public_hosts = mediamtx_public_hosts(config)
-    lines = [
-        f"logLevel: {os.environ.get('LOG_LEVEL', 'info')}",
-        "logDestinations: [stdout]",
-        "readTimeout: 10s",
-        "writeTimeout: 10s",
-        "writeQueueSize: 512",
-        "udpMaxPayloadSize: 1452",
-        "",
-        "api: yes",
-        f"apiAddress: :{MEDIAMTX_API_PORT}",
-        "",
-        "metrics: no",
-        "pprof: no",
-        "playback: yes",
-        "playbackAddress: :9996",
-        "",
-        "rtsp: yes",
-        "rtspTransports: [tcp]",
-        'rtspEncryption: "no"',
-        f"rtspAddress: :{MEDIAMTX_RTSP_PORT}",
-        "",
-        "moq: no",
-        "rtmp: no",
-        "",
-        "hls: yes",
-        f"hlsAddress: :{MEDIAMTX_HLS_PORT}",
-        'hlsAllowOrigins: ["*"]',
-        f"hlsAlwaysRemux: {bool_yaml(MEDIAMTX_HLS_ALWAYS_REMUX)}",
-        "hlsVariant: lowLatency",
-        "hlsSegmentCount: 4",
-        "hlsSegmentDuration: 1s",
-        "hlsPartDuration: 200ms",
-        "hlsSegmentMaxSize: 50M",
-        "",
-        "webrtc: yes",
-        f"webrtcAddress: :{MEDIAMTX_WEBRTC_PORT}",
-        'webrtcAllowOrigins: ["*"]',
-        f"webrtcLocalUDPAddress: {yaml_string(udp_address)}",
-        f"webrtcLocalTCPAddress: {yaml_string(tcp_address)}",
-        "webrtcIPsFromInterfaces: no",
-        f"webrtcAdditionalHosts: {json.dumps(public_hosts)}",
-        *mediamtx_ice_servers_yaml(config),
-        "webrtcSTUNGatherTimeout: 5s",
-        "webrtcHandshakeTimeout: 20s",
-        "webrtcTrackGatherTimeout: 5s",
-        "",
-        "srt: yes",
-        f"srtAddress: :{MEDIAMTX_SRT_PORT}",
-        "",
-        "pathDefaults:",
-        "  sourceOnDemand: yes",
-        "  rtspTransport: tcp",
-        "  recordFormat: fmp4",
-        "  recordPartDuration: 1s",
-        f"  recordSegmentDuration: {segment_seconds}s",
-        f"  recordDeleteAfter: {retention_days}d",
-        "",
-        "paths:",
-    ]
-    path_count = 0
-    for index, camera in enumerate(config.get("cameras", [])):
-        if not isinstance(camera, dict):
-            continue
-        record_stream = normalize_stream_name(camera.get("record_stream"), "main")
-        tile_stream = normalize_stream_name(camera.get("tile_stream"), "sub")
-        live_stream = normalize_stream_name(camera.get("live_stream"), "sub")
-        enabled = safe_bool(camera.get("enabled"), False)
-        record = safe_bool(camera.get("record"), False)
-        low_latency = safe_bool(camera.get("low_latency"), True)
-        record_main = enabled and record and record_stream == "main"
-        record_sub = enabled and record and record_stream == "sub"
-        selected_main = tile_stream == "main" or live_stream == "main"
-        selected_sub = tile_stream == "sub" or live_stream == "sub"
-        always_on_main = always_on_enabled and (
-            always_on_scope == "all"
-            or (always_on_scope in ("tile", "tile_live") and tile_stream == "main")
-            or (always_on_scope in ("live", "tile_live") and live_stream == "main")
-        )
-        always_on_sub = always_on_enabled and (
-            always_on_scope == "all"
-            or (always_on_scope in ("tile", "tile_live") and tile_stream == "sub")
-            or (always_on_scope in ("live", "tile_live") and live_stream == "sub")
-        )
-        warm_main = enabled and low_latency and prebuffer_enabled and (
-            selected_main
-            or always_on_main
-            or record_main
-        )
-        warm_sub = enabled and low_latency and prebuffer_enabled and (
-            selected_sub
-            or always_on_sub
-            or record_sub
-        )
-        before = len(lines)
-        add_mediamtx_path(lines, mediamtx_path(camera, index, "main"), camera.get("rtsp_main") or "", record_main, warm_main, recordings_dir, retention_days)
-        if len(lines) > before:
-            path_count += 1
-        before = len(lines)
-        add_mediamtx_path(lines, mediamtx_path(camera, index, "sub"), camera.get("rtsp_sub") or "", record_sub, warm_sub, recordings_dir, retention_days)
-        if len(lines) > before:
-            path_count += 1
-    written = write_runtime_config_if_changed(MEDIAMTX_CONFIG_PATH, "\n".join(lines) + "\n")
-    return {
-        "enabled": True,
-        "written": written,
-        "unchanged": not written,
-        "path": str(MEDIAMTX_CONFIG_PATH),
-        "path_count": path_count,
-        "public_hosts": public_hosts,
-        "ice_transport": normalize_webrtc_ice_transport(live.get("mobile_webrtc_ice_transport"), live.get("mobile_webrtc_tcp_only")),
-        "recording_enabled": False,
-        "recording_owner": "edge_recorder",
-        "segment_seconds": segment_seconds,
-        "prebuffer_enabled": prebuffer_enabled,
-        "always_on_enabled": always_on_enabled,
-        "always_on_stream_scope": always_on_scope,
-    }
 
 
-def write_janus_streaming_runtime_config(config: dict) -> dict:
-    if not JANUS_ENABLED:
-        return {"enabled": False, "written": False, "mounts": 0}
-    live = config.get("live") if isinstance(config.get("live"), dict) else {}
-    bufferkf_ms = clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000)
-    streaming_config = JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg"
-    lines = [
-        "general: {",
-        '  admin_key = "edge-local"',
-        "}",
-    ]
-    mounts = 0
-    for index, camera in enumerate(config.get("cameras", [])):
-        if not isinstance(camera, dict):
-            continue
-        camera_id = safe_id(camera.get("id") or f"camera_{index + 1}")
-        name = str(camera.get("name") or camera_id).replace('"', '\\"')
-        for stream_name in ("main", "sub"):
-            path_name = mediamtx_path(camera, index, stream_name)
-            mount_id = janus_mount_id(index, stream_name)
-            url = f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}/{path_name}"
-            lines += [
-                "",
-                f"{path_name}: {{",
-                '  type = "rtsp"',
-                f"  id = {mount_id}",
-                f"  description = {yaml_string(f'{name} {stream_name} via MediaMTX')}",
-                "  audio = true",
-                "  video = true",
-                f"  url = {yaml_string(url)}",
-                "  rtsp_reconnect_delay = 3",
-                "  rtsp_timeout = 5",
-                "  rtsp_conn_timeout = 3",
-                "  rtsp_notify_changes = true",
-                f"  bufferkf_ms = {bufferkf_ms}",
-                "  playoutdelay_ext = true",
-                "}",
-            ]
-            mounts += 1
-    written = write_runtime_config_if_changed(streaming_config, "\n".join(lines) + "\n")
-    return {
-        "enabled": True,
-        "written": written,
-        "unchanged": not written,
-        "path": str(streaming_config),
-        "mounts": mounts,
-        "restart_required": written,
-    }
 
 
-def reload_managed_janus() -> dict:
-    global JANUS_MANAGED_PID
-    with JANUS_RELOAD_LOCK:
-        if JANUS_MANAGED_PID <= 0 or not JANUS_ENABLED:
-            return {"applied": False, "reason": "not_managed_here"}
-        try:
-            command = Path(f"/proc/{JANUS_MANAGED_PID}/cmdline").read_bytes().split(b"\0")[0]
-            if Path(os.fsdecode(command)).name != "janus":
-                return {"applied": False, "reason": "janus_pid_mismatch"}
-            os.kill(JANUS_MANAGED_PID, signal.SIGTERM)
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                try:
-                    done, _ = os.waitpid(JANUS_MANAGED_PID, os.WNOHANG)
-                except ChildProcessError:
-                    done = JANUS_MANAGED_PID
-                if done:
-                    break
-                time.sleep(0.05)
-            else:
-                os.kill(JANUS_MANAGED_PID, signal.SIGKILL)
-                os.waitpid(JANUS_MANAGED_PID, 0)
-            HOME_DIR.mkdir(parents=True, exist_ok=True)
-            with (HOME_DIR / "janus.log").open("ab") as log:
-                process = subprocess.Popen(["janus", f"--configs-folder={JANUS_CONFIG_DIR}", "--disable-colors"], stdout=log, stderr=subprocess.STDOUT)
-            JANUS_MANAGED_PID = process.pid
-            return {"applied": True, "pid": process.pid}
-        except OSError:
-            return {"applied": False, "reason": "janus_reload_failed"}
 
 
 def supervisor_self_request(path: str, payload: dict | None = None) -> dict:
@@ -2448,7 +2046,7 @@ def supervisor_self_request(path: str, payload: dict | None = None) -> dict:
 
 
 def addon_options_from_config(config: dict, existing: dict) -> dict:
-    options = dict(existing)
+    options = native_options(existing)
     cameras = [{key: camera.get(key) for key in ("id", "name", "vendor", "host", "username", "password", "rtsp_main", "rtsp_sub", "camera_number", "access_protocol", "rtsp_transport", "onvif_url", "isapi_base_url", "manufacturer", "model", "firmware", "enabled", "events_enabled", "local_detection_enabled", "record", "low_latency", "snapshot_stream", "live_stream", "tile_stream", "record_stream")} for camera in config.get("cameras", [])]
     for projected, camera in zip(cameras, config.get("cameras", [])):
         zone = zone_settings(camera)
@@ -2475,28 +2073,8 @@ def sync_supervisor_options(config: dict) -> dict:
         return _sync_supervisor_options(config)
 
 
-def core_engine_settings(options: dict | None = None) -> dict:
-    running = os.environ.get("EDGE_CORE_ENGINE", "mediamtx_janus")
-    if options is None:
-        try:
-            options = supervisor_self_request("/addons/self/info").get("options") or {}
-        except (OSError, ValueError, RuntimeError):
-            return {"available": False, "running_engine": running, "core_engine": running, "restart_required": False}
-    selected = options.get("core_engine", "mediamtx_janus")
-    return {"available": True, "running_engine": running, "core_engine": selected, "restart_required": selected != running}
 
 
-def save_core_engine(engine: str) -> dict:
-    if engine not in CORE_ENGINES:
-        raise ValueError("Choose EdgeRTC, MediaMTX + Janus or MediaMTX.")
-    with SUPERVISOR_OPTIONS_LOCK:
-        current = supervisor_self_request("/addons/self/info").get("options") or {}
-        if current.get("core_engine") != engine:
-            supervisor_self_request("/addons/self/options", {"options": {**current, "core_engine": engine}})
-        observed = supervisor_self_request("/addons/self/info").get("options") or {}
-        if observed.get("core_engine") != engine:
-            raise RuntimeError("engine_verification_failed")
-        return core_engine_settings(observed)
 
 
 def _sync_supervisor_options(config: dict) -> dict:
@@ -2520,107 +2098,29 @@ def _sync_supervisor_options(config: dict) -> dict:
 def sync_runtime_engine_config(config: dict, reason: str) -> dict:
     if str(Path(__file__).parent) not in sys.path:
         sys.path.insert(0, str(Path(__file__).parent))
-    if EDGE_RTC_ENABLED:
-        from edge_rtc_config import write_config
-        with CONFIG_LOCK:
-            current = load_config()
-            write_config(current, HOME_DIR, EDGE_RTC_CONFIG_PATH, MEDIAMTX_RTSP_PORT, MEDIAMTX_API_PORT)
-            write_json(HOME_DIR / "restream.json", home_assistant_restream_payload(current))
-        return {"reason": reason, "edge_rtc": {"written": True}}
-    result = {"reason": reason, "mediamtx": {}, "janus": {}}
-    try:
-        result["mediamtx"] = write_mediamtx_runtime_config(config)
-    except OSError as error:
-        result["mediamtx"] = {"written": False, "error": str(error), "type": type(error).__name__}
-    try:
-        result["janus"] = write_janus_streaming_runtime_config(config)
-        if result["janus"].get("written"):
-            result["janus"]["reload"] = reload_managed_janus()
-    except OSError as error:
-        result["janus"] = {"written": False, "error": str(error), "type": type(error).__name__}
-    write_json(HOME_DIR / "restream.json", home_assistant_restream_payload(config))
+    from edge_rtc_config import write_config
+    with CONFIG_LOCK:
+        current = load_config()
+        write_config(current, HOME_DIR, EDGE_RTC_CONFIG_PATH, EDGE_RTC_RTSP_PORT, EDGE_RTC_API_PORT)
+        write_json(HOME_DIR / "restream.json", home_assistant_restream_payload(current))
+    result = {"reason": reason, "edge_rtc": {"written": True, "cameras": len(current.get("cameras", []))}}
     write_json(HOME_DIR / "edge.last-runtime-sync.json", result)
-    write_debug_event("runtime_engine_config_sync", {
-        "reason": reason,
-        "result": result,
-        "summary": config_summary(config),
-    })
+    write_debug_event("native_runtime_config_sync", result)
     return result
 
 
-def mediamtx_api_url(path: str) -> str:
-    return f"http://127.0.0.1:{MEDIAMTX_API_PORT}{path}"
 
 
-def mediamtx_status() -> dict:
-    api_reachable = False
-    api_error = ""
-    if MEDIAMTX_ENABLED:
-        try:
-            import urllib.request
-
-            with urllib.request.urlopen(mediamtx_api_url("/v3/config/global/get"), timeout=1) as response:
-                api_reachable = 200 <= response.status < 500
-        except Exception as error:
-            api_error = str(error)
-    return {
-        "enabled": MEDIAMTX_ENABLED,
-        "binary": bool(shutil.which("mediamtx")),
-        "config_path": str(MEDIAMTX_CONFIG_PATH),
-        "config_exists": MEDIAMTX_CONFIG_PATH.exists(),
-        "api_reachable": api_reachable,
-        "api_error": api_error,
-        "ports": {
-            "rtsp": MEDIAMTX_RTSP_PORT,
-            "ll_hls": MEDIAMTX_HLS_PORT,
-            "webrtc_whep": MEDIAMTX_WEBRTC_PORT,
-            "webrtc_ice_udp": MEDIAMTX_WEBRTC_UDP_PORT,
-            "webrtc_public_hosts": MEDIAMTX_WEBRTC_PUBLIC_HOSTS,
-            "srt": MEDIAMTX_SRT_PORT,
-            "api": MEDIAMTX_API_PORT,
-        },
-    }
 
 
-def janus_status() -> dict:
-    api_reachable = False
-    api_error = ""
-    if JANUS_ENABLED:
-        try:
-            import urllib.request
 
-            payload = json.dumps({"janus": "info", "transaction": "edge"}).encode("utf-8")
-            request = urllib.request.Request(
-                f"http://127.0.0.1:{JANUS_HTTP_PORT}/janus",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(request, timeout=1) as response:
-                api_reachable = 200 <= response.status < 500
-        except Exception as error:
-            api_error = str(error)
-    streaming_config = JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg"
-    return {
-        "enabled": JANUS_ENABLED,
-        "binary": bool(shutil.which("janus")),
-        "config_dir": str(JANUS_CONFIG_DIR),
-        "streaming_config": str(streaming_config),
-        "streaming_config_exists": streaming_config.exists(),
-        "api_reachable": api_reachable,
-        "api_error": api_error,
-        "ports": {
-            "http": JANUS_HTTP_PORT,
-            "websocket": JANUS_WS_PORT,
-        },
-    }
 
 
 def edge_rtc_status() -> dict:
     import urllib.request
     try:
         token = (HOME_DIR / "edge-rtc-token").read_text().strip()
-        request = urllib.request.Request(f"http://127.0.0.1:{MEDIAMTX_API_PORT}/api/status", headers={"Authorization": "Bearer " + token})
+        request = urllib.request.Request(f"http://127.0.0.1:{EDGE_RTC_API_PORT}/api/status", headers={"Authorization": "Bearer " + token})
         with urllib.request.urlopen(request, timeout=1) as response:
             return {"enabled": True, "api_reachable": True, **json.loads(response.read())}
     except (OSError, ValueError):
@@ -2628,103 +2128,33 @@ def edge_rtc_status() -> dict:
 
 
 def engine_runtime_status() -> dict:
-    if EDGE_RTC_ENABLED:
-        return {"architecture": "camera RTSP -> EdgeRTC registry -> encoded frames/WebCodecs + RTSP recorder; one recording profile per camera", "edge_rtc": edge_rtc_status(), "mediamtx": {"api_reachable": False, "config_exists": False}, "janus": {"api_reachable": False, "streaming_config_exists": False}, "codec_notes": {"h264": "Native EdgeRTC/1 encoded frames, no WebRTC or MSE.", "h265": "Native HEVC Annex B; browser profile support is checked before decoding.", "microphone": "PCM over authenticated WS -> RTSP G711 backchannel on the existing source session."}}
-    return {
-        "architecture": "camera RTSP -> MediaMTX core -> Janus Streaming Plugin -> browser WebRTC. MediaMTX also exposes LL-HLS, WHEP, SRT, RTSP proxy, and fMP4 recording paths.",
-        "mediamtx": mediamtx_status(),
-        "janus": janus_status(),
-        "codec_notes": {
-            "h264": "Best browser/WebRTC compatibility.",
-            "h265": "Kept for MediaMTX proxying, SRT, recording, and compatible players; browser WebRTC support is still client-dependent.",
-            "pcm_alaw": "Camera audio can be proxied/recorded; WebRTC browsers usually prefer Opus, so audio may need a later transcode path.",
-        },
-    }
+    return {"architecture": "camera RTSP -> shared EdgeRTC source -> Live, recorder and analysis; indexed EdgeRTC DVR reads saved files",
+            "edge_rtc": edge_rtc_status(),
+            "codec_notes": {"video": "Original H264/H265, resolution and FPS; no video re-encoding.",
+                            "audio": "Source AAC copy; G711 is converted once when required for saved playback.",
+                            "microphone": "PCM over authenticated WS -> RTSP G711 backchannel on the existing camera session."}}
+
 
 
 def stream_urls(camera: dict, index: int) -> dict:
-    camera_id = safe_id(camera.get("id") or f"camera_{index + 1}")
-    main_path = mediamtx_path(camera, index, "main")
-    sub_path = mediamtx_path(camera, index, "sub")
-    return {
-        "ll_hls": f"http://{MEDIAMTX_HOST}:{MEDIAMTX_HLS_PORT}/{main_path}/index.m3u8",
-        "mediamtx_ll_hls_main": f"http://{MEDIAMTX_HOST}:{MEDIAMTX_HLS_PORT}/{main_path}/index.m3u8",
-        "mediamtx_ll_hls_sub": f"http://{MEDIAMTX_HOST}:{MEDIAMTX_HLS_PORT}/{sub_path}/index.m3u8",
-        "mediamtx_webrtc_main": f"http://{MEDIAMTX_HOST}:{MEDIAMTX_WEBRTC_PORT}/{main_path}/whep",
-        "mediamtx_webrtc_sub": f"http://{MEDIAMTX_HOST}:{MEDIAMTX_WEBRTC_PORT}/{sub_path}/whep",
-        "mediamtx_rtsp_main": f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}/{main_path}",
-        "mediamtx_rtsp_sub": f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}/{sub_path}",
-        "srt_main": f"srt://{MEDIAMTX_HOST}:{MEDIAMTX_SRT_PORT}?streamid=read:{main_path}",
-        "srt_sub": f"srt://{MEDIAMTX_HOST}:{MEDIAMTX_SRT_PORT}?streamid=read:{sub_path}",
-        "janus_main": f"http://{JANUS_HOST}:{JANUS_HTTP_PORT}/janus/streaming/{janus_mount_id(index, 'main')}",
-        "janus_sub": f"http://{JANUS_HOST}:{JANUS_HTTP_PORT}/janus/streaming/{janus_mount_id(index, 'sub')}",
-        "rtsp_main": redact_rtsp(camera.get("rtsp_main") or ""),
-        "rtsp_sub": redact_rtsp(camera.get("rtsp_sub") or ""),
-    }
+    return {"edge_rtc_main": f"api/edge-rtc/player/{edge_stream_path(camera, index, 'main')}",
+            "edge_rtc_sub": f"api/edge-rtc/player/{edge_stream_path(camera, index, 'sub')}",
+            "shared_rtsp_main": edge_rtsp_url(camera, index, 'main'),
+            "shared_rtsp_sub": edge_rtsp_url(camera, index, 'sub'),
+            "rtsp_main": redact_rtsp(camera.get("rtsp_main") or ""),
+            "rtsp_sub": redact_rtsp(camera.get("rtsp_sub") or "")}
+
 
 
 def stream_capabilities(config: dict | None = None) -> dict:
     config = config or load_config()
-    live = config.get("live") if isinstance(config.get("live"), dict) else {}
     runtime = engine_runtime_status()
-    if EDGE_RTC_ENABLED:
-        return {"engines": {"edge_rtc": {"status": "active" if runtime["edge_rtc"].get("api_reachable") else "starting", "transport": "edgertc/1-websocket-webcodecs"}}, "codec_policy": {"live": "H264 access units, no video re-encoding", "recording": "original RTSP video", "microphone": "PCM16LE 8kHz -> RTSP G711 backchannel"}, "runtime": runtime, "cameras": [{"id": camera.get("id"), "record_stream": camera.get("record_stream") or "main"} for camera in config.get("cameras", [])]}
-    mediamtx_ready = runtime["mediamtx"]["api_reachable"] or runtime["mediamtx"]["config_exists"]
-    janus_ready = runtime["janus"]["api_reachable"] or runtime["janus"]["streaming_config_exists"]
-    return {
-        "engines": {
-            "mediamtx": {"status": "active" if mediamtx_ready else "starting", "transport": "rtsp-proxy/webrtc-whep/ll-hls/srt"},
-            "janus_webrtc": {"status": "active" if janus_ready else "starting", "transport": "janus-streaming-plugin-over-mediamtx-rtsp"},
-            "ll_hls": {"status": "active" if mediamtx_ready else "starting", "transport": "hls-fmp4", "note": "MediaMTX low-latency HLS path."},
-            "srt": {"status": "active" if mediamtx_ready else "starting", "transport": "srt"},
-        },
-        "codec_policy": {
-            "webrtc_primary": "H264/AV1/VP9/VP8 where the browser supports them; H265/HEVC only when the browser WebRTC stack advertises support.",
-            "hevc": {
-                "rtsp_proxy": "supported by MediaMTX path proxying",
-                "ll_hls": "supported by MediaMTX when the client/player can decode HEVC",
-                "srt": "supported by MediaMTX transport",
-                "recording": "preserved by fMP4 stream-copy recording",
-                "webrtc": "experimental and browser/device dependent",
-            },
-            "mobile_lte_recommendation": "Use warmed sub stream for tiles/live start, keep main for recording, prefer H264 for universal WebRTC and HEVC for recording/LL-HLS when the phone supports it.",
-        },
-        "mobile_webrtc": {
-            "remote_access_mode": normalize_remote_access_mode(live.get("remote_access_mode")),
-            "public_hosts": live.get("mobile_webrtc_public_hosts") or ",".join(MEDIAMTX_WEBRTC_PUBLIC_HOSTS),
-            "public_url": live.get("mobile_webrtc_public_url") or "",
-            "stun_url": live.get("mobile_webrtc_stun_url") if live.get("mobile_webrtc_stun_url") is not None else MEDIAMTX_WEBRTC_STUN_URL,
-            "turn_configured": bool(live.get("mobile_webrtc_turn_url", MEDIAMTX_WEBRTC_TURN_URL)),
-            "ice_transport": normalize_webrtc_ice_transport(
-                live.get("mobile_webrtc_ice_transport"),
-                live.get("mobile_webrtc_tcp_only"),
-            ),
-            "tcp_only": normalize_webrtc_ice_transport(
-                live.get("mobile_webrtc_ice_transport"),
-                live.get("mobile_webrtc_tcp_only"),
-            ) == "tcp",
-            "ice_udp_port": MEDIAMTX_WEBRTC_UDP_PORT,
-            "whep_port": MEDIAMTX_WEBRTC_PORT,
-            "prebuffer_enabled": safe_bool(live.get("prebuffer_enabled"), True),
-            "always_on_enabled": safe_bool(live.get("always_on_enabled"), True),
-            "always_on_stream_scope": normalize_always_on_stream_scope(live.get("always_on_stream_scope")),
-            "prebuffer_remote_ms": clamp_int(live.get("prebuffer_remote_ms"), 2000, 0, 10000),
-            "diagnosis": "If LAN works but LTE fails, the browser usually cannot reach the advertised ICE host/ports. Nabu Casa exposes the HA panel, not MediaMTX WebRTC ports. Use a reachable DDNS/VPS relay public URL first; add TURN for CGNAT/firewalls.",
-        },
-        "runtime": runtime,
-        "cameras": [
-            {
-                "index": index,
-                "id": camera.get("id"),
-                "name": camera.get("name"),
-                "tile_stream": camera.get("tile_stream") or "sub",
-                "live_stream": camera.get("live_stream") or "sub",
-                "record_stream": camera.get("record_stream") or "main",
-                "urls": stream_urls(camera, index),
-            }
-            for index, camera in enumerate(config.get("cameras", []))
-        ],
-    }
+    return {"engines": {"edge_rtc": {"status": "active" if runtime["edge_rtc"].get("api_reachable") else "starting", "transport": "edgertc/1-websocket-webcodecs"}},
+            "archive": {"transport": "edgertc/archive/1", "fallback": "native_mp4", "audio_buffer_limit_ms": 600},
+            "codec_policy": {"live": "Original H264/H265 without re-encoding", "recording": "Original video/FPS and source AAC", "microphone": "PCM16LE 8kHz -> shared RTSP G711"},
+            "runtime": runtime,
+            "cameras": [{"id": c.get("id"), "record_stream": c.get("record_stream") or "main"} for c in config.get("cameras", [])]}
+
 
 
 def cleanup_recording_processes() -> None:
@@ -4194,7 +3624,7 @@ class RecordingSourcePending(RuntimeError):
 
 def recording_registry_metadata(camera,index,stream_name,wait_seconds=4):
     """Use the already connected camera's SDP; never open another probe channel."""
-    path=mediamtx_path(camera,index,stream_name);deadline=time.monotonic()+wait_seconds
+    path=edge_stream_path(camera,index,stream_name);deadline=time.monotonic()+wait_seconds
     while True:
         status=edge_rtc_status()
         sources=status.get('sources',[])
@@ -4324,7 +3754,7 @@ def cleanup_old_recordings(directory: Path, retention_days: int) -> int:
     for root, dirs, files in os.walk(directory, followlinks=False, onerror=scan_error):
         dirs[:] = [name for name in dirs if not (Path(root) / name).is_symlink()]
         for name in files:
-            # Only names produced by the FFmpeg or MediaMTX recorder qualify.
+            # Only known recorder output names qualify; preserve unrelated media.
             if not re.fullmatch(r"(?:\d{8}-\d{6}|\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:-\d+)?)[.]mp4", name):
                 continue
             path = Path(root) / name
@@ -4671,7 +4101,7 @@ def start_recording(camera: dict, index: int, metadata_wait_seconds=4) -> dict:
 
     config = load_config()
     nvr = config.get("nvr") if isinstance(config.get("nvr"), dict) else {}
-    metadata=recording_registry_metadata(camera,index,record_stream,wait_seconds=metadata_wait_seconds) if EDGE_RTC_ENABLED else None
+    metadata=recording_registry_metadata(camera,index,record_stream,wait_seconds=metadata_wait_seconds)
     mode, video_codec, audio_codec, probe = recording_codec_mode(stream, nvr,metadata)
     audio_info=probe.get('audio') or {}
 
@@ -5318,7 +4748,7 @@ def refresh_status() -> dict:
         if isinstance(item, dict)
     }
     cameras = []
-    registry=edge_rtc_status() if EDGE_RTC_ENABLED else None
+    registry=edge_rtc_status()
 
     for index, camera in enumerate(config.get("cameras", [])):
         camera_id = safe_id(camera.get("id", "camera"))
@@ -5347,8 +4777,8 @@ def refresh_status() -> dict:
         snapshot_url = ""
         snapshot_path = ""
 
-        if camera.get('enabled') and EDGE_RTC_ENABLED:
-            path=mediamtx_path(camera,index,record_stream_name)
+        if camera.get('enabled'):
+            path=edge_stream_path(camera,index,record_stream_name)
             source=next((row for row in registry.get('sources',[]) if path in row.get('paths',[]) or row.get('camera_id')==camera_id),None)
             observed=(source or {}).get('video') or {};audio=(source or {}).get('audio') or {}
             connected=bool(source and source.get('ready') and source.get('upstream_connections',0))
@@ -5360,53 +4790,8 @@ def refresh_status() -> dict:
             audio_codec=str(audio.get('codec') or '');audio_codec='aac' if audio_codec.startswith('mp4a.40.') else {'pcma':'pcm_alaw','pcmu':'pcm_mulaw'}.get(audio_codec,audio_codec)
             audio_sample_rate=str(audio.get('sampleRate') or '');audio_channels=str(audio.get('channels') or '')
             live_probe_status='online' if status=='online' else 'warming';live_video_codec=video_codec;live_width=width;live_height=height;live_fps=fps;live_bitrate=bitrate
-        elif camera.get("enabled"):
-            rtsp_main = camera.get("rtsp_main") or ""
-            if not rtsp_main:
-                status = "missing_rtsp"
-                detail = "Camera is enabled, but rtsp_main is empty."
-            else:
-                main_probe = probe_rtsp_stream(recording_source_stream(camera, index, "main")[0])
-                video_stream = main_probe.get("video") or {}
-                audio_stream = main_probe.get("audio") or {}
-                if video_stream:
-                    status = "online"
-                    detail = "RTSP main stream is reachable."
-                    video_codec = str(video_stream.get("codec_name") or "")
-                    width = str(video_stream.get("width") or "")
-                    height = str(video_stream.get("height") or "")
-                    fps = str(video_stream.get("r_frame_rate") or "")
-                    bitrate = str(video_stream.get("bit_rate") or "")
-                    audio_codec = str(audio_stream.get("codec_name") or "")
-                    audio_sample_rate = str(audio_stream.get("sample_rate") or "")
-                    audio_channels = str(audio_stream.get("channels") or "")
-                else:
-                    status = "lost_connection" if previous.get("status") == "online" else "offline"
-                    detail = "RTSP connection was lost." if status == "lost_connection" else "RTSP probe failed. Check IP, credentials, port 554, and camera stream path."
-            if live_rtsp:
-                if live_rtsp == rtsp_main and video_codec:
-                    live_probe_status = "online"
-                    live_video_codec = video_codec
-                    live_width = width
-                    live_height = height
-                    live_fps = fps
-                    live_bitrate = bitrate
-                else:
-                    live_probe = probe_rtsp_stream(recording_source_stream(camera, index, live_stream_name)[0])
-                    live_video_stream = live_probe.get("video") or {}
-                    if live_video_stream:
-                        live_probe_status = "online"
-                        live_video_codec = str(live_video_stream.get("codec_name") or "")
-                        live_width = str(live_video_stream.get("width") or "")
-                        live_height = str(live_video_stream.get("height") or "")
-                        live_fps = str(live_video_stream.get("r_frame_rate") or "")
-                        live_bitrate = str(live_video_stream.get("bit_rate") or "")
-                    else:
-                        live_probe_status = "offline"
-            else:
-                live_probe_status = "missing_rtsp"
 
-        # Live is now served by MediaMTX/Janus. Status refresh intentionally does
+        # Live uses the shared EdgeRTC registry. Status refresh intentionally does
         # not capture JPEG snapshots, so old fallback work cannot block live.
 
         camera_status = {
@@ -5439,7 +4824,7 @@ def refresh_status() -> dict:
             "live_bitrate": live_bitrate,
             "status": status,
             "detail": detail,
-            "status_source":'edge_rtc_registry' if EDGE_RTC_ENABLED else 'rtsp_probe',
+            "status_source":'edge_rtc_registry',
             "codec": video_codec,
             "video_codec": video_codec,
             "audio_codec": audio_codec,
@@ -5491,7 +4876,7 @@ def health_payload() -> dict:
         "version": APP_VERSION,
         "server_version": SERVER_VERSION,
         "ui_build": UI_BUILD,
-        "mode": "edge-rtc-native" if EDGE_RTC_ENABLED else "mediamtx-janus-webrtc-core",
+        "mode": "edge-rtc-native",
         "authoritative_config": str(CONFIG_PATH),
         "addon_config_mirror": str(ADDON_CONFIG_PATH),
         "core": core,
@@ -6502,14 +5887,7 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </header>
           <section class="settings">
-            <section class="field-section" id="core-engine-settings">
-              <h2>Silnik obrazu / Streaming engine</h2>
-              <p id="core-engine-running" class="notice">Loading streaming engine...</p>
-              <label>Silnik / Engine<select id="core-engine-select" disabled><option value="mediamtx_janus">MediaMTX + Janus</option><option value="edge_rtc">EdgeRTC (beta)</option><option value="mediamtx">MediaMTX</option></select></label>
-              <div class="actions"><button class="primary" id="save-core-engine" type="button" disabled>Zapisz silnik / Save engine</button><button id="reload-core-engine" type="button">Refresh engine</button></div>
-              <p id="core-engine-state" class="notice" role="status" aria-live="polite">Engine selection is saved separately from camera and recording settings.</p>
-              <p class="field-help">Po zmianie zrestartuj aplikację Edge, a następnie Home Assistant Core. EdgeRTC wymaga HTTPS i WebCodecs; H.265 wymaga także dekodera HEVC w przeglądarce. / After changing the engine, restart the Edge app and then Home Assistant Core.</p>
-            </section>
+            <section class="field-section" id="edge-rtc-engine-info"><h2>EdgeRTC · Live / DVR</h2><p class="notice">Wspólne źródło kamery dla podglądu, nagrywarki i analizy. Archiwum jest odczytywane z serwera przez EdgeRTC DVR. / One camera source; indexed archive playback.</p></section>
             <div class="settings-jumps"><button type="button" data-settings-jump="recording-settings">Recording</button><button type="button" data-settings-jump="network-settings">Network</button><button type="button" data-settings-jump="storage-settings">Storage</button><button type="button" data-settings-jump="advanced-settings">Advanced</button></div>
             <form id="edge-settings-form"></form>
             <div class="actions save-bar">
@@ -6549,7 +5927,7 @@ INDEX_HTML = r"""<!doctype html>
             <section class="panel dashboard-builder">
               <div class="section-heading"><span class="step-number">1</span><div><h2>Choose your camera</h2><p>Choose 1–4 cameras. Edge Live uses shared NVR streams with quality and audio controls.</p></div></div>
               <label>Number of cameras<select id="ha-camera-count"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label><label>Camera 1<select id="ha-camera-select"></select></label>
-              <label>Card type<select id="ha-card-type"><option value="edge">Edge Live · WebRTC, sound & microphone</option><option value="native">Standard Home Assistant camera</option></select></label>
+              <label>Card type<select id="ha-card-type"><option value="edge">Edge Live · EdgeRTC, sound & microphone</option><option value="native">Standard Home Assistant camera</option></select></label>
               <p class="notice" id="ha-card-resource-status" role="status"></p>
               <label>Home Assistant camera entity<input id="ha-camera-entity" placeholder="camera.front_door" autocomplete="off" spellcheck="false"></label>
               <div id="ha-extra-cameras"></div><label>Stream quality<select id="ha-card-quality"><option value="nvr">NVR · same profile as recording</option><option value="main">Main stream</option><option value="sub">Substream · less data</option></select></label><p class="notice">NVR shares the recording feed without reducing its resolution. Different main/sub profiles may open separate upstream camera streams.</p><p class="notice" id="ha-entity-status" role="status"></p>
@@ -6699,20 +6077,9 @@ INDEX_HTML = r"""<!doctype html>
         return panelPath(clean);
       }
 
-      function directMediaMtxPath(path) {
-        const clean = String(path).replace(/^\/+/, '').replace(/\/+$/, '');
-        const publicUrl = String(config?.live?.mobile_webrtc_public_url || '').trim().replace(/\/+$/, '');
-        if (publicUrl) return `${publicUrl}/${clean}`;
-        if (window.location.hostname) {
-          return `http://${window.location.hostname}:8889/${clean}`;
-        }
-        return `http://127.0.0.1:8889/${clean}`;
-      }
 
-      function mediaMtxPlayerUrl(url) {
-        const separator = String(url).includes('?') ? '&' : '?';
-        return `${url}${separator}controls=true&muted=false&autoplay=true&playsInline=true&disablepictureinpicture=true`;
-      }
+
+
 
       function fullscreenIcon() {
         return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 3H3v5"/><path d="M16 3h5v5"/><path d="M21 16v5h-5"/><path d="M8 21H3v-5"/><path d="M3 3l7 7"/><path d="M21 3l-7 7"/><path d="M21 21l-7-7"/><path d="M3 21l7-7"/></svg>';
@@ -6792,148 +6159,18 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
 
-      function isLanHost(hostname) {
-        const host = String(hostname || '').toLowerCase();
-        return host === 'localhost'
-          || host === '127.0.0.1'
-          || host === '::1'
-          || host.endsWith('.local')
-          || host.startsWith('192.168.')
-          || host.startsWith('10.')
-          || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
-      }
 
-      function isNabuCasaHost(hostname) {
-        return String(hostname || '').toLowerCase().endsWith('.ui.nabu.casa');
-      }
+
+
 
       function liveConnectionPlan(path) {
-        if (EDGE_NATIVE_RTC) {
-          const url = panelPath(`api/edge-rtc/player/${path}`);
-          return {
-            url,
-            canEmbed: true,
-            reason: 'edge_rtc',
-            message: 'EdgeRTC uses the Home Assistant HTTPS/WebSocket connection.',
-            diagnostics: {
-              engine: 'edge_rtc',
-              page_protocol: window.location.protocol,
-              page_host: window.location.hostname,
-              media_url: new URL(url, window.location.href).href,
-              transport: window.location.protocol === 'https:' ? 'wss' : 'ws',
-            },
-          };
-        }
-        const publicUrl = String(config?.live?.mobile_webrtc_public_url || '').trim().replace(/\/+$/, '');
-        const mediaUrl = directMediaMtxPath(path);
-        const parsedMediaUrl = parseUrl(mediaUrl);
-        const pageHost = window.location.hostname || '';
-        const mediaHost = parsedMediaUrl?.hostname || '';
-        const pageIsLan = isLanHost(pageHost);
-        const mediaIsLan = isLanHost(mediaHost);
-        const pageIsNabuCasa = isNabuCasaHost(pageHost);
-        const mediaIsNabuCasa = isNabuCasaHost(mediaHost);
-        const pageIsHttps = window.location.protocol === 'https:';
-        const mediaIsHttp = parsedMediaUrl?.protocol === 'http:';
-        const publicUrlConfigured = Boolean(publicUrl);
-        const remotePage = !pageIsLan;
-        const iceTransport = String(config?.live?.mobile_webrtc_ice_transport || 'auto');
-        const remoteAccessMode = String(config?.live?.remote_access_mode || 'local_only');
-        const diagnostics = {
-          page_protocol: window.location.protocol,
-          page_host: pageHost,
-          page_is_lan: pageIsLan,
-          page_is_nabu_casa: pageIsNabuCasa,
-          media_url: mediaUrl,
-          media_protocol: parsedMediaUrl?.protocol || 'invalid',
-          media_host: mediaHost || 'invalid',
-          media_is_lan: mediaIsLan,
-          media_is_nabu_casa: mediaIsNabuCasa,
-          remote_access_mode: remoteAccessMode,
-          public_url_configured: publicUrlConfigured,
-          mobile_webrtc_public_url: publicUrl || '',
-          ice_transport: iceTransport,
-          user_agent: navigator.userAgent,
-          viewport: `${window.innerWidth}x${window.innerHeight}`,
-        };
-        if (publicUrlConfigured && !/^https?:\/\//i.test(publicUrl)) {
-          return {
-            url: mediaUrl,
-            canEmbed: false,
-            reason: 'public_webrtc_url_missing_scheme',
-            message: 'WebRTC public URL must start with http:// or https://.',
-            diagnostics,
-          };
-        }
-        if (pageIsNabuCasa && !publicUrlConfigured) {
-          return {
-            url: '(no public MediaMTX URL configured)',
-            canEmbed: false,
-            reason: 'nabu_casa_needs_stream_relay',
-            message: 'Nabu Casa opens the Home Assistant panel, but it does not expose MediaMTX WebRTC ports. Set WebRTC public URL to a VPS/reverse-proxy/TURN reachable endpoint.',
-            diagnostics,
-          };
-        }
-        if (remotePage && !publicUrlConfigured) {
-          return {
-            url: mediaUrl,
-            canEmbed: false,
-            reason: 'public_webrtc_url_missing',
-            message: 'Remote live needs Edge Settings -> WebRTC public URL. A LAN fallback cannot work on LTE or another Wi-Fi.',
-            diagnostics,
-          };
-        }
-        if (publicUrlConfigured && mediaIsNabuCasa) {
-          return {
-            url: mediaUrl,
-            canEmbed: false,
-            reason: 'nabu_casa_public_url_not_supported',
-            message: 'Do not use ui.nabu.casa as WebRTC public URL. It is Home Assistant remote UI, not a MediaMTX relay endpoint.',
-            diagnostics,
-          };
-        }
-        if (!parsedMediaUrl) {
-          return {
-            url: mediaUrl,
-            canEmbed: false,
-            reason: 'invalid_media_url',
-            message: 'WebRTC URL is invalid. Check Edge Settings -> WebRTC public URL.',
-            diagnostics,
-          };
-        }
-        if (pageIsHttps && mediaIsHttp) {
-          return {
-            url: mediaUrl,
-            canEmbed: false,
-            reason: 'mixed_content_blocked',
-            message: 'This Home Assistant page is HTTPS, but WebRTC URL is HTTP. Use HTTPS reverse proxy for MediaMTX or open the panel over HTTP on LAN.',
-            diagnostics,
-          };
-        }
-        if (remotePage && publicUrlConfigured && mediaIsLan) {
-          return {
-            url: mediaUrl,
-            canEmbed: false,
-            reason: 'public_webrtc_url_is_lan',
-            message: 'WebRTC public URL points to a private LAN address. LTE cannot reach 192.168/10/172.16 addresses without VPN, TURN, or a public reverse proxy.',
-            diagnostics,
-          };
-        }
-        return {
-          url: mediaUrl,
-          canEmbed: true,
-          reason: 'ok',
-          message: 'WebRTC URL can be embedded from this browser context.',
-          diagnostics,
-        };
+        const url=panelPath(`api/edge-rtc/player/${path}`);
+        return {url,canEmbed:true,reason:'edge_rtc',message:'EdgeRTC through the authenticated Home Assistant connection.',
+          diagnostics:{engine:'edge_rtc',page_protocol:location.protocol,page_host:location.hostname,
+            media_url:new URL(url,location.href).href,transport:location.protocol==='https:'?'wss':'ws'}};
       }
 
-      function remoteLiveNotice() {
-        const publicUrl = String(config?.live?.mobile_webrtc_public_url || '').trim();
-        const plan = liveConnectionPlan('diagnostic');
-        if (plan.canEmbed || isLanHost(window.location.hostname)) return '';
-        return `<p class="notice warning">${escapeHtml(plan.message)} MediaMTX handshake must be reachable on TCP 8889 and ICE TCP/UDP 8189, or through TURN/VPS. Current public URL: ${escapeHtml(publicUrl || 'not set')}.</p>`;
-      }
+
 
       function liveBlockedPreview(plan) {
         return `
@@ -8598,9 +7835,9 @@ INDEX_HTML = r"""<!doctype html>
         const liveResolution = camera.live_width && camera.live_height ? `${camera.live_width}x${camera.live_height}` : 'unknown';
         const previewResolution = previewStream === liveStream ? liveResolution : 'tile';
         const liveCodec = camera.live_video_codec || videoCodec || 'video';
-        const mediamtxPath = `${encodeURIComponent(liveId)}_${encodeURIComponent(previewStream)}`;
-        const plan = liveConnectionPlan(mediamtxPath);
-        const mediamtxUrl = plan.canEmbed ? (EDGE_NATIVE_RTC ? plan.url : mediaMtxPlayerUrl(plan.url)) : plan.url;
+        const sourcePath = `${encodeURIComponent(liveId)}_${encodeURIComponent(previewStream)}`;
+        const plan = liveConnectionPlan(sourcePath);
+        const liveUrl = plan.url;
         const statusBadge = `<div class="connection-badge ${statusClass(camera.status)}">${escapeHtml(statusLabel(camera.status))}</div>`;
         if (live[liveKey]) {
           debugEvent('ui_live_plan', {
@@ -8617,7 +7854,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         const preview = live[liveKey]
           ? (plan.canEmbed
-            ? `<iframe class="live-frame" src="${escapeHtml(activePage==='home'&&!document.hidden?mediamtxUrl:'about:blank')}" ${EDGE_NATIVE_RTC&&activePage==='home'&&!document.hidden?`srcdoc="${escapeHtml(inlineLiveDocument(mediamtxUrl))}"`:''} ${activePage==='home'&&!document.hidden?'':'data-live-suspended="true"'} data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(mediamtxUrl)}" data-live-path="${escapeHtml(mediamtxPath)}" title="${escapeHtml(text(camera.name, camera.id))} ${EDGE_NATIVE_RTC ? 'EdgeRTC' : 'WebRTC'} live" loading="eager" allow="autoplay; fullscreen; encrypted-media" allowfullscreen onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
+            ? `<iframe class="live-frame" src="${escapeHtml(activePage==='home'&&!document.hidden?liveUrl:'about:blank')}" ${EDGE_NATIVE_RTC&&activePage==='home'&&!document.hidden?`srcdoc="${escapeHtml(inlineLiveDocument(liveUrl))}"`:''} ${activePage==='home'&&!document.hidden?'':'data-live-suspended="true"'} data-live-key="${escapeHtml(liveKey)}" data-live-url="${escapeHtml(liveUrl)}" data-live-path="${escapeHtml(sourcePath)}" title="${escapeHtml(text(camera.name, camera.id))} EdgeRTC live" loading="eager" allow="autoplay; fullscreen; encrypted-media" allowfullscreen onload="window.edgeFrameLoaded && window.edgeFrameLoaded(this)" onerror="window.edgeFrameError && window.edgeFrameError(this)"></iframe>`
             : liveBlockedPreview(plan))
           : `<span>${online ? 'Click to start live' : escapeHtml(text(camera.detail, 'Waiting for camera'))}</span>`;
         const fullscreenButton = live[liveKey] && plan.canEmbed
@@ -8625,7 +7862,7 @@ INDEX_HTML = r"""<!doctype html>
           : '';
         return `
           <article class="camera video-tile">
-            <div class="preview" data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" data-live-path="${escapeHtml(mediamtxPath)}" title="Click to toggle live preview">${preview}${statusBadge}${fullscreenButton}</div>
+            <div class="preview" data-live-key="${escapeHtml(liveKey)}" data-live-index="${escapeHtml(camera.index ?? 0)}" data-live-path="${escapeHtml(sourcePath)}" title="Click to toggle live preview">${preview}${statusBadge}${fullscreenButton}</div>
             <div class="body">
               <div class="row">
                 <div class="name">${escapeHtml(text(camera.name, camera.id))}</div>
@@ -8923,7 +8160,7 @@ INDEX_HTML = r"""<!doctype html>
         const valid = items.length === count && items.every(item => item.camera && /^camera\.[a-z0-9_]+$/.test(item.entity)) && new Set(items.map(item => item.entity)).size === count;
         document.getElementById('ha-card-quality').disabled = !custom || EDGE_NATIVE_RTC;
         if (EDGE_NATIVE_RTC) {document.getElementById('ha-card-quality').value='nvr';document.querySelector('#ha-card-type option[value="edge"]').textContent='Edge Live · native EdgeRTC';}
-        document.getElementById('ha-card-resource-status').textContent = EDGE_NATIVE_RTC ? 'EdgeRTC beta · live, NVR and a compatible RTSP microphone share one camera session. Use the NVR quality profile. HTTPS and WebCodecs are required.' : haDashboard.card_ready ? `Edge Live card registered in HA (${haDashboard.card_version}). NVR is the shared recording feed. The microphone starts only when you click it and may temporarily use a direct talk connection.` : 'Restart Home Assistant Core after updating Edge to register the Edge Live card and its NVR profile entities.';
+        document.getElementById('ha-card-resource-status').textContent = `Edge Live ${haDashboard.card_version||EDGE_PANEL_VERSION} · EdgeRTC Live / DVR · HTTPS and WebCodecs; shared camera source and G711 microphone.`;
         copy.disabled = !valid;
         if (!valid) { yaml.value = ''; status.textContent = 'Choose 1–4 different cameras and enter their exact Home Assistant entity IDs. Enable/update the Edge integration and restart Core if entities are missing.'; return; }
         if (custom) {
@@ -9346,28 +8583,9 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Oryginalna jakość i kodek (zalecane)</option>
 
               </select></label></div><p class="field-help">Testy H.264/H.265 i dźwięku są w menu Kodeki odtwarzacza. Zapis zachowuje kodek, rozdzielczość i FPS kamery. Nagranie jest już skompresowane przez kamerę. Zmniejszanie bitrate lub ponowne kodowanie może pogorszyć szczegóły. Obsługa odtwarzania H.265 zależy od przeglądarki.</p><div class="notice" data-recording-disk-usage role="status">Statystyki dysku są odczytywane osobno od nagrań.</div><button type="button" data-cleanup-recording-cache>Posprzątaj cache i miniatury</button><output data-storage-cleanup-result role="status"></output><input type="hidden" name="storage-retention-days" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"><details class="settings-group"><summary>Advanced recording <small>Limity miejsca i długość fragmentów</small></summary><div class="form-grid"><label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label><label>Limit miniatur (MB)<input name="nvr-thumbnail-cache-mb" type="number" min="1" max="256" value="${nvrConfig.thumbnail_cache_mb ?? 32}"></label><label>Limit kopii do odtwarzania (MB, 0 = wyłączone)<input name="nvr-playback-cache-mb" type="number" min="0" max="2048" value="${nvrConfig.playback_cache_mb ?? 0}"></label><label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label></div><p class="field-help">Domyślnie cały dzień odtwarza się z oryginalnych fragmentów, bez pełnej kopii filmu. Miniatury mają wspólny limit miejsca, maksymalnie 2048 obrazów i wygasają po 48 godzinach bez użycia. Usunięte miniatury można wygenerować ponownie z nagrania.</p></details></section>
-          <details class="settings-group" id="network-settings"><summary>Network & remote access <small>${EDGE_NATIVE_RTC ? 'EdgeRTC through Home Assistant HTTPS/WSS' : 'Optional for viewing outside your home network'}</small></summary>${EDGE_NATIVE_RTC ? '<p class="notice" data-native-network-info>EdgeRTC korzysta z adresu HTTPS Home Assistanta, także przez Nabu Casa. Nie wymaga publicznego adresu MediaMTX, portów ICE ani TURN/VPS. / EdgeRTC uses the Home Assistant HTTPS/WebSocket connection; no public MediaMTX URL or extra media ports are needed.</p>' : ''}<div data-legacy-network ${EDGE_NATIVE_RTC ? 'hidden' : ''}><div class="form-grid"><label>Remote access<select name="live-remote-access-mode">
-                <option value="local_only" ${text(liveConfig.remote_access_mode, 'local_only') === 'local_only' ? 'selected' : ''}>Local only / Nabu panel only</option>
-                <option value="direct_public" ${liveConfig.remote_access_mode === 'direct_public' ? 'selected' : ''}>Direct public DDNS</option>
-                <option value="vps_relay" ${liveConfig.remote_access_mode === 'vps_relay' ? 'selected' : ''}>VPS relay</option>
-                <option value="turn_relay" ${liveConfig.remote_access_mode === 'turn_relay' ? 'selected' : ''}>TURN relay</option>
-              </select></label><label>WebRTC public URL<input name="live-mobile-public-url" value="${escapeHtml(liveConfig.mobile_webrtc_public_url || '')}" placeholder="http://PUBLIC-IP:8889 or https://edge.example.com"></label><label>Mobile public hosts<input name="live-mobile-public-hosts" value="${escapeHtml(text(liveConfig.mobile_webrtc_public_hosts, 'homeassistant.local,192.168.33.17'))}" placeholder="homeassistant.local,public.example.com"></label></div><p class="field-help">For a Home Assistant dashboard card, Home Assistant handles remote access. These settings apply to the Edge live player.</p><details class="settings-group"><summary>Advanced WebRTC <small>STUN, TURN and ICE transport</small></summary><div class="form-grid"><label>STUN URL<input name="live-mobile-stun-url" value="${escapeHtml(text(liveConfig.mobile_webrtc_stun_url, 'stun:stun.l.google.com:19302'))}"></label><label>TURN URL<input name="live-mobile-turn-url" value="${escapeHtml(liveConfig.mobile_webrtc_turn_url || '')}" placeholder="turns:turn.example.com:443"></label><label>TURN username<input name="live-mobile-turn-username" value="${escapeHtml(liveConfig.mobile_webrtc_turn_username || '')}"></label><label>TURN password<input name="live-mobile-turn-password" type="password" value="${escapeHtml(liveConfig.mobile_webrtc_turn_password || '')}"></label><label>WebRTC ICE transport<select name="live-mobile-ice-transport">
-                <option value="auto" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'auto' ? 'selected' : ''}>Auto UDP + TCP</option>
-                <option value="udp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'udp' ? 'selected' : ''}>UDP only</option>
-                <option value="tcp" ${text(liveConfig.mobile_webrtc_ice_transport, liveConfig.mobile_webrtc_tcp_only ? 'tcp' : 'auto') === 'tcp' ? 'selected' : ''}>TCP only</option>
-              </select></label></div></details></div></details>
+          <details class="settings-group" id="network-settings"><summary>Network & remote access <small>Home Assistant HTTPS / WSS</small></summary><p class="notice" data-native-network-info>EdgeRTC Live i DVR korzystają z uwierzytelnionego połączenia Home Assistanta, także przez Nabu Casa. Otwórz panel przez HTTPS. / Live and DVR share the authenticated Home Assistant connection.</p></details>
           <details class="settings-group" id="storage-settings"><summary>Storage locations <small>Keep the defaults unless you use a custom disk layout</small></summary><div class="form-grid"><label>Recordings directory<input name="storage-recordings-dir" value="${escapeHtml(text(storage.recordings_dir, '/media/edge-of-infinity/recordings'))}"></label><label>Database path<input name="storage-database-path" value="${escapeHtml(text(storage.database_path, '/homeassistant/edge/edge.db'))}"></label></div></details>
-          <details class="settings-group" id="advanced-settings"><summary>Advanced system settings <small>Playback performance, streaming engine and server</small></summary><h3>Performance</h3><div class="form-grid"><label>Tile FPS<input name="live-tile-fps" type="number" min="1" max="10" value="${escapeHtml(text(liveConfig.tile_fps, 5))}"></label><label>Tile max width<input name="live-tile-max-width" type="number" min="320" max="1920" value="${escapeHtml(text(liveConfig.tile_max_width, 960))}"></label><label class="check-row"><input name="live-prebuffer-enabled" type="checkbox" ${liveConfig.prebuffer_enabled !== false ? 'checked' : ''}> Keep selected low-latency streams warm</label><label class="check-row"><input name="live-always-on-enabled" type="checkbox" ${liveConfig.always_on_enabled !== false ? 'checked' : ''}> Keep live paths warm after boot</label><label>Always-on scope<select name="live-always-on-stream-scope">
-                <option value="tile" ${text(liveConfig.always_on_stream_scope, 'tile') === 'tile' ? 'selected' : ''}>Tile preview only</option>
-                <option value="live" ${liveConfig.always_on_stream_scope === 'live' ? 'selected' : ''}>Live stream only</option>
-                <option value="tile_live" ${liveConfig.always_on_stream_scope === 'tile_live' ? 'selected' : ''}>Tile + live</option>
-                <option value="all" ${liveConfig.always_on_stream_scope === 'all' ? 'selected' : ''}>All camera streams</option>
-              </select></label><label>Local prebuffer ms<input name="live-prebuffer-local-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_local_ms, 4000))}"></label><label>Remote prebuffer ms<input name="live-prebuffer-remote-ms" type="number" min="0" max="10000" value="${escapeHtml(text(liveConfig.prebuffer_remote_ms, 2000))}"></label></div><h3>${EDGE_NATIVE_RTC ? 'Server' : 'Engine & server'}</h3><div class="form-grid"><label ${EDGE_NATIVE_RTC ? 'hidden' : ''}>Engine<select name="live-engine">
-                <option value="janus_webrtc" ${liveConfig.engine === 'janus_webrtc' ? 'selected' : ''}>Janus WebRTC core</option>
-                <option value="mediamtx" ${liveConfig.engine === 'mediamtx' ? 'selected' : ''}>MediaMTX WHEP core</option>
-                <option value="ll_hls" ${liveConfig.engine === 'll_hls' ? 'selected' : ''}>LL-HLS experimental</option>
-                <option value="srt" ${liveConfig.engine === 'srt' ? 'selected' : ''}>SRT relay</option>
-              </select></label><label>Listen address<input name="server-listen" value="${escapeHtml(text(server.listen, '0.0.0.0:8088'))}"></label><label>Public URL<input name="server-public-url" value="${escapeHtml(server.public_url || '')}" placeholder="Optional external URL"></label><label>Frame interval ms<input name="live-frame-interval-ms" type="number" min="250" max="10000" value="${escapeHtml(text(liveConfig.frame_interval_ms, 1200))}" disabled></label></div><p class="field-help">The add-on's API port is configured in Home Assistant. Engine and listener changes may require restarting the add-on.</p></details>
+          <details class="settings-group" id="advanced-settings"><summary>Advanced system settings <small>Server</small></summary><p class="field-help">Źródła kamer działają stale na serwerze. Podgląd zachowuje oryginalną jakość i FPS. / Camera sources stay connected; original video quality and FPS.</p><div class="form-grid"><label>API listen<input name="server-listen" value="${escapeHtml(text(server.listen, '0.0.0.0:8088'))}" readonly></label><label>Public panel URL<input name="server-public-url" value="${escapeHtml(server.public_url || '')}" placeholder="Optional external URL"></label></div><p class="field-help">The API port is configured in Home Assistant.</p></details>
         `;
       }
 
@@ -9757,26 +8975,7 @@ INDEX_HTML = r"""<!doctype html>
             database_path: get('storage-database-path').value.trim() || '/homeassistant/edge/edge.db',
             retention_days: Number(get('nvr-retention-days').value || 14)
           },
-          live: {
-            engine: get('live-engine').value,
-            remote_access_mode: get('live-remote-access-mode').value,
-            frame_interval_ms: Number(get('live-frame-interval-ms').value || 1200),
-            tile_fps: Number(get('live-tile-fps').value || 5),
-            tile_max_width: Number(get('live-tile-max-width').value || 960),
-            prebuffer_enabled: get('live-prebuffer-enabled').checked,
-            always_on_enabled: get('live-always-on-enabled').checked,
-            always_on_stream_scope: get('live-always-on-stream-scope').value,
-            prebuffer_local_ms: Number(get('live-prebuffer-local-ms').value || 4000),
-            prebuffer_remote_ms: Number(get('live-prebuffer-remote-ms').value || 2000),
-            mobile_webrtc_public_url: get('live-mobile-public-url').value.trim(),
-            mobile_webrtc_public_hosts: get('live-mobile-public-hosts').value.trim(),
-            mobile_webrtc_stun_url: get('live-mobile-stun-url').value.trim(),
-            mobile_webrtc_turn_url: get('live-mobile-turn-url').value.trim(),
-            mobile_webrtc_turn_username: get('live-mobile-turn-username').value.trim(),
-            mobile_webrtc_turn_password: get('live-mobile-turn-password').value,
-            mobile_webrtc_ice_transport: get('live-mobile-ice-transport').value,
-            mobile_webrtc_tcp_only: get('live-mobile-ice-transport').value === 'tcp'
-          },
+          live: {engine: 'edge_rtc'},
           detection: {
             camera_events_enabled: get('detection-camera-events').checked,
             local_enabled: get('detection-local').checked,
@@ -9867,59 +9066,6 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
 
-      let engineSettings = null;
-      let engineSaveInFlight = false;
-      let engineLoadInFlight = false;
-      const engineSelect = document.getElementById('core-engine-select');
-      const engineSave = document.getElementById('save-core-engine');
-      const engineState = document.getElementById('core-engine-state');
-      function updateEngineControls() {
-        engineSelect.disabled = engineSaveInFlight || engineLoadInFlight || !engineSettings?.available;
-        engineSave.disabled = engineSelect.disabled || engineSelect.value === engineSettings.core_engine;
-        document.getElementById('reload-core-engine').disabled = engineSaveInFlight || engineLoadInFlight;
-      }
-      function showEngineSettings(data) {
-        engineSettings = data;
-        engineSelect.value = data.core_engine;
-        document.getElementById('core-engine-running').textContent = `Active engine: ${data.running_engine}. Saved engine: ${data.core_engine}.`;
-        engineState.textContent = !data.available ? 'Cannot access this app configuration in Home Assistant. Check the Supervisor connection and press Refresh engine.' : data.restart_required ? 'Zapisano. Restart required: restart the Edge app, then Home Assistant Core.' : 'Zapisano. Selected engine is already active.';
-        updateEngineControls();
-      }
-      async function loadEngineSettings() {
-        if (engineLoadInFlight || engineSaveInFlight) return;
-        engineLoadInFlight = true;
-        updateEngineControls();
-        try {
-          const { response, data } = await settingsRequest('api/core/engine', { cache: 'no-store' }, 15000);
-          if (!response.ok) throw new Error('Could not read engine configuration.');
-          showEngineSettings(data);
-        } catch (error) {
-          engineSettings = null;
-          engineState.textContent = error.message;
-        } finally {
-          engineLoadInFlight = false;
-          updateEngineControls();
-        }
-      }
-      engineSelect.addEventListener('change', updateEngineControls);
-      document.getElementById('reload-core-engine').addEventListener('click', loadEngineSettings);
-      engineSave.addEventListener('click', async () => {
-        if (engineSaveInFlight || engineSave.disabled) return;
-        engineSaveInFlight = true;
-        updateEngineControls();
-        engineState.textContent = 'Saving and verifying engine configuration...';
-        try {
-          const { response, data } = await settingsRequest('api/core/engine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ core_engine: engineSelect.value }) });
-          if (!response.ok) throw new Error(data.error || 'Could not save engine.');
-          showEngineSettings(data);
-        } catch (error) {
-          engineState.textContent = error.message;
-        } finally {
-          engineSaveInFlight = false;
-          updateEngineControls();
-        }
-      });
-
       async function loadCameras() {
         const response = await panelFetch(panelPath('cameras.json'), { cache: 'no-store' });
         const data = await response.json();
@@ -9950,8 +9096,8 @@ INDEX_HTML = r"""<!doctype html>
           }
         });
         grid.innerHTML = cameras.length
-          ? `${remoteLiveNotice()}${cameras.map(cameraCard).join('')}${addCameraTile()}`
-          : `${remoteLiveNotice()}${addCameraTile()}`;
+          ? `${cameras.map(cameraCard).join('')}${addCameraTile()}`
+          : `${addCameraTile()}`;
         monitorLiveFrames();
       }
 
@@ -11132,7 +10278,6 @@ INDEX_HTML = r"""<!doctype html>
         });
         await loadConfig();
         void restoreRecordingGallery();
-        void loadEngineSettings();
         await Promise.all([loadPresets(), loadCameras(), loadRecordingStatus({ forceRender: true, reason: 'boot' })]);
         setTimeout(()=>{if(activePage==='home'&&!document.hidden)scheduleGalleryPrefetch();},3000);
         let eventId=new URLSearchParams(location.search).get('edge_event');try{eventId=eventId||new URLSearchParams(window.top.location.search).get('edge_event');}catch(_){}if(/^[1-9][0-9]{0,18}$/.test(eventId||''))await openAlertById(eventId);
@@ -11149,15 +10294,15 @@ INDEX_HTML = r"""<!doctype html>
 
 INDEX_HTML = (
     INDEX_HTML
-    .replace("__EDGE_LIVE_PRELOAD__", '<script>{for(const name of ["client.js","device-diagnostics.js"]){const link=document.createElement("link");link.rel="modulepreload";link.href=new URL("api/edge-rtc/"+name+"?v=__EDGE_PANEL_VERSION__",document.baseURI).href;document.head.append(link);}}</script>' if EDGE_RTC_ENABLED else '')
+    .replace("__EDGE_LIVE_PRELOAD__", '<script>{for(const name of ["client.js","device-diagnostics.js"]){const link=document.createElement("link");link.rel="modulepreload";link.href=new URL("api/edge-rtc/"+name+"?v=__EDGE_PANEL_VERSION__",document.baseURI).href;document.head.append(link);}}</script>')
     .replace("__EDGE_NATIVE_PLAYER_DOCUMENT__", json.dumps(EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',APP_VERSION)).replace('<', '\\u003c'))
     .replace("__EDGE_PANEL_VERSION__", APP_VERSION)
     .replace("__EDGE_GALLERY_CACHE__", (Path(__file__).parent/'edge-recording-gallery.js').read_text())
     .replace("__EDGE_RECORDING_SURFACE__", (Path(__file__).parent/'edge-recording-surface.js').read_text())
     .replace("__EDGE_LOG_VIEW__", (Path(__file__).parent/'edge-log-view.js').read_text())
     .replace("__EDGE_UI_BUILD__", UI_BUILD)
-    .replace("__EDGE_NATIVE_RTC__", "true" if EDGE_RTC_ENABLED else "false")
-    .replace("__EDGE_HA_LIVE_HELP__", "EdgeRTC sends H264 frames through authenticated Home Assistant WebSocket connections. Native live requires HTTPS and browser WebCodecs. A compatible RTSP G711 microphone uses the existing camera session. HA streaming needs no extra public media ports." if EDGE_RTC_ENABLED else 'Home Assistant streams the selected live feed through its own authenticated connection. Keep the camera reachable from Home Assistant and use H264 for broad browser support. Edge Live needs a Home Assistant WebRTC provider such as go2rtc. The microphone requires HTTPS, browser permission and camera/provider support for return audio.')
+    .replace("__EDGE_NATIVE_RTC__", "true")
+    .replace("__EDGE_HA_LIVE_HELP__", "EdgeRTC sends original H264/H265 frames through authenticated Home Assistant WebSocket connections. Native live requires HTTPS and browser WebCodecs. A compatible RTSP G711 microphone uses the existing camera session. HA streaming needs no extra public media ports.")
     .replace("__EDGE_CAMERA_VENDORS__", json.dumps(CAMERA_VENDORS))
     .replace("__EDGE_CAMERA_TEMPLATES__", json.dumps({vendor: {stream: camera_stream_template(vendor, "1", stream) for stream in ("main", "sub")} for vendor in CAMERA_VENDORS}))
 )
@@ -11222,7 +10367,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             token = (HOME_DIR / "edge-rtc-token").read_text().strip()
             camera=next((c for c in load_config().get('cameras',[]) if c.get('enabled') and stream_path in (safe_id(c.get('id','camera'))+'_main',safe_id(c.get('id','camera'))+'_sub')),None)
             if camera and not archive:CAMERA_KEYFRAMES.request(camera['id'])
-            backend = socket.create_connection(("127.0.0.1", MEDIAMTX_API_PORT), timeout=5)
+            backend = socket.create_connection(("127.0.0.1", EDGE_RTC_API_PORT), timeout=5)
             key = self.headers.get("Sec-WebSocket-Key", "")
             if not re.fullmatch(r"[A-Za-z0-9+/=]{20,32}", key):
                 raise ValueError("invalid_websocket_key")
@@ -11282,13 +10427,13 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/edge-rtc/edge-pcm-worklet.js":
             self.send_live_script("edge-pcm-worklet.js")
             return
-        if path.startswith("/api/edge-rtc/stream/") and EDGE_RTC_ENABLED:
+        if path.startswith('/api/edge-rtc/stream/'):
             self.serve_edge_rtc_stream(path.removeprefix("/api/edge-rtc/stream/"))
             return
-        if path.startswith('/api/edge-rtc/archive/') and EDGE_RTC_ENABLED:
+        if path.startswith('/api/edge-rtc/archive/'):
             self.serve_edge_rtc_stream(path.removeprefix('/api/edge-rtc/archive/'),archive=True)
             return
-        if path.startswith("/api/edge-rtc/player/") and EDGE_RTC_ENABLED:
+        if path.startswith('/api/edge-rtc/player/'):
             self.send_bytes(EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',APP_VERSION).encode(), "text/html; charset=utf-8")
             return
         if path == "/api/version":
@@ -11403,22 +10548,6 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/core/status":
             self.send_json(engine_runtime_status())
             return
-        if path == "/api/core/engine":
-            self.send_json(core_engine_settings())
-            return
-        if path == "/api/core/mediamtx.yml":
-            if not MEDIAMTX_CONFIG_PATH.exists():
-                self.send_json({"error": "mediamtx_config_not_found"}, HTTPStatus.NOT_FOUND)
-                return
-            self.send_bytes(redact_rtsp(MEDIAMTX_CONFIG_PATH.read_text(encoding="utf-8", errors="replace")).encode("utf-8"), "text/plain; charset=utf-8")
-            return
-        if path == "/api/core/janus-streaming.jcfg":
-            streaming_config = JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg"
-            if not streaming_config.exists():
-                self.send_json({"error": "janus_streaming_config_not_found"}, HTTPStatus.NOT_FOUND)
-                return
-            self.send_bytes(redact_rtsp(streaming_config.read_text(encoding="utf-8", errors="replace")).encode("utf-8"), "text/plain; charset=utf-8")
-            return
         if path == "/cameras.json":
             payload = read_json(DATA_DIR / "cameras.json", {"cameras": []})
             self.send_json(payload)
@@ -11525,17 +10654,6 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 self.send_json({'cleanup':report,'storage':storage_usage_payload(config)})
             except (OSError,ValueError) as error:
                 self.send_json({'error':str(error)},HTTPStatus.BAD_REQUEST)
-            return
-        if parsed.path == "/api/core/engine":
-            try:
-                payload = self.read_body_json()
-                if not isinstance(payload, dict):
-                    raise ValueError("Expected an object")
-                self.send_json(save_core_engine(payload.get("core_engine")))
-            except ValueError:
-                self.send_json({"error": "Choose a valid streaming engine."}, HTTPStatus.BAD_REQUEST)
-            except (OSError, RuntimeError):
-                self.send_json({"error": "Could not confirm the saved engine in Home Assistant. Press Refresh engine before retrying."}, HTTPStatus.BAD_GATEWAY)
             return
         if parsed.path == "/api/refresh":
             payload = refresh_status()
@@ -12109,7 +11227,7 @@ def main() -> None:
     write_debug_event('release_features',{'version':APP_VERSION,'features':APP_RELEASE_FEATURES,
                       'hardware':hardware_inventory(),'recordings_changed':False,'camera_codec_settings_changed':False,
                       'edge_rtc':'Sources stay connected on the server; viewers share its bounded keyframe buffer.'})
-    print(f'[edge-panel] {APP_VERSION}: UNV optional talk AAC SDP compatibility, per-media codec diagnostics, metadata retry and source AAC copy. Original video/FPS unchanged.')
+    print(f'[edge-panel] {APP_VERSION}: EdgeRTC-only Live / DVR, bounded AAC playback, native configuration migration and shared recording source. Original video/FPS unchanged.')
     write_json(DATA_DIR / "health", health_payload())
     write_json(HOME_DIR / "health.json", health_payload())
     try:
@@ -12122,11 +11240,11 @@ def main() -> None:
         start_recording_cache_refresh_loop()
         # Previews decode in the browser; avoid competing background FFmpeg jobs.
         DETECTION_SERVICE = DetectionService(HOME_DIR, onvif_request,
-            lambda camera, index: mediamtx_rtsp_url(camera, index, camera.get("record_stream") or "main") if EDGE_RTC_ENABLED or MEDIAMTX_ENABLED else "",
+            lambda camera, index: edge_rtsp_url(camera, index, camera.get("record_stream") or "main"),
             write_json, on_event=enqueue_alert)
         ALERT_SERVICE=AlertMediaService(DETECTION_SERVICE.store,load_config,alert_source_entries,save_alert_image,save_alert_fallback_image,write_debug_event)
         DETECTION_SERVICE.apply(config)
-        if EDGE_RTC_ENABLED:CAMERA_KEYFRAMES.warm()
+        CAMERA_KEYFRAMES.warm()
     except Exception as error:
         write_debug_event("boot_refresh_status_error", {"error": str(error), "type": type(error).__name__})
         raise

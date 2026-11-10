@@ -2,18 +2,11 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.13.3** restores camera connection when optional ONVIF talk AAC is
-malformed, preserving forward H.265/AAC and valid G711 talk on one connection.
-Version **0.13.2** reports exact RTSP connection failures and advertised codecs,
-and handles rejected optional microphone negotiation on the same connection.
-Version **0.13.0** adds optional **EdgeRTC DVR** archive playback with indexed
-keyframe seeks, one persistent authenticated socket and bounded frame delivery.
-Original video/FPS and AAC stay unchanged. Native MP4 remains available and is
-selected automatically for unsupported device profiles. Live status and recorder
-codec detection now use the existing EdgeRTC source registry, fixing false UNV
-probe failures and avoiding unnecessary AAC encoding. Camera GOP 1 s / 2 s actions
-are explicit and verified.
-See [update details](edge-of-infinity/DOCS.md#0130-edgertc-dvr-source-metadata-and-native-aac).
+Version **0.14.0** uses EdgeRTC as the sole core for Live and indexed DVR.
+It removes the retired engines and their settings while preserving camera
+profiles, original recordings and 14-day retention. DVR AAC uses bounded audio
+queues and backpressure; Live keeps its existing audio policy.
+See [migration and setup](edge-of-infinity/DOCS.md).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:
 
@@ -44,17 +37,17 @@ After publishing this repository on GitHub:
 
 This app runs Edge Core.
 
-The bundled Home Assistant integration exposes cameras and sensors, and automatically registers the Edge Live dashboard card. It supports 1–4 cameras, NVR/Main/Sub quality selection, audio controls and optional microphone talk. Live viewing shares the NVR recording feed by default. After an add-on update, restart Home Assistant Core to load the integration and refresh the frontend. See [setup and limitations](edge-of-infinity/DOCS.md#shared-nvr-live-streams-and-14-cameras-01044).
+The bundled Home Assistant integration exposes cameras and sensors, and automatically registers the Edge Live dashboard card. It supports 1–4 cameras, NVR/Main/Sub quality selection, audio controls and optional microphone talk. Live viewing shares the NVR recording feed by default. After an add-on update, restart Home Assistant Core to load the integration and refresh the frontend. See [setup and limitations](edge-of-infinity/DOCS.md#home-assistant-card-and-integration).
 
 The app is the engine. The integration is the bridge.
 
 
-## Native EdgeRTC beta
+## Native EdgeRTC
 
-The optional `core_engine: edge_rtc` mode uses our EdgeRTC/1 frame protocol over
+EdgeRTC uses our EdgeRTC/1 frame protocol over
 WebSocket and browser WebCodecs, with no WebRTC or MSE on that path. One recording
 profile is shared with native live, NVR and supported RTSP G711 microphone audio.
-See [setup and current limits](edge-of-infinity/DOCS.md#native-edgertc-beta-01045).
+See [setup and current limits](edge-of-infinity/DOCS.md#live).
 
 ## Recording alerts (0.11.6)
 

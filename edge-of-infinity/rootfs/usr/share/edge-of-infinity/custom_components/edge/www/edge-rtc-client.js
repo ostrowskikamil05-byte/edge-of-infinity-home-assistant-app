@@ -51,7 +51,7 @@ export class EdgeRTCClient {
     bootstrap_packets_superseded:this.bootstrapSkippedPackets||0,bootstrap_keyframe_replacements:this.bootstrapKeyReplacements||0,
     measured_end_to_end_latency_ms:null,audio_state:this.audio?.state||'muted_or_not_started',audio_codec:this.audioInfo?.codec,audio_rate:this.audioInfo?.sampleRate,
     audio_queue_ms:Math.round((this.audioQueuedSeconds||0)*1000)+(this.audioStats?.queued_ms||0),audio_scheduled_ms:0,audio_presentation:'continuous_pcm_worklet',audio_output_rate:this.audio?.sampleRate,audio_output_frames:this.audioStats?.output_frames||0,
-    audio_packets:this.audioPackets||0,audio_dropped_packets:this.audioDroppedPackets||0,audio_underruns:this.audioStats?.underruns||0,audio_overruns:this.audioStats?.overruns||0,audio_dropped_frames:this.audioStats?.dropped_frames||0};}
+    audio_packets:this.audioPackets||0,audio_dropped_packets:this.audioDroppedPackets||0,audio_underruns:this.audioStats?.underruns||0,audio_overruns:this.audioStats?.overruns||0,audio_dropped_frames:this.audioStats?.dropped_frames||0,audio_worklet_mode:this.audioStats?.mode,audio_buffer_limit_ms:this.audioStats?.buffer_limit_ms};}
   async message(data){
     if(this.closed)return;
     try{
@@ -173,14 +173,14 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   audioModule(){
-    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.13.3',import.meta.url).href);
+    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.14.0',import.meta.url).href);
   }
   startAudioPlayback(){
     if(this.audioPlaybackPromise||this.closed||this.audioDisabled)return;
     const started=performance.now();
     this.audioPlaybackPromise=Promise.resolve().then(()=>this.audioModule()).then(()=>{
       if(this.closed)return;
-      this.audioPlayback=new AudioWorkletNode(this.audio,'edge-playback',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});
+      this.audioPlayback=new AudioWorkletNode(this.audio,'edge-playback',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2],processorOptions:{mode:this.options.audioPlaybackMode==='archive'?'archive':'live'}});
       this.audioPlayback.connect(this.gain);
       this.audioPlayback.port.onmessage=event=>{
         if(this.closed)return;const data=event.data;
@@ -202,7 +202,8 @@ export class EdgeRTCClient {
     this.audioPackets=(this.audioPackets||0)+1;const packet={type:'pcm',channels,rate,timestamp};
     if(this.audioPlayback){this.sendPCM(packet);return;}
     this.audioPending??=[];this.audioPending.push(packet);this.audioQueuedSeconds=(this.audioQueuedSeconds||0)+duration;
-    while(this.audioPending.length>1&&(this.audioQueuedSeconds>.24||this.audioPending.length>48)){const old=this.audioPending.shift();this.audioQueuedSeconds-=old.channels[0].length/old.rate;this.audioDroppedPackets=(this.audioDroppedPackets||0)+1;}
+    const limit=this.options.audioPlaybackMode==='archive' ? .6 : .24;
+    while(this.audioPending.length>1&&(this.audioQueuedSeconds>limit||this.audioPending.length>48)){const old=this.audioPending.shift();this.audioQueuedSeconds-=old.channels[0].length/old.rate;this.audioDroppedPackets=(this.audioDroppedPackets||0)+1;}
     this.startAudioPlayback();
   }
   async startMicrophone(){this.micTimer=setTimeout(()=>this.fail('Microphone initialization timed out.'),10000);for(const track of this.options.microphone.getTracks())track.addEventListener('ended',()=>this.fail('Microphone device disconnected.'),{once:true});const audio=this.ensureAudio();await this.audioModule();if(this.closed)return;this.micSource=audio.createMediaStreamSource(this.options.microphone);this.worklet=new AudioWorkletNode(audio,'edge-pcm');this.silence=audio.createGain();this.silence.gain.value=0;this.micSource.connect(this.worklet);this.worklet.connect(this.silence);this.silence.connect(audio.destination);this.worklet.port.onmessage=event=>{if(this.closed||this.ws.readyState!==WebSocket.OPEN)return;if(this.ws.bufferedAmount>6400){this.fail('Microphone connection is too slow.');return;}const packet=new Uint8Array(321);packet[0]=3;packet.set(new Uint8Array(event.data),1);this.ws.send(packet);};clearTimeout(this.micTimer);this.options.onMicrophone?.(true);}

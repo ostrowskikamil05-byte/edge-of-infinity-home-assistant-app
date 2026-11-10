@@ -91,7 +91,7 @@ async def main():
                 sys.path.insert(0, str(ROOT/'tests'))
                 from test_edge_panel_config import load_panel_module
                 os.environ['EDGE_CORE_ENGINE']='edge_rtc'
-                panel=load_panel_module();panel.EDGE_RTC_ENABLED=True;panel.MEDIAMTX_ENABLED=False;panel.MEDIAMTX_API_PORT=urlparse(info['api']).port
+                panel=load_panel_module();panel.EDGE_RTC_ENABLED=True;panel.EDGE_RTC_API_PORT=urlparse(info['api']).port
                 panel.HOME_DIR.mkdir(parents=True,exist_ok=True);(panel.HOME_DIR/'edge-rtc-token').write_text(info['token'])
                 server=panel.ThreadingHTTPServer(('127.0.0.1',18090),panel.EdgeHandler);threading.Thread(target=server.serve_forever,daemon=True).start()
                 from edge_detection import DetectionService

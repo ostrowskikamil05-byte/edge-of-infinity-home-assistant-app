@@ -21,8 +21,7 @@ def load_panel_module():
     os.environ["EDGE_DATA_DIR"] = str(temp_root / "data")
     os.environ["EDGE_HOME_CONFIG"] = str(temp_root / "home" / "edge.json")
     os.environ["EDGE_ADDON_CONFIG"] = str(temp_root / "addon-config" / "edge.json")
-    os.environ["EDGE_MEDIAMTX_CONFIG"] = str(temp_root / "runtime" / "mediamtx.yml")
-    os.environ["EDGE_JANUS_CONFIG_DIR"] = str(temp_root / "runtime" / "janus")
+    os.environ["EDGE_RTC_CONFIG"] = str(temp_root / "runtime" / "edge-rtc.json")
     spec = importlib.util.spec_from_file_location(f"edge_panel_test_{temp_root.name}", PANEL_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -73,11 +72,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.13.3")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.13.3")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.13.3")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.13.3")
-        self.assertIn("v0.13.3", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.14.0")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.14.0")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.14.0")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.14.0")
+        self.assertIn("v0.14.0", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -356,68 +355,24 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(addon_mirror["cameras"][0]["host"], "192.168.33.136")
 
     def test_home_live_tiles_honor_tile_stream_and_enable_audio_controls(self):
-        html = PANEL_PATH.read_text(encoding="utf-8")
+        panel = load_panel_module()
+        self.assertIn("function chooseHomePreviewStream(camera)", panel.INDEX_HTML)
+        self.assertIn("configured_tile_stream", panel.INDEX_HTML)
+        self.assertIn("api/edge-rtc/player/", panel.INDEX_HTML)
+        self.assertIn("client.setAudio(.6,muted)", panel.EDGE_RTC_PLAYER_HTML)
 
-        self.assertIn("function chooseHomePreviewStream(camera)", html)
-        self.assertIn("configured_tile_stream", html)
-        self.assertNotIn("main_stream_above_tile_width", html)
-        self.assertIn("function mediaMtxPlayerUrl(url)", html)
-        self.assertIn("controls=true&muted=false&autoplay=true&playsInline=true&disablepictureinpicture=true", html)
-
-    def test_janus_streaming_mounts_do_not_disable_audio(self):
-        runner = (ROOT / "edge-of-infinity" / "rootfs" / "usr" / "bin" / "edge-app-run").read_text(encoding="utf-8")
-
-        self.assertIn("audio = true", runner)
-        self.assertNotIn("audio = false", runner)
 
     def test_runtime_engine_config_uses_saved_camera_values(self):
         panel = load_panel_module()
-        payload = panel.normalize_config(
-            {
-                "server": {},
-                "storage": {"recordings_dir": str(panel.HOME_DIR / "recordings")},
-                "live": {
-                    "mobile_webrtc_public_url": "http://edge.example.com:8889",
-                    "mobile_webrtc_public_hosts": "homeassistant.local",
-                    "mobile_webrtc_ice_transport": "tcp",
-                },
-                "cameras": [
-                    {
-                        "id": "hikvision_1",
-                        "vendor": "hikvision",
-                        "host": "192.168.33.136",
-                        "username": "admin",
-                        "password": "secret",
-                        "live_stream": "sub",
-                        "tile_stream": "sub",
-                        "record_stream": "sub",
-                        "enabled": True,
-                        "record": True,
-                    }
-                ],
-            }
-        )
-
-        result = panel.sync_runtime_engine_config(payload, "test")
-        mediamtx_config = panel.MEDIAMTX_CONFIG_PATH.read_text(encoding="utf-8")
-        janus_config = (panel.JANUS_CONFIG_DIR / "janus.plugin.streaming.jcfg").read_text(encoding="utf-8")
-
-        self.assertTrue(result["mediamtx"]["written"])
-        self.assertIn("edge.example.com", mediamtx_config)
-        self.assertIn("hikvision_1_sub:", mediamtx_config)
-        self.assertIn("rtsp://admin:secret@192.168.33.136:554/Streaming/Channels/102", mediamtx_config)
-        self.assertIn("sourceOnDemand: no", mediamtx_config)
-        self.assertIn("record: no", mediamtx_config)
-        self.assertFalse(result["mediamtx"]["recording_enabled"])
-        self.assertIn("audio = true", janus_config)
-        self.assertIn("hikvision_1_sub", janus_config)
-
-        second = panel.sync_runtime_engine_config(payload, "test-unchanged")
-
-        self.assertFalse(second["mediamtx"]["written"])
-        self.assertTrue(second["mediamtx"]["unchanged"])
-        self.assertFalse(second["janus"]["written"])
-        self.assertTrue(second["janus"]["unchanged"])
+        config = panel.normalize_config({'cameras': [{**camera('front', '192.0.2.10', 'sub'), 'record_stream': 'sub'}]})
+        panel.commit_panel_config(config)
+        result = panel.sync_runtime_engine_config(config, 'save')
+        runtime = json.loads(panel.EDGE_RTC_CONFIG_PATH.read_text())
+        self.assertTrue(result['edge_rtc']['written'])
+        self.assertEqual(len(runtime['sources']), 1)
+        self.assertEqual(runtime['sources'][0]['url'], config['cameras'][0]['rtsp_sub'])
+        self.assertTrue(runtime['sources'][0]['microphone'])
+        self.assertEqual(runtime['sources'][0]['paths'], ['front_main', 'front_sub'])
 
     def test_panel_has_fullscreen_and_recording_timeline_controls(self):
         html = PANEL_PATH.read_text(encoding="utf-8")
@@ -438,7 +393,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("unv-sdp-v133", html)
+        self.assertIn("native-dvr-v140", html)
         self.assertIn("function recordingPlayerControls", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
@@ -525,143 +480,20 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("Access-Control-Allow-Origin", html)
         self.assertIn("private, max-age=86400, immutable", html)
 
-    def test_live_mobile_settings_are_normalized_and_preserved(self):
+    def test_retired_live_settings_do_not_change_camera_or_recording_profiles(self):
         panel = load_panel_module()
-        payload = {
-            "server": {},
-            "storage": {},
-            "live": {
-                "engine": "janus_webrtc",
-                "remote_access_mode": "vps_relay",
-                "prebuffer_enabled": True,
-                "always_on_enabled": True,
-                "always_on_stream_scope": "tile",
-                "prebuffer_local_ms": 5000,
-                "prebuffer_remote_ms": 2500,
-                "mobile_webrtc_public_hosts": "edge.example.com,192.168.33.17",
-                "mobile_webrtc_stun_url": "stun:stun.l.google.com:19302",
-                "mobile_webrtc_turn_url": "turns:turn.example.com:443",
-                "mobile_webrtc_turn_username": "edge",
-                "mobile_webrtc_turn_password": "secret",
-                "mobile_webrtc_ice_transport": "tcp",
-            },
-            "cameras": [camera("hikvision_1", "192.168.33.21", "sub")],
-        }
+        camera_config = camera('front', '192.0.2.10', 'sub')
+        base = panel.normalize_config({'cameras': [camera_config]})
+        changed = panel.normalize_config({**base, 'live': {'engine': 'janus_webrtc', 'mobile_webrtc_turn_password': 'retired', 'always_on_enabled': False}})
+        self.assertEqual(changed['live'], {'engine': 'edge_rtc'})
+        self.assertEqual(changed['cameras'], base['cameras'])
+        self.assertEqual(changed['nvr'], base['nvr'])
+        self.assertEqual(changed['storage'], base['storage'])
 
-        normalized = panel.normalize_config(payload)
 
-        self.assertTrue(normalized["live"]["prebuffer_enabled"])
-        self.assertTrue(normalized["live"]["always_on_enabled"])
-        self.assertEqual(normalized["live"]["always_on_stream_scope"], "tile")
-        self.assertEqual(normalized["live"]["remote_access_mode"], "vps_relay")
-        self.assertEqual(normalized["live"]["prebuffer_remote_ms"], 2500)
-        self.assertEqual(normalized["live"]["mobile_webrtc_public_hosts"], "edge.example.com,192.168.33.17")
-        self.assertEqual(normalized["live"]["mobile_webrtc_turn_url"], "turns:turn.example.com:443")
-        self.assertEqual(normalized["live"]["mobile_webrtc_turn_password"], "secret")
-        self.assertEqual(normalized["live"]["mobile_webrtc_ice_transport"], "tcp")
-        self.assertTrue(normalized["live"]["mobile_webrtc_tcp_only"])
 
-    def test_default_always_on_keeps_tile_stream_warm_without_forcing_4k_main(self):
-        panel = load_panel_module()
-        test_camera = camera("hikvision_1", "192.168.33.21", "sub")
-        test_camera["record"] = False
-        test_camera["record_stream"] = "sub"
-        test_camera["live_stream"] = "sub"
-        test_camera["tile_stream"] = "sub"
-        payload = panel.normalize_config(
-            {
-                "server": {},
-                "storage": {},
-                "live": {"prebuffer_enabled": True, "always_on_enabled": True},
-                "cameras": [test_camera],
-            }
-        )
 
-        result = panel.write_mediamtx_runtime_config(payload)
-        text = panel.MEDIAMTX_CONFIG_PATH.read_text(encoding="utf-8")
 
-        self.assertTrue(result["always_on_enabled"])
-        self.assertEqual(result["always_on_stream_scope"], "tile")
-        self.assertIn("hikvision_1_main:", text)
-        self.assertIn("hikvision_1_sub:", text)
-        main_block = text.split("  hikvision_1_main:", 1)[1].split("  hikvision_1_sub:", 1)[0]
-        sub_block = text.split("  hikvision_1_sub:", 1)[1]
-        self.assertIn("sourceOnDemand: yes", main_block)
-        self.assertIn("record: no", main_block)
-        self.assertIn("sourceOnDemand: no", sub_block)
-
-    def test_all_scope_can_keep_both_mediamtx_paths_started_when_requested(self):
-        panel = load_panel_module()
-        test_camera = camera("hikvision_1", "192.168.33.21", "sub")
-        test_camera["record"] = False
-        test_camera["record_stream"] = "sub"
-        test_camera["live_stream"] = "sub"
-        test_camera["tile_stream"] = "sub"
-        payload = panel.normalize_config(
-            {
-                "server": {},
-                "storage": {},
-                "live": {"prebuffer_enabled": True, "always_on_enabled": True, "always_on_stream_scope": "all"},
-                "cameras": [test_camera],
-            }
-        )
-
-        result = panel.write_mediamtx_runtime_config(payload)
-        text = panel.MEDIAMTX_CONFIG_PATH.read_text(encoding="utf-8")
-
-        self.assertEqual(result["always_on_stream_scope"], "all")
-        main_block = text.split("  hikvision_1_main:", 1)[1].split("  hikvision_1_sub:", 1)[0]
-        sub_block = text.split("  hikvision_1_sub:", 1)[1]
-        self.assertIn("sourceOnDemand: no", main_block)
-        self.assertIn("sourceOnDemand: no", sub_block)
-
-    def test_selected_stream_warmth_still_works_when_always_on_is_disabled(self):
-        panel = load_panel_module()
-        test_camera = camera("hikvision_1", "192.168.33.21", "sub")
-        test_camera["record"] = False
-        test_camera["record_stream"] = "sub"
-        test_camera["live_stream"] = "sub"
-        test_camera["tile_stream"] = "sub"
-        payload = panel.normalize_config(
-            {
-                "server": {},
-                "storage": {},
-                "live": {"prebuffer_enabled": True, "always_on_enabled": False},
-                "cameras": [test_camera],
-            }
-        )
-
-        result = panel.write_mediamtx_runtime_config(payload)
-        text = panel.MEDIAMTX_CONFIG_PATH.read_text(encoding="utf-8")
-
-        self.assertFalse(result["always_on_enabled"])
-        main_block = text.split("  hikvision_1_main:", 1)[1].split("  hikvision_1_sub:", 1)[0]
-        sub_block = text.split("  hikvision_1_sub:", 1)[1]
-        self.assertIn("sourceOnDemand: yes", main_block)
-        self.assertIn("sourceOnDemand: no", sub_block)
-
-    def test_edge_settings_exposes_always_on_live_control(self):
-        html = PANEL_PATH.read_text(encoding="utf-8")
-
-        self.assertIn("live-always-on-enabled", html)
-        self.assertIn("Keep live paths warm after boot", html)
-        self.assertIn("live-always-on-stream-scope", html)
-        self.assertIn("always_on_stream_scope: get('live-always-on-stream-scope').value", html)
-        self.assertIn("always_on_enabled: get('live-always-on-enabled').checked", html)
-
-    def test_legacy_tcp_only_selects_tcp_ice_transport(self):
-        panel = load_panel_module()
-        normalized = panel.normalize_config(
-            {
-                "server": {},
-                "storage": {},
-                "live": {"mobile_webrtc_tcp_only": True},
-                "cameras": [camera("hikvision_1", "192.168.33.21", "sub")],
-            }
-        )
-
-        self.assertEqual(normalized["live"]["mobile_webrtc_ice_transport"], "tcp")
-        self.assertTrue(normalized["live"]["mobile_webrtc_tcp_only"])
 
     def test_camera_number_builds_hikvision_channels_and_rtsp_urls(self):
         panel = load_panel_module()
@@ -884,13 +716,13 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(status["record_error"], "recording_password_missing")
         self.assertEqual(status["recording_status"], "blocked")
 
-    def test_recording_source_prefers_mediamtx_rebroadcast_from_panel_camera(self):
+    def test_recording_source_prefers_edge_rtc_shared_from_panel_camera(self):
         panel = load_panel_module()
         camera_config = panel.normalize_camera(camera("hikvision_1", "192.168.33.21", "sub"), 1)
 
         stream, source = panel.recording_source_stream(camera_config, 0, "main")
 
-        self.assertEqual(source, "mediamtx_rebroadcast")
+        self.assertEqual(source, "edge_rtc_shared")
         self.assertEqual(stream, "rtsp://127.0.0.1:8556/hikvision_1_main")
 
     def test_recording_status_marks_enabled_record_camera_as_scheduled(self):
@@ -919,7 +751,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertTrue(status["desired_recording"])
         self.assertEqual(status["recording_status"], "scheduled_stopped")
 
-    def test_recording_status_uses_mediamtx_rebroadcast_source(self):
+    def test_recording_status_uses_edge_rtc_shared_source(self):
         panel = load_panel_module()
         payload = panel.normalize_config(
             {
@@ -942,7 +774,7 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         status = panel.recording_status_payload(payload)["cameras"][0]
 
-        self.assertEqual(status["record_source"], "mediamtx_rebroadcast")
+        self.assertEqual(status["record_source"], "edge_rtc_shared")
         self.assertIn("rtsp://127.0.0.1", status["record_rtsp"])
         self.assertIn("hikvision_1_main", status["record_rtsp"])
 

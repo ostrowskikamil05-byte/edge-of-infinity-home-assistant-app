@@ -35,6 +35,18 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
   if(audioDecoder){
    await page.evaluate(()=>{const c=archivePlayers.get(window.fixtureDVRIndex).client;c.ensureAudio();window.dvrAnalyser=c.audio.createAnalyser();c.gain.disconnect();c.gain.connect(dvrAnalyser);dvrAnalyser.connect(c.audio.destination);});
    await page.waitForFunction(()=>{const a=new Float32Array(dvrAnalyser.fftSize);dvrAnalyser.getFloatTimeDomainData(a);return a.some(v=>Math.abs(v)>.01);});
+   await page.waitForTimeout(500);
+   const continuity=await page.evaluate(()=>new Promise(resolve=>{
+    const start=performance.now();let lastSound=start,maxSilence=0;
+    const timer=setInterval(()=>{const now=performance.now(),samples=new Float32Array(dvrAnalyser.fftSize);dvrAnalyser.getFloatTimeDomainData(samples);if(samples.some(v=>Math.abs(v)>.01))lastSound=now;maxSilence=Math.max(maxSilence,now-lastSound);if(now-start>=6000){clearInterval(timer);resolve({maxSilence,state:archivePlayers.get(window.fixtureDVRIndex).client.diagnosticState()});}},20);
+   }));
+   console.log('DVR AAC continuity',JSON.stringify(continuity));
+   assert.equal(continuity.state.state,'playing','DVR stopped during sustained playback');
+   assert(continuity.state.audio_output_frames>48000,'DVR did not deliver sustained PCM output');
+   assert(continuity.maxSilence<200,'DVR AAC had a sustained silent interruption: '+JSON.stringify(continuity));
+   assert.equal(continuity.state.audio_overruns,0,'DVR discarded ahead-of-video PCM');
+   assert.equal(continuity.state.audio_dropped_packets,0,'DVR discarded encoded/decoded AAC packets');
+
   }
   assert((await picture()).bright>2000);
   await seek(47.8);await page.waitForFunction(()=>{const p=archivePlayers.get(window.fixtureDVRIndex);return p.client?.picture&&p.wantPlay&&p.client.request.file.endsWith('000048.mp4')&&p.position>=48.1;});
@@ -46,5 +58,5 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
   const status=await context.request.get(info.archive_core+'/api/status',{headers:{Authorization:'Bearer '+info.archive_token}});assert.deepEqual((await status.json()).sources,[],'archive connected to a camera');
   console.log(`PASS ${wk?'webkit':'chromium'}: actual indexed DVR pixels/AAC=${audioDecoder}, latest long-GOP seek ${Math.round(diagnostics.seek_ms)} ms, frame stepping, same-socket file transition, pause stops downloads, original files and MP4 fallback retained`);
   await page.unrouteAll({behavior:'ignoreErrors'});await context.close();
- }catch(error){try{console.error('DVR state',await page.evaluate(()=>({players:[...archivePlayers].map(([i,p])=>({i,position:p.position,wantPlay:p.wantPlay,client:p.client?.diagnosticState(),message:p.note.textContent})),page:activePage})));}catch(_){}throw error;}finally{await browser.close();}
+ }catch(error){try{console.error('DVR state',JSON.stringify(await page.evaluate(()=>({players:[...archivePlayers].map(([i,p])=>({i,position:p.position,wantPlay:p.wantPlay,client:p.client?.diagnosticState(),message:p.note.textContent})),page:activePage}))));}catch(_){}throw error;}finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exit(1);});
