@@ -205,6 +205,28 @@ func TestSharedSourceAndMicrophone(t *testing.T) {
 				t.Fatal(e)
 			}
 		}
+		// Timing feedback is read-only, shares this socket, and must not
+		// interfere with microphone ownership or encoded media delivery.
+		if hello["network_feedback"] != true {
+			t.Fatal("missing network feedback capability")
+		}
+		if e = ws.WriteJSON(map[string]any{"type": "network_ping", "id": uint32(i + 1)}); e != nil {
+			t.Fatal(e)
+		}
+		for {
+			kind, packet, err := ws.ReadMessage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind != websocket.TextMessage {
+				continue
+			}
+			var pong map[string]any
+			if json.Unmarshal(packet, &pong) != nil || pong["type"] != "network_pong" || pong["id"] != float64(i+1) {
+				t.Fatalf("invalid timing reply: %s", packet)
+			}
+			break
+		}
 	}
 	eventually(t, func() bool { return c.mic.Load() > 0 })
 	if c.maximum.Load() != 1 || c.active.Load() != 1 || source.attempts.Load() != 1 {

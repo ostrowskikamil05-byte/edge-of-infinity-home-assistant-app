@@ -75,6 +75,9 @@ class ProxyPermissionsTests(unittest.IsolatedAsyncioTestCase):
         error=modules['rtc_acl.client'].EdgeClientError=type('EdgeClientError',(Exception,),{})
         with patch.dict(sys.modules,modules):
             spec=importlib.util.spec_from_file_location('rtc_acl.rtc',CORE/'custom_components/edge/rtc.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+            self.assertTrue(module.network_ping('{"type":"network_ping","id":1}'))
+            for payload in ('{}','[]','null','{"type":"network_ping","id":true}','{"type":"network_ping","id":0}','{"type":"network_ping","id":4294967296}','{"type":"network_ping","id":1,"microphone":1}','{"type":"other","id":1}','x'*129):
+                self.assertFalse(module.network_ping(payload),payload)
             secret=AsyncMock(side_effect=error('missing private token'))
             data={'client':types.SimpleNamespace(is_local=True,_read_local_bytes=secret),'entities':{'front':{'camera_id':'front','entity_id':'camera.front'}},'coordinator':types.SimpleNamespace(data={'cameras':[{'id':'front','enabled':True,'edge_rtc':{'api':'http://edge-addon:9997','path':'front_main'}}]})}
             view=module.EdgeRTCView(types.SimpleNamespace(data={'edge':{'entry':data}}))

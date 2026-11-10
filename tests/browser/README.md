@@ -20,7 +20,7 @@ node tests/browser/edge_rtc_support.cjs
 Go tests cover one physical upstream shared by viewers/recorder/microphone,
 slow-consumer isolation, keyframe bootstrap, RTP recovery, camera SDP errors,
 optional talk AAC filtering, indexed archive seeks and path confinement.
-Audio tests compare G711 with FFmpeg, exercise the unchanged Live PCM policy,
+Audio tests compare G711 with FFmpeg, exercise steady Live and bounded cellular PCM policies,
 and reproduce DVR ahead-of-picture AAC bursts, decoder backpressure and
 cancellation across seek epochs at 0.5/1/2×.
 
@@ -71,6 +71,14 @@ non-disruptive network failure and log filters.
 `edge_rtc_long_gop.cjs` and `edge_rtc_native.cjs` inspect actual Live frame
 presentation and cached-keyframe startup. `edge_rtc_fixture.py` / the Go fixture
 provide generated camera frames and return-audio checks without external engines.
+
+`run_edge_rtc_cellular.py` uses H264/Chromium (Android) and H265/WebKit (iPhone).
+It delivers the actual authenticated stream in 360 ms bursts, verifies original
+picture dimensions and cadence, actual continuous PCM without later underruns or
+overruns, read-only RTT feedback, same-socket IDR recovery and one camera source.
+The local Linux WebKit decoder rejects raw Annex-B H264; H265 is used for its
+native Live test while AVC/HEVC MP4 remains covered by the DVR suites. These
+browser scenarios simulate delivery, not an actual mobile carrier or radio.
 
 ## Container smoke test
 

@@ -25,7 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const version = "0.14.0"
+const version = "0.14.1"
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -264,6 +264,7 @@ func (a *app) stream(w http.ResponseWriter, r *http.Request, path string) {
 	}
 	defer s.detach(v)
 	hello["metadata_wait_ms"] = time.Since(metadataStarted).Milliseconds()
+	hello["network_feedback"] = true
 	hello["keyframe_request_sent"] = false
 	if len(cache) == 0 || len(cache) >= 40 {
 		hello["keyframe_request_sent"] = s.requestKeyframe()
@@ -284,21 +285,44 @@ func (a *app) stream(w http.ResponseWriter, r *http.Request, path string) {
 	if ws.WriteJSON(hello) != nil {
 		return
 	}
+	networkPings := make(chan uint32, 1)
 	go func() {
 		defer v.close()
 		window := time.Now()
 		packets := 0
+		feedback := 0
 		for {
 			kind, p, e := ws.ReadMessage()
 			if e != nil {
 				return
 			}
-			if kind != websocket.BinaryMessage || !v.microphone || len(p) != 321 || p[0] != 3 {
-				return
-			}
 			if time.Since(window) >= time.Second {
 				window = time.Now()
 				packets = 0
+				feedback = 0
+			}
+			if kind == websocket.TextMessage && len(p) <= 128 {
+				var ping struct {
+					Type string `json:"type"`
+					ID   uint32 `json:"id"`
+				}
+				decoder := json.NewDecoder(strings.NewReader(string(p)))
+				decoder.DisallowUnknownFields()
+				if decoder.Decode(&ping) != nil || ping.Type != "network_ping" || ping.ID == 0 || feedback >= 4 {
+					return
+				}
+				feedback++
+				if !v.microphone {
+					ws.SetReadDeadline(time.Now().Add(45 * time.Second))
+				}
+				select {
+				case networkPings <- ping.ID:
+				default:
+				}
+				continue
+			}
+			if kind != websocket.BinaryMessage || !v.microphone || len(p) != 321 || p[0] != 3 {
+				return
 			}
 			packets++
 			ws.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -324,6 +348,11 @@ func (a *app) stream(w http.ResponseWriter, r *http.Request, path string) {
 			return
 		case <-v.done:
 			return
+		case id := <-networkPings:
+			ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if ws.WriteJSON(map[string]any{"type": "network_pong", "id": id, "queue_bytes": v.queueBytes.Load()}) != nil {
+				return
+			}
 		case <-ticker.C:
 			ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if ws.WriteMessage(websocket.PingMessage, nil) != nil {

@@ -9,7 +9,7 @@ Native EdgeRTC Live, recording and indexed DVR for Home Assistant.
 - Optional camera/local detection, zones, alert clips and phone notifications.
 - Native card with 1–4 views and separate microphone permissions.
 
-Version 0.14.0 removes retired streaming engines and migrates their settings while
+Version 0.14.1 removes retired streaming engines and migrates their settings while
 preserving cameras and saved recordings. DVR AAC uses bounded buffering and
 backpressure without changing Live audio behavior.
 

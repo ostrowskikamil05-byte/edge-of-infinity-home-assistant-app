@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.14.1
+
+- Stabilize Live on variable 4G/5G delivery with an observed-gap playout reserve
+  capped at 400 ms, source-timestamp picture pacing and matching PCM protection.
+  Retain the existing short queues on steady connections and the DVR policy.
+- Recover a severely backlogged viewer at a newer complete IDR without reopening
+  the camera or skipping references needed by encoded delta pictures.
+- Add bounded read-only timing feedback through the existing authenticated
+  socket. Log application RTT, delivery cadence/rate, queue sizes, adaptation and
+  keyframe recovery. Preserve separate microphone access checks.
+- Keep original H264/H265 resolution/FPS/audio and one physical camera source.
+  Playback remains limited by sustained network capacity; no transcoding or
+  camera encoder changes are introduced.
+- Test actual RTSP/HA/WebCodecs delivery bursts, PCM continuity, safe recovery,
+  stable-network pacing and the existing archive regression suite.
+
 ## 0.14.0
 
 - Make EdgeRTC the sole core. Remove Janus/MediaMTX binaries, dependencies,

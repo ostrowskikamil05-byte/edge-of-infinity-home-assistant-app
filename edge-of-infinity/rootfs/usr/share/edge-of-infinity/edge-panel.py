@@ -101,7 +101,7 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.14.0"
+APP_VERSION = "0.14.1"
 APP_RELEASE_FEATURES=['EdgeRTC-only Live, recording and DVR; retired engines and options removed with bounded migration',
                       'DVR AAC uses timestamp lookahead, bounded PCM and decoder backpressure; original Live policy retained',
                       'UNV malformed optional talk AAC compatibility; valid forward H265/AAC and G711 mic share one connection',
@@ -117,7 +117,7 @@ APP_RELEASE_FEATURES=['EdgeRTC-only Live, recording and DVR; retired engines and
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "native-dvr-v140"
+UI_BUILD = "cellular-live-v141"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
