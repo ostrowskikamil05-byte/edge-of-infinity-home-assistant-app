@@ -264,7 +264,9 @@ func (a *app) stream(w http.ResponseWriter, r *http.Request, path string) {
 	}
 	defer s.detach(v)
 	hello["metadata_wait_ms"] = time.Since(metadataStarted).Milliseconds()
-	hello["network_feedback"] = true
+	// Older HA bridges reject upstream text. Advertise feedback only when
+	// the bridge explicitly opts in; passive jitter protection still works.
+	hello["network_feedback"] = r.URL.Query().Get("network_feedback") == "1"
 	hello["keyframe_request_sent"] = false
 	if len(cache) == 0 || len(cache) >= 40 {
 		hello["keyframe_request_sent"] = s.requestKeyframe()

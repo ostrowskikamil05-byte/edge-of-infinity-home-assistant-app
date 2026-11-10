@@ -61,7 +61,7 @@ class EdgeRTCView(HomeAssistantView):
             return web.Response(status=503)
         if not token:
             return web.Response(status=503)
-        endpoint = route['api'].replace('http://', 'ws://', 1).replace('https://', 'wss://', 1) + '/api/stream/' + route['path'] + ('?microphone=1' if microphone else '')
+        endpoint = route['api'].replace('http://', 'ws://', 1).replace('https://', 'wss://', 1) + '/api/stream/' + route['path'] + '?network_feedback=1' + ('&microphone=1' if microphone else '')
         front = web.WebSocketResponse(heartbeat=20, compress=False, max_msg_size=8*1024*1024)
         if not front.can_prepare(request).ok:return web.Response(status=400)
         await front.prepare(request)

@@ -175,8 +175,11 @@ func TestSharedSourceAndMicrophone(t *testing.T) {
 	}
 	for i := 0; i < 4; i++ {
 		suffix := ""
+		if i > 0 {
+			suffix = "?network_feedback=1"
+		}
 		if i == 3 {
-			suffix = "?microphone=1"
+			suffix = "?network_feedback=1&microphone=1"
 		}
 		ws, _, e := websocket.DefaultDialer.Dial("ws://"+cfg.HTTP+"/api/stream/front_main"+suffix, headers)
 		if e != nil {
@@ -207,6 +210,12 @@ func TestSharedSourceAndMicrophone(t *testing.T) {
 		}
 		// Timing feedback is read-only, shares this socket, and must not
 		// interfere with microphone ownership or encoded media delivery.
+		if i == 0 {
+			if hello["network_feedback"] != false {
+				t.Fatal("legacy bridge was offered unsupported upstream text")
+			}
+			continue
+		}
 		if hello["network_feedback"] != true {
 			t.Fatal("missing network feedback capability")
 		}

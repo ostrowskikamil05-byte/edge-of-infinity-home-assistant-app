@@ -10355,7 +10355,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         self.send_bytes(body,'application/json',status,headers)
 
     def serve_edge_rtc_stream(self, stream_path: str, archive=False) -> None:
-        """Read-only binary tunnel; microphone is available only through HA ACLs."""
+        """Read-only media/timing tunnel; microphone requires the HA ACL bridge."""
         import socket
         import select
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", stream_path) or self.headers.get("Upgrade", "").lower() != "websocket":
@@ -10372,7 +10372,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
             if not re.fullmatch(r"[A-Za-z0-9+/=]{20,32}", key):
                 raise ValueError("invalid_websocket_key")
             endpoint='archive' if archive else 'stream'
-            header = f"GET /api/{endpoint}/{stream_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            feedback='' if archive else '?network_feedback=1'
+            header = f"GET /api/{endpoint}/{stream_path}{feedback} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
             backend.sendall(header.encode())
             response = bytearray()
             while not response.endswith(b"\r\n\r\n") and len(response) < 16384:
