@@ -9,7 +9,8 @@
   budgets. Carry custom shared RTSP/API ports to native option names. Keep mirror
   timestamps and camera contents so stale settings cannot become authoritative.
 - Batch up to 16 interleaved archive packets within the existing 2 MiB limit
-  to reduce pull round trips, retaining bounded decode/picture queues.
+  to reduce pull round trips. Reserve picture capacity for submitted frames,
+  including decoder reordering, so delayed output cannot stop DVR playback.
 - Stabilize DVR AAC with a separate bounded 600 ms PCM policy, encoded audio
   lookahead limited against picture time, and decoder backpressure instead of
   silently dropping packets. Keep Live's existing short queue.
