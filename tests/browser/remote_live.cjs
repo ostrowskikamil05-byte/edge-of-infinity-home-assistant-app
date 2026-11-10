@@ -28,6 +28,7 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
      const endpoint=url.pathname.slice(prefix.length);
      const json=data=>route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
      if(!endpoint)return route.fulfill({contentType:'text/html',body:fixtures[mode].html});
+     if(endpoint==='api/brand/icon.png')return route.fulfill({contentType:'image/png',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/icon.png'))});
      if(endpoint==='api/version')return json({version:fixtures[mode].version,ui_build:fixtures[mode].ui_build});
      if(endpoint==='api/config'){
       if(request.method()==='POST')config=request.postDataJSON();
@@ -39,9 +40,10 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
      if(endpoint==='api/storage/status')return json({pending:false,recordings_bytes:0,recordings_volume:{free_bytes:2*1024**3},cache_volume:{free_bytes:2*1024**3}});
      if(endpoint==='api/debug')throw Error('per-event debug HTTP must not be used');
      if(endpoint==='api/client-diagnostics.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-device-diagnostics.js'),'utf8')});
-     if(endpoint==='api/edge-rtc/client.js'||endpoint==='api/edge-rtc/device-diagnostics.js'){
+     const moduleAssets={'api/edge-rtc/client.js':'edge-rtc-client.js','api/edge-rtc/device-diagnostics.js':'edge-device-diagnostics.js','api/edge-rtc/edge-dvr-client.js':'edge-dvr-client.js','api/edge-rtc/edge-dvr-panel.js':'edge-dvr-panel.js'};
+     if(moduleAssets[endpoint]){
       assert.equal(mode,'native');assert.equal(url.searchParams.get('v'),fixtures[mode].version,'preload URL is not versioned');
-      const asset=endpoint.endsWith('/client.js')?'edge-rtc-client.js':'edge-device-diagnostics.js';
+      const asset=moduleAssets[endpoint];
       return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www',asset),'utf8')});
      }
      if(endpoint==='api/client-diagnostics'){events.push(...(request.postDataJSON().events||[]));return json({ok:true});}

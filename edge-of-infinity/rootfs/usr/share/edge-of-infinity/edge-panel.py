@@ -4904,7 +4904,7 @@ INDEX_HTML = r"""<!doctype html>
     <script>{const p=location.pathname.replace(/\/{2,}/g,'/').replace(/\/index\.html$/,'/'),b=document.createElement('base');b.href=location.origin+(p.endsWith('/')?p:p+'/');document.head.prepend(b);}</script>
     __EDGE_LIVE_PRELOAD__
     <title>Edge of Infinity</title>
-    <link rel="icon" type="image/png" href="api/brand/icon.png?v=__EDGE_PANEL_VERSION__">
+    <script>{const url=new URL('api/brand/icon.png?v=__EDGE_PANEL_VERSION__',document.baseURI).href,icon=document.createElement('link');icon.rel='icon';icon.type='image/png';icon.href=url;document.head.append(icon);document.addEventListener('DOMContentLoaded',()=>{for(const image of document.querySelectorAll('img[data-edge-brand]'))image.src=url;},{once:true});}</script>
     <style>
       :root {
         color-scheme: dark;
@@ -5795,7 +5795,7 @@ INDEX_HTML = r"""<!doctype html>
           <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Toggle navigation" aria-expanded="true">
             <span class="menu-toggle-lines" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
-          <div class="brand"><img src="api/brand/icon.png?v=__EDGE_PANEL_VERSION__" alt="" decoding="async" fetchpriority="low"><span>Edge of Infinity</span></div>
+          <div class="brand"><img data-edge-brand alt="" decoding="async" fetchpriority="low"><span>Edge of Infinity</span></div>
           <div class="build-pill" title="Panel build">v__EDGE_PANEL_VERSION__</div>
         </div>
         <nav class="nav" aria-label="Main navigation">

@@ -11,6 +11,8 @@ async function until(page,predicate){const deadline=Date.now()+15000;while(!pred
    assert.equal(u.host,host);assert(u.pathname.startsWith(prefix));const endpoint=u.pathname.slice(prefix.length).replace(/^\/+/,''),json=data=>route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
    if(!endpoint)return route.fulfill({contentType:'text/html',body:f.html});
    assert(!u.pathname.includes('//'),'double slash survived inside ingress URL: '+u.pathname);
+   if(endpoint==='api/brand/icon.png')return route.fulfill({contentType:'image/png',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/icon.png'))});
+   if(['api/edge-rtc/edge-dvr-client.js','api/edge-rtc/edge-dvr-panel.js'].includes(endpoint))return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www',endpoint.split('/').pop()),'utf8')});
    if(endpoint==='api/version'){
     if(held){await new Promise(resolve=>{releaseProbe=async()=>{await json({version:f.version,ui_build:f.ui_build});resolve();};});return;}
     if(expired)return route.fulfill({status:401,contentType:'text/plain',body:'No valid ingress session'});
