@@ -79,8 +79,7 @@ forward H.265/AAC and valid PCMA/PCMU microphone formats. The event
 ## DVR and recordings
 
 Open **Recordings**, select the camera/day, and use the in-picture seek bar.
-Choose **EdgeRTC DVR** in the player's playback-mode menu; the saved device
-choice is retained after updating.
+The panel and HA recordings/events cards use EdgeRTC DVR automatically.
 EdgeRTC DVR reads indexed H.264/H.265/AAC samples from saved MP4 files over one
 persistent authenticated socket. It seeks from the preceding keyframe, discards
 outdated seek results and keeps bounded video/audio queues. It does not connect
@@ -88,10 +87,10 @@ to the camera, download a whole day or modify original files. Pause stops pulls;
 leaving Recordings releases the viewer's decoder and socket.
 
 New cores can deliver the first encoded batch with the seek response, removing
-one request round trip. The client negotiates up to 64 access units per batch
-and at most two bounded batches of encoded lookahead. The existing per-picture,
+one request round trip. The client requests up to 32 access units/1 MiB for a first picture, then
+16 access units/512 KiB, with at most two batches of encoded lookahead. The existing per-picture,
 24-picture decoder and 24 MiB pending-message limits remain; a batch's 2 MiB
-budget is soft for a single larger access unit. This does not download a whole
+maximum is soft for a single larger access unit; pictures are never split. This does not download a whole
 day. Legacy cores/clients keep their earlier explicit-pull behavior.
 
 The latest seek cancels stale batches at access-unit boundaries and replaces old
@@ -103,8 +102,9 @@ expose batch count, transfer/read time, pending pulls and queued batches.
 The DVR offers frame steps, speed 0.5–2×, sound, full screen and event markers.
 Gray event points turn green behind the playback position. Selecting an event
 or its image seeks to that moment. Hover-thumbnail strips are not used.
-Native MP4 playback remains available and is the automatic fallback for an
-unsupported codec/profile or unavailable archive audio decoder.
+MP4 is available as an original-file download. Unsupported video profiles
+show an error and download link; unsupported audio leaves native video playing
+with a diagnostic entry.
 
 DVR sound uses a separate bounded PCM policy: up to 600 ms, with encoded AAC
 held until its picture time approaches. Decoder backpressure avoids silently
@@ -230,3 +230,22 @@ An expired HA Ingress session pauses requests and asks to reopen the sidebar
 panel. Structured diagnostics are bounded and batched. Optional camera features
 remain warnings; authentication, missing sources and genuine decoder errors are
 reported explicitly. The watchdog checks the native core's actual availability.
+
+### Playback in 0.16.0
+
+The panel and HA recordings/events cards play through EdgeRTC DVR over the
+authenticated HA connection. No separate MP4 player or playback transport selector
+is needed. MP4 links download the original fragment; storage format and camera
+encoding are unchanged. Use HTTPS (including Nabu Casa) and a browser with
+WebCodecs support for the camera codec. A missing audio decoder mutes playback
+with diagnostics; a missing video decoder offers the original download.
+
+A vertical swipe over the HA timeline scrolls the dashboard; a horizontal drag
+seeks and displays decoded recording frames. Offscreen HA views release their
+client decoder/socket. The Edge server retains the single camera connection and
+its bounded keyframe cache for the next viewer. This cannot remove physical
+network latency or make an insufficient 4G/5G bitrate carry a full-quality source.
+
+After updating the add-on, restart Home Assistant Core and reopen the dashboard
+and panel so cached frontend modules and the authenticated integration agree.
+Existing card YAML, themes and language settings do not need to be recreated.

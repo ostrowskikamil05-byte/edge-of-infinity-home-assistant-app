@@ -9,7 +9,7 @@ export function edgeRTCPlaybackSupport(language=globalThis.navigator?.language||
 export class EdgeRTCClient {
   constructor(options){this.options=options;this.canvas=options.canvas;this.closed=false;this.playing=false;this.connectionState='connecting';this.waitKey=true;this.firstFrameMS=null;this.frames=0;this.started=performance.now();this.frameQueue=[];this.droppedFrames=0;this.bootstrapFrames=0;}
   async start(){
-    this.diagnosticKey=this.options.entity||(this.options.url?new URL(this.options.url,location.href).pathname.split('/').pop():'edge_rtc');this.diagnostics=this.options.diagnostics;
+    this.diagnosticKey=this.options.diagnosticSource||this.options.entity||(this.options.url?new URL(this.options.url,location.href).pathname.split('/').pop():'edge_rtc');this.diagnostics=this.options.diagnostics;
     this.diagnostics?.registerSource(this.diagnosticKey,()=>this.diagnosticState());
     this.diagnostics?.note('rtc_connect_start',{source:this.diagnosticKey});
     this.language=this.options.language||this.options.hass?.locale?.language||this.options.hass?.language||globalThis.navigator?.language||'en';const support=edgeRTCPlaybackSupport(this.language);
@@ -229,7 +229,7 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   audioModule(){
-    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.15.2',import.meta.url).href);
+    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.16.0',import.meta.url).href);
   }
   startAudioPlayback(){
     if(this.audioPlaybackPromise||this.closed||this.audioDisabled)return;

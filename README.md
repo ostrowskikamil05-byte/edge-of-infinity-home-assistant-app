@@ -7,11 +7,13 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.15.2** adds automatic and manual interface languages: Polish,
-English, German, French, Spanish, Italian and Ukrainian. The panel and HA cards
-use the HA profile language, then the browser language, with English fallback.
-Original camera quality, shared sources, DVR, dashboard cards and 14-day
-retention are preserved.
+Version **0.16.0** uses indexed EdgeRTC DVR for the panel and Home Assistant
+recordings/events cards. MP4 is kept for downloading the original recordings.
+Visible Live views receive original camera quality; views outside the dashboard
+viewport release their browser decoders while the server keeps the source warm.
+The update also fixes vertical touch scrolling and shares a bounded, per-user
+thumbnail cache. Existing card configuration, seven interface languages,
+original resolution/FPS/AAC and 14-day retention are preserved.
 See [migration and setup](edge-of-infinity/DOCS.md).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:

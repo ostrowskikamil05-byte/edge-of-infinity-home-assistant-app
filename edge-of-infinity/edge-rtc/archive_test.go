@@ -193,3 +193,49 @@ func TestArchiveFromFFmpeg(t *testing.T) {
 		})
 	}
 }
+
+func TestArchiveClipIsBoundToOneAlert(t *testing.T) {
+	root := t.TempDir()
+	a, err := newApp(config{HTTP: "127.0.0.1:0", RTSP: "127.0.0.1:0", Token: strings.Repeat("c", 48), Recordings: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.close()
+	headers := http.Header{"Authorization": []string{"Bearer " + a.cfg.Token}}
+	base := "ws://" + a.listener.Addr().String()
+	for _, path := range []string{"/api/clip/0", "/api/clip/01", "/api/clip/9223372036854775808", "/api/archive/__alerts"} {
+		ws, response, err := websocket.DefaultDialer.Dial(base+path, headers)
+		if ws != nil {
+			ws.Close()
+			t.Fatal("invalid alert route upgraded", path)
+		}
+		if err == nil || response == nil || response.StatusCode == 101 {
+			t.Fatal("invalid alert route accepted", path)
+		}
+	}
+	ws, _, err := websocket.DefaultDialer.Dial(base+"/api/clip/1", headers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var message map[string]any
+	if err = ws.ReadJSON(&message); err != nil {
+		t.Fatal(err)
+	}
+	if message["byte_budget"] != true {
+		t.Fatal(message)
+	}
+	for epoch, file := range []string{"event-2.mp4", "20261109-000000.mp4", "../event-1.mp4"} {
+		ws.WriteJSON(archiveCommand{Type: "seek", Epoch: uint32(epoch + 1), File: file})
+		if err = ws.ReadJSON(&message); err != nil {
+			t.Fatal(err)
+		}
+		if message["code"] != "invalid_archive_seek" {
+			t.Fatal("alert socket accepted a different file", message)
+		}
+	}
+	if len(a.sources) != 0 {
+		t.Fatal("alert opened a camera connection")
+	}
+}

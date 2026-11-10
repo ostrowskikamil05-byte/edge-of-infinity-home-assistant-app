@@ -65,13 +65,13 @@ const THEMES={glass:{'--ha-card-background':'rgba(255,255,255,0.10)','--ha-card-
 </script><script src="/edge/edge-dashboard-cards.js"></script><script>
 const query=new URLSearchParams(location.search);window.fixture={signed:[],api:[]};
 const camera=(id,name)=>({state:'idle',attributes:{friendly_name:name,edge_camera_id:id,edge_stream_role:'nvr'}});
-window.hass={locale:{language:query.get('lang')||'pl'},states:{'camera.front':camera('front','Front'),'camera.back':camera('back','Ogród'),
+window.hass={user:{id:'fixture-dashboard-user'},locale:{language:query.get('lang')||'pl'},states:{'camera.front':camera('front','Front'),'camera.back':camera('back','Ogród'),
   'camera.private':{state:'idle',attributes:{friendly_name:'Front · Main',edge_camera_id:'front',edge_stream_role:'main'}},
   'binary_sensor.front_person':{state:'off',attributes:{edge_camera_id:'front'}}},
  async callApi(method,path){fixture.api.push(path);const r=await fetch('/api/'+path,{headers:{Authorization:'Bearer fixture'}});const text=await r.text();let body=text;try{body=JSON.parse(text)}catch(_){}
   if(!r.ok)throw {error:'Request error',status_code:r.status,body};return body;},
  fetchWithAuth(path,init={}){return fetch(path,{...init,headers:{...(init.headers||{}),Authorization:'Bearer fixture'}});},
- async callWS(message){if(message.type!=='auth/sign_path')throw new Error('Unexpected WS '+message.type);fixture.signed.push(message.path);return {path:message.path+'?authSig='+encodeURIComponent('signed:'+message.path)};}};
+ async callWS(message){if(message.type!=='auth/sign_path')throw new Error('Unexpected WS '+message.type);fixture.signed.push(message.path);return {path:message.path+(message.path.includes('?')?'&':'?')+'authSig='+encodeURIComponent('signed:'+message.path)};}};
 const main=document.querySelector('main');const cards=(query.get('cards')||'recordings,events').split(',');if(query.get('split'))main.className='split';
 for(const name of cards){const card=document.createElement('edge-'+name+'-card');const config=JSON.parse(query.get(name)||'{}');card.setConfig({type:'custom:edge-'+name+'-card',...config});card.hass=window.hass;main.append(card);}
 </script></html>"""
@@ -86,7 +86,8 @@ def create_app(panel=PANEL):
     @web.middleware
     async def authenticate(request, handler):
         if request.path.startswith('/api/'):
-            signed = request.query.get('authSig') == 'signed:' + request.path
+            signed_path=request.path+('?'+'&'.join(key+'='+value for key,value in request.query.items() if key!='authSig') if any(key!='authSig' for key in request.query) else '')
+            signed = request.query.get('authSig') == 'signed:' + signed_path
             if request.headers.get('Authorization') != 'Bearer fixture' and not signed:
                 return web.json_response({'error': 'unauthorized'}, status=401)
             request[USER_KEY] = user
@@ -101,7 +102,7 @@ def create_app(panel=PANEL):
     app = web.Application(middlewares=[authenticate])
     app.on_startup.append(start)
     app.on_cleanup.append(stop)
-    for view_class in (bridge.EdgeRecordingsView, bridge.EdgeEventsView, bridge.EdgeMediaView):
+    for view_class in (bridge.EdgeRecordingsView, bridge.EdgeEventsView, bridge.EdgeMediaView, bridge.EdgeArchiveView):
         view = view_class(hass)
         # Home Assistant passes URL parameters to the view as keyword arguments.
         app.router.add_get(view.url, lambda request, view=view: view.get(request, **request.match_info))

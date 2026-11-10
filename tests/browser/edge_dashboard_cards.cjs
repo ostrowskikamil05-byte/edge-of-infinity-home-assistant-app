@@ -29,29 +29,33 @@ const engine=process.env.EDGE_TEST_BROWSER==='webkit'?webkit:chromium;
    await rec(card=>card.shadowRoot.querySelector('[data-camera="camera.back"]').click());
    await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._entity==='camera.back'&&card._files.length===3&&card.shadowRoot.querySelectorAll('.moment .thumb.loaded').length===3;});
    await rec(card=>card.shadowRoot.querySelector('.big').click());
-   await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._index===0&&!card._front.paused&&card._front.videoWidth>0&&card._front.currentTime>.3;});
+   await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._index===0&&card._dvr?.picture&&!card._dvr?.paused&&card._dvr.position>.3;});
    assert(await rec(card=>card.shadowRoot.querySelector('.big').hidden&&card.shadowRoot.querySelector('.poster').hidden),'poster or play overlay covers the playing picture');
-   await page.waitForFunction(()=>Boolean(window.EdgeI18n));await rec(card=>{window.languageVideo=card._front;window.languageVideoSrc=card._front.currentSrc;});
+   await page.waitForFunction(()=>Boolean(window.EdgeI18n));await rec(card=>{window.languageVideo=card._dvr;window.languageVideoSrc=card._dvr.ws;});
    for(const [code,title]of Object.entries({en:'Recordings',pl:'Nagrania',de:'Aufnahmen',fr:'Enregistrements',es:'Grabaciones',it:'Registrazioni',uk:'Записи'})){
     await page.evaluate(code=>EdgeI18n.setPreference(code),code);assert.equal(await rec(card=>card.shadowRoot.querySelector('h2').textContent),title);
-    assert(await rec(card=>card._front===languageVideo&&card._front.currentSrc===languageVideoSrc&&!card._front.paused),'language interrupted HA recording playback');
+    assert(await rec(card=>card._dvr===languageVideo&&card._dvr.ws===languageVideoSrc&&!card._dvr?.paused),'language interrupted HA recording playback');
    }
    await page.evaluate(()=>EdgeI18n.setPreference('auto'));
    await rec(card=>{card.shadowRoot.querySelector('[data-speed]').value='4';card.shadowRoot.querySelector('[data-speed]').dispatchEvent(new Event('change'));});
-   await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._index===1&&!card._front.paused&&card._front.currentTime>.2&&card._front.videoWidth>0;});
-   assert.equal(await rec(card=>card._front.playbackRate),4);
+   await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._index===1&&!card._dvr?.paused&&card._dvr?.picture&&card._dvr.position>.2;});
+   assert.equal(await rec(card=>card._dvr.speed),4);
    const signed=await page.evaluate(()=>fixture.signed.slice());
-   assert(signed.length>=2&&signed.every(path=>/^\/api\/edge\/dashboard\/media\/camera\.back\/video\/\d{8}-\d{6}\.mp4$/.test(path)),'recordings were not requested through signed bridge paths');
+   assert(signed.length===1&&signed[0]==='/api/edge/dashboard/archive/camera.back','recordings were not requested through signed bridge paths');
    await rec(card=>card.shadowRoot.querySelector('[data-zoom="3600"]').click());
    const track=await rec(card=>{const box=card.shadowRoot.querySelector('.track').getBoundingClientRect();return {x:box.left,y:box.top+box.height/2,width:box.width};});
    await rec(card=>card.shadowRoot.querySelector('.track').scrollIntoView({block:'center'}));
    const box=await rec(card=>{const b=card.shadowRoot.querySelector('.track').getBoundingClientRect();return {x:b.left,y:b.top+b.height/2,width:b.width};});
-   await page.mouse.click(box.x+box.width*(16/3600)+1,box.y);assert(track.width>100);
-   await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._index===2&&!card._front.paused;});
-   assert.equal(await rec(card=>card.shadowRoot.querySelector('.moment[aria-current="true"] .label').textContent),'00:00:14');
+   await page.mouse.click(box.x+box.width*(50/3600)+1,box.y);assert(track.width>100);
+   await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._index===2&&card._dvr?.picture&&!card._dvr?.paused;});
+   assert.equal(await rec(card=>card.shadowRoot.querySelector('.moment[aria-current="true"] .label').textContent),'00:00:48');
    await rec(card=>card.shadowRoot.querySelector('[data-toggle]').click());
-   await page.waitForFunction(()=>document.querySelector('edge-recordings-card')._front.paused);
+   await page.waitForFunction(()=>document.querySelector('edge-recordings-card')._dvr.paused);
    await fits('playback');
+   await rec(card=>{window.dayNode=card.shadowRoot.querySelector('.day');window.savedY=scrollY;});await rec(card=>card._paintDays());assert(await rec(card=>card.shadowRoot.querySelector('.day')===dayNode&&scrollY===savedY),'metadata repaint replaced thumbnails or moved the dashboard');
+   assert.equal(await rec(card=>getComputedStyle(card.shadowRoot.querySelector('.track')).touchAction),'pan-y');
+   await rec(card=>{const track=card.shadowRoot.querySelector('.track'),position=card._position;track.dispatchEvent(new PointerEvent('pointerdown',{pointerId:9,clientX:80,clientY:100,button:0}));track.dispatchEvent(new PointerEvent('pointermove',{pointerId:9,clientX:82,clientY:160}));track.dispatchEvent(new PointerEvent('pointercancel',{pointerId:9}));if(card._position!==position||card._dragging)throw Error('vertical scroll changed DVR position');});
+
    // Another day keeps the camera and replaces the list.
    await rec(card=>card.shadowRoot.querySelector('[data-day="2026-07-27"]').click());
    await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._day==='2026-07-27'&&card._files[0]?.[0]==='20260727-000000.mp4'&&card._index===-1;});
@@ -59,7 +63,7 @@ const engine=process.env.EDGE_TEST_BROWSER==='webkit'?webkit:chromium;
    await rec(card=>card.shadowRoot.querySelector('[data-camera="camera.front"]').click());
    await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._entity==='camera.front'&&card._files.length===3;});
    await rec(card=>card.shadowRoot.querySelector('.big').click());
-   await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return (card._front.videoWidth>0&&!card._front.paused)||!card.shadowRoot.querySelector('.note').hidden;});
+   await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return (card._dvr?.picture&&!card._dvr?.paused)||!card.shadowRoot.querySelector('.note').hidden;});
    await rec(card=>card._stop());
    // Events: default list hides motion, filters narrow it, pictures are authenticated.
    await ev(card=>card.scrollIntoView({block:'start'}));
@@ -71,13 +75,13 @@ const engine=process.env.EDGE_TEST_BROWSER==='webkit'?webkit:chromium;
    await ev(card=>{const select=card.shadowRoot.querySelector('[data-camera]');select.value='camera.back';select.dispatchEvent(new Event('change'));});
    await page.waitForFunction(()=>{const card=document.querySelector('edge-events-card');return !card._loading&&card._events.length===1&&card._events[0].entity_id==='camera.back';});
    await ev(card=>card.shadowRoot.querySelector('.event').click());
-   await page.waitForFunction(()=>{const card=document.querySelector('edge-events-card');const stage=card.shadowRoot.querySelector('.view-stage');return card.shadowRoot.querySelector('dialog').open&&(stage.querySelector('video')?.videoWidth>0||stage.querySelector('img')?.naturalWidth>0);});
+   await page.waitForFunction(()=>{const card=document.querySelector('edge-events-card');const stage=card.shadowRoot.querySelector('.view-stage');return card.shadowRoot.querySelector('dialog').open&&(card._clipClient?.picture||stage.querySelector('img')?.naturalWidth>0);});
    assert.equal(await ev(card=>card.shadowRoot.querySelector('.view-head b').textContent),'Osoba · Ogród');
    const dialog=await ev(card=>{const b=card.shadowRoot.querySelector('dialog').getBoundingClientRect();return {left:b.left,right:b.right,top:b.top,bottom:b.bottom,w:innerWidth,h:innerHeight};});
    assert(dialog.left>=0&&dialog.right<=dialog.w&&dialog.top>=0&&dialog.bottom<=dialog.h,`${label}: event viewer leaves the screen`);
    // The viewer hands the moment over to the recordings card on the same dashboard.
    await ev(card=>card.shadowRoot.querySelector('[data-action="recordings"]').click());
-   await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._entity==='camera.back'&&card._day==='2026-07-28'&&card._index>=0&&!card._front.paused&&card._position-card._dayStart>=6;});
+   await page.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._entity==='camera.back'&&card._day==='2026-07-28'&&card._index>=0&&!card._dvr?.paused&&card._position-card._dayStart>=6;});
    assert(!(await ev(card=>card.shadowRoot.querySelector('dialog').open)));
    await rec(card=>card._stop());await fits('events');
    assert.deepEqual(errors,[]);await context.close();
@@ -109,9 +113,9 @@ const engine=process.env.EDGE_TEST_BROWSER==='webkit'?webkit:chromium;
   await page.waitForFunction(()=>document.querySelector('edge-recordings-card').shadowRoot.querySelector('.status').textContent==='You do not have access to this camera.');
   assert.equal(await page.evaluate(()=>document.querySelector('edge-recordings-card').shadowRoot.querySelector('h2').textContent),'Recordings');
   assert(await page.evaluate(()=>document.querySelector('edge-recordings-card').shadowRoot.querySelector('.player').hidden));
-  for(const path of ['/api/edge/dashboard/recordings/camera.front','/api/edge/dashboard/media/camera.front/video/20260728-000000.mp4','/api/edge/dashboard/events'])
+  for(const path of ['/api/edge/dashboard/archive/camera.front','/api/edge/dashboard/recordings/camera.front','/api/edge/dashboard/media/camera.front/video/20260728-000000.mp4','/api/edge/dashboard/events'])
    assert.equal(await page.evaluate(path=>fetch(path).then(r=>r.status),path),401,'bridge answered without Home Assistant authentication');
-  for(const [path,status] of [['media/camera.private/thumb/20260728-000000.mp4.jpg',403],['media/camera.front/video/..%2F..%2Fedge.json',400],['media/camera.front/event-image/213.jpg',404],['events?kinds=nothing',400],['recordings/camera.front?day=2026',400]])
+  for(const [path,status] of [['archive/camera.private',403],['archive/camera.front?clip=213',404],['archive/camera.front?clip=../1',400],['media/camera.private/thumb/20260728-000000.mp4.jpg',403],['media/camera.front/video/..%2F..%2Fedge.json',400],['media/camera.front/event-image/213.jpg',404],['events?kinds=nothing',400],['recordings/camera.front?day=2026',400]])
    assert.equal(await page.evaluate(path=>hass.fetchWithAuth('/api/edge/dashboard/'+path).then(r=>r.status),path),status,path);
   assert.equal(await page.evaluate(()=>{try{document.createElement('edge-events-card').setConfig({kinds:['door']});return 'accepted';}catch(error){return 'rejected';}}),'rejected');
   assert.equal(await page.evaluate(()=>{try{document.createElement('edge-recordings-card').setConfig({cameras:['sensor.x']});return 'accepted';}catch(error){return 'rejected';}}),'rejected');

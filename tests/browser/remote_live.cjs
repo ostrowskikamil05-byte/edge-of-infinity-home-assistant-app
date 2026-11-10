@@ -40,7 +40,7 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
      if(endpoint==='api/storage/status')return json({pending:false,recordings_bytes:0,recordings_volume:{free_bytes:2*1024**3},cache_volume:{free_bytes:2*1024**3}});
      if(endpoint==='api/debug')throw Error('per-event debug HTTP must not be used');
      if(endpoint==='api/client-diagnostics.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-of-infinity/custom_components/edge/www/edge-device-diagnostics.js'),'utf8')});
-     const moduleAssets={'api/edge-rtc/client.js':'edge-rtc-client.js','api/edge-rtc/device-diagnostics.js':'edge-device-diagnostics.js','api/edge-rtc/edge-dvr-client.js':'edge-dvr-client.js','api/edge-rtc/edge-dvr-panel.js':'edge-dvr-panel.js'};
+     const moduleAssets={'api/edge-rtc/edge-rtc-client.js':'edge-rtc-client.js','api/edge-rtc/device-diagnostics.js':'edge-device-diagnostics.js','api/edge-rtc/edge-dvr-client.js':'edge-dvr-client.js','api/edge-rtc/edge-dvr-panel.js':'edge-dvr-panel.js'};
      if(moduleAssets[endpoint]){
       assert.equal(mode,'native');assert.equal(url.searchParams.get('v'),fixtures[mode].version,'preload URL is not versioned');
       const asset=moduleAssets[endpoint];

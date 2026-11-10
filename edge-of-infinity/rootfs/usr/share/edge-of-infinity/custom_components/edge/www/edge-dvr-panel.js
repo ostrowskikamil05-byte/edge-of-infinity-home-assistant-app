@@ -1,4 +1,4 @@
-import {EdgeDVRClient} from './edge-dvr-client.js?v=0.15.2';
+import {EdgeDVRClient} from './edge-dvr-client.js?v=0.16.0';
 
 export class EdgeDVRPanel {
   constructor(host,options){
@@ -15,10 +15,10 @@ export class EdgeDVRPanel {
     listen(host.querySelector('[data-dvr-rate]'),'change',event=>{this.rate=Number(event.target.value);this.seekPlayback(this.position,{play:this.wantPlay});});
     listen(this.slider,'input',()=>{
       if(!this.dragging){this.dragging=true;this.resumeAfterDrag=this.wantPlay;}
-      clearTimeout(this.scrubTimer);this.clock.textContent=this.options.format(Number(this.slider.value));
-      this.scrubTimer=setTimeout(()=>this.seekPlayback(Number(this.slider.value),{play:false}),75);
+      this.clock.textContent=this.options.format(Number(this.slider.value));
+      if(!this.scrubTimer)this.scrubTimer=setTimeout(()=>{this.scrubTimer=null;this.seekPlayback(Number(this.slider.value),{play:false});},120);
     });
-    listen(this.slider,'change',()=>{clearTimeout(this.scrubTimer);const play=this.dragging?this.resumeAfterDrag:this.wantPlay;this.dragging=false;this.seekPlayback(Number(this.slider.value),{play});});
+    listen(this.slider,'change',()=>{clearTimeout(this.scrubTimer);this.scrubTimer=null;const play=this.dragging?this.resumeAfterDrag:this.wantPlay;this.dragging=false;this.seekPlayback(Number(this.slider.value),{play});});
     this.refresh();this.update();
   }
   refresh(){this.total=this.options.total();this.slider.max=String(Math.max(0,this.total-.05));if(!this.dragging)this.slider.value=String(Math.min(this.position,this.total));this.update();}
@@ -38,13 +38,14 @@ export class EdgeDVRPanel {
     this.options.onTarget?.(target);
     if(!this.client||this.client.closed){
       this.client=new EdgeDVRClient({url:this.options.url,canvas:this.canvas,diagnostics:this.options.diagnostics,
-        onMetadata:metadata=>{this.fps=metadata.fps||25;this.slider.step=String(1/this.fps);this.host.dataset.dvrGop=String(metadata.keyframe_interval_seconds);this.host.dataset.dvrIndexHit=String(metadata.index_hit);},
+        onMetadata:metadata=>{this.options.onMetadata?.(metadata);this.fps=metadata.fps||25;this.slider.step=String(1/this.fps);this.host.dataset.dvrGop=String(metadata.keyframe_interval_seconds);this.host.dataset.dvrIndexHit=String(metadata.index_hit);},
         onWaiting:waiting=>{if(this.waiting===waiting)return;this.waiting=waiting;this.note.hidden=!waiting;this.note.textContent=waiting?'Odczyt wybranego miejsca…':'';},
         onFrame:frame=>{
           if(!this.host.isConnected)return;this.position=(this.entry.playbackOffset||0)+frame.seconds;this.host.dataset.dvrPicture='true';this.host.dataset.dvrEpoch=String(frame.epoch);this.host.dataset.dvrSeekMs=String(Math.round(frame.seekMS));this.note.hidden=true;
           this.host.querySelector('[data-dvr-poster]')?.remove();
           const now=performance.now();if(this.client?.paused||this.lastEpoch!==frame.epoch||now-(this.lastUI||0)>=100){this.lastEpoch=frame.epoch;this.lastUI=now;this.options.onPosition(this.entry,frame.seconds,this.fps);this.update();}
         },
+        onAudioUnavailable:()=>{this.muted=true;this.update();},
         onEnded:()=>{const next=(this.entry.playbackOffset||0)+this.entry.duration+.02;if(next<this.total-.05)this.seekPlayback(next,{play:this.wantPlay});else{this.wantPlay=false;this.update();this.note.hidden=false;this.note.textContent='Koniec dostępnych nagrań tego dnia.';}},
         onError:message=>{this.wantPlay=false;this.waiting=false;this.note.hidden=false;this.note.textContent=message;this.update();},
         onFallback:reason=>this.options.fallback?.(reason)
@@ -54,6 +55,6 @@ export class EdgeDVRPanel {
     }else this.client.seek(this.entry.file.name,target.seek,{paused:!play,rate:this.rate});
   }
   pause(){this.wantPlay=false;this.client?.pause();this.update();}
-  suspend(){clearTimeout(this.scrubTimer);this.wantPlay=false;this.client?.close();this.client=null;this.update();}
+  suspend(){clearTimeout(this.scrubTimer);this.scrubTimer=null;this.wantPlay=false;this.client?.close();this.client=null;this.update();}
   destroy(){this.suspend();this.abort.abort();}
 }

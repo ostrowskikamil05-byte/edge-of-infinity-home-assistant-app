@@ -66,16 +66,16 @@ const assert=require('node:assert/strict');
    assert(!/rtsp:|secret|192\.0\.2/.test(yaml));
    await page.locator('#event-copy-notification').click();assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),yaml);
    await page.locator('[data-event-recording="1"]').click();
-   await page.waitForFunction(()=>!document.querySelector('[data-page="nvr"]').hidden&&document.querySelector('video[data-recording-player]'));
-   await page.waitForFunction(()=>{const video=document.querySelector('video[data-recording-player]');if(!video||video.readyState<2||video.seeking)return false;pauseRecording(video);return Math.abs(Number(video.dataset.recordingPlaybackStart||0)+video.currentTime-8)<1.5;});
+   await page.waitForFunction(()=>!document.querySelector('[data-page="nvr"]').hidden&&archivePlayers.get('0'));
+   await page.waitForFunction(()=>{const player=archivePlayers.get('0');if(!player?.client?.picture)return false;player.pause();return Math.abs(player.position-8)<1.5;});
    await page.locator('[data-alert-point]').waitFor();
    assert.equal(await page.locator('[data-alert-point]').count(),1);
-   await page.evaluate(()=>{window.eventVideo=document.querySelector('video[data-recording-player]');window.eventVideoSrc=eventVideo.src;});
+   await page.evaluate(()=>{window.eventVideo=archivePlayers.get('0');window.eventVideoSrc=eventVideo.client.ws;});
    await page.locator('[data-recording-event-select]').selectOption('0');
-   assert(await page.evaluate(()=>eventVideo===document.querySelector('video[data-recording-player]')));
+   assert(await page.evaluate(()=>eventVideo===archivePlayers.get('0')));
    await page.locator('[data-recording-events-refresh]').click();
    await page.waitForTimeout(300);
-   assert(await page.evaluate(()=>eventVideo===document.querySelector('video[data-recording-player]')&&eventVideo.paused&&eventVideo.src===eventVideoSrc),'event refresh changed paused video');
+   assert(await page.evaluate(()=>eventVideo===archivePlayers.get('0')&&eventVideo.client.paused&&eventVideo.client.ws===eventVideoSrc),'event refresh changed paused video');
    if(width===1440){
     let delayedTimeline=false;
     await page.route('**/api/events/timeline?**',async route=>{

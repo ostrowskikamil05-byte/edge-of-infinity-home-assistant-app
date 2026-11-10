@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 )
 
 var archiveName = regexp.MustCompile(`^(?:[0-9]{8}-[0-9]{6}|[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}(?:-[0-9]{1,9})?)\.mp4$`)
+var archiveClipName = regexp.MustCompile(`^event-[1-9][0-9]{0,18}\.mp4$`)
 
 const archiveBatchPackets = 64
 const archiveBatchBytes = 2 * 1024 * 1024
@@ -26,17 +28,45 @@ type archiveCommand struct {
 	File  string  `json:"file"`
 	At    float64 `json:"at"`
 	Count int     `json:"count"`
+	Bytes int     `json:"bytes,omitempty"`
 }
 
 func validArchiveSeek(command archiveCommand) bool {
-	return command.Epoch != 0 && !math.IsNaN(command.At) && !math.IsInf(command.At, 0) && command.At >= 0 && command.At <= 172800 && command.Count >= 0 && command.Count <= archiveBatchPackets && archiveName.MatchString(command.File)
+	return validArchiveControl(command) && archiveName.MatchString(command.File)
+}
+
+func validArchiveControl(command archiveCommand) bool {
+	return command.Epoch != 0 && !math.IsNaN(command.At) && !math.IsInf(command.At, 0) && command.At >= 0 && command.At <= 172800 && command.Count >= 0 && command.Count <= archiveBatchPackets && (command.Bytes == 0 || command.Bytes >= 65536 && command.Bytes <= archiveBatchBytes)
 }
 
 func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
+	if key == "__alerts" {
+		reply(w, 404, map[string]string{"error": "unknown_archive"})
+		return
+	}
+	a.serveArchive(w, r, key, "")
+}
+
+func (a *app) archiveClip(w http.ResponseWriter, r *http.Request, id string) {
+	ident, err := strconv.ParseUint(id, 10, 63)
+	if err != nil || ident == 0 || strconv.FormatUint(ident, 10) != id {
+		reply(w, 400, map[string]string{"error": "invalid_clip"})
+		return
+	}
+	a.serveArchive(w, r, "__alerts", "event-"+id+".mp4")
+}
+
+func (a *app) serveArchive(w http.ResponseWriter, r *http.Request, key, fixedFile string) {
 	a.mu.RLock()
 	root := a.archiveRoot
 	directory := a.archiveKeys[key]
 	a.mu.RUnlock()
+	validSeek := func(command archiveCommand) bool {
+		if fixedFile != "" {
+			return validArchiveControl(command) && command.File == fixedFile
+		}
+		return validArchiveSeek(command)
+	}
 	if root == "" || directory == "" || !validID.MatchString(key) {
 		reply(w, 404, map[string]string{"error": "unknown_archive"})
 		return
@@ -80,7 +110,7 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 		ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		return ws.WriteJSON(value)
 	}
-	if write(map[string]any{"type": "archive_ready", "protocol": "edgertc/archive/1", "batch_packets": archiveBatchPackets, "batch_bytes": archiveBatchBytes, "initial_batch": true, "pipeline_batches": 2}) != nil {
+	if write(map[string]any{"type": "archive_ready", "protocol": "edgertc/archive/1", "batch_packets": archiveBatchPackets, "batch_bytes": archiveBatchBytes, "byte_budget": true, "initial_batch": true, "pipeline_batches": 2}) != nil {
 		return
 	}
 	var file *os.File
@@ -95,7 +125,10 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 	var epoch uint32
 	var latestEpoch atomic.Uint32
 	video, audio := 0, 0
-	sendBatch := func(limit int) error {
+	sendBatch := func(limit, byteLimit int) error {
+		if byteLimit == 0 {
+			byteLimit = archiveBatchBytes
+		}
 		started := time.Now()
 		var readTime time.Duration
 		bytes, packets := 0, 0
@@ -148,7 +181,7 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 			packets++
 			// A single access unit may exceed the soft batch budget, but keeps
 			// the existing per-packet limit. Never split an encoded picture.
-			if bytes >= archiveBatchBytes {
+			if bytes >= byteLimit {
 				break
 			}
 		}
@@ -173,7 +206,7 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 			if count > 240 {
 				return
 			}
-			if command.Type == "seek" && validArchiveSeek(command) {
+			if command.Type == "seek" && validSeek(command) {
 				latestEpoch.Store(command.Epoch)
 				// Coalesce queued seeks/pulls. Only the most recent requested
 				// position should spend disk/network/decoder work.
@@ -194,7 +227,7 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 	for command := range commands {
 		switch command.Type {
 		case "seek":
-			if !validArchiveSeek(command) {
+			if !validSeek(command) {
 				if write(map[string]any{"type": "archive_error", "epoch": command.Epoch, "code": "invalid_archive_seek"}) != nil {
 					return
 				}
@@ -258,7 +291,7 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 					}
 				}
 				log.Printf("archive index unavailable key=%s file=%s reason=%s", key, command.File, reason)
-				if write(map[string]any{"type": "archive_error", "epoch": epoch, "code": "archive_requires_mp4"}) != nil {
+				if write(map[string]any{"type": "archive_error", "epoch": epoch, "code": "archive_index_unavailable"}) != nil {
 					return
 				}
 				continue
@@ -277,7 +310,7 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 			// Opt-in initial delivery removes a full request round trip after
 			// every seek. Legacy clients leave Count at zero and still pull.
 			if command.Count > 0 {
-				if sendBatch(command.Count) != nil {
+				if sendBatch(command.Count, command.Bytes) != nil {
 					return
 				}
 			}
@@ -285,10 +318,10 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 			if index == nil || command.Epoch != epoch || command.Epoch != latestEpoch.Load() {
 				continue
 			}
-			if command.Count < 1 || command.Count > archiveBatchPackets {
+			if command.Count < 1 || !validArchiveControl(command) {
 				return
 			}
-			if sendBatch(command.Count) != nil {
+			if sendBatch(command.Count, command.Bytes) != nil {
 				return
 			}
 		default:
@@ -298,7 +331,7 @@ func (a *app) archive(w http.ResponseWriter, r *http.Request, key string) {
 }
 
 func archivePath(root, key, name string) (string, error) {
-	if !validID.MatchString(key) || !archiveName.MatchString(name) {
+	if !validID.MatchString(key) || !(archiveName.MatchString(name) || archiveClipName.MatchString(name)) {
 		return "", errors.New("invalid_archive_path")
 	}
 	canonical, e := filepath.EvalSymlinks(root)
