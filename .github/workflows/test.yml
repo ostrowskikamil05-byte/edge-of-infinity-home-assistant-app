@@ -127,6 +127,23 @@ jobs:
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_codec_test.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/device_diagnostics.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_aac_resume.cjs
+          pip install aiohttp==3.14.4
+          EDGE_NVR_TEST_URL=http://127.0.0.1:18091 EDGE_HA_BRIDGE_PORT=18191 python tests/browser/ha_bridge_fixture.py > "${RUNNER_TEMP}/ha-bridge.log" 2>&1 &
+          edge_bridge_pid=$!
+          trap 'kill "${edge_phone_fixture_pid}" "${edge_bridge_pid}" || true' EXIT
+          python - <<'PY'
+          import time, urllib.request
+          deadline = time.monotonic() + 20
+          while True:
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:18191/', timeout=1).close()
+                  break
+              except OSError:
+                  if time.monotonic() > deadline:
+                      raise
+                  time.sleep(.1)
+          PY
+          EDGE_HA_BRIDGE_URL=http://127.0.0.1:18191 node tests/browser/edge_dashboard_cards.cjs
 
       - name: Test latest seek and direct transitions with long-GOP recordings
         run: |

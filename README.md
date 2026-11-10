@@ -2,10 +2,12 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.14.1** uses EdgeRTC as the sole core for Live and indexed DVR.
-It removes the retired engines and their settings while preserving camera
-profiles, original recordings and 14-day retention. DVR AAC uses bounded audio
-queues and backpressure; Live keeps its existing audio policy.
+Version **0.15.0** adds two Home Assistant dashboard cards next to Edge Live:
+`custom:edge-recordings-card` (days, timeline, playback) and
+`custom:edge-events-card` (detections with pictures and clips). They adapt to
+phones, tablets and desktops; the Edge panel itself is unchanged.
+EdgeRTC remains the sole core for Live and indexed DVR, with original
+recordings and 14-day retention preserved.
 See [migration and setup](edge-of-infinity/DOCS.md).
 
 This is the correct packaging when Edge of Infinity should appear in Home Assistant under:

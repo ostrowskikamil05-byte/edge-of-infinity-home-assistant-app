@@ -4,7 +4,7 @@
 
 EdgeRTC is the sole streaming core. Update the app, restart Home Assistant Core
 if the bundled integration is installed, and reopen Edge through the HA sidebar.
-The version/build is `0.14.1` / `cellular-live-v141`.
+The version/build is `0.15.0` / `cellular-live-v141`.
 
 The update removes Janus and MediaMTX binaries, packages, startup services,
 configuration generators, engine selection, public media ports and obsolete
@@ -131,6 +131,42 @@ select a standard HA camera entity. The custom card supports 1–4 views, layout
 audio, microphone and full screen. Its native source is the EdgeRTC registry.
 HA entity read permission and microphone control permission remain separate.
 The private core token is never included in public camera metadata/card YAML.
+
+### Recordings and events cards (0.15.0)
+
+Two more cards are registered automatically with the integration. Update the
+app and restart HA Core once so Home Assistant loads them.
+
+```yaml
+type: custom:edge-recordings-card   # days, 24 h / 6 h / 1 h timeline, playback
+type: custom:edge-events-card       # person, vehicle and animal detections
+```
+
+Both show every Edge camera by default. Optional settings:
+
+| Option | Card | Meaning |
+| --- | --- | --- |
+| `title` | both | Heading text |
+| `cameras` | both | List of `camera.…` entities to show |
+| `muted` | recordings | Start playback without sound |
+| `kinds` | events | Any of `person`, `vehicle`, `animal`, `motion` (motion is off by default) |
+| `layout` | events | `grid` (default, grouped by day) or `strip` (one swipeable row) |
+| `limit` | events | Events per page, 4–60 (default 12) |
+| `max_height` | events | Scroll the list inside this height in pixels |
+
+The cards take their frame from the active Home Assistant theme and add no
+borders of their own, so translucent themes such as Frosted Glass apply as they
+do to built-in cards. The cards lay themselves out from their own width, so the same YAML works in a
+narrow phone column and a wide desktop section. In a sections view, give the
+recordings card `grid_options: {columns: full}`. "Show in recordings" in the
+event viewer moves the recordings card on the same view to that moment.
+
+Requests go through Home Assistant: each one names a camera entity, requires
+that user's read permission and is mapped to a fixed add-on route. Video is
+requested with short-lived signed paths; no add-on address, token or camera
+credential reaches the browser. Recordings keep their original codec. A browser
+without an H.265 decoder shows a message instead of a black picture; use the
+Edge panel or a device with H.265 support for those cameras.
 
 ## Detection and alerts
 

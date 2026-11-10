@@ -8,9 +8,10 @@ Native EdgeRTC Live, recording and indexed DVR for Home Assistant.
 - Authenticated HA HTTPS/WebSocket access, including Nabu Casa.
 - Optional camera/local detection, zones, alert clips and phone notifications.
 - Native card with 1–4 views and separate microphone permissions.
+- Dashboard cards for recordings and events that adapt to phone, tablet and desktop.
 
-Version 0.14.1 removes retired streaming engines and migrates their settings while
-preserving cameras and saved recordings. DVR AAC uses bounded buffering and
-backpressure without changing Live audio behavior.
+Version 0.15.0 adds the `custom:edge-recordings-card` and
+`custom:edge-events-card` dashboard cards. The panel, recorder and Live path are
+unchanged; restart Home Assistant Core after updating to load the cards.
 
 See [configuration, migration and playback](DOCS.md).
