@@ -101,6 +101,89 @@ configuration:
   hikvision_2_record_stream:
     name: Kamera 2 stream nagrywania
     description: Wybiera czy NVR nagrywa main czy sub.
+  cameras:
+    name: Kamery
+    description: Opcjonalna lista kamer w YAML. Kamery zwykle dodaje się w panelu Edge; ta lista tworzy tylko pierwszą konfigurację.
+  sync_addon_options:
+    name: Synchronizacja opcji dodatku (starsza)
+    description: Zachowane dla starszych instalacji. Kamery zapisane w panelu Edge zawsze mają pierwszeństwo; opcje dodatku tworzą tylko pierwszą konfigurację.
+  camera_events_enabled:
+    name: Zdarzenia z kamery
+    description: Odbiera zdarzenia ruchu i analityki zgłaszane przez samą kamerę (ONVIF lub API producenta).
+  local_detection_enabled:
+    name: Lokalna detekcja
+    description: Wykrywa osoby, zwierzęta i pojazdy na tym urządzeniu ze wspólnego strumienia kamery.
+  detection_fps:
+    name: Analizowane klatki na sekundę
+    description: Łączna liczba analizowanych klatek na sekundę dla wszystkich kamer, 0,2–3. Na słabszym sprzęcie zacznij od 1.
+  detection_decoder:
+    name: Dekoder detekcji
+    description: auto wybiera dostępną akcelerację, cpu dekoduje programowo, keyframes analizuje tylko klatki kluczowe.
+  detection_confidence:
+    name: Pewność detekcji
+    description: Minimalna pewność dla osób i pojazdów, 0,1–0,95. Wyższa wartość oznacza mniej fałszywych alarmów.
+  detection_animal_confidence:
+    name: Pewność detekcji zwierząt
+    description: Minimalna pewność dla zwierząt, 0,1–0,95.
+  detection_hold_seconds:
+    name: Czas podtrzymania detekcji
+    description: Liczba sekund, przez które czujnik pozostaje włączony po ostatnim wykryciu, 1–120.
+  detection_person_enabled:
+    name: Wykrywaj osoby
+    description: Tworzy zdarzenia dla wykrytych osób.
+  detection_animal_enabled:
+    name: Wykrywaj zwierzęta
+    description: Tworzy zdarzenia dla wykrytych zwierząt.
+  detection_vehicle_enabled:
+    name: Wykrywaj pojazdy
+    description: Tworzy zdarzenia dla wykrytych pojazdów.
+  detection_alert_media_mb:
+    name: Miejsce na klipy alertów
+    description: Limit miejsca na klipy alertów w MiB, 32–4096. Najstarsze klipy są usuwane jako pierwsze.
+  detection_pre_seconds:
+    name: Sekundy przed zdarzeniem
+    description: Długość nagrania sprzed zdarzenia w klipie alertu, 0–10.
+  detection_post_seconds:
+    name: Sekundy po zdarzeniu
+    description: Długość nagrania po zdarzeniu w klipie alertu, 5–60.
+  detection_notifications_enabled:
+    name: Powiadomienia na telefon
+    description: Wysyła powiadomienie ze zdjęciem po wykryciu osoby lub zwierzęcia.
+  detection_notify_service:
+    name: Usługa powiadomień
+    description: Usługa aplikacji Home Assistant Companion, np. notify.mobile_app_twoj_telefon.
+  detection_notify_cooldown:
+    name: Przerwa między powiadomieniami
+    description: Minimalna liczba sekund między powiadomieniami z jednej kamery, 5–3600.
+  detection_notify_path:
+    name: Odnośnik w powiadomieniu
+    description: Ścieżka dashboardu otwierana po dotknięciu powiadomienia, np. /lovelace/kamery. Puste pole oznacza brak odnośnika.
+  hikvision_1_camera_number:
+    name: Kamera 1 numer kanału
+    description: Numer kanału w kamerze lub rejestratorze, używany do zbudowania adresu RTSP.
+  hikvision_1_access_protocol:
+    name: Kamera 1 protokół dostępu
+    description: "Sposób łączenia z kamerą: rtsp, isapi, onvif, unicast lub multicast."
+  hikvision_1_rtsp_transport:
+    name: Kamera 1 transport RTSP
+    description: tcp jest najbardziej niezawodny; udp lub auto tylko, gdy wymaga tego kamera.
+  hikvision_1_live_stream:
+    name: Kamera 1 strumień podglądu
+    description: Wybiera strumień podglądu na żywo, sub lub main.
+  hikvision_2_camera_number:
+    name: Kamera 2 numer kanału
+    description: Numer kanału w kamerze lub rejestratorze, używany do zbudowania adresu RTSP.
+  hikvision_2_access_protocol:
+    name: Kamera 2 protokół dostępu
+    description: "Sposób łączenia z kamerą: rtsp, isapi, onvif, unicast lub multicast."
+  hikvision_2_rtsp_transport:
+    name: Kamera 2 transport RTSP
+    description: tcp jest najbardziej niezawodny; udp lub auto tylko, gdy wymaga tego kamera.
+  hikvision_2_live_stream:
+    name: Kamera 2 strumień podglądu
+    description: Wybiera strumień podglądu na żywo, sub lub main.
 network:
   8088/TCP: API Edge Core i interfejs webowy
-
+  "8443/TCP": "Opcjonalna lokalna brama HTTPS dla Home Assistant; najpierw ją włącz i zaufaj certyfikatowi"
+  "8556/TCP": "Wspólny strumień RTSP rdzenia; pozostaw wyłączony, chyba że musi go czytać inne urządzenie"
+  "9997/TCP": "Prywatne API rdzenia strumieniowania; pozostaw wyłączone"

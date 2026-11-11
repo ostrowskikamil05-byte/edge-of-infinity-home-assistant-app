@@ -248,6 +248,7 @@ Both show every Edge camera by default. Optional settings:
 | --- | --- | --- |
 | `title` | both | Heading text |
 | `cameras` | both | List of `camera.…` entities to show |
+| `language` | both | `auto` (default) or `en`, `pl`, `de`, `fr`, `es`, `it`, `uk` |
 | `muted` | recordings | Start playback without sound |
 | `kinds` | events | Any of `person`, `vehicle`, `animal`, `motion` (motion is off by default) |
 | `layout` | events | `grid` (default, grouped by day) or `strip` (one swipeable row) |

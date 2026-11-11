@@ -99,8 +99,10 @@ jobs:
           node tests/browser/detection_ui.cjs
           node tests/browser/nvr_navigation.cjs
           node tests/browser/recording_storage.cjs
+          node tests/browser/nvr_backpressure.cjs
           node tests/browser/ui_dashboard.cjs
           node tests/browser/camera_settings.cjs
+          node tests/browser/settings_save.cjs
           node tests/browser/brand_assets.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/interface_languages.cjs
           EDGE_TEST_BROWSER=webkit node tests/browser/interface_languages.cjs

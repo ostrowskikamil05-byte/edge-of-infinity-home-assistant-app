@@ -442,10 +442,6 @@ cp "${EDGE_HOME_EXAMPLE_CONFIG}" "${EDGE_ADDON_EXAMPLE_CONFIG}"
 
 ADDON_OPTIONS_HASH_PATH=/homeassistant/edge/addon-options.hash
 ADDON_OPTIONS_HASH="$(addon_camera_options_hash)"
-PREVIOUS_ADDON_OPTIONS_HASH=""
-if [[ -f "${ADDON_OPTIONS_HASH_PATH}" ]]; then
-  PREVIOUS_ADDON_OPTIONS_HASH="$(cat "${ADDON_OPTIONS_HASH_PATH}")"
-fi
 
 if [[ -f "${EDGE_HOME_CONFIG}" ]] && ! jq -e 'type == "object" and (.cameras | type == "array")' "${EDGE_HOME_CONFIG}" >/dev/null 2>&1; then
   bashio::log.error "Invalid authoritative config ${EDGE_HOME_CONFIG}. Refusing to restore stale settings from mirrors; repair the JSON file."

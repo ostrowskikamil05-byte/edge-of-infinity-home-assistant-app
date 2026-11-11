@@ -25,3 +25,17 @@ class ArchiveCommandTests(unittest.TestCase):
         self.assertTrue(valid(json.dumps({'type':'pull','epoch':1,'count':16,'bytes':524288})))
         self.assertFalse(valid(json.dumps({'type':'pull','epoch':1,'count':0})))
         self.assertFalse(valid(' '*4097))
+
+    def test_recording_keys_match_the_add_on_and_cannot_leave_their_folder(self):
+        root=Path(__file__).parents[1]/'edge-of-infinity/rootfs/usr/share/edge-of-infinity'
+        source=(root/'custom_components/edge/dashboard.py').read_text()
+        pattern=re.compile(re.search(r'^RECORDING_KEY = re\.compile\(r"(.+)"\)$',source,re.M)[1])
+        # One definition: both lookups (coordinator data and the summary fallback) use it.
+        self.assertEqual(source.count('RECORDING_KEY.fullmatch('),2)
+        safe_id=re.search(r'def safe_id\(value: str\) -> str:\n    return re\.sub\(r"\[\^(.+)\]", "_", value or "camera"\)',(root/'edge-panel.py').read_text())[1]
+        add_on_key=lambda ident,index:re.sub('[^'+safe_id+']','_',ident or 'camera')+'_'+str(index)
+        for ident in ('front','front.door','hikvision_1','Garaż 2','a/b','..','.'):
+            self.assertTrue(pattern.fullmatch(add_on_key(ident,0)),ident)
+        for key in ('','.','..','...','a/b','a b','x'*97,'../edge'):
+            self.assertFalse(pattern.fullmatch(key),key)
+        self.assertIn("quote(str(camera_id), safe='')",source)
