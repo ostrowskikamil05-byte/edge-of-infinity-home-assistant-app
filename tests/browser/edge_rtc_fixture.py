@@ -56,7 +56,7 @@ async def main():
             sys.modules['homeassistant.components.http'].HomeAssistantView=object
             sys.modules['homeassistant.components.http.const'].KEY_HASS_USER='hass_user'
             sys.modules['edge_fixture.const'].DOMAIN='edge'
-            sys.modules['edge_fixture.const'].CARD_VERSION='0.17.1'
+            sys.modules['edge_fixture.const'].CARD_VERSION='0.17.2'
             sys.modules['edge_fixture.client'].EdgeClientError=type('EdgeClientError',(Exception,),{})
             async with ClientSession() as session:
                 sys.modules['homeassistant.helpers.aiohttp_client'].async_get_clientsession=lambda hass:session
