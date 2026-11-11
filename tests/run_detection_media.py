@@ -12,11 +12,13 @@ with tempfile.TemporaryDirectory() as directory:
         process = subprocess.Popen([sys.executable, str(root/'tests/browser/edge_rtc_fixture.py')],
             cwd=root, env={**os.environ, 'EDGE_RTC_TEST_CODEC':'h265', 'EDGE_RTC_TEST_DETECTION':'1'}, stdout=log, stderr=subprocess.STDOUT)
         try:
-            subprocess.run([sys.executable, str(root/'tests/edge_rtc_hevc_wire.py')], cwd=root, check=True, timeout=60)
+            subprocess.run([sys.executable, str(root/'tests/edge_rtc_hevc_wire.py')], cwd=root, check=True, timeout=120)
         finally:
             process.terminate()
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill();process.wait()
-    print(log_path.read_text()[-2000:])
+            # Also on failure: the fixture log is where the cause is.
+            log.flush()
+            print(log_path.read_text(errors='replace')[-4000:])

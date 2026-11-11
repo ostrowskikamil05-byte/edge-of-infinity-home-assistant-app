@@ -7,7 +7,8 @@
 
 Home Assistant App repository for Edge of Infinity.
 
-Version **0.17.1** fixes dashboard cards that failed with "Importing a module
+Version **0.17.2** names every add-on option in Polish and English and
+tightens the dashboard bridge. Version **0.17.1** fixed dashboard cards that failed with "Importing a module
 script failed" after an add-on update until Home Assistant Core was restarted;
 the cards and Settings → Repairs now say when that restart is needed.
 

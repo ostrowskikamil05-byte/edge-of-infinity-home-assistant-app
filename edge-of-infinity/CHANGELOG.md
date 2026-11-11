@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.17.2
+
+- Name and describe every add-on option and port in English and Polish; 27
+  detection, notification and camera options previously showed raw keys.
+- Accept camera IDs containing a dot in the dashboard bridge, escape the camera
+  filter of event queries and answer cleanly when a viewer disconnects before
+  streaming starts. Declare the integration's `http` dependency.
+- Point the add-on and repository links at this repository.
+- Remove eleven browser tests for the MP4 player retired in 0.16.0; they could
+  no longer pass and were not run. Run the thumbnail back-off and settings-save
+  tests in CI again and update the Live card test for viewport release.
+- Make the HEVC recording/alert CI check wait for a finished recording segment
+  instead of a fixed 3.5 s, and print the fixture log when it fails.
+- No change to the Edge panel, recorder, Live or DVR behaviour. Restart Home
+  Assistant Core after updating.
+
 ## 0.17.1
 
 - Fix "Importing a module script failed" / "Failed to fetch dynamically imported

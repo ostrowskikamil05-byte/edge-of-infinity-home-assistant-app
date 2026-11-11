@@ -111,6 +111,8 @@ const path=require('node:path');
     }
     window.multi=document.createElement('edge-live-card');window.cameraIds=['camera.front','camera.side','camera.back','camera.garage'];
    });
+    // Players outside the viewport release their connection (0.16.0), so make room for all four.
+    await page.setViewportSize({width,height:6000});
    for(let count=1;count<=4;count++){
     await page.evaluate(count=>{multi.setConfig({cameras:cameraIds.slice(0,count),reconnect:false});multi.hass=hass;fixture.players=[...multi._players.values()];if(!multi.isConnected)document.body.append(multi);},count);
     await page.waitForFunction(count=>multi._players.size===count&&[...multi._players.values()].every(p=>p._video.readyState>=2&&!p._video.paused),count);

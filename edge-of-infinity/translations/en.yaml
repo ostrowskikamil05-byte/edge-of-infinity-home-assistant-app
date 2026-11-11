@@ -101,6 +101,89 @@ configuration:
   hikvision_2_record_stream:
     name: Camera 2 recording stream
     description: Selects whether NVR recordings use main or sub.
+  cameras:
+    name: Cameras
+    description: Optional camera list in YAML. Cameras are normally added in the Edge panel; this list only creates the first configuration.
+  sync_addon_options:
+    name: Sync add-on options (legacy)
+    description: Kept for older installations. Cameras saved in the Edge panel always take priority; add-on options only create the first configuration.
+  camera_events_enabled:
+    name: Camera events
+    description: Receive motion and smart events reported by the camera itself (ONVIF or vendor API).
+  local_detection_enabled:
+    name: Local detection
+    description: Detect people, animals and vehicles on this device from the shared camera stream.
+  detection_fps:
+    name: Analyzed frames per second
+    description: Total frames analyzed per second across all cameras, 0.2–3. Start with 1 on slower hardware.
+  detection_decoder:
+    name: Detection decoder
+    description: auto prefers supported acceleration, cpu decodes in software, keyframes analyzes key frames only.
+  detection_confidence:
+    name: Detection confidence
+    description: Minimum confidence for people and vehicles, 0.1–0.95. Higher means fewer false alerts.
+  detection_animal_confidence:
+    name: Animal detection confidence
+    description: Minimum confidence for animals, 0.1–0.95.
+  detection_hold_seconds:
+    name: Detection hold time
+    description: Seconds a detection sensor stays on after the last detection, 1–120.
+  detection_person_enabled:
+    name: Detect people
+    description: Create events for detected people.
+  detection_animal_enabled:
+    name: Detect animals
+    description: Create events for detected animals.
+  detection_vehicle_enabled:
+    name: Detect vehicles
+    description: Create events for detected vehicles.
+  detection_alert_media_mb:
+    name: Alert clip storage
+    description: Disk budget for alert clips in MiB, 32–4096. The oldest clips are removed first.
+  detection_pre_seconds:
+    name: Seconds before the event
+    description: Recording kept before the event in an alert clip, 0–10.
+  detection_post_seconds:
+    name: Seconds after the event
+    description: Recording kept after the event in an alert clip, 5–60.
+  detection_notifications_enabled:
+    name: Phone notifications
+    description: Send a notification with a picture when a person or animal is detected.
+  detection_notify_service:
+    name: Notification service
+    description: Home Assistant Companion service, for example notify.mobile_app_your_phone.
+  detection_notify_cooldown:
+    name: Notification cooldown
+    description: Minimum seconds between notifications for one camera, 5–3600.
+  detection_notify_path:
+    name: Notification link
+    description: Dashboard path opened when the notification is tapped, for example /lovelace/cameras. Leave empty for no link.
+  hikvision_1_camera_number:
+    name: Camera 1 channel number
+    description: Channel number on the camera or recorder, used to build the RTSP address.
+  hikvision_1_access_protocol:
+    name: Camera 1 access protocol
+    description: "How Edge reaches the camera: rtsp, isapi, onvif, unicast or multicast."
+  hikvision_1_rtsp_transport:
+    name: Camera 1 RTSP transport
+    description: tcp is the most reliable; udp or auto only if the camera requires it.
+  hikvision_1_live_stream:
+    name: Camera 1 live stream
+    description: Selects the stream for live view, sub or main.
+  hikvision_2_camera_number:
+    name: Camera 2 channel number
+    description: Channel number on the camera or recorder, used to build the RTSP address.
+  hikvision_2_access_protocol:
+    name: Camera 2 access protocol
+    description: "How Edge reaches the camera: rtsp, isapi, onvif, unicast or multicast."
+  hikvision_2_rtsp_transport:
+    name: Camera 2 RTSP transport
+    description: tcp is the most reliable; udp or auto only if the camera requires it.
+  hikvision_2_live_stream:
+    name: Camera 2 live stream
+    description: Selects the stream for live view, sub or main.
 network:
   8088/TCP: Edge Core API and web interface
-
+  "8443/TCP": "Optional local HTTPS gateway for Home Assistant; enable and trust its certificate first"
+  "8556/TCP": "Shared core RTSP feed; keep disabled unless another device must read it"
+  "9997/TCP": "Private streaming core API; keep disabled"

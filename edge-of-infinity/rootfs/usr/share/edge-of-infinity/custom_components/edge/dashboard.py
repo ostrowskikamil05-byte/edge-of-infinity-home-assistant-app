@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, quote
 
 from aiohttp import ClientError, ClientTimeout, WSMsgType, web
 from contextlib import suppress
@@ -27,6 +27,8 @@ ENTITY = re.compile(r"camera\.[a-z0-9_]+")
 DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 SEGMENT = re.compile(r"\d{8}-\d{6}\.mp4")
 EVENT_ID = re.compile(r"[1-9][0-9]{0,18}")
+# The add-on builds keys as safe_id(camera id) + "_" + index; safe_id keeps dots.
+RECORDING_KEY = re.compile(r"(?!\.+$)[A-Za-z0-9_.-]{1,96}")
 KINDS = ("person", "vehicle", "animal", "motion")
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 KEY_TTL_SECONDS = 30
@@ -104,13 +106,13 @@ async def recording_slot(hass, target: dict) -> dict:
     entry = target["entry"]
     coordinator = entry.get('coordinator')
     for camera in ((coordinator.data if coordinator else None) or {}).get('cameras', []):
-        if camera.get('id') == target['camera_id'] and type(camera.get('index')) is int and re.fullmatch(r'[A-Za-z0-9_.-]{1,96}', str(camera.get('key') or '')):
+        if camera.get('id') == target['camera_id'] and type(camera.get('index')) is int and RECORDING_KEY.fullmatch(str(camera.get('key') or '')):
             return camera
     cache = entry.setdefault("_dashboard_slots", {"at": 0.0, "rows": {}})
     if time.monotonic() - cache["at"] > KEY_TTL_SECONDS or target["camera_id"] not in cache["rows"]:
         async def refresh():
             payload = await fetch_json(hass, entry, "/api/recording/status?summary=1")
-            cache["rows"] = {row.get("id"): row for row in payload.get("cameras", []) if re.fullmatch(r"[A-Za-z0-9_-]{1,96}", str(row.get("key") or ""))}
+            cache["rows"] = {row.get("id"): row for row in payload.get("cameras", []) if RECORDING_KEY.fullmatch(str(row.get("key") or ""))}
             cache["at"] = time.monotonic()
         task = cache.get("task")
         if task is None or task.done():
@@ -234,7 +236,7 @@ class EdgeEventsView(HomeAssistantView):
         return rows[:limit], more or len(rows) > limit
 
     async def _page(self, entry, camera_id, kinds, day, before, limit):
-        base = "/api/events?limit=" + str(limit) + (f"&camera={camera_id}" if camera_id else "") + (f"&day={day}" if day else "") + (f"&before={before}" if before else "")
+        base = "/api/events?limit=" + str(limit) + (f"&camera={quote(str(camera_id), safe='')}" if camera_id else "") + (f"&day={day}" if day else "") + (f"&before={before}" if before else "")
         if len(kinds) <= 1:
             payload = await fetch_json(self.hass, entry, base + (f"&kind={kinds[0]}" if kinds else ""))
             return payload.get("events", []), bool(payload.get("has_more")), str(payload.get("next_before") or "")
@@ -288,7 +290,7 @@ class EdgeMediaView(HomeAssistantView):
             return web.json_response({"error": "edge_addon_unreachable"}, status=502)
         except ConnectionError:
             # The viewer closed the player or sought elsewhere; nothing to report.
-            return response
+            return response if response is not None else web.json_response({"error": "edge_addon_unreachable"}, status=502)
 
     async def _route(self, target, kind, name):
         """Translate a validated card path into (add-on path, is_image)."""

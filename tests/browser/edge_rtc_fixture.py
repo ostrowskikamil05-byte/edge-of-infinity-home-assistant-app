@@ -56,7 +56,7 @@ async def main():
             sys.modules['homeassistant.components.http'].HomeAssistantView=object
             sys.modules['homeassistant.components.http.const'].KEY_HASS_USER='hass_user'
             sys.modules['edge_fixture.const'].DOMAIN='edge'
-            sys.modules['edge_fixture.const'].CARD_VERSION='0.17.1'
+            sys.modules['edge_fixture.const'].CARD_VERSION='0.17.2'
             sys.modules['edge_fixture.client'].EdgeClientError=type('EdgeClientError',(Exception,),{})
             async with ClientSession() as session:
                 sys.modules['homeassistant.helpers.aiohttp_client'].async_get_clientsession=lambda hass:session
@@ -127,7 +127,19 @@ async def main():
                     command=panel.build_recording_command(info['rtsp'],str(folder/'record-%Y%m%d-%H%M%S.mp4'),2,mode,video_codec,audio_codec,audio_info.get('sample_rate'),audio_info.get('channels'))
                     with (folder/'recorder.log').open('wb') as record_log:
                         recorder=await asyncio.create_subprocess_exec(*command,stdout=record_log,stderr=record_log)
-                        await asyncio.sleep(3.5);recorder.terminate();await recorder.wait()
+                        # Wait for recorded media, not for a fixed time: recorder start-up
+                        # varies with machine load, and a fixed window left too little
+                        # (or nothing) to export on a slow runner. A second file means
+                        # the first two-second segment is complete.
+                        deadline=time.monotonic()+30;first_seen=None
+                        while time.monotonic()<deadline and recorder.returncode is None:
+                            segments=[path for path in folder.glob('record-*.mp4') if path.stat().st_size>0]
+                            if segments and first_seen is None:first_seen=time.monotonic()
+                            if len(segments)>=2 or (first_seen is not None and time.monotonic()-first_seen>6):break
+                            await asyncio.sleep(.1)
+                        await asyncio.sleep(.5)
+                        if recorder.returncode is None:recorder.terminate()
+                        await recorder.wait()
                     def hashes(path):
                         result=subprocess.run(['ffmpeg','-v','error','-threads','1','-i',str(path),'-map','0:v:0','-threads','1','-f','framemd5','-'],capture_output=True,text=True,check=True)
                         return [line.rsplit(',',1)[-1].strip() for line in result.stdout.splitlines() if line and not line.startswith('#')]
@@ -153,7 +165,8 @@ async def main():
                             duration=video_timing(path)['duration']
                             if duration>0:
                                 rows.append({'path':path,'start_ts':stamp,'duration':duration});stamp+=duration
-                        ident=store.add('front','animal','local',rows[0]['start_ts']+.5,{})
+                        if not rows:raise RuntimeError('no finished recording segment to export')
+                        ident=store.add('front','animal','local',rows[0]['start_ts']+min(.5,rows[0]['duration']/2),{})
                         service=AlertMediaService(store,lambda:{'storage':{'recordings_dir':str(folder/'alerts')},'detection':{}},lambda *args:rows,lambda *args:None,lambda *args:None,start=False)
                         service.build(store.get(ident));clip=service.path(ident)
                         def pixels(path):
@@ -162,7 +175,11 @@ async def main():
                         original=[value for row in rows for value in pixels(row['path'])]
                         recorded_fps=sum(video_timing(row['path'])['fps']*row['duration'] for row in rows)/sum(row['duration'] for row in rows)
                         return {'state':store.get(ident)['clip_state'],'pixel_identical':original==pixels(clip),'fps':video_timing(clip)['fps'],'recorded_fps':recorded_fps}
-                    return web.json_response(await asyncio.to_thread(build))
+                    # Report why the export failed instead of an opaque HTTP 500.
+                    try:return web.json_response(await asyncio.to_thread(build))
+                    except Exception as error:
+                        recorded=[{'name':path.name,'bytes':path.stat().st_size} for path in sorted(folder.glob('record-*.mp4'))]
+                        return web.json_response({'state':'error','error':type(error).__name__+': '+str(error)[:400],'recorded':recorded})
                 app=web.Application();app.router.add_get('/',index);app.router.add_get('/edge/{name}',asset);app.router.add_get('/api/edge/rtc/{entity}',websocket);app.router.add_post('/api/edge/client-diagnostics',device_report);app.router.add_get('/test/devices',device_logs);app.router.add_get('/test/status',status);app.router.add_get('/test/detection',detection_status);app.router.add_get('/test/record',record);app.router.add_get('/test/alert',alert)
                 if archive:
                     for view_class in (dashboard.EdgeRecordingsView,dashboard.EdgeEventsView,dashboard.EdgeMediaView,dashboard.EdgeArchiveView,dashboard.EdgeDashboardStatusView):

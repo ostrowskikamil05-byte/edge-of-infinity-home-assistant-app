@@ -66,7 +66,7 @@ Reference: [HA HTTP and trusted proxies](https://www.home-assistant.io/integrati
 
 EdgeRTC is the sole streaming core. Update the app, restart Home Assistant Core
 if the bundled integration is installed, and reopen Edge through the HA sidebar.
-The current version/build is `0.17.1` / `shared-sessions-v170`.
+The current version/build is `0.17.2` / `shared-sessions-v170`.
 
 The panel and Live/recordings/events cards support Polish, English, German,
 French, Spanish, Italian and Ukrainian (`pl`, `en`, `de`, `fr`, `es`, `it`, `uk`).
@@ -248,6 +248,7 @@ Both show every Edge camera by default. Optional settings:
 | --- | --- | --- |
 | `title` | both | Heading text |
 | `cameras` | both | List of `camera.…` entities to show |
+| `language` | both | `auto` (default) or `en`, `pl`, `de`, `fr`, `es`, `it`, `uk` |
 | `muted` | recordings | Start playback without sound |
 | `kinds` | events | Any of `person`, `vehicle`, `animal`, `motion` (motion is off by default) |
 | `layout` | events | `grid` (default, grouped by day) or `strip` (one swipeable row) |

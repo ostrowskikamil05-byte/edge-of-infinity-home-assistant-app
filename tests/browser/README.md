@@ -38,9 +38,8 @@ node tests/browser/settings_save.cjs
 node tests/browser/camera_settings.cjs
 node tests/browser/ui_dashboard.cjs
 node tests/browser/nvr_navigation.cjs
-node tests/browser/nvr_scrubbing.cjs
-node tests/browser/nvr_alerts.cjs
-node tests/browser/nvr_mobile.cjs
+node tests/browser/nvr_backpressure.cjs
+node tests/browser/edge_live_card.cjs   # real WebRTC loopback; run locally, not in CI
 ```
 
 The default fixture listens on 18088. Set `EDGE_NVR_TEST_PORT` and matching
@@ -71,9 +70,8 @@ Run in WebKit and Chromium against the multi-camera 24 s long-GOP fixture.
 `brand_assets.cjs` checks real transparent PNG delivery, conditional caching and
 the branded layout on desktop, tablet and phone widths.
 
-`nvr_phone_native.cjs`, `nvr_aac_resume.cjs`, `nvr_seek_direct.cjs` and
-`nvr_ready_playback.cjs` cover the native MP4 compatibility path. The 12000-file
-archive scenario uses `nvr_archive_start.cjs`, `nvr_gallery_cache.cjs` and
+The MP4 player was retired in 0.16.0 and its tests were removed with it; playback
+is covered by the EdgeRTC DVR tests above. The 12000-file archive scenario uses `nvr_archive_start.cjs`, `nvr_gallery_cache.cjs` and
 `logs_organized.cjs`; it verifies IndexedDB/JPEG ownership, storage limits,
 non-disruptive network failure and log filters.
 
