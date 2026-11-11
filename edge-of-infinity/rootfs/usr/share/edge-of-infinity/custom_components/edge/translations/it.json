@@ -19,5 +19,11 @@
     "abort": {
       "already_configured": "Edge of Infinity è già configurato"
     }
+  },
+  "issues": {
+    "restart_required": {
+      "title": "Riavvia Home Assistant per completare l’aggiornamento di Edge",
+      "description": "Il componente aggiuntivo Edge of Infinity ha installato l’integrazione nella versione {installed}, ma Home Assistant sta ancora eseguendo la {running}. Fino al riavvio le schede live, registrazioni ed eventi potrebbero non caricarsi o non riprodurre.\n\nApri Impostazioni → Sistema, scegli Riavvia Home Assistant, quindi ricarica la dashboard."
+    }
   }
 }

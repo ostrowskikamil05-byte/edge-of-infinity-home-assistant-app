@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.17.1
+
+- Fix "Importing a module script failed" / "Failed to fetch dynamically imported
+  module" in the recordings and events cards after an add-on update. The add-on
+  replaces the card files at once, while Home Assistant kept serving only the
+  files its older, still-running integration had listed, so the new player
+  module was missing until Core restarted.
+- Serve the whole card folder from Home Assistant instead of a fixed file list.
+  A module added by a later update no longer needs a restart to be reachable.
+- Both cards compare their own version with the integration Home Assistant is
+  running and show a restart notice with both versions. A missing player module
+  is explained in the card's language instead of showing the browser's error,
+  and playback recovers on the same page once Home Assistant has restarted.
+- Add a "Restart Home Assistant to finish the Edge update" entry under
+  Settings → Repairs while installed and running integration versions differ.
+  It disappears by itself after the restart.
+- The Edge panel, recorder, Live and DVR paths are unchanged.
+
 ## 0.17.0
 
 - Coordinate HA Live, recordings and alert viewers on phones/tablets. Retain the

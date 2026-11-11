@@ -32,7 +32,7 @@ def load_bridge(session_factory):
     modules['homeassistant.helpers.aiohttp_client'].async_get_clientsession = session_factory
     modules['edge_bridge_test'].__path__ = [str(COMPONENT)]
     modules['edge_bridge_test.const'].DOMAIN = 'edge'
-    modules['edge_bridge_test.const'].CARD_VERSION = '0.17.0'
+    modules['edge_bridge_test.const'].CARD_VERSION = '0.17.1'
     sys.modules.update(modules)
     spec = importlib.util.spec_from_file_location('edge_bridge_test.dashboard', COMPONENT / 'dashboard.py')
     module = importlib.util.module_from_spec(spec)
@@ -73,7 +73,8 @@ const THEMES={glass:{'--ha-card-background':'rgba(255,255,255,0.10)','--ha-card-
 {const theme=THEMES[new URLSearchParams(location.search).get('theme')];if(theme)for(const [name,value] of Object.entries(theme)){if(name==='page'){document.documentElement.style.background=value;document.documentElement.style.minHeight='100%';document.body.style.background='transparent';}else document.documentElement.style.setProperty(name,value);}}
 </script><script src="/edge/edge-dashboard-cards.js"></script><script>
 const query=new URLSearchParams(location.search);window.fixture={signed:[],api:[]};
-const camera=(id,name)=>({state:'idle',attributes:{friendly_name:name,edge_camera_id:id,edge_stream_role:'nvr'}});
+// ?integration=x.y.z: the integration code Home Assistant is running (camera entities report it).
+const camera=(id,name)=>({state:'idle',attributes:{friendly_name:name,edge_camera_id:id,edge_stream_role:'nvr',...(query.get('integration')?{edge_live_card_version:query.get('integration')}:{})}});
 window.hass={user:{id:'fixture-dashboard-user'},locale:{language:query.get('lang')||'pl'},states:{'camera.front':camera('front','Front'),'camera.back':camera('back','Ogród'),
   'camera.private':{state:'idle',attributes:{friendly_name:'Front · Main',edge_camera_id:'front',edge_stream_role:'main'}},
   'binary_sensor.front_person':{state:'off',attributes:{edge_camera_id:'front'}}},

@@ -7,6 +7,10 @@
 
 Home Assistant App repository for Edge of Infinity.
 
+Version **0.17.1** fixes dashboard cards that failed with "Importing a module
+script failed" after an add-on update until Home Assistant Core was restarted;
+the cards and Settings → Repairs now say when that restart is needed.
+
 Version **0.17.0** improves shared Live/DVR playback on phones and Home Assistant
 cards, adds accurate playback diagnostics and bounded network-aware archive
 prefetch. Original camera resolution, codec, 1x FPS, AAC and retention remain

@@ -119,6 +119,44 @@ const engine=process.env.EDGE_TEST_BROWSER==='webkit'?webkit:chromium;
    assert.equal(await page.evaluate(path=>hass.fetchWithAuth('/api/edge/dashboard/'+path).then(r=>r.status),path),status,path);
   assert.equal(await page.evaluate(()=>{try{document.createElement('edge-events-card').setConfig({kinds:['door']});return 'accepted';}catch(error){return 'rejected';}}),'rejected');
   assert.equal(await page.evaluate(()=>{try{document.createElement('edge-recordings-card').setConfig({cameras:['sensor.x']});return 'accepted';}catch(error){return 'rejected';}}),'rejected');
+  // The add-on has installed newer card files, but Home Assistant still runs the previous
+  // integration: it serves no player module and has no archive bridge yet.
+  const cardVersion=await page.evaluate(()=>EDGE_DASH_VERSION);
+  const stale=await browser.newPage({viewport:{width:390,height:844}});stale.setDefaultTimeout(20000);const staleErrors=[];stale.on('pageerror',error=>staleErrors.push(error.message));
+  let playerRequests=0,playerAvailable=false;
+  await stale.route('**/edge/edge-dvr-client.js*',route=>{playerRequests++;return playerAvailable?route.continue():route.fulfill({status:404,contentType:'text/plain',body:'404: Not Found'});});
+  for(const name of ['edge-gallery-cache.js','edge-i18n.js'])await stale.route('**/edge/'+name+'*',route=>route.fulfill({status:404,contentType:'text/plain',body:'404: Not Found'}));
+  await stale.goto(base+'/?integration=0.15.2');
+  const restart='Karta i integracja mają różne wersje. Uruchom ponownie Home Assistant Core i przeładuj dashboard.';
+  for(const tag of ['edge-recordings-card','edge-events-card']){
+   await stale.waitForFunction(tag=>{const banner=document.querySelector(tag).shadowRoot.querySelector('.restart');return banner&&!banner.hidden;},tag);
+   assert.equal(await stale.evaluate(tag=>document.querySelector(tag).shadowRoot.querySelector('.restart').textContent,tag),restart+`Home Assistant 0.15.2 · Edge ${cardVersion}`);
+  }
+  await stale.waitForFunction(()=>document.querySelector('edge-recordings-card')._files?.length===3);
+  await stale.evaluate(()=>document.querySelector('edge-recordings-card').shadowRoot.querySelector('.big').click());
+  await stale.waitForFunction(()=>!document.querySelector('edge-recordings-card').shadowRoot.querySelector('.note').hidden);
+  assert.equal(await stale.evaluate(()=>document.querySelector('edge-recordings-card').shadowRoot.querySelector('.note').textContent),restart,'a missing player module must ask for the restart, not show the browser error');
+  assert(await stale.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'restart banner overflows a phone');
+  // After the restart the same page recovers: the failed module URL is not reused.
+  playerAvailable=true;const before=playerRequests;
+  await stale.evaluate(version=>{for(const state of Object.values(hass.states))if(state.attributes.edge_live_card_version)state.attributes.edge_live_card_version=version;},cardVersion);
+  await stale.evaluate(()=>{const card=document.querySelector('edge-recordings-card');card.shadowRoot.querySelector('[data-camera="camera.back"]').click();});
+  await stale.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._entity==='camera.back'&&card._files?.length===3;});
+  await stale.evaluate(()=>document.querySelector('edge-recordings-card').shadowRoot.querySelector('.big').click());
+  await stale.waitForFunction(()=>{const card=document.querySelector('edge-recordings-card');return card._dvr&&!card._dvr.closed&&card.shadowRoot.querySelector('.restart').hidden;});
+  assert(playerRequests>before,'the player module was not requested again after the restart');
+  await stale.evaluate(()=>document.querySelector('edge-recordings-card')._stop());
+  // Same versions but an unreachable module: say so, in the card's language.
+  const offline=await browser.newPage({viewport:{width:390,height:844}});offline.setDefaultTimeout(20000);
+  await offline.route('**/edge/edge-dvr-client.js*',route=>route.abort());
+  await offline.goto(base+'/?cards=recordings&integration='+cardVersion);
+  await offline.waitForFunction(()=>document.querySelector('edge-recordings-card')._files?.length===3);
+  await offline.evaluate(()=>document.querySelector('edge-recordings-card').shadowRoot.querySelector('.big').click());
+  await offline.waitForFunction(()=>!document.querySelector('edge-recordings-card').shadowRoot.querySelector('.note').hidden);
+  assert.equal(await offline.evaluate(()=>document.querySelector('edge-recordings-card').shadowRoot.querySelector('.note').textContent),'Nie udało się wczytać odtwarzacza. Sprawdź połączenie i przeładuj dashboard.');
+  assert.equal(await offline.evaluate(()=>document.querySelector('edge-recordings-card').shadowRoot.querySelector('.restart')),null);
+  assert.deepEqual(staleErrors,[]);
+  console.log('PASS update without restart: both cards ask for a Home Assistant restart, missing player module explained, recovery on the same page, offline module message');
   console.log('PASS options: kinds, paging order, max_height, strip row, wide two-pane recordings, English, forbidden camera, unauthenticated and invalid bridge requests');
  }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exit(1);});
