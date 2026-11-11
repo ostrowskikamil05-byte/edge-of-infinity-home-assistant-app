@@ -15,6 +15,9 @@ Native EdgeRTC Live, recording and indexed DVR for Home Assistant.
 - Native card with 1–4 views and separate microphone permissions.
 - Dashboard cards for recordings and events that adapt to phone, tablet and desktop.
 
+Version 0.17.1 fixes dashboard cards failing with "Importing a module script
+failed" after an add-on update and shows when Home Assistant must restart.
+
 Version 0.17.0 improves shared mobile decoders and network-aware native EdgeRTC DVR, retains
 original MP4 downloads and reduces competition between offscreen players,
 thumbnail requests and visible streams. Vertical dashboard swipes no longer

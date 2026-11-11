@@ -102,7 +102,7 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.0"
+APP_VERSION = "0.17.1"
 APP_RELEASE_FEATURES=['Shared mobile Live/DVR decoder ownership, typed playback failures and direct authenticated archive bridge',
                       'Optional local HTTPS gateway and CA setup; full Live/DVR/dashboard without Nabu Casa',
                       'Bounded RTT-aware DVR pulls, 4x AAC playback and stable image cadence after network gaps',

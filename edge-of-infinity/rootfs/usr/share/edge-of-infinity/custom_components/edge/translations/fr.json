@@ -19,5 +19,11 @@
     "abort": {
       "already_configured": "Edge of Infinity est déjà configuré"
     }
+  },
+  "issues": {
+    "restart_required": {
+      "title": "Redémarrez Home Assistant pour terminer la mise à jour Edge",
+      "description": "Le module Edge of Infinity a installé l’intégration en version {installed}, mais Home Assistant exécute encore la version {running}. Jusqu’au redémarrage, les cartes direct, enregistrements et événements peuvent ne pas se charger ou ne pas lire.\n\nOuvrez Paramètres → Système, choisissez Redémarrer Home Assistant, puis rechargez le tableau de bord."
+    }
   }
 }

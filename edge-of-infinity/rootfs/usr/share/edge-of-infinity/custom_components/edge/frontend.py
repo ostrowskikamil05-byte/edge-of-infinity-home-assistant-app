@@ -18,8 +18,10 @@ async def async_register_card(hass: HomeAssistant) -> None:
     data = hass.data.setdefault(DOMAIN, {})
     if data.get("_card_registered"):
         return
-    path = str(Path(__file__).parent / "www" / "edge-live-card.js")
-    await hass.http.async_register_static_paths([StaticPathConfig(CARD_PATH, path, False), *[StaticPathConfig("/edge/" + name, str(Path(__file__).parent / "www" / name), name == "edge-brand.png") for name in ("edge-rtc-client.js", "edge-dvr-client.js", "edge-gallery-cache.js", "edge-pcm-worklet.js", "edge-device-diagnostics.js", "edge-dashboard-cards.js", "edge-i18n.js", "edge-brand.png")]])
+    # Serve the folder, not a list of files: the add-on replaces these files while Home
+    # Assistant is running, and a card may then import a module this (older) code never
+    # listed. Listing files here made such an update fail until Core restarted.
+    await hass.http.async_register_static_paths([StaticPathConfig("/edge", str(Path(__file__).parent / "www"), False)])
     frontend.add_extra_js_url(hass, CARD_URL)
     frontend.add_extra_js_url(hass, DASHBOARD_CARDS_URL)
     data["_card_registered"] = True

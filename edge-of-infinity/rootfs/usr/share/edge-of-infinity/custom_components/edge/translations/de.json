@@ -19,5 +19,11 @@
     "abort": {
       "already_configured": "Edge of Infinity ist bereits eingerichtet"
     }
+  },
+  "issues": {
+    "restart_required": {
+      "title": "Home Assistant neu starten, um das Edge-Update abzuschließen",
+      "description": "Das Edge of Infinity Add-on hat die Integration in Version {installed} installiert, Home Assistant läuft aber noch mit {running}. Bis zum Neustart werden die Live-, Aufnahme- und Ereigniskarten möglicherweise nicht geladen oder abgespielt.\n\nÖffnen Sie Einstellungen → System, wählen Sie „Home Assistant neu starten“ und laden Sie danach das Dashboard neu."
+    }
   }
 }

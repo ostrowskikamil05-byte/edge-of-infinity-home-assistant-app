@@ -66,7 +66,7 @@ Reference: [HA HTTP and trusted proxies](https://www.home-assistant.io/integrati
 
 EdgeRTC is the sole streaming core. Update the app, restart Home Assistant Core
 if the bundled integration is installed, and reopen Edge through the HA sidebar.
-The current version/build is `0.17.0` / `shared-sessions-v170`.
+The current version/build is `0.17.1` / `shared-sessions-v170`.
 
 The panel and Live/recordings/events cards support Polish, English, German,
 French, Spanish, Italian and Ukrainian (`pl`, `en`, `de`, `fr`, `es`, `it`, `uk`).
@@ -229,6 +229,13 @@ The private core token is never included in public camera metadata/card YAML.
 
 Two more cards are registered automatically with the integration. Update the
 app and restart HA Core once so Home Assistant loads them.
+
+After every add-on update, restart Home Assistant Core (Settings → System →
+Restart Home Assistant) and reload the dashboard. The add-on installs the new
+integration files immediately, but Home Assistant runs the previous code until
+it restarts. From 0.17.1 the cards show a restart notice with both versions,
+and Settings → Repairs lists "Restart Home Assistant to finish the Edge update"
+until the restart is done. Restarting only the add-on is not enough.
 
 ```yaml
 type: custom:edge-recordings-card   # days, 24 h / 6 h / 1 h timeline, playback

@@ -1,8 +1,11 @@
 /* Edge of Infinity dashboard cards: recordings and events.
    All data comes through Home Assistant's authenticated /api/edge/dashboard bridge. */
-const EDGE_DASH_VERSION = "0.17.0";
+const EDGE_DASH_VERSION = "0.17.1";
 const edgeDashI18nReady=import('/edge/edge-i18n.js?v='+EDGE_DASH_VERSION).catch(()=>null);
-let edgeProblemText;const edgeDVRModule=()=>import('/edge/edge-dvr-client.js?v='+EDGE_DASH_VERSION);
+let edgeProblemText,edgeDVRLoad,edgeDVRAttempt=0;
+/* Browsers remember a failed module URL for the page's lifetime, so a later attempt
+   (for example after Home Assistant restarted) uses a fresh one. */
+const edgeDVRModule=()=>edgeDVRLoad??=import('/edge/edge-dvr-client.js?v='+EDGE_DASH_VERSION+(edgeDVRAttempt?'&retry='+edgeDVRAttempt:'')).catch(cause=>{edgeDVRLoad=null;edgeDVRAttempt++;throw Object.assign(new Error('Edge player module could not be loaded'),{code:'edge_module_unavailable',cause});});
 const edgeGalleryReady=import('/edge/edge-gallery-cache.js?v='+EDGE_DASH_VERSION).catch(()=>null);
 const EDGE_DASH_API = "edge/dashboard";
 const EDGE_DASH_OPEN = "edge-dashboard-open-recording";
@@ -13,12 +16,14 @@ const EDGE_DASH_TEXT = {
     loading:"Loading…",noCamera:"No Edge camera found. Add the Edge of Infinity integration first.",noRecordings:"No recordings for this camera yet.",noDay:"No recordings on this day.",unreachable:"Edge add-on is not responding. Check that it is running.",forbidden:"You do not have access to this camera.",outdated:"Update the Edge of Infinity add-on and restart Home Assistant to use this card.",
     playError:"Cannot decode this recording on this device. Download the original file or use a browser that supports its video codec.",preparing:"Preparing the recording…",recording:"Recording",today:"Today",yesterday:"Yesterday",all:"All",person:"Person",vehicle:"Vehicle",animal:"Animal",motion:"Motion",
     allCameras:"All cameras",camera:"Camera",day:"Day",allDays:"All days",older:"Show older",noEvents:"No events match these filters.",close:"Close",previous:"Previous event",next:"Next event",inRecordings:"Show in recordings",noPicture:"No picture saved for this event",clipPending:"The clip is still being prepared — showing the picture.",
-    title:"Title",layout:"Layout: grid or one swipeable row",cameras:"Cameras (empty = all Edge cameras)",kinds:"Event types",limit:"Events per page",maxHeight:"Maximum list height (px, 0 = no limit)",muted:"Start muted",hours:"h",minutes:"min"},
+    title:"Title",layout:"Layout: grid or one swipeable row",cameras:"Cameras (empty = all Edge cameras)",kinds:"Event types",limit:"Events per page",maxHeight:"Maximum list height (px, 0 = no limit)",muted:"Start muted",hours:"h",minutes:"min",
+    restart:"The card and integration versions differ. Restart Home Assistant Core and reload the dashboard.",playerMissing:"The player could not be loaded. Check the connection and reload the dashboard."},
   pl: {recordings:"Nagrania",events:"Zdarzenia",refresh:"Odśwież",play:"Odtwórz",pause:"Pauza",back:"Cofnij 10 sekund",forward:"Do przodu 10 sekund",sound:"Włącz dźwięk",mute:"Wycisz",full:"Pełny ekran",download:"Pobierz ten fragment",speed:"Prędkość odtwarzania",earlier:"Wcześniej",later:"Później",zoom:"Zakres osi czasu",timeline:"Oś czasu nagrań",
     loading:"Wczytywanie…",noCamera:"Nie znaleziono kamery Edge. Najpierw dodaj integrację Edge of Infinity.",noRecordings:"Ta kamera nie ma jeszcze nagrań.",noDay:"Brak nagrań z tego dnia.",unreachable:"Dodatek Edge nie odpowiada. Sprawdź, czy jest uruchomiony.",forbidden:"Nie masz dostępu do tej kamery.",outdated:"Zaktualizuj dodatek Edge of Infinity i uruchom ponownie Home Assistant, aby używać tej karty.",
     playError:"To urządzenie nie dekoduje tego nagrania. Pobierz oryginalny plik lub użyj przeglądarki obsługującej jego kodek wideo.",preparing:"Przygotowywanie nagrania…",recording:"Nagrywanie",today:"Dziś",yesterday:"Wczoraj",all:"Wszystkie",person:"Osoba",vehicle:"Pojazd",animal:"Zwierzę",motion:"Ruch",
     allCameras:"Wszystkie kamery",camera:"Kamera",day:"Dzień",allDays:"Wszystkie dni",older:"Pokaż starsze",noEvents:"Brak zdarzeń dla tych filtrów.",close:"Zamknij",previous:"Poprzednie zdarzenie",next:"Następne zdarzenie",inRecordings:"Pokaż w nagraniach",noPicture:"Brak zapisanego zdjęcia tego zdarzenia",clipPending:"Klip jest jeszcze przygotowywany — widzisz zdjęcie.",
-    title:"Tytuł",layout:"Układ: siatka lub jeden przewijany rząd",cameras:"Kamery (puste = wszystkie kamery Edge)",kinds:"Rodzaje zdarzeń",limit:"Zdarzeń na stronę",maxHeight:"Maksymalna wysokość listy (px, 0 = bez limitu)",muted:"Zaczynaj bez dźwięku",hours:"h",minutes:"min"},
+    title:"Tytuł",layout:"Układ: siatka lub jeden przewijany rząd",cameras:"Kamery (puste = wszystkie kamery Edge)",kinds:"Rodzaje zdarzeń",limit:"Zdarzeń na stronę",maxHeight:"Maksymalna wysokość listy (px, 0 = bez limitu)",muted:"Zaczynaj bez dźwięku",hours:"h",minutes:"min",
+    restart:"Karta i integracja mają różne wersje. Uruchom ponownie Home Assistant Core i przeładuj dashboard.",playerMissing:"Nie udało się wczytać odtwarzacza. Sprawdź połączenie i przeładuj dashboard."},
 };
 const EDGE_ICONS = {
   play:'<path d="M8 5l11 7-11 7z" fill="currentColor"/>', pause:'<path d="M8 5v14M16 5v14" stroke-width="3"/>',
@@ -38,6 +43,11 @@ const edgeLanguageSchema=()=>({name:'language',selector:{select:{mode:'dropdown'
 const edgeClock = seconds => { const s = Math.max(0, Math.floor(seconds)); return [s / 3600, s / 60 % 60, s % 60].map(v => String(Math.floor(v)).padStart(2, "0")).join(":"); };
 const edgeEscape = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const edgeDayKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+/* The add-on replaces these card files as soon as it updates, while Home Assistant keeps
+   running the previous integration code until Core restarts. Camera entities report
+   the version of the code that is actually running. */
+const edgeIntegrationVersion=hass=>{for(const id of edgeCameraIds(hass)){const version=hass.states[id].attributes?.edge_live_card_version;if(version)return String(version);}return '';};
+const edgeRestartRequired=hass=>{const version=edgeIntegrationVersion(hass);return Boolean(version)&&version!==EDGE_DASH_VERSION;};
 const edgeCameraIds = hass => Object.entries(hass?.states || {}).filter(([id, s]) => id.startsWith("camera.") && s.attributes?.edge_camera_id && (s.attributes.edge_stream_role || "nvr") === "nvr").map(([id]) => id);
 /* The card frame (background, blur, radius, border, shadow) is left to the active
    Home Assistant theme. Inner controls are borderless tints of the theme's own text
@@ -64,6 +74,7 @@ const EDGE_SHARED_STYLE = `
   .chips{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding:0 16px 10px}.chips::-webkit-scrollbar{display:none}
   .chip{flex:0 0 auto;border-radius:999px;min-height:36px;padding:0 14px;font-size:13px;white-space:nowrap}
   .chip[aria-pressed=true],.chip[aria-selected=true]{background:var(--edge-tint);color:var(--edge-accent);font-weight:600}
+  .restart{margin:12px 16px 0;padding:10px 12px;border-radius:var(--edge-inner);background:color-mix(in srgb,var(--warning-color,#ffa600) 20%,transparent);font-size:13px;line-height:1.45}.restart b{display:block;font-weight:600;font-variant-numeric:tabular-nums}
   .status{margin:0;padding:0 16px 14px;font-size:13px;line-height:1.5;color:var(--edge-muted)}.status.error{color:var(--error-color,#f28b8b)}
   .thumb{position:relative;display:block;aspect-ratio:16/9;background:var(--edge-fill);overflow:hidden;color:var(--edge-muted)}
   .thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .15s}.thumb.loaded img{opacity:1}
@@ -141,6 +152,16 @@ class EdgeDashCard extends HTMLElement {
     if (code === "camera_not_recording") return this._t("noRecordings");
     return this._t("unreachable");
   }
+  /* Say plainly when Home Assistant must restart to finish an add-on update. */
+  _checkVersion() {
+    const card = this.shadowRoot.querySelector("ha-card"); if (!card || !this._hass) return false;
+    const needed = edgeRestartRequired(this._hass); let banner = card.querySelector(".restart");
+    if (!banner) { if (!needed) return false; banner = document.createElement("p"); banner.className = "restart"; banner.setAttribute("role", "alert"); card.prepend(banner); }
+    banner.hidden = !needed;
+    if (needed) { const versions = document.createElement("b"); versions.textContent = `Home Assistant ${edgeIntegrationVersion(this._hass)} · Edge ${EDGE_DASH_VERSION}`; banner.replaceChildren(this._t("restart"), versions); }
+    return needed;
+  }
+  _moduleProblem() { return this._t(this._checkVersion() ? "restart" : "playerMissing"); }
   _validate(config) {
     if (config.cameras !== undefined && (!Array.isArray(config.cameras) || config.cameras.some(id => typeof id !== "string" || !/^camera\.[a-z0-9_]+$/.test(id)))) throw new Error("cameras must be a list of camera entity IDs");
   }
@@ -149,7 +170,7 @@ class EdgeDashCard extends HTMLElement {
     now.setDate(now.getDate() - 1); if (day === edgeDayKey(now)) return this._t("yesterday");
     return new Intl.DateTimeFormat(edgeLang(this._hass,this._config?.language), {weekday:"short", day:"numeric", month:"short"}).format(new Date(day + "T12:00:00"));
   }
-  connectedCallback() { this._connected = true;this._media.resume(); edgeDashI18nReady.then(()=>{if(!this.isConnected||!globalThis.EdgeI18n)return;this._languageUnsubscribe?.();const refresh=()=>{this.lang=edgeLang(this._hass,this._config?.language);this._render();};this._languageUnsubscribe=EdgeI18n.subscribe(refresh);refresh();}); this._visible = () => { if(document.hidden)this._suspendMedia?.();else {this._wake?.();this._resumeMedia?.();} }; document.addEventListener("visibilitychange", this._visible); this._timer = setInterval(() => { if (!document.hidden) this._tick?.(); }, 60000); this._wake?.(); }
+  connectedCallback() { this._connected = true;this._media.resume(); edgeDashI18nReady.then(()=>{if(!this.isConnected||!globalThis.EdgeI18n)return;this._languageUnsubscribe?.();const refresh=()=>{this.lang=edgeLang(this._hass,this._config?.language);this._render();this._checkVersion();};this._languageUnsubscribe=EdgeI18n.subscribe(refresh);refresh();}); this._visible = () => { if(document.hidden)this._suspendMedia?.();else {this._wake?.();this._resumeMedia?.();} }; document.addEventListener("visibilitychange", this._visible); this._timer = setInterval(() => { if (!document.hidden) { this._checkVersion(); this._tick?.(); } }, 60000); this._checkVersion(); this._wake?.(); }
   disconnectedCallback() { this._connected = false; this._languageUnsubscribe?.(); document.removeEventListener("visibilitychange", this._visible); clearInterval(this._timer); this._sleep?.(); this._media.dispose(); }
 }
 
@@ -230,7 +251,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
   getCardSize() { return 9; }
   getGridOptions() { return {columns:"full", rows:"auto", min_columns:6}; }
   setConfig(config) { this._stop(); this._validate(config); this._config = {muted:false, ...config}; this._muted = Boolean(this._config.muted); this._entity = ""; this._render(); if (this._hass && this._connected) this._load(); }
-  set hass(value) { const first = !this._hass, oldLanguage = edgeLang(this._hass,this._config?.language); this._hass = value; if (!first && oldLanguage !== edgeLang(value,this._config?.language)) this._render(); if (first) { this._render(); if (this._connected) this._load(); } else if (!this._entity && this._cameras().length) this._load(); }
+  set hass(value) { const first = !this._hass, oldLanguage = edgeLang(this._hass,this._config?.language); this._hass = value; if (!first && oldLanguage !== edgeLang(value,this._config?.language)) this._render(); if (first) { this._render(); this._checkVersion(); if (this._connected) this._load(); } else if (!this._entity && this._cameras().length) this._load(); }
   get hass() { return this._hass; }
   _wake() { this._viewport.observe(this); (window.__edgeRecordingCards ||= new Set()).add(this); window.addEventListener(EDGE_DASH_OPEN, this._open); if (this._hass && this._config && !this._files.length) this._load(); }
   _sleep() { this._viewport.disconnect(); window.__edgeRecordingCards?.delete(this); window.removeEventListener(EDGE_DASH_OPEN, this._open); this._stop(); }
@@ -249,6 +270,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
   _status(text, error = false) { const node = this._$(".status"); if(node.textContent!==(text||""))node.textContent=text||"";if(node.hidden!==!text)node.hidden=!text; node.classList.toggle("error", error); }
   _note(text) { const node = this._$(".note"); if(node.textContent!==(text||""))node.textContent=text||"";if(node.hidden!==!text)node.hidden=!text; }
   async _load(day = "", quiet = false) {
+    this._checkVersion();
     const cameras = this._cameras();
     if (!cameras.length) { this._$(".player").hidden = true; this._status(this._t("noCamera")); return; }
     if (!cameras.includes(this._entity)) { this._entity = cameras[0]; this._render(); }
@@ -369,7 +391,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
           onError:(message,detail)=>{if(this._dvr===client){if(detail?.retryable&&this._wantPlay&&this._connected&&this._inView&&!document.hidden&&(this._networkRetries||0)<2){this._networkRetries=(this._networkRetries||0)+1;this._note(message);clearTimeout(this._reconnectTimer);const failedToken=this._token;this._reconnectTimer=setTimeout(()=>{if(this._token===failedToken&&this._connected&&this._inView&&this._wantPlay&&this._index>=0&&!document.hidden)this._show(this._index,Math.max(0,this._position-this._files[this._index][1]));},this._networkRetries*400);return;}this._wantPlay=false;this._note(edgeProblemText(message,detail,edgeLang(this._hass,this._config.language)));this._paint();}}});
         this._dvr=client;client.setAudio(.6,this._muted);client.seek(file[0],offset,{paused:!this._wantPlay,rate:this._rate});await client.start();
       }else this._dvr.seek(file[0],offset,{paused:!this._wantPlay,rate:this._rate});
-    }catch(error){if(token===this._token){this._wantPlay=false;this._note(edgeProblemText?.(error.message,{code:error.code},edgeLang(this._hass,this._config.language))||error.message||this._t('playError'));this._paint();}}
+    }catch(error){if(token===this._token){this._wantPlay=false;this._note(error.code==='edge_module_unavailable'?this._moduleProblem():edgeProblemText?.(error.message,{code:error.code},edgeLang(this._hass,this._config.language))||error.message||this._t('playError'));this._paint();}}
   }
   async _advance(){
     const next=this._index+1;
@@ -448,7 +470,7 @@ class EdgeEventsCard extends EdgeDashCard {
   }
   set hass(value) {
     const first = !this._hass, oldLanguage = edgeLang(this._hass,this._config?.language); this._hass = value; if (!first && oldLanguage !== edgeLang(value,this._config?.language)) this._render();
-    if (first) { this._render(); if (this._connected) this._load(); return; }
+    if (first) { this._render(); this._checkVersion(); if (this._connected) this._load(); return; }
     const active = Object.entries(value.states).filter(([id, state]) => id.startsWith("binary_sensor.") && state.attributes?.edge_camera_id && state.state === "on").map(([id]) => id).join();
     if (active !== this._active) { const grew = active.length > (this._active || "").length; this._active = active; if (grew) { clearTimeout(this._soon); this._soon = setTimeout(() => this._tick(), 2500); } }
   }
@@ -480,6 +502,7 @@ class EdgeEventsCard extends EdgeDashCard {
   }
   /* older: append the next page. quiet: merge newer events without moving the list. */
   async _load(older = false, quiet = false) {
+    this._checkVersion();
     const status = this._$(".status"); const request = ++this._request; this._loading = true;
     if (!older && !quiet) { status.hidden = false; status.classList.remove("error"); status.textContent = this._t("loading"); }
     try {
@@ -540,7 +563,7 @@ class EdgeEventsCard extends EdgeDashCard {
       play.onclick=()=>{if(client.paused||client.ended){client.seek('event-'+event.id+'.mp4',client.ended?0:client.position,{paused:false});play.textContent=this._t('pause');}else{client.pause();play.textContent=this._t('play');}};
       sound.onclick=()=>{muted=!muted;client.setAudio(.6,muted);sound.textContent=this._t(muted?'sound':'mute');};
       client.seek('event-'+event.id+'.mp4',Math.max(0,(event.clip_offset||0)-2),{paused:false});await client.start();
-    } catch (_) { await picture(); }
+    } catch (error) { await picture(); if (error?.code === 'edge_module_unavailable' && this._viewing === event) { note.textContent = this._moduleProblem(); note.hidden = false; } }
   }
 }
 

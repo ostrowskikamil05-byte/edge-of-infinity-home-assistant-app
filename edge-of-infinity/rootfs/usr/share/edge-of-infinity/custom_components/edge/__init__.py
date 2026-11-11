@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_URL
 from homeassistant.core import HomeAssistant
@@ -16,6 +18,8 @@ from .events import EdgeEventImageView
 from .device_diagnostics import EdgeDeviceDiagnosticsView
 from .dashboard import async_register_dashboard
 
+_LOGGER = logging.getLogger(__name__)
+
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Load the bundled dashboard card without manual resource configuration."""
@@ -24,6 +28,11 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.http.register_view(EdgeEventImageView(hass))
     hass.http.register_view(EdgeDeviceDiagnosticsView(hass))
     async_register_dashboard(hass)
+    try:
+        from .restart_check import async_watch_installed_version
+        async_watch_installed_version(hass)
+    except Exception:  # noqa: BLE001 - a restart hint must never stop the integration loading
+        _LOGGER.debug("Edge restart-required check is unavailable", exc_info=True)
     return True
 
 

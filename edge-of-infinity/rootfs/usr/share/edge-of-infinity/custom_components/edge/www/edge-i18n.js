@@ -1,8 +1,8 @@
 /* Offline interface translations. Classic-script and module compatible. */
 (()=>{
   'use strict';
-  if(globalThis.EdgeI18n?.version==='0.17.0')return;
-  const version='0.17.0',key='edge.interface.language';
+  if(globalThis.EdgeI18n?.version==='0.17.1')return;
+  const version='0.17.1',key='edge.interface.language';
   const languages=Object.freeze({en:'English',pl:'Polski',de:'Deutsch',fr:'Français',es:'Español',it:'Italiano',uk:'Українська'});
   // Columns: English, Polish, German, French, Spanish, Italian, Ukrainian.
   const rows=[
@@ -11,6 +11,7 @@
     ["Live paused while viewing recordings.","Podgląd Live wstrzymany podczas oglądania nagrań.","Live beim Ansehen von Aufnahmen pausiert.","Le direct est en pause pendant la lecture des enregistrements.","Directo en pausa mientras se ven grabaciones.","Live in pausa durante la visione delle registrazioni.","Перегляд наживо призупинено під час перегляду записів."],
     ["Local HTTPS","Lokalny HTTPS","Lokales HTTPS","HTTPS local","HTTPS local","HTTPS locale","Локальний HTTPS"],
     ["The card and integration versions differ. Restart Home Assistant Core and reload the dashboard.","Karta i integracja mają różne wersje. Uruchom ponownie Home Assistant Core i przeładuj dashboard.","Karte und Integration haben unterschiedliche Versionen. Starten Sie Home Assistant Core neu und laden Sie das Dashboard erneut.","Les versions de la carte et de l’intégration diffèrent. Redémarrez Home Assistant Core et rechargez le tableau de bord.","Las versiones de la tarjeta y la integración difieren. Reinicia Home Assistant Core y recarga el panel.","Le versioni della scheda e dell’integrazione sono diverse. Riavvia Home Assistant Core e ricarica la dashboard.","Версії картки та інтеграції різні. Перезапустіть Home Assistant Core й оновіть панель."],
+    ["The player could not be loaded. Check the connection and reload the dashboard.","Nie udało się wczytać odtwarzacza. Sprawdź połączenie i przeładuj dashboard.","Der Player konnte nicht geladen werden. Prüfen Sie die Verbindung und laden Sie das Dashboard neu.","Le lecteur n’a pas pu être chargé. Vérifiez la connexion et rechargez le tableau de bord.","No se pudo cargar el reproductor. Compruebe la conexión y vuelva a cargar el panel.","Impossibile caricare il lettore. Controlla la connessione e ricarica la dashboard.","Не вдалося завантажити програвач. Перевірте з’єднання та перезавантажте панель."],
 
     ["Live view", "Podgląd na żywo", "Live-Ansicht", "Vue en direct", "Vista en directo", "Vista dal vivo", "Перегляд наживо"],
     ["Recordings", "Nagrania", "Aufnahmen", "Enregistrements", "Grabaciones", "Registrazioni", "Записи"],

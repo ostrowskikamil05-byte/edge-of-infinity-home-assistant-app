@@ -19,5 +19,11 @@
     "abort": {
       "already_configured": "Edge of Infinity is already configured"
     }
+  },
+  "issues": {
+    "restart_required": {
+      "title": "Restart Home Assistant to finish the Edge update",
+      "description": "The Edge of Infinity add-on installed integration version {installed}, but Home Assistant is still running {running}. Until Home Assistant restarts, the Live, recordings and events dashboard cards may not load or play.\n\nGo to Settings → System, choose Restart Home Assistant, then reload the dashboard."
+    }
   }
 }
