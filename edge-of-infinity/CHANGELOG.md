@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.17.4
+
+- Re-release of 0.17.2 under a new version number so Home Assistant offers the
+  update again. No code changes. Restart Home Assistant Core after updating.
+
 ## 0.17.2
 
 - Name and describe every add-on option and port in English and Polish; 27

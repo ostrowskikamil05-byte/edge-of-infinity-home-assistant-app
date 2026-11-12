@@ -1,5 +1,5 @@
 /* EdgeRTC archive: persistent socket, indexed seeks, bounded pull-based delivery. */
-import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport} from './edge-rtc-client.js?v=0.17.2';
+import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport} from './edge-rtc-client.js?v=0.17.4';
 
 export {edgeMediaProblem};
 
@@ -15,7 +15,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
       this.options.url=this.options.hass.hassUrl?this.options.hass.hassUrl(signed.path):signed.path;
     }
     if(this.options.hass&&!this.options.diagnostics){
-      try{const {getDeviceReporter}=await import('./edge-device-diagnostics.js?v=0.17.2');const hass=this.options.hass,entity=this.options.entity;
+      try{const {getDeviceReporter}=await import('./edge-device-diagnostics.js?v=0.17.4');const hass=this.options.hass,entity=this.options.entity;
         this.options.diagnostics=getDeviceReporter({context:{surface:'home_assistant_dvr_card'},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);try{return(await hass.fetchWithAuth('/api/edge/client-diagnostics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,entity_id:entity}),signal:controller.signal})).ok;}finally{clearTimeout(timer);}}});
       }catch(_){}
     }
