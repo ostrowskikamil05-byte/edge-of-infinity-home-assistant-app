@@ -155,7 +155,7 @@ class EdgeRecordingsView(HomeAssistantView):
             if day and not DAY.fullmatch(day):
                 raise BridgeError(400, "invalid_day")
             slot = await recording_slot(self.hass, target)
-            query = "/api/recording/status?catalog=1" + (f"&days={int(slot['index'])}:{day}" if day else "")
+            query = f"/api/recording/status?catalog=1&camera_index={int(slot['index'])}" + (f"&days={int(slot['index'])}:{day}" if day else "")
             payload = await fetch_json(self.hass, target["entry"], query)
             camera = next((row for row in payload.get("cameras", []) if row.get("id") == target["camera_id"]), None)
             if camera is None:

@@ -19,7 +19,7 @@ Version 0.17.2 names every add-on option in Polish and English and tightens
 the dashboard bridge. Version 0.17.1 fixed dashboard cards failing with "Importing a module script
 failed" after an add-on update and shows when Home Assistant must restart.
 
-Version 0.17.0 improves shared mobile decoders and network-aware native EdgeRTC DVR, retains
+Version 0.17.6 adds fast cached dashboard galleries and debounced DVR loading, retains
 original MP4 downloads and reduces competition between offscreen players,
 thumbnail requests and visible streams. Vertical dashboard swipes no longer
 seek the archive. Existing card YAML, themes and interface languages remain

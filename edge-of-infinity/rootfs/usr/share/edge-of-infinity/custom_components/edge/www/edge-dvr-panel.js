@@ -1,8 +1,8 @@
-import {EdgeDVRClient} from './edge-dvr-client.js?v=0.17.5';
+import {EdgeDVRClient} from './edge-dvr-client.js?v=0.17.6';
 
 export class EdgeDVRPanel {
   constructor(host,options){
-    this.host=host;this.options=options;this.abort=new AbortController();this.slider=host.querySelector('[data-dvr-seek]');this.clock=host.querySelector('[data-dvr-clock]');this.note=host.querySelector('[data-dvr-message]');this.canvas=host.querySelector('canvas');this.muted=true;this.rate=1;this.fps=25;this.wantPlay=false;this.position=options.position||0;
+    this.host=host;this.options=options;this.abort=new AbortController();this.slider=host.querySelector('[data-dvr-seek]');this.clock=host.querySelector('[data-dvr-clock]');this.note=host.querySelector('[data-dvr-message]');this.loading=host.querySelector('[data-dvr-loading]');this.canvas=host.querySelector('canvas');this.muted=true;this.rate=1;this.fps=25;this.wantPlay=false;this.position=options.position||0;
     const listen=(node,name,fn)=>node.addEventListener(name,fn,{signal:this.abort.signal});
     listen(host,'click',event=>{
       const button=event.target.closest('[data-dvr-action]');if(!button)return;event.preventDefault();
@@ -34,20 +34,20 @@ export class EdgeDVRPanel {
     if(this.client&&!this.client.closed&&(this.client.paused||!this.client.picture)&&this.entry?.file.name===target.target.file.name&&this.client.paused===!play&&Math.abs((this.client.request?.at??-1)-target.seek)<.0005){
       this.options.diagnostics?.note('dvr_seek_coalesced',{file:target.target.file.name,seconds:target.seek,epoch:this.client.epoch});return;
     }
-    this.options.activate(this);this.entry=target.target;this.position=(this.entry.playbackOffset||0)+target.seek;this.wantPlay=play;this.waiting=true;this.update();
+    this.options.activate(this);this.entry=target.target;this.position=(this.entry.playbackOffset||0)+target.seek;this.wantPlay=play;this.waiting=false;this.note.hidden=true;this.update();
     this.options.onTarget?.(target);
     if(!this.client||this.client.closed){
       this.client=new EdgeDVRClient({url:this.options.url,canvas:this.canvas,diagnostics:this.options.diagnostics,
         onMetadata:metadata=>{this.options.onMetadata?.(metadata);this.fps=metadata.fps||25;this.slider.step=String(1/this.fps);this.host.dataset.dvrGop=String(metadata.keyframe_interval_seconds);this.host.dataset.dvrIndexHit=String(metadata.index_hit);},
-        onWaiting:waiting=>{if(this.waiting===waiting)return;this.waiting=waiting;this.note.hidden=!waiting;this.note.textContent=waiting?'Odczyt wybranego miejsca…':'';},
+        onWaiting:waiting=>{this.waiting=waiting;if(this.loading)this.loading.hidden=!waiting;this.canvas.setAttribute('aria-busy',String(waiting));},
         onFrame:frame=>{
-          if(!this.host.isConnected)return;this.position=(this.entry.playbackOffset||0)+frame.seconds;this.host.dataset.dvrPicture='true';this.host.dataset.dvrEpoch=String(frame.epoch);this.host.dataset.dvrSeekMs=String(Math.round(frame.seekMS));this.note.hidden=true;
+          if(!this.host.isConnected)return;this.position=(this.entry.playbackOffset||0)+frame.seconds;this.host.dataset.dvrPicture='true';this.host.dataset.dvrEpoch=String(frame.epoch);this.host.dataset.dvrSeekMs=String(Math.round(frame.seekMS));this.note.hidden=true;if(this.loading)this.loading.hidden=true;
           this.host.querySelector('[data-dvr-poster]')?.remove();
           const now=performance.now();if(this.client?.paused||this.lastEpoch!==frame.epoch||now-(this.lastUI||0)>=100){this.lastEpoch=frame.epoch;this.lastUI=now;this.options.onPosition(this.entry,frame.seconds,this.fps);this.update();}
         },
         onAudioUnavailable:()=>{this.muted=true;this.update();},
         onEnded:()=>{const next=(this.entry.playbackOffset||0)+this.entry.duration+.02;if(next<this.total-.05)this.seekPlayback(next,{play:this.wantPlay});else{this.wantPlay=false;this.update();this.note.hidden=false;this.note.textContent='Koniec dostępnych nagrań tego dnia.';}},
-        onError:message=>{this.wantPlay=false;this.waiting=false;this.note.hidden=false;this.note.textContent=message;this.update();},
+        onError:message=>{if(this.loading)this.loading.hidden=true;this.wantPlay=false;this.waiting=false;this.note.hidden=false;this.note.textContent=message;this.update();},
         onFallback:reason=>this.options.fallback?.(reason)
       });
       this.client.setAudio(.6,this.muted);this.client.seek(this.entry.file.name,target.seek,{paused:!play,rate:this.rate});
@@ -55,6 +55,6 @@ export class EdgeDVRPanel {
     }else this.client.seek(this.entry.file.name,target.seek,{paused:!play,rate:this.rate});
   }
   pause(){this.wantPlay=false;this.client?.pause();this.update();}
-  suspend(){clearTimeout(this.scrubTimer);this.scrubTimer=null;this.wantPlay=false;this.client?.close();this.client=null;this.update();}
+  suspend(){if(this.loading)this.loading.hidden=true;clearTimeout(this.scrubTimer);this.scrubTimer=null;this.wantPlay=false;this.client?.close();this.client=null;this.update();}
   destroy(){this.suspend();this.abort.abort();}
 }

@@ -12,9 +12,10 @@ tightens the dashboard bridge. Version **0.17.1** fixed dashboard cards that fai
 script failed" after an add-on update until Home Assistant Core was restarted;
 the cards and Settings → Repairs now say when that restart is needed.
 
-Version **0.17.0** improves shared Live/DVR playback on phones and Home Assistant
-cards, adds accurate playback diagnostics and bounded network-aware archive
-prefetch. Original camera resolution, codec, 1x FPS, AAC and retention remain
+Version **0.17.6** restores the Home Assistant recordings gallery before a slow
+network refresh, loads only the selected camera catalog and replaces repeated
+preparing-video banners with a delayed in-video spinner. Adjacent decoded-frame
+previews reuse the current player; catalog refresh preserves active playback. Original camera resolution, codec, 1x FPS, AAC and retention remain
 unchanged. MP4 is retained for original-file downloads.
 
 Live, DVR, events and dashboard cards can work entirely locally without Nabu

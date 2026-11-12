@@ -91,6 +91,18 @@ class RestartRequiredTests(unittest.IsolatedAsyncioTestCase):
             for placeholder in ('{installed}', '{running}'):
                 self.assertIn(placeholder, issue['description'], path.name)
 
+    def test_integration_ships_the_original_edge_brand_images(self):
+        # Keep the user's original design in every HA brand slot.
+        original=COMPONENT.parent.parent/'brand'
+        sources={'icon.png':'icon.png','icon@2x.png':'icon.png','logo.png':'logo-light.png','logo@2x.png':'logo-light.png','dark_logo.png':'logo.png','dark_logo@2x.png':'logo.png'}
+        for name,source in sources.items():
+            data=(COMPONENT/'brand'/name).read_bytes()
+            self.assertEqual(data,(original/source).read_bytes(),name)
+            self.assertEqual(data[:8],b'\x89PNG\r\n\x1a\n',name)
+            self.assertLess(len(data),1024*1024,name)
+            self.assertGreaterEqual(min(int.from_bytes(data[16:20],'big'),int.from_bytes(data[20:24],'big')),256)
+        self.assertEqual({path.name for path in (COMPONENT/'brand').iterdir()},set(sources))
+
     def test_setup_survives_a_missing_helper(self):
         source = (COMPONENT / '__init__.py').read_text()
         guarded = source[source.index('    try:\n        from .restart_check'):source.index('    return True')]

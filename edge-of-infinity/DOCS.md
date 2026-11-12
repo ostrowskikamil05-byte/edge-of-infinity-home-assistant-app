@@ -1,5 +1,25 @@
 # Edge of Infinity
 
+## 0.17.6: faster dashboard gallery and quieter DVR loading
+
+HA recordings cards restore their last gallery and JPEGs for the same HA user
+while refreshing the authenticated catalog. The cache holds up to eight metadata
+views (12 MiB total, 15-minute lifetime); it contains no video or credentials.
+A permission denial clears that camera's saved views. The current video, socket
+and cursor stay active when fresh catalog data arrives. The server prepares only
+the requested camera when a full warm catalog is unavailable.
+
+A small spinner inside the video replaces preparing-video banners. It appears
+only when a seek/start/stall lasts 250 ms and disappears when a decoded frame
+arrives. Regular inter-frame waits do not show it. Adjacent paused frame previews
+reuse up to two decoded frames for 350 ms; distant seeks still use the original
+archive index and keyframe references. Original files, image quality/FPS and
+camera/recording settings are unchanged. MP4 remains an original-file download.
+
+This update includes 0.17.5's thumbnail improvements and keeps the original Edge
+branding. Update the app, restart HA Core to load the integration, then reopen the
+dashboard/Companion view to load the matching card modules.
+
 ## 0.17.0: shared mobile playback and local HTTPS
 
 Update Edge, restart **Home Assistant Core** to load the bundled integration,
@@ -66,7 +86,7 @@ Reference: [HA HTTP and trusted proxies](https://www.home-assistant.io/integrati
 
 EdgeRTC is the sole streaming core. Update the app, restart Home Assistant Core
 if the bundled integration is installed, and reopen Edge through the HA sidebar.
-The current version/build is `0.17.5` / `shared-sessions-v170`.
+The current version/build is `0.17.6` / `dashboard-gallery-v176`.
 
 The panel and Live/recordings/events cards support Polish, English, German,
 French, Spanish, Italian and Ukrainian (`pl`, `en`, `de`, `fr`, `es`, `it`, `uk`).
