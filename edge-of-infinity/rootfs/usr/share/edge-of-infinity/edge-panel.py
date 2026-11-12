@@ -102,7 +102,7 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.2"
+APP_VERSION = "0.17.3"
 APP_RELEASE_FEATURES=['Shared mobile Live/DVR decoder ownership, typed playback failures and direct authenticated archive bridge',
                       'Optional local HTTPS gateway and CA setup; full Live/DVR/dashboard without Nabu Casa',
                       'Bounded RTT-aware DVR pulls, 4x AAC playback and stable image cadence after network gaps',
@@ -163,8 +163,8 @@ ACTIVE_DAY_CACHE_DEFER_REASON = "active_day_deferred_until_midnight"
 RECORDING_ENSURE_MIN_SECONDS = 30
 RECORDING_RETENTION_INTERVAL_SECONDS = 3600
 RECORDING_RETENTION_LOOP_STARTED = False
-RECORDING_THUMBNAIL_WARMUP_INTERVAL_SECONDS = 300
-RECORDING_THUMBNAIL_WARMUP_PER_CAMERA = 4
+RECORDING_THUMBNAIL_WARMUP_INTERVAL_SECONDS = 120
+RECORDING_THUMBNAIL_WARMUP_PER_CAMERA = 8
 RECORDING_PROCESSES: dict[str, subprocess.Popen] = {}
 RECORDING_SOURCE_WAIT = {}
 RECORDING_SOURCE_RETRY_RUNNING = False
@@ -184,7 +184,7 @@ RECORDING_DURATION_CACHE: dict[str, tuple[int, int, int]] = {}
 RECORDING_DURATION_LOCK = threading.Lock()
 RECORDING_CACHE_LOCK = threading.Lock()
 RECORDING_CACHE_BUILD_SEMAPHORE = threading.BoundedSemaphore(value=1)
-RECORDING_THUMBNAIL_SEMAPHORE = threading.BoundedSemaphore(value=1)
+RECORDING_THUMBNAIL_SEMAPHORE = threading.BoundedSemaphore(value=3)
 STORAGE_CLEANUP_LOCK = threading.Lock()
 STORAGE_USAGE_LOCK = threading.Lock()
 STORAGE_USAGE_CACHE = {}
@@ -1257,7 +1257,7 @@ def system_diagnostics_payload(recordings_dir: Path) -> dict:
         "recording_cache_workers": cache_workers,
         "recording_cache_backlog": len(cache_workers),
         "recording_cache_worker_limit": 1,
-        "recording_thumbnail_worker_limit": 1,
+        "recording_thumbnail_worker_limit": 3,
         "system_uptime_seconds": proc_uptime_seconds(),
         "process": {
             "pid": os.getpid(),
@@ -3335,6 +3335,7 @@ def build_recording_thumbnail_command(source: Path, target: Path, seek_seconds: 
         "-y",
         "-ss",
         str(max(0, seek_seconds)),
+        "-noaccurate_seek",
         "-threads",
         "1",
         "-i",
@@ -6038,7 +6039,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       async function restoreGalleryThumbnails(){
         if(!galleryScope)return;
-        await Promise.allSettled([...nvrGrid.querySelectorAll('img[data-recording-thumb-src]')].slice(0,12).map(async image=>{
+        await Promise.allSettled([...nvrGrid.querySelectorAll('img[data-recording-thumb-src]')].slice(0,24).map(async image=>{
           if(image.dataset.recordingThumbQueued)return;
           const source=image.dataset.recordingThumbSrc;image.dataset.recordingThumbQueued='true';
           let finished=false;
@@ -6644,7 +6645,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       function pumpRecordingThumbnails() {
         if(activePage!=='nvr')return;
-        while (recordingThumbnailActive < 2 && recordingThumbnailQueue.length) {
+        while (recordingThumbnailActive < (isMobileNvrPlayback() ? 4 : 6) && recordingThumbnailQueue.length) {
           const image = recordingThumbnailQueue.shift();
           if (!image.isConnected) continue;
           const source = image.dataset.recordingThumbSrc;
@@ -6707,7 +6708,7 @@ INDEX_HTML = r"""<!doctype html>
         }
         const images = Array.from(nvrGrid.querySelectorAll('img[data-recording-thumb-src]'));
         if (!images.length) return;
-        const immediate = images.slice(0, isMobileNvrPlayback() ? 4 : 8);
+        const immediate = images.slice(0, isMobileNvrPlayback() ? 8 : 16);
         immediate.forEach(loadRecordingThumbnail);
         const deferred = images.slice(immediate.length);
         if (!deferred.length) return;
@@ -6718,7 +6719,7 @@ INDEX_HTML = r"""<!doctype html>
               loadRecordingThumbnail(entry.target);
               thumbnailObserver.unobserve(entry.target);
             });
-          }, { root: null, rootMargin: '220px 0px', threshold: 0.01 });
+          }, { root: null, rootMargin: '700px 0px', threshold: 0.01 });
           deferred.forEach((image) => thumbnailObserver.observe(image));
           return;
         }
@@ -7371,13 +7372,13 @@ INDEX_HTML = r"""<!doctype html>
         clearTimeout(state.timer);
         const video=state.video;
         if(!video.isConnected){discardRecordingScrub(state.index);return;}
-        const delay=state.active?Math.max(0,80-(performance.now()-state.lastSeek)):0;
+        const delay=state.active?Math.max(0,40-(performance.now()-state.lastSeek)):0;
         const desiredTarget=recordingTargetForPlaybackOffset(state.index,state.desired);
         const crossFile=desiredTarget?.target?.file?.url!==video.dataset.recordingLoadedFile;
-        const settle=state.active&&crossFile?Math.max(0,100-(performance.now()-(state.changedAt||0))):0;
+        const settle=state.active&&crossFile?Math.max(0,50-(performance.now()-(state.changedAt||0))):0;
         if(settle){state.timer=setTimeout(()=>flushRecordingScrub(state),settle);return;}
-        const supersede=state.applied!==state.desired&&(video.error||state.finishing||performance.now()-state.lastSeek>160);
-        if(((video.seeking||video.readyState<1)&&!supersede)||delay){state.timer=setTimeout(()=>flushRecordingScrub(state),Math.max(40,delay));return;}
+        const supersede=state.applied!==state.desired&&(video.error||state.finishing||performance.now()-state.lastSeek>100);
+        if(((video.seeking||video.readyState<1)&&!supersede)||delay){state.timer=setTimeout(()=>flushRecordingScrub(state),Math.max(20,delay));return;}
         if(state.applied!==state.desired){
           state.applied=state.desired;state.lastSeek=performance.now();
           seekRecordingPlayback(state.index,state.desired,true);
@@ -7391,7 +7392,7 @@ INDEX_HTML = r"""<!doctype html>
           if(resume)playRecording(video);else pauseRecording(video);
           return;
         }
-        state.timer=setTimeout(()=>flushRecordingScrub(state),80);
+        state.timer=setTimeout(()=>flushRecordingScrub(state),40);
       }
       function finishRecordingScrub(slider,cancel=false) {
         const state=recordingScrubs.get(slider.dataset.recordingPlaybackSeek);if(!state)return;
@@ -11015,7 +11016,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
             write_debug_event("recording_thumbnail_error", payload)
             self.send_json({"error": str(error)}, HTTPStatus.TOO_MANY_REQUESTS if str(error) == 'thumbnail_generation_busy' else HTTPStatus.BAD_GATEWAY)
             return
-        self.send_bytes(data, "image/jpeg")
+        self.send_bytes(data, "image/jpeg", extra_headers={"Cache-Control": "private, max-age=3600, stale-while-revalidate=86400"})
 
     def serve_mp4_file(
         self,
