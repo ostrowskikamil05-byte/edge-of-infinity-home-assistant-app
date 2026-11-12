@@ -69,6 +69,7 @@ jobs:
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"
           node tests/edge_rtc_audio.cjs
           node tests/edge_media_errors.cjs
+          node tests/edge_dvr_wait.cjs
           EDGE_TEST_BROWSER=webkit node tests/browser/edge_rtc_audio.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/edge_rtc_audio.cjs
       - uses: actions/setup-go@v5
@@ -144,6 +145,8 @@ jobs:
           PY
           EDGE_HA_BRIDGE_URL=http://127.0.0.1:18191 EDGE_TEST_BROWSER=chromium node tests/browser/edge_dashboard_cards.cjs
           EDGE_HA_BRIDGE_URL=http://127.0.0.1:18191 EDGE_TEST_BROWSER=webkit node tests/browser/edge_dashboard_cards.cjs
+          EDGE_HA_BRIDGE_URL=http://127.0.0.1:18191 EDGE_TEST_BROWSER=chromium node tests/browser/dashboard_fast_start.cjs
+          EDGE_HA_BRIDGE_URL=http://127.0.0.1:18191 EDGE_TEST_BROWSER=webkit node tests/browser/dashboard_fast_start.cjs
           EDGE_NVR_TEST_URL=http://127.0.0.1:18091 EDGE_NVR_FIXTURE_INFO="${RUNNER_TEMP}/phone-fixture.json" EDGE_HA_BRIDGE_URL=http://127.0.0.1:18191 node tests/browser/local_https.cjs
           EDGE_NVR_TEST_URL=http://127.0.0.1:18091 EDGE_TEST_BROWSER=chromium node tests/browser/nvr_native_interactions.cjs
           EDGE_NVR_TEST_URL=http://127.0.0.1:18091 EDGE_TEST_BROWSER=webkit node tests/browser/nvr_native_interactions.cjs

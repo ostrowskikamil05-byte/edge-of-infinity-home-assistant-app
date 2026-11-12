@@ -102,8 +102,11 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.5"
-APP_RELEASE_FEATURES=['Shared mobile Live/DVR decoder ownership, typed playback failures and direct authenticated archive bridge',
+APP_VERSION = "0.17.6"
+APP_RELEASE_FEATURES=['Fast per-camera dashboard catalogs, bounded user gallery snapshots and parallel JPEG cache reads',
+                      'Debounced in-video loading indication and adjacent decoded-frame preview seeks',
+                      'Original Edge branding retained for the panel, repository and integration',
+                      'Shared mobile Live/DVR decoder ownership, typed playback failures and direct authenticated archive bridge',
                       'Optional local HTTPS gateway and CA setup; full Live/DVR/dashboard without Nabu Casa',
                       'Bounded RTT-aware DVR pulls, 4x AAC playback and stable image cadence after network gaps',
                       'Native-only DVR in panel and HA cards; MP4 retained as original downloads',
@@ -124,7 +127,7 @@ APP_RELEASE_FEATURES=['Shared mobile Live/DVR decoder ownership, typed playback 
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "shared-sessions-v170"
+UI_BUILD = "dashboard-gallery-v176"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -185,8 +188,7 @@ RECORDING_DURATION_LOCK = threading.Lock()
 RECORDING_CACHE_LOCK = threading.Lock()
 RECORDING_CACHE_BUILD_SEMAPHORE = threading.BoundedSemaphore(value=1)
 RECORDING_THUMBNAIL_SEMAPHORE = threading.BoundedSemaphore(value=3)
-RECORDING_THUMBNAIL_TARGET_LOCKS: dict[str, threading.Lock] = {}
-RECORDING_THUMBNAIL_TARGET_GUARD = threading.Lock()
+RECORDING_THUMBNAIL_TARGET_LOCKS = tuple(threading.Lock() for _ in range(256))
 STORAGE_CLEANUP_LOCK = threading.Lock()
 STORAGE_USAGE_LOCK = threading.Lock()
 STORAGE_USAGE_CACHE = {}
@@ -3375,6 +3377,11 @@ def recording_thumbnail_ready(target: Path, source: Path) -> bool:
         return False
 
 
+def recording_thumbnail_target_lock(target) -> threading.Lock:
+    """Stable stripes also protect requests that obtained a lock but have not acquired it."""
+    return RECORDING_THUMBNAIL_TARGET_LOCKS[hashlib.sha256(str(target).encode()).digest()[0]]
+
+
 def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_seconds: int | None = None) -> Path:
     target = recording_thumbnail_path(key, filename)
     if seek_seconds is not None and seek_seconds>0:
@@ -3417,10 +3424,11 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_secon
     tmp = target.with_name(f".{target.name}.{time.time_ns()}.tmp")
     command = build_recording_thumbnail_command(source, tmp, seek_seconds=0 if seek_seconds is None else seek_seconds)
     # One decode per target file even with several workers; others wait, then reuse it.
-    with RECORDING_THUMBNAIL_TARGET_GUARD:
-        target_lock = RECORDING_THUMBNAIL_TARGET_LOCKS.setdefault(str(target), threading.Lock())
+    target_lock = recording_thumbnail_target_lock(target)
     if not target_lock.acquire(timeout=20):
         raise RuntimeError("thumbnail_generation_busy")
+    if recording_thumbnail_ready(target,source):
+        target_lock.release();return target
     acquired = RECORDING_THUMBNAIL_SEMAPHORE.acquire(timeout=0.2)
     if not acquired:
         target_lock.release()
@@ -3844,12 +3852,13 @@ def start_recording_retention_loop() -> None:
     threading.Thread(target=recording_retention_loop, daemon=True).start()
 
 
-def recording_status_payload(config: dict | None = None, day_selection: dict[str, str] | None = None) -> dict:
+def recording_status_payload(config: dict | None = None, day_selection: dict[str, str] | None = None, camera_indices=None) -> dict:
     cleanup_recording_processes()
     config = config or load_config()
     day_selection = day_selection or {}
     cameras = []
     for index, camera in enumerate(config.get("cameras", [])):
+        if camera_indices is not None and index not in camera_indices:continue
         key = recording_key(camera, index)
         process = RECORDING_PROCESSES.get(key)
         directory = recording_base_dir(camera, index)
@@ -3964,7 +3973,7 @@ def recording_files_revision(key,day,files):
     return digest.hexdigest()[:32]
 
 
-RECORDING_INDEX=RecordingIndexCache(lambda config,selection:recording_status_payload(config,selection),
+RECORDING_INDEX=RecordingIndexCache(lambda config,selection,indices=None:recording_status_payload(config,selection,camera_indices=indices),
     lambda event,data:append_jsonl_log(HOME_DIR/'playback.jsonl',event,data))
 
 
@@ -3983,9 +3992,15 @@ def recording_status_response(config,query):
         return {'summary':True,'cameras':rows}
     selection=parse_recording_day_query(query)
     if query.get('catalog')==['1']:
-        data=RECORDING_INDEX.get(config,selection,force=query.get('fresh')==['1'])
+        indices=None
+        if 'camera_index' in query:
+            value=str(query['camera_index'][0])
+            if not re.fullmatch(r'[0-9]{1,4}',value):raise ValueError('invalid_camera_index')
+            indices=(int(value),)
+        data=RECORDING_INDEX.get(config,selection,force=query.get('fresh')==['1'],**({'indices':indices} if indices is not None else {}))
         states=recording_status_response(config,{'summary':['1']})
-        for row,state in zip(data['cameras'],states['cameras']):row.update(state)
+        by_index={row['index']:row for row in states['cameras']}
+        for row in data['cameras']:row.update(by_index.get(row['index'],{}))
         data['storage']=storage_usage_snapshot(config)
     else:data=recording_status_payload(config,day_selection=selection)
     known={}
@@ -5308,6 +5323,7 @@ INDEX_HTML = r"""<!doctype html>
       .nvr-playback-toolbar button, .nvr-playback-toolbar select { min-height: 44px; }
       .nvr-playback-clock { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
       .nvr-playback-seek { width: 100%; min-width: 0; min-height: 32px; accent-color: var(--accent); touch-action: pan-y; }
+      .dvr-loading{position:absolute;left:50%;top:50%;z-index:5;box-sizing:border-box;width:38px;height:38px;margin:0;border:3px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;background:rgba(0,0,0,.25);box-shadow:0 0 0 6px rgba(0,0,0,.25);pointer-events:none;transform:translate(-50%,-50%);animation:edge-dvr-spin .85s linear infinite}.dvr-loading[hidden]{display:none!important}@keyframes edge-dvr-spin{to{transform:translate(-50%,-50%) rotate(360deg)}}@media(prefers-reduced-motion:reduce){.dvr-loading{animation:none}}
       .nvr-playback-message { min-height: 18px; font-size: 12px; color: var(--muted); }
       .recording-timeline .timeline-row { flex-wrap: wrap; overflow-wrap: anywhere; }
       @media (min-width: 1450px) { #nvr-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -6568,6 +6584,7 @@ INDEX_HTML = r"""<!doctype html>
       function disposeArchivePlayer(index){const player=archivePlayers.get(String(index));if(player){player.destroy();archivePlayers.delete(String(index));}}
       function archivePlayerMarkup(index,total,position,poster){return `<div class="recording-player-wrap" data-recording-wrap="${index}" data-dvr-host="${index}">
         <canvas class="recording-player" width="640" height="360" aria-label="Nagrania EdgeRTC DVR" style="display:block;width:100%;height:auto;aspect-ratio:16/9;background:#080e15"></canvas>
+        <span class="dvr-loading" data-dvr-loading role="status" aria-label="Loading…" hidden></span>
         ${poster?`<img data-dvr-poster src="${escapeHtml(poster)}" alt="Podgląd wybranego nagrania" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none">`:''}
         <div class="nvr-playback-controls"><div class="nvr-seek-shell"><div class="nvr-alert-dots" data-alert-axis="${index}" role="group" aria-label="Wykrycia osób i zwierząt na nagraniu"></div><input class="nvr-playback-seek" type="range" min="0" max="${Math.max(0,total-.05)}" step="0.04" value="${position}" data-dvr-seek aria-label="Przewiń nagrania EdgeRTC DVR"></div>
         <div class="nvr-playback-toolbar"><button type="button" data-dvr-action="toggle" aria-label="Odtwórz">▶</button><button type="button" data-dvr-action="back" aria-label="Poprzednia klatka">‹|</button><button type="button" data-dvr-action="next" aria-label="Następna klatka">|›</button><output class="nvr-playback-clock" data-dvr-clock></output><button type="button" data-dvr-action="sound">Dźwięk</button><select data-dvr-rate aria-label="Szybkość nagrania"><option value=".5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select><button type="button" data-dvr-action="fullscreen" aria-label="Pełny ekran">${fullscreenIcon()}</button></div></div>
@@ -10490,7 +10507,10 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path == "/api/recording/status":
             config = load_config()
             schedule_recording_ensure(config, "recording_status")
-            started=time.monotonic();payload=recording_status_response(config,parse_qs(parsed.query))
+            started=time.monotonic()
+            try:payload=recording_status_response(config,parse_qs(parsed.query))
+            except ValueError:
+                self.send_json({'error':'invalid_recording_query'},HTTPStatus.BAD_REQUEST);return
             append_jsonl_log(HOME_DIR/'playback.jsonl','recording_index_ready',{'elapsed_ms':round((time.monotonic()-started)*1000),'summary':bool(payload.get('summary')),
                 'files':sum(len(c.get('files',[])) for c in payload['cameras'])})
             self.send_json(payload,compress=True)

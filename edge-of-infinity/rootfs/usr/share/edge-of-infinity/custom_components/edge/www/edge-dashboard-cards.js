@@ -1,6 +1,6 @@
 /* Edge of Infinity dashboard cards: recordings and events.
    All data comes through Home Assistant's authenticated /api/edge/dashboard bridge. */
-const EDGE_DASH_VERSION = "0.17.5";
+const EDGE_DASH_VERSION = "0.17.6";
 const edgeDashI18nReady=import('/edge/edge-i18n.js?v='+EDGE_DASH_VERSION).catch(()=>null);
 let edgeProblemText,edgeDVRLoad,edgeDVRAttempt=0;
 /* Browsers remember a failed module URL for the page's lifetime, so a later attempt
@@ -75,6 +75,7 @@ const EDGE_SHARED_STYLE = `
   .chip{flex:0 0 auto;border-radius:999px;min-height:36px;padding:0 14px;font-size:13px;white-space:nowrap}
   .chip[aria-pressed=true],.chip[aria-selected=true]{background:var(--edge-tint);color:var(--edge-accent);font-weight:600}
   .restart{margin:12px 16px 0;padding:10px 12px;border-radius:var(--edge-inner);background:color-mix(in srgb,var(--warning-color,#ffa600) 20%,transparent);font-size:13px;line-height:1.45}.restart b{display:block;font-weight:600;font-variant-numeric:tabular-nums}
+  .dvr-loading{position:absolute;left:50%;top:50%;z-index:5;box-sizing:border-box;width:38px;height:38px;margin:0;border:3px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;background:rgba(0,0,0,.25);box-shadow:0 0 0 6px rgba(0,0,0,.25);pointer-events:none;transform:translate(-50%,-50%);animation:edge-dvr-spin .85s linear infinite}.dvr-loading[hidden]{display:none!important}@keyframes edge-dvr-spin{to{transform:translate(-50%,-50%) rotate(360deg)}}@media(prefers-reduced-motion:reduce){.dvr-loading{animation:none}}
   .status{margin:0;padding:0 16px 14px;font-size:13px;line-height:1.5;color:var(--edge-muted)}.status.error{color:var(--error-color,#f28b8b)}
   .thumb{position:relative;display:block;aspect-ratio:16/9;background:var(--edge-fill);overflow:hidden;color:var(--edge-muted)}
   .thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .15s}.thumb.loaded img{opacity:1}
@@ -85,6 +86,9 @@ const EDGE_SHARED_STYLE = `
    are fetched with it and shown from short-lived object URLs. */
 // Shared per HA user, bounded by bytes as well as entry count. No video cache.
 const edgePictureCaches=new Map();
+const edgeCatalogCaches=new Map();
+let edgeDashboardGallery;
+const edgeDashboardStore=async()=>{await edgeGalleryReady;return edgeDashboardGallery??=globalThis.EdgeRecordingGallery?new EdgeRecordingGallery():null;};
 class EdgeDashMedia {
   constructor(card){
     this.card=card;this.queue=[];this.active=0;this.owners=new Map();
@@ -92,11 +96,11 @@ class EdgeDashMedia {
   }
   _cache(){
     const scope=this.card.hass?.user?.id||this.card;
-    if(!edgePictureCaches.has(scope))edgePictureCaches.set(scope,{images:new Map(),urls:new Map(),pending:new Map(),bytes:0,tail:Promise.resolve()});
+    if(!edgePictureCaches.has(scope))edgePictureCaches.set(scope,{images:new Map(),urls:new Map(),pending:new Map(),bytes:0,active:0,waiting:[]});
     return edgePictureCaches.get(scope);
   }
   path(entity,kind,name){return `/api/${EDGE_DASH_API}/media/${entity}/${kind}/${name}`;}
-  image(img,entity,kind,name){img.decoding='async';img.dataset.src=this.path(entity,kind,name);const hit=this._cache().images.get(img.dataset.src);if(hit)this._show(img,hit.url);else this.observer.observe(img);}
+  image(img,entity,kind,name){this.releaseDetached();img.decoding='async';img.dataset.src=this.path(entity,kind,name);const hit=this._cache().images.get(img.dataset.src);if(hit)this._show(img,hit.url);else this.observer.observe(img);}
   _release(img,row){row.refs.delete(img);if(row.evicted&&!row.refs.size){URL.revokeObjectURL(row.url);row.cache.urls.delete(row.url);}}
   releaseDetached(){for(const [img,row] of this.owners)if(!img.isConnected){this.owners.delete(img);this._release(img,row);}}
   _show(img,url){if(!img.isConnected)return;const old=this.owners.get(img),row=this._cache().urls.get(url);if(old&&old!==row)this._release(img,old);if(row){row.refs.add(img);this.owners.set(img,row);}if(img.src!==url)img.src=url;img.closest('.thumb')?.classList.add('loaded');}
@@ -113,8 +117,8 @@ class EdgeDashMedia {
     if(user){await Promise.race([edgeGalleryReady,new Promise(resolve=>setTimeout(resolve,40))]);cache.gallery??=globalThis.EdgeRecordingGallery?new EdgeRecordingGallery():null;
       if(cache.gallery)blob=await Promise.race([cache.gallery.loadThumbnail('ha:'+user,src),new Promise(resolve=>setTimeout(()=>resolve(null),40))]);}
     if(!blob){
-      // The server has one thumbnail decoder. Serial cold requests avoid 429 storms.
-      const previous=cache.tail;let release;cache.tail=new Promise(resolve=>release=resolve);await previous;
+      // Two bounded requests share the server workers; cold JPEGs cannot block every cached image.
+      if(cache.active>=2)await new Promise(resolve=>cache.waiting.push(resolve));else cache.active++;
       try{
         if(!this.card.isConnected)throw Error('card_disconnected');
         let response;
@@ -127,7 +131,7 @@ class EdgeDashMedia {
         if(!response.ok)throw Error(String(response.status));blob=await response.blob();
         if(blob.type!=='image/jpeg'||blob.size>4*1024*1024)throw Error('invalid_image');
         if(user)void cache.gallery?.saveThumbnail('ha:'+user,src,blob);
-      }finally{release();}
+      }finally{const next=cache.waiting.shift();if(next)next();else cache.active--;}
     }
     const url=URL.createObjectURL(blob),row={url,bytes:blob.size,refs:new Set(),cache};cache.images.set(src,row);cache.urls.set(url,row);cache.bytes+=blob.size;
     while(cache.images.size>96||cache.bytes>8*1024*1024){const [key,old]=cache.images.entries().next().value;cache.images.delete(key);cache.bytes-=old.bytes;old.evicted=true;if(!old.refs.size){URL.revokeObjectURL(old.url);cache.urls.delete(old.url);}}
@@ -216,7 +220,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
       <div class="chips cams" role="tablist"></div>
       <div class="days" role="tablist"></div>
       <div class="body"><div class="player" hidden>
-        <div class="stage"><canvas width="640" height="360" aria-label="EdgeRTC DVR"></canvas><img class="poster" alt="" hidden><span class="live" hidden></span><button class="big" data-action="toggle">${edgeIcon("play")}</button><p class="note" role="status" hidden></p></div>
+        <div class="stage"><canvas width="640" height="360" aria-label="EdgeRTC DVR"></canvas><img class="poster" alt="" hidden><span class="live" hidden></span><button class="big" data-action="toggle">${edgeIcon("play")}</button><span class="dvr-loading" data-dvr-loading role="status" aria-label="Loading…" hidden></span><p class="note" role="status" hidden></p></div>
         <div class="scale"><button class="icon" data-action="earlier">${edgeIcon("left")}</button><output></output><button class="icon" data-action="later">${edgeIcon("right")}</button><button data-zoom="86400">24 h</button><button data-zoom="21600">6 h</button><button data-zoom="3600">1 h</button></div>
         <div class="track" role="slider" tabindex="0"><div class="ranges"></div><div class="dots"></div><div class="cursor"></div></div>
         <div class="ticks"></div>
@@ -268,25 +272,51 @@ class EdgeRecordingsCard extends EdgeDashCard {
     this._paint();
   }
   _status(text, error = false) { const node = this._$(".status"); if(node.textContent!==(text||""))node.textContent=text||"";if(node.hidden!==!text)node.hidden=!text; node.classList.toggle("error", error); }
+  _loading(waiting){const icon=this._$("[data-dvr-loading]");icon.hidden=!waiting;icon.setAttribute("aria-label",this._t("loading"));this._$(".stage").setAttribute("aria-busy",String(waiting));}
   _note(text) { const node = this._$(".note"); if(node.textContent!==(text||""))node.textContent=text||"";if(node.hidden!==!text)node.hidden=!text; }
-  async _load(day = "", quiet = false) {
-    this._checkVersion();
-    const cameras = this._cameras();
-    if (!cameras.length) { this._$(".player").hidden = true; this._status(this._t("noCamera")); return; }
-    if (!cameras.includes(this._entity)) { this._entity = cameras[0]; this._render(); }
-    const entity = this._entity; const request = ++this._request; if (!quiet) this._status(this._t("loading"));
-    try {
-      const data = await this._api(`recordings/${entity}${day ? "?day=" + day : ""}`);
-      if (request !== this._request || entity !== this._entity) return;
-      const playing = this._index >= 0 ? this._files[this._index]?.[0] : "";
-      this._days = data.days || []; this._day = data.day || day; this._files = data.files || []; this._recording = Boolean(data.recording);
-      const info = this._days.find(row => row.day === this._day); this._dayStart = info?.start || (this._files[0]?.[1] ?? 0);
-      this._ranges = []; for (const [, start, length] of this._files) { const last = this._ranges[this._ranges.length - 1]; if (last && start - last[1] <= 2) last[1] = start + length; else this._ranges.push([start, start + length]); }
-      if (quiet && playing) this._index = this._files.findIndex(row => row[0] === playing);
-      else { this._stop(); const last = this._files[this._files.length - 1]; this._position = last ? Math.max(this._files[0][1], last[1] + last[2] - 60) : this._dayStart; this._follow(); this._poster(); }
-      this._status(this._files.length ? "" : this._t(this._days.length ? "noDay" : "noRecordings")); this._$(".player").hidden = !this._files.length;
-      this._paintDays(); this._paintMoments(); this._paint(); this._loadEvents(entity, this._day);
-    } catch (error) { if (request === this._request && !quiet) { this._$(".player").hidden = true; this._files = []; this._paintMoments(); this._status(this._problem(error), true); } }
+  _catalogScope(entity,day){const user=this._hass?.user?.id;return user?'ha:'+user+'|'+entity+'|'+(day||'latest'):null;}
+  _rememberCatalog(scope,data){
+    if(!scope)return;edgeCatalogCaches.delete(scope);edgeCatalogCaches.set(scope,{...data,cache_at:Date.now()});
+    while(edgeCatalogCaches.size>8||[...edgeCatalogCaches.values()].reduce((n,row)=>n+row.files.length,0)>24000)edgeCatalogCaches.delete(edgeCatalogCaches.keys().next().value);
+    void edgeDashboardStore().then(store=>store?.saveDashboard(scope,data)).catch(()=>{});
+  }
+  _applyCatalog(data,quiet=false){
+    const playing=this._index>=0?this._files[this._index]?.[0]:'';const sameDay=data.day===this._day;
+    this._days=data.days||[];this._day=data.day||'';this._files=data.files||[];if(!data.cached)this._recording=Boolean(data.recording);
+    const info=this._days.find(row=>row.day===this._day);this._dayStart=info?.start||(this._files[0]?.[1]??0);
+    this._ranges=[];for(const [,start,length]of this._files){const last=this._ranges.at(-1);if(last&&start-last[1]<=2)last[1]=start+length;else this._ranges.push([start,start+length]);}
+    const kept=playing&&sameDay?this._files.findIndex(row=>row[0]===playing):-1;
+    if(kept>=0)this._index=kept;
+    else{this._stop();const last=this._files.at(-1);this._position=last?Math.max(this._files[0][1],last[1]+last[2]-60):this._dayStart;this._follow();void this._poster();}
+    this._status(this._files.length?'':this._t(this._days.length?'noDay':'noRecordings'));this._$('.player').hidden=!this._files.length;
+    this._paintDays();this._paintMoments();this._paint();
+    if(this._files.length&&!document.hidden)void edgeDVRModule().catch(()=>{});
+  }
+  _load(day='',quiet=false){
+    const cameras=this._cameras();if(!cameras.length){this._$('.player').hidden=true;this._status(this._t('noCamera'));return Promise.resolve();}
+    if(!cameras.includes(this._entity)){this._entity=cameras[0];this._render();}
+    const key=this._catalogScope(this._entity,day)||this._entity+'|'+day;
+    if(this._catalogTask?.key===key)return this._catalogTask.promise;
+    const promise=this._loadCatalog(day,quiet);this._catalogTask={key,promise};
+    void promise.finally(()=>{if(this._catalogTask?.promise===promise)this._catalogTask=null;});return promise;
+  }
+  async _loadCatalog(day='',quiet=false){
+    this._checkVersion();const entity=this._entity,request=++this._request,scope=this._catalogScope(entity,day);let settled=false,restored=false;
+    const current=()=>request===this._request&&entity===this._entity&&this.isConnected;
+    const restore=data=>{if(!data||settled||!current()||data.entity_id!==entity||day&&data.day!==day||restored)return;restored=true;this._applyCatalog({...data,cached:true},true);};
+    let cached=scope&&edgeCatalogCaches.get(scope);if(cached&&Date.now()-cached.cache_at>900000){edgeCatalogCaches.delete(scope);cached=null;}if(cached)restore(cached);
+    if(!quiet&&!restored&&(!this._files.length||day&&day!==this._day))this._status(this._t('loading'));
+    if(scope&&!cached)void Promise.race([edgeDashboardStore().then(store=>store?.loadDashboard(scope)),new Promise(resolve=>setTimeout(()=>resolve(null),200))]).then(restore).catch(()=>{});
+    const started=performance.now();
+    try{
+      const data=await this._api(`recordings/${entity}${day?'?day='+day:''}`);settled=true;if(!current())return;
+      this._rememberCatalog(scope,data);this._applyCatalog(data,quiet||restored);this._loadEvents(entity,this._day);
+      this._catalogMetrics={entity,elapsed_ms:Math.round(performance.now()-started),restored,files:this._files.length};globalThis.__edgeDeviceReporter?.note('ui_dashboard_catalog_ready',this._catalogMetrics);
+    }catch(error){
+      settled=true;if(!current())return;const status=error?.status_code||error?.status;
+      if(status===403||status===404){if(scope){const prefix=scope.slice(0,scope.lastIndexOf('|')+1);for(const key of edgeCatalogCaches.keys())if(key.startsWith(prefix))edgeCatalogCaches.delete(key);void edgeDashboardStore().then(store=>store?.deleteDashboard(scope,true)).catch(()=>{});}this._stop();this._files=[];this._days=[];this._$('.player').hidden=true;this._paintDays();this._paintMoments();this._media.releaseDetached();this._status(this._problem(error),true);}
+      else if(!restored&&!quiet){this._$('.player').hidden=true;this._files=[];this._paintMoments();this._status(this._problem(error),true);}
+    }
   }
   async _loadEvents(entity, day) {
     try { const data = await this._api(`events?entity=${entity}&day=${day}&kinds=person,vehicle,animal&limit=200`); if (entity === this._entity && day === this._day) { this._events = data.events || []; this._paint(); } }
@@ -367,7 +397,7 @@ class EdgeRecordingsCard extends EdgeDashCard {
     try {const link=document.createElement('a');link.href=await this._media.signed(this._entity,'video',file[0]);link.download=`${this._hass.states[this._entity]?.attributes?.edge_camera_id||'edge'}-${file[0]}`;link.click();}
     catch (_) { this._note(this._t("unreachable")); }
   }
-  _stop(){clearTimeout(this._reconnectTimer);this._networkRetries=0;this._token++;this._wantPlay=false;this._index=-1;this._dvr?.close();this._dvr=null;clearTimeout(this._scrubTimer);this._note('');}
+  _stop(){clearTimeout(this._reconnectTimer);this._networkRetries=0;this._token++;this._wantPlay=false;this._index=-1;this._dvr?.close();this._dvr=null;clearTimeout(this._scrubTimer);this._loading(false);this._note('');}
   _suspendMedia(){clearTimeout(this._reconnectTimer);if(this._dvr){this._dvr.close();this._dvr=null;}}
   _resumeMedia(){if(this._connected&&this._inView&&!document.hidden&&this._index>=0&&!this._dvr)this._show(this._index,Math.max(0,this._position-this._files[this._index][1]));}
   async _seek(stamp, play = this._wantPlay) {
@@ -378,20 +408,20 @@ class EdgeRecordingsCard extends EdgeDashCard {
     await this._show(index, offset);
   }
   async _show(index,offset){
-    const token=++this._token,file=this._files[index];if(!file)return;this._index=index;
+    const token=++this._token,file=this._files[index];if(!file)return;this._index=index;this._note('');
     if(document.hidden||this._inView===false)return;
     try{
       if(!this._dvr||this._dvr.closed){
         const {EdgeDVRClient,edgeMediaProblem}=await edgeDVRModule();edgeProblemText=edgeMediaProblem;if(token!==this._token||!this.isConnected)return;
         const client=new EdgeDVRClient({hass:this._hass,entity:this._entity,canvas:this._canvas,
-          onWaiting:waiting=>{if(this._dvr===client)this._note(waiting?this._t('preparing'):'');},
-          onFrame:frame=>{if(this._dvr!==client||this._index<0)return;if(performance.now()-client.started>10000)this._networkRetries=0;this._position=this._files[this._index][1]+frame.seconds;this._$('.poster').hidden=true;const now=performance.now();if(client.paused||now-(this._lastPaint||0)>=100){this._lastPaint=now;this._paint();}},
+          onWaiting:waiting=>{if(this._dvr===client)this._loading(waiting);},
+          onFrame:frame=>{if(this._dvr!==client||this._index<0)return;if(performance.now()-client.started>10000)this._networkRetries=0;this._position=this._files[this._index][1]+frame.seconds;this._loading(false);this._note('');this._$('.poster').hidden=true;const now=performance.now();if(client.paused||now-(this._lastPaint||0)>=100){this._lastPaint=now;this._paint();}},
           onYield:()=>{this._wantPlay=false;this._paint();},
           onAudioUnavailable:()=>{this._muted=true;this._paint();},onEnded:()=>{if(this._dvr===client)this._advance();},
-          onError:(message,detail)=>{if(this._dvr===client){if(detail?.retryable&&this._wantPlay&&this._connected&&this._inView&&!document.hidden&&(this._networkRetries||0)<2){this._networkRetries=(this._networkRetries||0)+1;this._note(message);clearTimeout(this._reconnectTimer);const failedToken=this._token;this._reconnectTimer=setTimeout(()=>{if(this._token===failedToken&&this._connected&&this._inView&&this._wantPlay&&this._index>=0&&!document.hidden)this._show(this._index,Math.max(0,this._position-this._files[this._index][1]));},this._networkRetries*400);return;}this._wantPlay=false;this._note(edgeProblemText(message,detail,edgeLang(this._hass,this._config.language)));this._paint();}}});
+          onError:(message,detail)=>{if(this._dvr===client){this._loading(false);if(detail?.retryable&&this._wantPlay&&this._connected&&this._inView&&!document.hidden&&(this._networkRetries||0)<2){this._networkRetries=(this._networkRetries||0)+1;this._note(message);clearTimeout(this._reconnectTimer);const failedToken=this._token;this._reconnectTimer=setTimeout(()=>{if(this._token===failedToken&&this._connected&&this._inView&&this._wantPlay&&this._index>=0&&!document.hidden)this._show(this._index,Math.max(0,this._position-this._files[this._index][1]));},this._networkRetries*400);return;}this._wantPlay=false;this._note(edgeProblemText(message,detail,edgeLang(this._hass,this._config.language)));this._paint();}}});
         this._dvr=client;client.setAudio(.6,this._muted);client.seek(file[0],offset,{paused:!this._wantPlay,rate:this._rate});await client.start();
       }else this._dvr.seek(file[0],offset,{paused:!this._wantPlay,rate:this._rate});
-    }catch(error){if(token===this._token){this._wantPlay=false;this._note(error.code==='edge_module_unavailable'?this._moduleProblem():edgeProblemText?.(error.message,{code:error.code},edgeLang(this._hass,this._config.language))||error.message||this._t('playError'));this._paint();}}
+    }catch(error){if(token===this._token){this._loading(false);this._wantPlay=false;this._note(error.code==='edge_module_unavailable'?this._moduleProblem():edgeProblemText?.(error.message,{code:error.code},edgeLang(this._hass,this._config.language))||error.message||this._t('playError'));this._paint();}}
   }
   async _advance(){
     const next=this._index+1;
@@ -556,9 +586,9 @@ class EdgeEventsCard extends EdgeDashCard {
     try {
       const {EdgeDVRClient,edgeMediaProblem}=await edgeDVRModule();if(this._viewing!==event)return;
       const canvas=document.createElement('canvas'),controls=document.createElement('div');canvas.width=640;canvas.height=360;stage.replaceChildren(canvas);
-      controls.className='view-bar';const play=document.createElement('button'),sound=document.createElement('button');play.textContent=this._t('pause');sound.textContent=this._t('sound');controls.append(play,sound);stage.append(controls);controls.style.cssText='position:absolute;bottom:0;z-index:2';
+      const loading=document.createElement('span');loading.className='dvr-loading';loading.setAttribute('role','status');loading.setAttribute('aria-label',this._t('loading'));loading.hidden=true;stage.append(loading);controls.className='view-bar';const play=document.createElement('button'),sound=document.createElement('button');play.textContent=this._t('pause');sound.textContent=this._t('sound');controls.append(play,sound);stage.append(controls);controls.style.cssText='position:absolute;bottom:0;z-index:2';
       let muted=true;const client=new EdgeDVRClient({hass:this._hass,entity:event.entity_id,clip:event.id,canvas,
-        onYield:()=>{play.textContent=this._t('play');},onFrame:()=>{note.hidden=true;},onError:(message,detail)=>{note.textContent=edgeMediaProblem(message,detail,edgeLang(this._hass,this._config.language));note.hidden=false;},
+        onWaiting:waiting=>{loading.hidden=!waiting;},onYield:()=>{play.textContent=this._t('play');},onFrame:()=>{loading.hidden=true;note.hidden=true;},onError:(message,detail)=>{loading.hidden=true;note.textContent=edgeMediaProblem(message,detail,edgeLang(this._hass,this._config.language));note.hidden=false;},
         onEnded:()=>{play.textContent=this._t('play');}});this._clipClient=client;
       play.onclick=()=>{if(client.paused||client.ended){client.seek('event-'+event.id+'.mp4',client.ended?0:client.position,{paused:false});play.textContent=this._t('pause');}else{client.pause();play.textContent=this._t('play');}};
       sound.onclick=()=>{muted=!muted;client.setAudio(.6,muted);sound.textContent=this._t(muted?'sound':'mute');};

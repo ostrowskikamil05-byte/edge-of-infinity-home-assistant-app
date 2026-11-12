@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.17.6
+
+- Restore the HA recordings gallery and JPEGs from a bounded, per-user local
+  metadata cache while the authenticated catalog refresh runs. Coalesce duplicate
+  startup loads, keep the current player/socket/cursor during refresh and evict
+  saved catalog views when access is denied. Cache only metadata and thumbnails.
+- Request the selected camera's catalog rather than preparing every camera's
+  day list. Reuse a warm full catalog without duplicating its file-list cache,
+  and keep current recorder state separate from cached archive metadata.
+- Replace preparing-video text with a small, accessible animated indicator on
+  the image, shown only after a genuine 250 ms wait. Hide it on the first decoded
+  frame, pause, error and close; normal gaps between frames no longer flash it.
+  Apply the same behavior to the panel, HA card and saved alert playback.
+- Preview an adjacent, already-decoded frame without a new seek request or a
+  decoder restart. Keep at most two paused frames for 350 ms, then release them;
+  larger jumps continue to use the indexed native archive on the same socket.
+- Use two bounded HA thumbnail requests so a cold decode cannot block every
+  cached image. Release detached image references and keep stable thumbnail
+  target locks even before waiting callers acquire them. Retain 0.17.5's server
+  worker, warmup and disk-cache improvements.
+- Retain the original Edge logo in the repository/app and reuse those exact
+  original PNG assets in the integration; do not introduce Claude's replacement.
+- Add actual Chromium/WebKit cache-before-network, refresh-during-playback,
+  seek-spinner, adjacent-frame and denied-access tests. Preserve original video
+  codecs/resolution/FPS, AAC, camera connections, recordings and card settings.
+
 ## 0.17.5
 
 - Recording dashboard: thumbnails load faster (6 parallel fetches, 16 eager

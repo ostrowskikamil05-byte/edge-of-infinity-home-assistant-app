@@ -35,7 +35,7 @@
       });
     }
     put(key,kind,value,bytes){
-      const limit=kind==='snapshot'?8*1024*1024:512*1024;
+      const limit=kind==='snapshot'?8*1024*1024:kind==='dashboard'?2*1024*1024:512*1024;
       if(bytes>limit||this.queuedWrites>=8||this.queuedBytes+bytes>12*1024*1024)return Promise.resolve(false);
       this.queuedWrites++;this.queuedBytes+=bytes;
       const write=async()=>{
@@ -46,11 +46,11 @@
             const tx=db.transaction(['entries','data'],'readwrite'),entries=tx.objectStore('entries'),data=tx.objectStore('data');
             timer=setTimeout(()=>{this.report('ui_gallery_storage_unavailable',{reason:'write_timeout',kind});finish(false);try{tx.abort();}catch(_){}},2500);
             tx.oncomplete=()=>finish(true);tx.onerror=()=>finish(false);tx.onabort=()=>{this.report('ui_gallery_storage_unavailable',{reason:tx.error?.name});finish(false);};
-            entries.put({key,kind,bytes,updated:Date.now(),ttl:kind==='snapshot'?86400000:172800000});data.put(value,key);
+            entries.put({key,kind,bytes,updated:Date.now(),ttl:kind==='snapshot'?86400000:kind==='dashboard'?900000:172800000});data.put(value,key);
             const all=entries.getAll();all.onsuccess=()=>{
               const rows=all.result.filter(row=>row.kind===kind).sort((a,b)=>a.updated-b.updated);
               let used=rows.reduce((n,row)=>n+row.bytes,0),count=rows.length;
-              const budget=(kind==='snapshot'?12:8)*1024*1024,max=kind==='snapshot'?2:96;
+              const budget=(kind==='snapshot'||kind==='dashboard'?12:8)*1024*1024,max=kind==='snapshot'?2:kind==='dashboard'?8:96;
               for(const row of rows){
                 if(Date.now()-row.updated<=row.ttl&&used<=budget&&count<=max)continue;
                 entries.delete(row.key);data.delete(row.key);used-=row.bytes;count--;
@@ -69,6 +69,22 @@
       const fields=['index','id','key','files','files_revision','days','selected_day','segment_seconds','timeline','video_codec'];
       const payload={schema:1,saved_at:Date.now(),cameras:cameras.map(camera=>Object.fromEntries(fields.filter(field=>field in camera).map(field=>[field,camera[field]])))};
       const text=JSON.stringify(payload);return this.put('snapshot|'+scope,'snapshot',text,new Blob([text]).size);
+    }
+    async loadDashboard(scope){
+      const text=await this.read('dashboard|'+scope);if(typeof text!=='string')return null;
+      try{const data=JSON.parse(text);return data.schema===1&&Array.isArray(data.files)&&Array.isArray(data.days)?data:null;}catch(_){return null;}
+    }
+    saveDashboard(scope,data){
+      if(!Array.isArray(data.files)||!Array.isArray(data.days)||data.files.length>10000||data.days.length>90)return Promise.resolve(false);
+      const files=(data.files||[]).filter(row=>Array.isArray(row)&&/^\d{8}-\d{6}\.mp4$/.test(row[0])&&Number.isFinite(row[1])&&Number.isFinite(row[2])&&row[2]>0).map(row=>row.slice(0,3));
+      if(files.length!==data.files.length)return Promise.resolve(false);
+      const fields=['day','count','seconds','start','end','thumb'];
+      const payload={schema:1,entity_id:data.entity_id,day:data.day,revision:data.revision,files,days:(data.days||[]).slice(0,90).map(row=>Object.fromEntries(fields.filter(field=>field in row).map(field=>[field,row[field]])))};
+      const text=JSON.stringify(payload);return this.put('dashboard|'+scope,'dashboard',text,new Blob([text]).size);
+    }
+    async deleteDashboard(scope,allDays=false){
+      const db=await this.open();if(!db)return;
+      try{const tx=db.transaction(['entries','data'],'readwrite'),entries=tx.objectStore('entries'),data=tx.objectStore('data'),prefix='dashboard|'+scope.slice(0,scope.lastIndexOf('|')+1);if(!allDays){entries.delete('dashboard|'+scope);data.delete('dashboard|'+scope);}else{const request=entries.getAll();request.onsuccess=()=>{for(const row of request.result)if(row.kind==='dashboard'&&row.key.startsWith(prefix)){entries.delete(row.key);data.delete(row.key);}};}}catch(_){}
     }
     thumbnailKey(scope,url){
       const parsed=new URL(url,location.href);const at=parsed.pathname.lastIndexOf('/recording-thumbs/');

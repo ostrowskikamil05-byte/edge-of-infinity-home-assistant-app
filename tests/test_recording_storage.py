@@ -76,6 +76,25 @@ class RecordingStorageTests(unittest.TestCase):
         self.assertTrue(new.exists())
         self.assertLessEqual(report['bytes'],self.s.MIB)
 
+    def test_thumbnail_target_locks_are_shared_and_bounded(self):
+        p = self.p
+        first = p.recording_thumbnail_target_lock(self.root/'a.jpg')
+        self.assertIs(p.recording_thumbnail_target_lock(self.root/'a.jpg'), first, 'one decode per target needs one lock')
+        self.assertIsNot(p.recording_thumbnail_target_lock(self.root/'b.jpg'), first)
+        first.acquire()
+        try:
+            for index in range(2000):
+                p.recording_thumbnail_target_lock(self.root/f'{index}.jpg')
+            self.assertLessEqual(len(p.RECORDING_THUMBNAIL_TARGET_LOCKS), 257)
+            self.assertIs(p.recording_thumbnail_target_lock(self.root/'a.jpg'), first, 'a lock in use must stay stable')
+        finally:
+            first.release()
+
+    def test_thumbnail_lock_stays_stable_before_the_caller_acquires_it(self):
+        first=self.p.recording_thumbnail_target_lock(self.root/'pending.jpg')
+        for index in range(1000):self.p.recording_thumbnail_target_lock(self.root/f'other-{index}.jpg')
+        self.assertIs(self.p.recording_thumbnail_target_lock(self.root/'pending.jpg'),first)
+
     def test_thumbnail_ttl_and_count_limit(self):
         root = self.root/'thumbs'
         expired = self.file(root/'front_0/20260727-000000.mp4.jpg',age=172801)

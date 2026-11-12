@@ -1,5 +1,5 @@
 /* EdgeRTC archive: persistent socket, indexed seeks, bounded pull-based delivery. */
-import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport} from './edge-rtc-client.js?v=0.17.5';
+import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport} from './edge-rtc-client.js?v=0.17.6';
 
 export {edgeMediaProblem};
 
@@ -15,7 +15,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
       this.options.url=this.options.hass.hassUrl?this.options.hass.hassUrl(signed.path):signed.path;
     }
     if(this.options.hass&&!this.options.diagnostics){
-      try{const {getDeviceReporter}=await import('./edge-device-diagnostics.js?v=0.17.5');const hass=this.options.hass,entity=this.options.entity;
+      try{const {getDeviceReporter}=await import('./edge-device-diagnostics.js?v=0.17.6');const hass=this.options.hass,entity=this.options.entity;
         this.options.diagnostics=getDeviceReporter({context:{surface:'home_assistant_dvr_card'},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);try{return(await hass.fetchWithAuth('/api/edge/client-diagnostics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,entity_id:entity}),signal:controller.signal})).ok;}finally{clearTimeout(timer);}}});
       }catch(_){}
     }
@@ -24,6 +24,8 @@ export class EdgeDVRClient extends EdgeRTCClient {
   }
   seek(file,at,{paused=this.paused,rate=this.speed}={}){
     if(this.closed)return;
+    this.setWaiting(false);
+    if(this.previewFromBuffer(file,at,{paused,rate}))return;
     this.epoch=(this.epoch+1)>>>0||1;this.request={file,at:Math.max(0,Number(at)||0)};this.paused=paused;this.speed=Math.min(4,Math.max(.5,Number(rate)||1));this.position=this.request.at;this.handlingFailure=false;clearTimeout(this.recoveryTimer);clearTimeout(this.yieldTimer);if(this.options.hass)edgeMediaCoordinator().claim(this);
     this.target=Math.round(this.request.at*1e6);this.seekStarted=performance.now();this.picture=false;this.playing=false;this.eof=false;this.networkEOF=false;this.ended=false;this.pulling=false;this.pendingPulls=0;this.queuedBatches=0;this.batchTimes=[];this.batchCount=0;this.sentEpoch=0;this.originWall=null;this.lastPresentationAt=null;this.archiveMaxPresentationGapMS=0;this.prerollFrames=0;this.seekBytes=0;this.audioDrainEpoch=null;this.archiveVideoPending=0;
     // A replaced seek must not wait behind old decoder/backpressure promises.
@@ -33,7 +35,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
     if(this.video?.state!=='closed')this.video?.close();this.video=null;
     if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.audioDecoder=null;
     this.diagnostics?.note('dvr_seek_requested',{source:this.diagnosticKey,epoch:this.epoch,file,seconds:this.request.at,paused,rate:this.speed});
-    this.options.onWaiting?.(true);this.sendSeek();
+    this.setWaiting(true);this.sendSeek();
   }
   sendSeek(){
     if(!this.socketReady||!this.request||this.ws?.readyState!==WebSocket.OPEN||this.sentEpoch===this.epoch)return;
@@ -43,7 +45,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
     clearTimeout(this.seekTimer);this.seekTimer=setTimeout(()=>this.fail('EdgeRTC DVR: przekroczony czas dekodowania wybranej pozycji.'),15000);
   }
   play(){if(this.closed)return;this.seek(this.request.file,this.position,{paused:false});}
-  pause(){if(this.closed)return;this.paused=true;this.playing=false;this.clearFrames();this.clearAudio();this.archiveAudio=[];clearTimeout(this.pullTimer);this.options.onState?.();this.releaseArchiveDecoder();}
+  pause(){if(this.closed)return;this.paused=true;this.playing=false;this.setWaiting(false);if(this.renderRequest!=null)cancelAnimationFrame(this.renderRequest);this.renderRequest=null;clearTimeout(this.drawTimer);for(const item of this.frameQueue.splice(2))item.frame.close();this.clearAudio();this.archiveAudio=[];clearTimeout(this.pullTimer);this.options.onState?.();this.releaseArchiveDecoder();}
   async fail(message,retryable=true,detail={}){
     if(this.closed||this.handlingFailure)return;
     this.handlingFailure=true;const failureEpoch=this.epoch;
@@ -71,7 +73,21 @@ export class EdgeDVRClient extends EdgeRTCClient {
   }
   nativeFallback(code,message){this.diagnostics?.note('dvr_playback_unavailable',{code});this.fail(message,false,{code});}
   yieldMedia(){this.pause();this.epoch=(this.epoch+1)>>>0||1;clearTimeout(this.seekTimer);this.releaseArchiveDecoder(0);}
-  releaseArchiveDecoder(delay=350){if(!this.options.hass)return;clearTimeout(this.yieldTimer);const release=()=>{if(this.closed||!this.paused||delay&&!this.picture)return;if(this.video?.state!=='closed')this.video?.close();this.video=null;if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.audioDecoder=null;this.archiveVideoPending=0;edgeMediaCoordinator().release(this);};if(delay)this.yieldTimer=setTimeout(release,delay);else release();}
+  setWaiting(waiting){
+    if(!waiting){clearTimeout(this.waitTimer);this.waitTimer=null;if(this.waiting){this.waiting=false;this.options.onWaiting?.(false);}return;}
+    if(this.closed||this.waiting||this.waitTimer)return;
+    const epoch=this.epoch;this.waitTimer=setTimeout(()=>{this.waitTimer=null;if(this.closed||epoch!==this.epoch||this.paused&&this.picture)return;this.waiting=true;this.options.onWaiting?.(true);},250);
+  }
+  previewFromBuffer(file,at,{paused,rate}){
+    if(!paused||!this.picture||file!==this.request?.file||rate!==this.speed||Number(at)<this.position)return false;
+    const stamp=Math.round(Number(at)*1e6),index=this.frameQueue.findIndex(item=>item.frame.timestamp>=stamp-1000);
+    if(index<0||this.frameQueue[index].frame.timestamp>stamp+this.frameDuration*1.05)return false;
+    if(this.renderRequest!=null)cancelAnimationFrame(this.renderRequest);this.renderRequest=null;clearTimeout(this.drawTimer);clearTimeout(this.pullTimer);clearTimeout(this.seekTimer);
+    this.paused=true;this.playing=false;this.seekStarted=performance.now();this.lastPresentationAt=null;this.archiveMaxPresentationGapMS=0;this.picture=false;this.target=stamp;this.request={file,at:Number(at)};this.prerollFrames=0;this.clearAudio();this.archiveAudio=[];
+    for(const item of this.frameQueue.splice(0,index))item.frame.close();const item=this.frameQueue.shift();this.present(item.frame);
+    this.diagnostics?.note('dvr_seek_buffer_hit',{source:this.diagnosticKey,epoch:this.epoch,file,seconds:this.position,seek_ms:this.seekMS});return true;
+  }
+  releaseArchiveDecoder(delay=350){clearTimeout(this.yieldTimer);const release=()=>{if(this.closed||!this.paused||delay&&!this.picture)return;this.clearFrames();if(!this.options.hass)return;if(this.video?.state!=='closed')this.video?.close();this.video=null;if(this.audioDecoder?.state!=='closed')this.audioDecoder?.close();this.audioDecoder=null;this.archiveVideoPending=0;edgeMediaCoordinator().release(this);};if(delay)this.yieldTimer=setTimeout(release,delay);else release();}
   muteUnsupportedAudio(code){this.archiveAudio=[];this.setAudio(this.volume,true);this.diagnostics?.note('dvr_audio_unavailable',{code,video_continues:true});this.options.onAudioUnavailable?.(code);}
   setAudio(volume,muted){if(muted)this.archiveAudio=[];super.setAudio(volume,muted);if(!muted&&this.audioInfo)void this.checkArchiveAudio();}
   async checkArchiveAudio(){
@@ -159,7 +175,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
   render(frame){
     if(this.closed){frame.close();return;}
     if(frame.timestamp+this.frameDuration*.05<this.target){this.prerollFrames++;frame.close();return;}
-    if(this.paused){if(!this.picture)this.present(frame);else frame.close();return;}
+    if(this.paused){if(!this.picture)this.present(frame);else if(frame.timestamp>this.position*1e6+1000&&this.frameQueue.length<2)this.frameQueue.push({frame});else frame.close();return;}
     if(this.frameQueue.length>=24){frame.close();this.fail('EdgeRTC DVR: przekroczony limit kolejki obrazu.');return;}
     if(!this.frameQueue.length&&this.originWall!=null){const due=this.originWall+(frame.timestamp-this.originPTS)/1000/this.speed;if(performance.now()-due>80){this.originWall+=performance.now()-due;this.archiveRebuffers=(this.archiveRebuffers||0)+1;}}
     this.frameQueue.push({frame});this.scheduleDraw();
@@ -187,7 +203,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
     if(this.eof&&!this.frameQueue.length&&!this.archiveVideoPending&&!(this.video?.decodeQueueSize)&&this.picture){
       if(!this.ended){this.ended=true;this.playing=false;this.options.onEnded?.();if(this.ended){this.paused=true;this.releaseArchiveDecoder();}}return;
     }
-    if(!this.frameQueue.length&&this.picture&&!this.eof)this.options.onWaiting?.(true);
+    if(!this.frameQueue.length&&this.picture&&!this.eof)this.setWaiting(true);
     this.pull();if(this.frameQueue.length||this.archiveVideoPending||this.video?.decodeQueueSize)this.scheduleDraw();
   }
   present(frame){
@@ -195,7 +211,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
     if(this.canvas.width!==this.width||this.canvas.height!==this.height){this.canvas.width=this.width;this.canvas.height=this.height;}
     try{this.context??=this.canvas.getContext('2d',{alpha:false,desynchronized:true});if(!this.context)throw Error('canvas_unavailable');this.context.drawImage(frame,0,0,this.width,this.height);this.position=frame.timestamp/1e6;}catch(error){this.nativeFallback('canvas_unavailable','Nie udało się wyświetlić klatki EdgeRTC DVR. Pobierz nagranie, aby otworzyć je w innym odtwarzaczu.');return;}finally{frame.close();}
     const presentedAt=performance.now();if(this.lastPresentationAt!=null)this.archiveMaxPresentationGapMS=Math.max(this.archiveMaxPresentationGapMS||0,presentedAt-this.lastPresentationAt);this.lastPresentationAt=presentedAt;
-    this.connectionStage='playing';this.picture=true;this.frames++;this.playing=!this.paused;clearTimeout(this.connectTimer);clearTimeout(this.seekTimer);this.options.onWaiting?.(false);
+    this.connectionStage='playing';this.picture=true;this.frames++;this.playing=!this.paused;clearTimeout(this.connectTimer);clearTimeout(this.seekTimer);this.setWaiting(false);
     if(first){
       this.seekMS=performance.now()-this.seekStarted;this.firstFrameMS??=performance.now()-this.started;
       this.diagnostics?.note('dvr_seek_picture',{source:this.diagnosticKey,epoch:this.epoch,seconds:this.position,seek_ms:this.seekMS,preroll_frames:this.prerollFrames,received_bytes:this.seekBytes,width:this.width,height:this.height});
@@ -226,5 +242,5 @@ export class EdgeDVRClient extends EdgeRTCClient {
   }
   playPCM(channels,rate,timestamp){if(!this.paused)super.playPCM(channels,rate*this.speed,Math.round(this.target+(timestamp-this.target)/this.speed));}
   diagnosticState(){return {...super.diagnosticState(),transport:'edgertc/archive/1',source_fps:this.frameDuration?1e6/this.frameDuration:null,archive_presentation_fallbacks:this.archivePresentationFallbacks||0,archive_max_presentation_gap_ms:Math.round(this.archiveMaxPresentationGapMS||0),epoch:this.epoch,paused:this.paused,seconds:this.position,seek_ms:this.seekMS,preroll_frames:this.prerollFrames,indexed_file:this.request?.file,archive_buffer_frames:this.frameQueue.length,archive_video_pending:this.archiveVideoPending,archive_audio_packets:this.archiveAudio.length,archive_audio_limit_ms:600,pull_pending:this.pulling,archive_network_rtt_ms:Math.round(this.archiveRTT||0),archive_lookahead_ms:Math.round((this.archiveLookahead||.4)*1000),archive_rebuffers:this.archiveRebuffers||0,archive_batch_count:this.batchCount,archive_batch_bytes:this.batchBytes??null,archive_byte_budget:this.archiveByteBudget?524288:null,archive_pending_pulls:this.pendingPulls,archive_queued_batches:this.queuedBatches,archive_batch_transfer_ms:this.batchTransferMS??null,archive_batch_read_ms:this.batchReadMS??null,archive_batch_server_ms:this.batchServerMS??null};}
-  close(){clearTimeout(this.recoveryTimer);clearTimeout(this.yieldTimer);if(this.options.hass)edgeMediaCoordinator().release(this);clearTimeout(this.pullTimer);clearTimeout(this.seekTimer);this.archiveAudio=[];super.close();}
+  close(){this.setWaiting(false);clearTimeout(this.recoveryTimer);clearTimeout(this.yieldTimer);if(this.options.hass)edgeMediaCoordinator().release(this);clearTimeout(this.pullTimer);clearTimeout(this.seekTimer);this.archiveAudio=[];super.close();}
 }

@@ -85,3 +85,28 @@ class RecordingCatalogTests(unittest.TestCase):
             with self.service.worker:pass
             self.assertEqual(len(self.service.get(self.config,{})['cameras'][0]['files']),2)
 
+
+    def test_camera_scope_reuses_full_warm_snapshot_then_builds_only_that_camera(self):
+        config=self.p.normalize_config({'cameras':[camera('front','192.0.2.8','main'),camera('back','192.0.2.9','main')]})
+        calls=[]
+        def build(config,selection,indices=None):
+            calls.append(indices)
+            rows=[]
+            for index,cam in enumerate(config['cameras']):
+                if indices is not None and index not in indices:continue
+                row=deepcopy(self.data['cameras'][0]);row.update(index=index,id=cam['id'],key=cam['id']+'_'+str(index))
+                row['selected_day']=selection.get(str(index)) or '2026-07-28';rows.append(row)
+            return {'cameras':rows,'storage':{}}
+        service=self.Service(build)
+        service.get(config,{})
+        selected=service.get(config,{},indices=(1,))
+        self.assertEqual([row['id'] for row in selected['cameras']],['back']);self.assertEqual(calls,[None]);self.assertEqual(len(service.entries),1,'selected views duplicated the full file-list cache')
+        service.get(config,{'1':'2026-07-27'},indices=(1,));self.assertEqual(calls,[None,(1,)])
+        service.get(config,{},indices=(1,),force=True);self.assertEqual(calls,[None,(1,),(1,)])
+        self.p.RECORDING_INDEX=service
+        payload=self.p.recording_status_response(config,{'catalog':['1'],'camera_index':['1']})
+        self.assertEqual([(row['id'],row['index'],row['key']) for row in payload['cameras']],[('back',1,'back_1')])
+        self.assertEqual(len(calls),3,'HA lookup rebuilt unrelated camera history')
+
+    def test_invalid_scope_is_rejected(self):
+        with self.assertRaises(ValueError):self.p.recording_status_response(self.config,{'catalog':['1'],'camera_index':['../0']})
