@@ -15,6 +15,12 @@ export function mountEdgeAccount(root) {
   const logo=document.createElement('img');logo.src=new URL('api/brand/logo.png',base).href;logo.alt='Edge of Infinity';logo.width=140;logo.loading='lazy';view.querySelector('#account-title').before(logo);
   let state={},timer=null,generation=0,controller=null;
   const errorText=code=>({
+    account_session_expired:t('Sesja konta wygasła. Zamknij i otwórz ponownie okno konta.','The account session expired. Close and reopen the account dialog.'),
+    account_csrf_invalid:t('Odśwież okno konta i spróbuj ponownie.','Refresh the account dialog and try again.'),
+    account_ha_user_changed:t('Zmieniono użytkownika Home Assistanta. Otwórz okno konta ponownie.','The Home Assistant user changed. Reopen the account dialog.'),
+    account_ha_user_missing:t('Brakuje danych użytkownika z Supervisora. Otwórz panel przez aktualnego Home Assistanta i Supervisor.','Supervisor did not provide user information. Open the panel through up-to-date Home Assistant and Supervisor.'),
+    account_issuer_requires_https:t('Podaj prawidłowy adres HTTPS serwera kont.','Enter a valid HTTPS address for the account service.'),
+    account_client_id_invalid:t('Sprawdź publiczny identyfikator klienta serwera kont.','Check the account service public client ID.'),
     account_service_not_configured:t('Serwer kont nie jest jeszcze skonfigurowany.','The account service is not configured yet.'),
     account_email_not_verified:t('Zweryfikuj adres e-mail w serwisie kont, a potem spróbuj ponownie.','Verify your email at the account service, then try again.'),
     account_code_expired:t('Kod połączenia wygasł. Rozpocznij logowanie ponownie.','The connection code expired. Start sign-in again.'),

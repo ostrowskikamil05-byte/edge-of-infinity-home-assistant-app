@@ -5957,7 +5957,7 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </header>
           <section class="settings">
-            <section class="field-section" id="edge-account-settings"></section>
+            <section class="field-section" id="edge-account-settings"><h2>Edge account</h2><button id="settings-edge-account" type="button">Account and access method</button></section>
             <section class="field-section" id="language-settings"><h2>Language</h2><label>Interface language<select id="edge-language"></select></label><p class="field-help">Saved in this browser. Automatic uses Home Assistant, then your browser language.</p></section>
             <section class="field-section" id="edge-rtc-engine-info"><h2>EdgeRTC · Live / DVR</h2><p class="notice">Wspólne źródło kamery dla podglądu, nagrywarki i analizy. Archiwum jest odczytywane z serwera przez EdgeRTC DVR. / One camera source; indexed archive playback.</p></section>
             <div class="settings-jumps"><button type="button" data-settings-jump="recording-settings">Recording</button><button type="button" data-settings-jump="network-settings">Network</button><button type="button" data-settings-jump="storage-settings">Storage</button><button type="button" data-settings-jump="advanced-settings">Advanced</button></div>
@@ -9642,8 +9642,7 @@ INDEX_HTML = r"""<!doctype html>
         if(pageName!=='nvr')releaseInactiveRecordingPlayers(null,true);
         activePage = pageName;
         updateLivePlaybackVisibility();
-        if(pageName==='edge-settings'){void loadPhoneServices();void loadStorageUsage();
-          void loadEdgeAccounts();}
+        if(pageName==='edge-settings'){void loadPhoneServices();void loadStorageUsage();}
         else {clearTimeout(storageUsageTimer);storageUsageTimer=null;}
         document.querySelectorAll('[data-page]').forEach((page) => {
           page.hidden = page.dataset.page !== pageName;
@@ -9704,11 +9703,12 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById('setup-edge-account').addEventListener('click',()=>{
         showPage('edge-settings');void loadEdgeAccounts(true);
       });
+      document.getElementById('settings-edge-account').addEventListener('click',()=>void loadEdgeAccounts(true));
 
       async function loadEdgeAccounts(open=false){
         const root=document.getElementById('edge-account-settings');
         try{const module=await import(panelPath('api/account/client.js?v=__EDGE_PANEL_VERSION__'));if(open)module.openEdgeAccount(root);else module.mountEdgeAccount(root);}
-        catch(_){root.textContent='Konto Edge / Edge account: nie udało się wczytać modułu / module could not be loaded.';debugEvent('ui_account_module_error',{code:'account_module_unavailable'});}
+        catch(_){root.textContent='Nie udało się otworzyć konta. Odśwież panel. / Could not open account settings. Reload the panel.';debugEvent('ui_account_module_error',{code:'account_module_unavailable'});}
       }
 
       menuToggle.addEventListener('click', () => {
