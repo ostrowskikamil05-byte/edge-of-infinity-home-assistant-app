@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.10
+
+- Publish the completed 0.17.9 Supervisor-access and compact-configuration fixes
+  under a higher version so installations updated during preparation can update again.
+- Advance app, core, integration, dashboard cards and asset cache versions together.
+  Camera profiles, Live/DVR behavior, recording settings and the original logo stay unchanged.
+
 ## 0.17.9
 
 - Restore the s6 container environment with `with-contenv` before running the
