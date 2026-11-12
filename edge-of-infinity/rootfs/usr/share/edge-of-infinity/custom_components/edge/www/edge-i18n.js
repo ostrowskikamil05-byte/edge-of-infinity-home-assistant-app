@@ -1,8 +1,8 @@
 /* Offline interface translations. Classic-script and module compatible. */
 (()=>{
   'use strict';
-  if(globalThis.EdgeI18n?.version==='0.17.6')return;
-  const version='0.17.6',key='edge.interface.language';
+  if(globalThis.EdgeI18n?.version==='0.17.7')return;
+  const version='0.17.7',key='edge.interface.language';
   const languages=Object.freeze({en:'English',pl:'Polski',de:'Deutsch',fr:'Français',es:'Español',it:'Italiano',uk:'Українська'});
   // Columns: English, Polish, German, French, Spanish, Italian, Ukrainian.
   const rows=[

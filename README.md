@@ -12,6 +12,10 @@ tightens the dashboard bridge. Version **0.17.1** fixed dashboard cards that fai
 script failed" after an add-on update until Home Assistant Core was restarted;
 the cards and Settings → Repairs now say when that restart is needed.
 
+Version **0.17.7** fixes saved Supervisor options cleanup through its local Unix
+socket and adds the original Edge icon to the restart notice. MediaMTX and Janus
+artifacts are removed by name, with verified saves and bounded retries.
+
 Version **0.17.6** restores the Home Assistant recordings gallery before a slow
 network refresh, loads only the selected camera catalog and replaces repeated
 preparing-video banners with a delayed in-video spinner. Adjacent decoded-frame

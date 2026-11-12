@@ -23,7 +23,7 @@
   "issues": {
     "restart_required": {
       "title": "Reinicie Home Assistant para completar la actualización de Edge",
-      "description": "El complemento Edge of Infinity instaló la integración en la versión {installed}, pero Home Assistant sigue ejecutando la {running}. Hasta que se reinicie, las tarjetas de directo, grabaciones y eventos pueden no cargarse o no reproducirse.\n\nVaya a Ajustes → Sistema, elija Reiniciar Home Assistant y vuelva a cargar el panel."
+      "description": "<img src=\"/edge/edge-brand.png\" alt=\"Edge of Infinity\" width=\"64\" height=\"64\">\n\nEl complemento Edge of Infinity instaló la integración en la versión {installed}, pero Home Assistant sigue ejecutando la {running}. Hasta que se reinicie, las tarjetas de directo, grabaciones y eventos pueden no cargarse o no reproducirse.\n\nVaya a Ajustes → Sistema, elija Reiniciar Home Assistant y vuelva a cargar el panel."
     }
   }
 }

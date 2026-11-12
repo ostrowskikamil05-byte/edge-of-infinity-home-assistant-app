@@ -23,7 +23,7 @@
   "issues": {
     "restart_required": {
       "title": "Restart Home Assistant to finish the Edge update",
-      "description": "The Edge of Infinity add-on installed integration version {installed}, but Home Assistant is still running {running}. Until Home Assistant restarts, the Live, recordings and events dashboard cards may not load or play.\n\nGo to Settings → System, choose Restart Home Assistant, then reload the dashboard."
+      "description": "<img src=\"/edge/edge-brand.png\" alt=\"Edge of Infinity\" width=\"64\" height=\"64\">\n\nThe Edge of Infinity add-on installed integration version {installed}, but Home Assistant is still running {running}. Until Home Assistant restarts, the Live, recordings and events dashboard cards may not load or play.\n\nGo to Settings → System, choose Restart Home Assistant, then reload the dashboard."
     }
   }
 }

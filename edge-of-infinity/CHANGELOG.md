@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.17.7
+
+- Support the Supervisor's `SUPERVISOR_SOCKET` Unix transport for own-app
+  options/info, retaining legacy TCP token support. Fix cleanup reporting
+  `unavailable` when a modern Supervisor supplies a socket instead of a token;
+  use the same helper for settings saves and internal app-host discovery.
+- Replace and verify persisted retired options/network bindings through the
+  Supervisor API. Retry transient failures in a bounded background worker under
+  the settings-save lock, rereading current settings each time. Report safe
+  phase/status codes and show cleanup state in diagnostics.
+- Extend exact-file cleanup to saved app/runtime locations and generated Janus
+  configurations. Do not recursively delete directories or follow their links;
+  preserve unknown files, cameras, credentials, recording settings and all media.
+- Show the original, locally served Edge icon in the restart warning in every
+  supported language. Keep the warning until Core loads the installed version.
+- Add real tokenless Unix-socket tests for persisted cleanup, temporary failures,
+  concurrent settings changes, denied access and legacy token compatibility.
+
 ## 0.17.6
 
 - Restore the HA recordings gallery and JPEGs from a bounded, per-user local
