@@ -1,5 +1,20 @@
 # Edge of Infinity
 
+## Shared accounts — preparation for 0.18.0
+
+The account dialog is optional and does not authorize cameras or gate media.
+Open it from the Live setup toolbar or **Settings → Account and access method**.
+Users link a central verified identity, optionally keep their local session for
+up to 30 days, and choose Nabu Casa or local HTTPS guidance. Standalone NVR is
+not part of this step. The original Edge logo and media settings are preserved.
+
+The official domain, Workspace sender and identity server are not available yet.
+Until configured, the dialog clearly says so and keeps normal HA access usable.
+See [shared-account deployment](../deploy/accounts/README.md) for the separate
+server, email-code templates, authenticator enrollment and deployment checks.
+UI/transport fixtures are not evidence of real email delivery or production
+capacity. Enable the public provider only after those checks are completed.
+
 ## 0.17.9: Supervisor access and a smaller app configuration
 
 The runner restores its container environment with `with-contenv` before Python

@@ -1,0 +1,8 @@
+{
+  "title": "Edge of Infinity — verify your account",
+  "preHeader": "Verify the email address for your Edge of Infinity account",
+  "subject": "Confirm your Edge of Infinity account registration",
+  "greeting": "Hello {{.DisplayName}},",
+  "text": "An Edge of Infinity account registration was started with this email address. Your verification code is <strong>{{.Code}}</strong>.<br>Enter it on the verification page or use the button below. The code is single-use; the account service enforces its expiry.<br>If you did not start registration or change your email address, ignore this message. Reply to this message to contact support.",
+  "buttonText": "Verify email address"
+}

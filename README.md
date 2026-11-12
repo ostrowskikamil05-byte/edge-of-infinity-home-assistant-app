@@ -12,6 +12,11 @@ tightens the dashboard bridge. Version **0.17.1** fixed dashboard cards that fai
 script failed" after an add-on update until Home Assistant Core was restarted;
 the cards and Settings → Repairs now say when that restart is needed.
 
+Shared-account preparation for **0.18.0** is separate from the 0.17.9 fix.
+It adds optional central identity linking and Nabu Casa/local HTTPS setup without
+gating existing HA media access. The domain, Workspace sender and server still
+need deployment; see [account service setup](deploy/accounts/README.md).
+
 Version **0.17.9** restores Supervisor access through s6, verifies persisted
 retired-option cleanup and keeps camera/detection settings in the Edge panel.
 The app configuration defaults now contain only essential launcher/storage options.

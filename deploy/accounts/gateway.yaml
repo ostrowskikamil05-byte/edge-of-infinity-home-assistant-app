@@ -1,0 +1,29 @@
+# File-provider Go templates read only the public hostname, never credentials.
+http:
+  routers:
+    accounts:
+      rule: 'Host(`{{ env "EDGE_ACCOUNT_DOMAIN" }}`)'
+      entryPoints: [websecure]
+      service: identity
+      tls:
+        certResolver: edge
+    account-posts:
+      rule: 'Host(`{{ env "EDGE_ACCOUNT_DOMAIN" }}`) && Method(`POST`)'
+      priority: 100
+      entryPoints: [websecure]
+      service: identity
+      middlewares: [account-rate]
+      tls:
+        certResolver: edge
+  middlewares:
+    account-rate:
+      rateLimit:
+        average: 120
+        period: 1m
+        burst: 40
+  services:
+    identity:
+      loadBalancer:
+        passHostHeader: true
+        servers:
+          - url: h2c://identity:8080
