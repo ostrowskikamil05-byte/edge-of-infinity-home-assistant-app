@@ -11,10 +11,26 @@ from edge_supervisor import SupervisorError, request_self, supervisor_available,
 
 
 RETIRED_PREFIXES = ('mediamtx_', 'janus_')
+PANEL_OPTION_KEYS = {'cameras', 'sync_addon_options', 'camera_events_enabled',
+                     'local_detection_enabled'}
 NATIVE_PORTS = {'8088/tcp', '8556/tcp', '9997/tcp', '8443/tcp'}
 JANUS_FILES = ('janus.jcfg', 'janus.transport.http.jcfg',
                'janus.transport.websockets.jcfg', 'janus.plugin.recordplay.jcfg',
                'janus.plugin.streaming.jcfg')
+
+
+def panel_option(key):
+    return key in PANEL_OPTION_KEYS or key.startswith(('hikvision_1_', 'hikvision_2_', 'detection_'))
+
+
+def compact_options(options):
+    """The panel owns camera/analysis settings after their successful import."""
+    result = {key: value for key, value in native_options(options).items()
+              if not panel_option(key)}
+    # Supervisor requires the legacy object-list schema key; keep an empty
+    # importer, never a second copy of camera credentials.
+    result['cameras'] = []
+    return result
 
 
 def native_options(options):
@@ -111,7 +127,7 @@ def migrate_saved_files(home, addon, runtime):
     return report
 
 
-def sync_supervisor_options(options, token=None, request=None, output_path=None):
+def sync_supervisor_options(options, token=None, request=None, output_path=None, *, compact=False):
     if not token and not supervisor_available():
         return {'status': 'unavailable'}
     def call(path, payload=None):
@@ -137,7 +153,7 @@ def sync_supervisor_options(options, token=None, request=None, output_path=None)
         existing = current.get('options')
         if not isinstance(existing, dict):
             raise ValueError('supervisor_options_missing')
-        clean = native_options(existing)
+        clean = compact_options(existing) if compact else native_options(existing)
         if output_path is not None:
             # Supervisor strips retired keys from the mounted options file,
             # while info still has their persisted values. Recover custom
@@ -160,7 +176,15 @@ def sync_supervisor_options(options, token=None, request=None, output_path=None)
         verified = observed.get('options') == clean
         if isinstance(network, dict):
             verified = verified and observed.get('network') == payload['network']
-        return {'status': 'synced' if verified else 'verification_failed'}
+        result = {'status': 'synced' if verified else 'verification_failed'}
+        if compact:
+            result['scope'] = 'panel_owned_settings'
+        if not verified:
+            # Names only: values may include passwords or secret references.
+            result.update(phase='verify_options', code='supervisor_options_not_replaced',
+                          remaining_retired_keys=sorted(key for key in (observed.get('options') or {})
+                              if key == 'core_engine' or key.startswith(RETIRED_PREFIXES)))
+        return result
     except SupervisorError as error:
         result = {'status': 'retry_required', 'phase': phase, 'code': error.code}
         if error.http_status is not None:
@@ -204,8 +228,29 @@ def retry_supervisor_cleanup(home, stop, lock, log, *, sync=None, delays=(5, 15,
 def start_supervisor_cleanup(home, stop, lock, log):
     if not supervisor_available():
         return None
+    # Compact only after the runner has imported legacy cameras and the panel
+    # has successfully loaded the authoritative configuration. A failed boot
+    # must never delete the last saved camera/password configuration.
+    config_path = Path(home) / 'edge.json'
+    try:
+        config = json.loads(config_path.read_text())
+        ready = isinstance(config, dict) and isinstance(config.get('cameras'), list)
+    except (OSError, ValueError):
+        ready = False
+    sync = None
+    if ready:
+        path = Path(home) / 'native-migration.json'
+        try:
+            report = json.loads(path.read_text())
+            if not isinstance(report, dict):
+                report = {}
+        except (OSError, ValueError):
+            report = {}
+        report['supervisor'] = {'status': 'pending', 'scope': 'panel_owned_settings'}
+        atomic_json(path, report)
+        sync = lambda options: sync_supervisor_options(options, compact=True)
     worker = threading.Thread(target=retry_supervisor_cleanup,
-                              args=(home, stop, lock, log), daemon=True,
+                              args=(home, stop, lock, log), kwargs={'sync': sync}, daemon=True,
                               name='edge-supervisor-cleanup')
     worker.start()
     return worker

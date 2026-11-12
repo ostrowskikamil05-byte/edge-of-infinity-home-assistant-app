@@ -4,6 +4,7 @@ set -euo pipefail
 edge_smoke_image="${1:-edge-native-smoke}"
 edge_smoke_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/edge-native-smoke.XXXXXX")"
 edge_smoke_container="edge-native-smoke-${RANDOM}"
+edge_smoke_supervisor_pid=''
 mkdir -p "${edge_smoke_dir}/home" "${edge_smoke_dir}/addon" "${edge_smoke_dir}/runtime" "${edge_smoke_dir}/media"
 # A version-label change must reuse the same filesystem/dependency layers.
 if ! docker build --build-arg BUILD_VERSION=layer-cache-probe --tag "${edge_smoke_image}-layer-probe" edge-of-infinity > "${edge_smoke_dir}/layer-probe.log" 2>&1; then
@@ -28,9 +29,23 @@ printf '%s\n' 'retired engine log' > "${edge_smoke_dir}/home/janus.log"
 cleanup() {
   docker logs "${edge_smoke_container}" 2>&1 || true
   docker rm -f "${edge_smoke_container}" >/dev/null 2>&1 || true
+  if [[ -n "${edge_smoke_supervisor_pid}" ]]; then
+    kill "${edge_smoke_supervisor_pid}" 2>/dev/null || true
+    wait "${edge_smoke_supervisor_pid}" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
+python3 tests/supervisor_socket_fixture.py "${edge_smoke_dir}/supervisor" > "${edge_smoke_dir}/supervisor.log" 2>&1 &
+edge_smoke_supervisor_pid=$!
+for _ in $(seq 1 20); do
+  if [[ -f "${edge_smoke_dir}/supervisor/ready" ]]; then break; fi
+  sleep .1
+done
+test -f "${edge_smoke_dir}/supervisor/ready"
 docker run --detach --name "${edge_smoke_container}" \
+  --env SUPERVISOR_SOCKET=/run/edge-fixture-supervisor/api.sock \
+  --env SUPERVISOR_TOKEN=fixture-only-supervisor-token \
+  --volume "${edge_smoke_dir}/supervisor:/run/edge-fixture-supervisor" \
   --volume "${edge_smoke_dir}/options.json:/data/options.json:ro" \
   --volume "${edge_smoke_dir}/home:/homeassistant/edge" \
   --volume "${edge_smoke_dir}/addon:/config" \
@@ -51,7 +66,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import time
 assert shutil.which('edge-rtc') and shutil.which('ffmpeg')
+assert os.environ.get('SUPERVISOR_SOCKET')=='/run/edge-fixture-supervisor/api.sock', 's6 did not restore container environment'
+assert os.environ.get('SUPERVISOR_TOKEN')=='fixture-only-supervisor-token'
 assert 'GOMAXPROCS' not in os.environ and 'GOMEMLIMIT' not in os.environ, 'compiler limits leaked into media runtime'
 assert not shutil.which('janus') and not shutil.which('mediamtx')
 for name in ('icon.png','logo.png','logo-light.png'):
@@ -69,5 +87,15 @@ assert Path('/media/edge-of-infinity/recordings/keep.mp4').read_text()=='origina
 assert not Path('/homeassistant/edge/janus.log').exists()
 runtime=json.loads(Path('/tmp/edge-runtime/edge-rtc.json').read_text())
 assert runtime['sources']==[] and runtime['http']==':10997' and runtime['rtsp']==':9556'
-print('PASS container: dependency layers reused across version labels, compiler limits stay build-only, native boot/API, custom-port migration and recording preservation')
+for _ in range(15):
+    report=json.loads(Path('/homeassistant/edge/native-migration.json').read_text())
+    if report.get('supervisor')=={'status':'synced','scope':'panel_owned_settings'}:break
+    time.sleep(1)
+assert report['supervisor']=={'status':'synced','scope':'panel_owned_settings'}, report
+assert report['supervisor_transport']=='unix'
+persisted=json.loads(Path('/run/edge-fixture-supervisor/state.json').read_text())
+assert persisted['writes']>=2 and persisted['options']['cameras']==[]
+assert not any(k.startswith(('mediamtx_', 'janus_', 'hikvision_', 'detection_')) or k=='core_engine' for k in persisted['options'])
+assert '8889/tcp' not in persisted['network']
+print('PASS container: real s6 restores Supervisor access, verified persisted cleanup, dependency layers reused, compiler limits stay build-only, native boot/API, custom ports and recordings preserved')
 PY

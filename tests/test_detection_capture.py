@@ -86,10 +86,12 @@ class DetectionCaptureTests(unittest.TestCase):
                 self.assertIsNot(reader.process,original);self.assertIsNotNone(original.poll())
             finally:reader.close()
 
-    def test_decoder_setting_survives_supervisor_projection(self):
-        from test_edge_panel_config import load_panel_module
-        panel=load_panel_module();config=panel.normalize_config({'detection':{'decoder':'keyframes'}})
-        self.assertEqual(panel.addon_options_from_config(config,{})['detection_decoder'],'keyframes')
+    def test_decoder_setting_survives_authoritative_restart(self):
+        from test_edge_panel_config import load_panel_module, camera
+        panel=load_panel_module();config=panel.normalize_config({'cameras':[camera('front','192.0.2.8','main')],'detection':{'decoder':'keyframes'}})
+        panel.persist_config_payload(config)
+        self.assertEqual(panel.load_config()['detection']['decoder'],'keyframes')
+        self.assertNotIn('detection_decoder',panel.addon_options_from_config(config,{}))
         self.assertEqual(self.d.settings({'decoder':'untrusted'})['decoder'],'auto')
 
     def test_superseded_camera_cannot_start_a_late_decoder_after_disabling_detection(self):

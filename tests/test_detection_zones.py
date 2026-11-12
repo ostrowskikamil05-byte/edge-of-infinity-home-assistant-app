@@ -51,14 +51,15 @@ class DetectionZoneTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             m.AnalysisFrame(b'incomplete',416,234)
 
-    def test_zone_settings_survive_disk_and_supervisor_roundtrip_and_invalid_save_preserves_file(self):
+    def test_zone_settings_survive_authoritative_restart_and_invalid_save_preserves_file(self):
         p = load_panel_module()
         config = p.normalize_config({'cameras':[{**camera('front','192.0.2.10','sub'),**configured_zone()}]})
         saved = p.persist_config_payload(config)[-1]
         self.assertTrue(saved['cameras'][0]['detection_zone_enabled'])
         self.assertEqual(saved['cameras'][0]['detection_zone_left'],.5)
         options = p.addon_options_from_config(saved,{})
-        restarted = p.normalize_config({'cameras':options['cameras']})
+        self.assertEqual(options['cameras'], [])
+        restarted = p.load_config()
         for field in module().ZONE_FIELDS:
             self.assertEqual(restarted['cameras'][0][field],saved['cameras'][0][field])
         before = p.CONFIG_PATH.read_bytes()

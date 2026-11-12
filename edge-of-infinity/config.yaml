@@ -1,5 +1,5 @@
 name: Edge of Infinity
-version: "0.17.8"
+version: "0.17.9"
 slug: edge_of_infinity
 description: Local live and NVR core for Hikvision, Uniview, Reolink and ONVIF/RTSP cameras
 url: https://github.com/ostrowskikamil05-byte/edge-of-infinity-home-assistant-app
@@ -49,61 +49,10 @@ options:
   database_path: /homeassistant/edge/edge.db
   retention_days: 14
   install_custom_component: true
-  sync_addon_options: false
   edge_rtc_rtsp_port: 8556
   edge_rtc_api_port: 9997
   cameras: []
-  camera_events_enabled: false
-  local_detection_enabled: false
-  detection_fps: 1
-  detection_decoder: auto
-  detection_confidence: 0.45
-  detection_animal_confidence: 0.35
-  detection_hold_seconds: 10
-  detection_person_enabled: true
-  detection_animal_enabled: true
-  detection_vehicle_enabled: true
-  detection_alert_media_mb: 256
-  detection_pre_seconds: 5
-  detection_post_seconds: 15
-  detection_notifications_enabled: false
-  detection_notify_service: ""
-  detection_notify_cooldown: 30
-  detection_notify_path: ""
-  hikvision_1_enabled: false
-  hikvision_1_name: Hikvision 1
-  hikvision_1_host: ""
-  hikvision_1_username: admin
-  hikvision_1_password: ""
-  hikvision_1_camera_number: "1"
-  hikvision_1_access_protocol: rtsp
-  hikvision_1_rtsp_transport: tcp
-  hikvision_1_rtsp_main: ""
-  hikvision_1_rtsp_sub: ""
-  hikvision_1_onvif_url: ""
-  hikvision_1_isapi_base_url: ""
-  hikvision_1_record: true
-  hikvision_1_low_latency: true
-  hikvision_1_snapshot_stream: sub
-  hikvision_1_live_stream: sub
-  hikvision_1_record_stream: main
-  hikvision_2_enabled: false
-  hikvision_2_name: Hikvision 2
-  hikvision_2_host: ""
-  hikvision_2_username: admin
-  hikvision_2_password: ""
-  hikvision_2_camera_number: "2"
-  hikvision_2_access_protocol: rtsp
-  hikvision_2_rtsp_transport: tcp
-  hikvision_2_rtsp_main: ""
-  hikvision_2_rtsp_sub: ""
-  hikvision_2_onvif_url: ""
-  hikvision_2_isapi_base_url: ""
-  hikvision_2_record: true
-  hikvision_2_low_latency: true
-  hikvision_2_snapshot_stream: sub
-  hikvision_2_live_stream: sub
-  hikvision_2_record_stream: main
+# Optional legacy fields accept a one-time import; configure cameras/detection in Edge.
 schema:
   cameras:
     - id: str
@@ -142,7 +91,7 @@ schema:
   database_path: str
   retention_days: int(1,365)
   install_custom_component: bool
-  sync_addon_options: bool
+  sync_addon_options: bool?
   edge_rtc_rtsp_port: port
   edge_rtc_api_port: port
   camera_events_enabled: bool?
@@ -162,40 +111,40 @@ schema:
   detection_notify_service: str?
   detection_notify_cooldown: int(5,3600)?
   detection_notify_path: str?
-  hikvision_1_enabled: bool
+  hikvision_1_enabled: bool?
   hikvision_1_name: str?
   hikvision_1_host: str?
   hikvision_1_username: str?
   hikvision_1_password: password?
   hikvision_1_camera_number: str?
-  hikvision_1_access_protocol: list(rtsp|isapi|onvif|unicast|multicast)
-  hikvision_1_rtsp_transport: list(tcp|udp|auto)
+  hikvision_1_access_protocol: list(rtsp|isapi|onvif|unicast|multicast)?
+  hikvision_1_rtsp_transport: list(tcp|udp|auto)?
   hikvision_1_rtsp_main: str?
   hikvision_1_rtsp_sub: str?
   hikvision_1_onvif_url: str?
   hikvision_1_isapi_base_url: str?
-  hikvision_1_record: bool
-  hikvision_1_low_latency: bool
-  hikvision_1_snapshot_stream: list(sub|main)
-  hikvision_1_live_stream: list(sub|main)
-  hikvision_1_record_stream: list(main|sub)
-  hikvision_2_enabled: bool
+  hikvision_1_record: bool?
+  hikvision_1_low_latency: bool?
+  hikvision_1_snapshot_stream: list(sub|main)?
+  hikvision_1_live_stream: list(sub|main)?
+  hikvision_1_record_stream: list(main|sub)?
+  hikvision_2_enabled: bool?
   hikvision_2_name: str?
   hikvision_2_host: str?
   hikvision_2_username: str?
   hikvision_2_password: password?
   hikvision_2_camera_number: str?
-  hikvision_2_access_protocol: list(rtsp|isapi|onvif|unicast|multicast)
-  hikvision_2_rtsp_transport: list(tcp|udp|auto)
+  hikvision_2_access_protocol: list(rtsp|isapi|onvif|unicast|multicast)?
+  hikvision_2_rtsp_transport: list(tcp|udp|auto)?
   hikvision_2_rtsp_main: str?
   hikvision_2_rtsp_sub: str?
   hikvision_2_onvif_url: str?
   hikvision_2_isapi_base_url: str?
-  hikvision_2_record: bool
-  hikvision_2_low_latency: bool
-  hikvision_2_snapshot_stream: list(sub|main)
-  hikvision_2_live_stream: list(sub|main)
-  hikvision_2_record_stream: list(main|sub)
+  hikvision_2_record: bool?
+  hikvision_2_low_latency: bool?
+  hikvision_2_snapshot_stream: list(sub|main)?
+  hikvision_2_live_stream: list(sub|main)?
+  hikvision_2_record_stream: list(main|sub)?
 backup: hot
 backup_exclude:
   - /media/edge-of-infinity/recordings
