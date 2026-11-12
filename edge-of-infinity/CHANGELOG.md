@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.17.8
+
+- Check browser support first, then prepare HA Live signing and diagnostics in
+  parallel; overlap DVR signing and diagnostic loading. Keep generation/closed guards,
+  bounded startup timeout, exact signed paths and diagnostic-failure isolation.
+  Log preparation/signing durations; Live first-frame timing includes preparation.
+- Reuse at most eight positive browser video-capability results, keyed by the
+  exact codec/configuration bytes and acceleration/latency options. Share pending
+  queries, retry negative/error answers and clear when the decoder constructor
+  changes or a decoder fails. Each view/seek still allocates and configures its own decoder normally.
+  Oversized configuration keys (over 32 KiB) bypass the cache.
+  No video frames, signed addresses or authentication state are cached here.
+- Keep original codecs, quality, resolution/FPS, AAC, source count, seek protocol,
+  startup/jitter buffers and dashboard/player settings unchanged.
+- Limit only the compiler stage to one Go build worker and GOMAXPROCS=1 with a
+  384 MiB soft Go memory limit, leaving more resources for Core/recorders while
+  updating small hosts. The running EdgeRTC process retains its runtime defaults.
+- Move stable package/model installation before versioned binaries/files/labels
+  so normal updates can reuse the dependency layer. Verify filesystem layers are
+  identical across a version-label-only rebuild and compiler limits do not leak
+  into the running app. Keep existing packages, model checksum and engine paths.
+- Add host-log guidance for BuildKit sessions, update-time memory pressure and
+  normal container lifecycle entries. Keep host errors visible and distinguish
+  an app resource improvement from a Docker/BuildKit daemon fix.
+- Add Chromium/WebKit startup concurrency/cancellation/auth-failure checks, exact
+  capability-cache tests and real same-socket archive picture/seek measurements.
+
 ## 0.17.7
 
 - Support the Supervisor's `SUPERVISOR_SOCKET` Unix transport for own-app

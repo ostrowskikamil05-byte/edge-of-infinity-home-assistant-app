@@ -12,6 +12,11 @@ tightens the dashboard bridge. Version **0.17.1** fixed dashboard cards that fai
 script failed" after an add-on update until Home Assistant Core was restarted;
 the cards and Settings → Repairs now say when that restart is needed.
 
+Version **0.17.8** prepares HA Live/DVR startup in parallel and reuses up to eight
+positive, exact-profile browser codec checks. Camera quality, audio, pacing and
+recording files are preserved. Build-only compiler limits reduce competition
+with Core/recorders on small hosts; see the host log guidance in the docs.
+
 Version **0.17.7** fixes saved Supervisor options cleanup through its local Unix
 socket and adds the original Edge icon to the restart notice. MediaMTX and Janus
 artifacts are removed by name, with verified saves and bounded retries.

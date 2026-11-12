@@ -1,5 +1,5 @@
 /* EdgeRTC archive: persistent socket, indexed seeks, bounded pull-based delivery. */
-import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport} from './edge-rtc-client.js?v=0.17.7';
+import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport,edgeVideoConfigSupport,edgeClearVideoSupport} from './edge-rtc-client.js?v=0.17.8';
 
 export {edgeMediaProblem};
 
@@ -8,17 +8,21 @@ export class EdgeDVRClient extends EdgeRTCClient {
   async start(){try{
     const support=edgeRTCPlaybackSupport(this.options.hass?.locale?.language||this.options.language||navigator.language);
     if(!support.supported){const error=Object.assign(new Error(support.message),{code:support.code});this.close();throw error;}
+    const prepareStarted=performance.now();let signMS=0,diagnosticsMS=0;
+    const reporterModule=this.options.hass&&!this.options.diagnostics?import('./edge-device-diagnostics.js?v=0.17.8').catch(()=>null).then(module=>{diagnosticsMS=performance.now()-prepareStarted;return module;}):null;
     if(!this.options.url&&this.options.hass&&this.options.entity){
       const path='/api/edge/dashboard/archive/'+encodeURIComponent(this.options.entity)+(this.options.clip?'?clip='+encodeURIComponent(this.options.clip):'');
       const signed=await this.options.hass.callWS({type:'auth/sign_path',path,expires:3600});
+      signMS=performance.now()-prepareStarted;
       if(this.closed)return;
       this.options.url=this.options.hass.hassUrl?this.options.hass.hassUrl(signed.path):signed.path;
     }
-    if(this.options.hass&&!this.options.diagnostics){
-      try{const {getDeviceReporter}=await import('./edge-device-diagnostics.js?v=0.17.7');const hass=this.options.hass,entity=this.options.entity;
+    if(reporterModule){
+      try{const module=await reporterModule;if(this.closed)return;if(!module)throw Error('diagnostics_module_unavailable');const {getDeviceReporter}=module,hass=this.options.hass,entity=this.options.entity;
         this.options.diagnostics=getDeviceReporter({context:{surface:'home_assistant_dvr_card'},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);try{return(await hass.fetchWithAuth('/api/edge/client-diagnostics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,entity_id:entity}),signal:controller.signal})).ok;}finally{clearTimeout(timer);}}});
       }catch(_){}
     }
+    this.options.diagnostics?.note('dvr_startup_prepared',{source:this.options.entity,elapsed_ms:performance.now()-prepareStarted,signing_ms:signMS,diagnostics_ms:diagnosticsMS,parallel:true});
     if(!this.closed)await super.start();
     }catch(error){this.close();throw error;}
   }
@@ -71,7 +75,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
     const problem={...detail,code,stage:this.connectionStage,codec:this._codec,epoch:this.epoch};
     super.fail(edgeMediaProblem(message,problem,this.language||this.options.hass?.locale?.language),retryable&&code!=='integration_restart_required',problem);
   }
-  nativeFallback(code,message){this.diagnostics?.note('dvr_playback_unavailable',{code});this.fail(message,false,{code});}
+  nativeFallback(code,message){if(code==='decoder_rejected_stream'&&!this.closed)edgeClearVideoSupport();this.diagnostics?.note('dvr_playback_unavailable',{code});this.fail(message,false,{code});}
   yieldMedia(){this.pause();this.epoch=(this.epoch+1)>>>0||1;clearTimeout(this.seekTimer);this.releaseArchiveDecoder(0);}
   setWaiting(waiting){
     if(!waiting){clearTimeout(this.waitTimer);this.waitTimer=null;if(this.waiting){this.waiting=false;this.options.onWaiting?.(false);}return;}
@@ -153,13 +157,13 @@ export class EdgeDVRClient extends EdgeRTCClient {
   }
   async configureArchive(message,epoch){
     const config={codec:message.video.codec,optimizeForLatency:true,hardwareAcceleration:'prefer-hardware'};if(message.video.config)config.description=Uint8Array.from(atob(message.video.config),c=>c.charCodeAt(0));let supported;
-    try{supported=await VideoDecoder.isConfigSupported(config);}catch(_){supported={supported:false};}
-    if(!supported.supported){config.hardwareAcceleration='no-preference';supported=await VideoDecoder.isConfigSupported(config);}
+    try{supported=await edgeVideoConfigSupport(config);}catch(_){supported={supported:false};}
+    if(!supported.supported){config.hardwareAcceleration='no-preference';supported=await edgeVideoConfigSupport(config);}
     if(this.closed||epoch!==this.epoch)return;
     if(!supported.supported){this.nativeFallback('video_decoder_unavailable','EdgeRTC DVR: przeglądarka nie obsługuje profilu tego nagrania. Pobierz plik lub użyj przeglądarki z obsługą tego kodeka.');return;}
     this.connectionStage='decoding';this.target=message.target_us;this.duration=message.duration_us/1e6;this.frameDuration=1e6/Math.max(1,message.fps||25);this.audioInfo=message.audio;this._codec=message.video.codec;this.videoCodecName=message.video.codec_name;this.waitKey=true;
     try{this.video=new VideoDecoder({output:frame=>{if(this.closed||epoch!==this.epoch){frame.close();return;}this.archiveVideoPending=Math.max(0,this.archiveVideoPending-1);this.render(frame);},error:error=>{if(epoch===this.epoch)this.nativeFallback('decoder_rejected_stream','EdgeRTC DVR decoder: '+error.message+'. Pobierz plik, aby otworzyć go w innym odtwarzaczu.');}});this.video.configure(config);}catch(error){this.nativeFallback('decoder_rejected_stream','EdgeRTC DVR decoder: '+error.message);return;}this.connectionState='connected';
-    this.diagnostics?.note('dvr_index_ready',{source:this.diagnosticKey,epoch,codec:this._codec,audio_codec:message.audio?.codec,seconds:message.target_us/1e6,keyframe_seconds:message.keyframe_us/1e6,keyframe_interval_seconds:message.keyframe_interval_seconds,index_hit:message.index_hit,index_ms:message.index_ms});
+    this.diagnostics?.note('dvr_index_ready',{source:this.diagnosticKey,epoch,codec:this._codec,capability_cache_hit:supported.cacheHit,audio_codec:message.audio?.codec,seconds:message.target_us/1e6,keyframe_seconds:message.keyframe_us/1e6,keyframe_interval_seconds:message.keyframe_interval_seconds,index_hit:message.index_hit,index_ms:message.index_ms});
     this.options.onMetadata?.(message);if(await this.checkArchiveAudio())this.pull();
   }
   pull(){

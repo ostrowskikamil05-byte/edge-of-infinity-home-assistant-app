@@ -1,6 +1,6 @@
 /* Edge of Infinity Live Card. Signaling uses Home Assistant's authenticated camera API. */
-const edgeCoordinatorReady=import('/edge/edge-rtc-client.js?v=0.17.7').catch(()=>null);
-const EDGE_LIVE_VERSION = "0.17.7";
+const edgeCoordinatorReady=import('/edge/edge-rtc-client.js?v=0.17.8').catch(()=>null);
+const EDGE_LIVE_VERSION = "0.17.8";
 const edgeLiveI18nReady=import('/edge/edge-i18n.js?v='+EDGE_LIVE_VERSION).catch(()=>null);
 const EDGE_LIVE_TEXT = {
   en: {play:"Start live",pause:"Stop live",sound:"Sound",mute:"Mute",mic:"Microphone",micStop:"Stop microphone",settings:"Settings",full:"Fullscreen",reconnect:"Reconnect",pip:"Picture in picture",shot:"Snapshot",fit:"Image fit",contain:"Whole image",cover:"Fill card",echo:"Echo cancellation",retry:"Reconnect automatically",ready:"Ready",connecting:"Connecting via WebRTC…",connected:"Live · WebRTC",stopped:"Live view stopped",select:"Select a camera in the card editor.",missing:"Camera entity is unavailable.",required:"WebRTC is unavailable. Enable a Home Assistant WebRTC provider such as go2rtc.",https:"Microphone requires HTTPS or localhost.",permission:"Microphone permission was denied or no microphone is available.",micWait:"Waiting for microphone permission…",micOn:"Microphone on · audio sent through WebRTC",micNo:"This connection did not accept return audio. Check camera RTSP/ONVIF backchannel support.",micHelp:"Press to talk; press again to release the microphone. The camera and streaming engine must support return audio.",tap:"Press Start live to allow playback.",failed:"Connection failed. Press Reconnect to try again.",video:"Live camera video",volume:"Volume",title:"Title",entity:"Camera entity",autoplay:"Start live automatically",muted:"Start muted",microphone:"Show microphone control",header:"Show header",enabled:"Enabled",disabled:"Disabled",quality:"Stream quality",nvr:"NVR · recording profile",main:"Main stream",sub:"Substream · less data",views:"View",all:"All cameras",columns:"Columns",auto:"Auto",cameras:"Cameras",count:"Number of cameras",qualityMissing:"This camera has no registered NVR entity for that profile. Update/restart Edge and Home Assistant Core.",nvrHelp:"NVR shares the recording profile without reducing its resolution. Main and sub profiles can use separate camera connections. Talking temporarily connects directly to the camera."},
@@ -158,9 +158,17 @@ class EdgeLivePlayer extends HTMLElement {
     try{
       if(this._state()?.attributes?.edge_stream_source==='edge_rtc'){
         this._message(globalThis.EdgeI18n?.text('EdgeRTC · connecting…',this._hass,this._config?.language)||'EdgeRTC · connecting…');
-        const {EdgeRTCClient}=await import('/edge/edge-rtc-client.js?v='+EDGE_LIVE_VERSION);if(gen!==this._generation)return;
-        let diagnostics=null;const diagnosticEntity=this._activeEntity,diagnosticHass=this._hass;
-        try{const {getDeviceReporter}=await import('/edge/edge-device-diagnostics.js?v='+EDGE_LIVE_VERSION);
+        const prepareStarted=performance.now(),diagnosticEntity=this._activeEntity,diagnosticHass=this._hass;
+        const {EdgeRTCClient,edgeRTCPlaybackSupport}=await import('/edge/edge-rtc-client.js?v='+EDGE_LIVE_VERSION);if(gen!==this._generation)return;
+        const support=edgeRTCPlaybackSupport(diagnosticHass.locale?.language||diagnosticHass.language||navigator.language);
+        if(!support.supported)throw Object.assign(new Error(support.message),{code:support.code,retryable:false});
+        this._connectTimer=setTimeout(()=>this._fail(this._t('failed'),gen),15000);
+        const signing=diagnosticHass.callWS({type:'auth/sign_path',path:`/api/edge/rtc/${diagnosticEntity}?microphone=${micStream?1:0}`}).then(signed=>({url:diagnosticHass.hassUrl?diagnosticHass.hassUrl(signed.path):new URL(signed.path,location.href).href,ms:performance.now()-prepareStarted}));
+        const [reporterModule,signed]=await Promise.all([
+          import('/edge/edge-device-diagnostics.js?v='+EDGE_LIVE_VERSION).catch(()=>null),signing]);
+        if(gen!==this._generation)return;clearTimeout(this._connectTimer);this._connectTimer=null;
+        let diagnostics=null;
+        try{if(!reporterModule)throw Error('diagnostics_module_unavailable');const {getDeviceReporter}=reporterModule;
           diagnostics=getDeviceReporter({context:{surface:'home_assistant_card'},send:async payload=>{
             const data={...payload,entity_id:diagnosticEntity},controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);
             try{if(diagnosticHass.fetchWithAuth)return(await diagnosticHass.fetchWithAuth('/api/edge/client-diagnostics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),signal:controller.signal})).ok;
@@ -168,9 +176,11 @@ class EdgeLivePlayer extends HTMLElement {
             }finally{clearTimeout(timer);}
           }});
         }catch(_){}if(gen!==this._generation)return;
+        diagnostics?.note('rtc_ha_sign_complete',{source:diagnosticEntity,elapsed_ms:signed.ms,parallel_prepare:true});
+        diagnostics?.note('rtc_startup_prepared',{source:diagnosticEntity,elapsed_ms:performance.now()-prepareStarted,signing_ms:signed.ms,parallel:true});
         if(!this._edgeCanvas){this._edgeCanvas=document.createElement('canvas');this._edgeCanvas.setAttribute('aria-label',this._t('video'));this._frame.before(this._edgeCanvas);}
         this._video.hidden=true;this._edgeCanvas.hidden=false;
-        const client=new EdgeRTCClient({hass:this._hass,entity:this._activeEntity,diagnostics,canvas:this._edgeCanvas,microphone:micStream,onError:(message,detail)=>this._fail(message,gen,detail?.retryable!==false),onReady:()=>{if(gen===this._generation)this._message('EdgeRTC · live');},onFrame:()=>{if(gen===this._generation){this._frame.hidden=true;if(this._edgeRTC?.frames===1)this._update();const now=performance.now();if(!this._lastFrameUI||now-this._lastFrameUI>=1000){this._lastFrameUI=now;this._updateBadge();}}},onMicrophone:active=>{if(gen===this._generation){this._micNegotiated=active;this._message('EdgeRTC · '+this._t(active?'mic':'ready'));this._update();}}});
+        const client=new EdgeRTCClient({hass:this._hass,entity:this._activeEntity,url:signed.url,startedAt:prepareStarted,diagnostics,canvas:this._edgeCanvas,microphone:micStream,onError:(message,detail)=>this._fail(message,gen,detail?.retryable!==false),onReady:()=>{if(gen===this._generation)this._message('EdgeRTC · live');},onFrame:()=>{if(gen===this._generation){this._frame.hidden=true;if(this._edgeRTC?.frames===1)this._update();const now=performance.now();if(!this._lastFrameUI||now-this._lastFrameUI>=1000){this._lastFrameUI=now;this._updateBadge();}}},onMicrophone:active=>{if(gen===this._generation){this._micNegotiated=active;this._message('EdgeRTC · '+this._t(active?'mic':'ready'));this._update();}}});
         this._edgeRTC=client;this._pc=client;this._applyAudio();await client.start();if(gen!==this._generation)return;this._starting=false;this._update();return;
       }
       if(typeof RTCPeerConnection==='undefined')throw new Error(this._t('required'));
