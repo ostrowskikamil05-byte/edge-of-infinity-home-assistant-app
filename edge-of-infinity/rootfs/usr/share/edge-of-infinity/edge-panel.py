@@ -38,7 +38,7 @@ from edge_recording_compat import CompatibleRecordings
 from edge_metrics import CpuSampler, cpu_load_severity, hardware_inventory
 from edge_camera_keyframes import CameraKeyframes
 from edge_camera_gop import set_onvif_gop
-from edge_native_migration import native_options, start_supervisor_cleanup
+from edge_native_migration import compact_options, start_supervisor_cleanup
 from edge_supervisor import SupervisorError, request_self, supervisor_available
 from edge_local_network import local_settings, save_local_settings, network_status, normalize_hosts, save_proxy_helper
 sys.path.insert(0,str(Path(__file__).parent/'custom_components/edge'))
@@ -103,8 +103,9 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.8"
-APP_RELEASE_FEATURES=['Parallel HA signing/modules, bounded positive codec-capability cache and complete startup timings',
+APP_VERSION = "0.17.9"
+APP_RELEASE_FEATURES=['Restore s6 container environment before Supervisor migration; compact launcher settings after safe camera import',
+                      'Parallel HA signing/modules, bounded positive codec-capability cache and complete startup timings',
                       'Build-only compiler concurrency/memory limits for small HA hosts; host BuildKit log guidance',
                       'Supervisor Unix-socket support, verified retired-option cleanup and bounded background retries',
                       'Exact retired engine artifacts removed safely; original Edge icon in restart notice',
@@ -132,7 +133,7 @@ APP_RELEASE_FEATURES=['Parallel HA signing/modules, bounded positive codec-capab
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "parallel-start-v178"
+UI_BUILD = "supervisor-env-v179"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -1397,12 +1398,13 @@ def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording
     sync = migration.get('supervisor') if isinstance(migration, dict) else None
     if isinstance(sync, dict):
         status = sync.get('status')
-        if status in ('synced', 'unavailable', 'retry_required', 'verification_failed'):
+        if status in ('synced', 'pending', 'unavailable', 'retry_required', 'verification_failed'):
             diagnostics.append(diagnostic_item(
                 'ok' if status == 'synced' else 'warning', 'Supervisor options cleanup',
                 'Retired engine options were removed and the Supervisor save was verified.' if status == 'synced'
                 else 'Retired app options still need cleanup in Supervisor. Check native-migration.json for the connection status.',
-                {'status': status, 'transport': migration.get('supervisor_transport', 'unknown')}))
+                {**{key: sync[key] for key in ('status', 'scope', 'phase', 'code', 'http_status', 'remaining_retired_keys') if key in sync},
+                 'transport': migration.get('supervisor_transport', 'unknown')}))
     ffmpeg_path = hardware.get("ffmpeg_path") or ""
     ffprobe_path = hardware.get("ffprobe_path") or ""
     diagnostics.append(
@@ -2062,21 +2064,8 @@ def supervisor_self_request(path: str, payload: dict | None = None) -> dict:
 
 
 def addon_options_from_config(config: dict, existing: dict) -> dict:
-    options = native_options(existing)
-    cameras = [{key: camera.get(key) for key in ("id", "name", "vendor", "host", "username", "password", "rtsp_main", "rtsp_sub", "camera_number", "access_protocol", "rtsp_transport", "onvif_url", "isapi_base_url", "manufacturer", "model", "firmware", "enabled", "events_enabled", "local_detection_enabled", "record", "low_latency", "snapshot_stream", "live_stream", "tile_stream", "record_stream")} for camera in config.get("cameras", [])]
-    for projected, camera in zip(cameras, config.get("cameras", [])):
-        zone = zone_settings(camera)
-        projected.update(dict(zip(ZONE_FIELDS, [zone['enabled'], *zone['bounds']])))
-    options["cameras"] = cameras
-    detect = detection_settings(config.get("detection"))
-    for option, field in (("camera_events_enabled", "camera_events_enabled"), ("local_detection_enabled", "local_enabled"), ("detection_fps", "max_fps"), ("detection_decoder", "decoder"), ("detection_confidence", "confidence"), ("detection_hold_seconds", "hold_seconds"), ("detection_animal_confidence", "animal_confidence"), ("detection_person_enabled", "person_enabled"), ("detection_animal_enabled", "animal_enabled"), ("detection_vehicle_enabled", "vehicle_enabled"), ("detection_alert_media_mb", "alert_media_mb"), ("detection_pre_seconds", "pre_seconds"), ("detection_post_seconds", "post_seconds"), ("detection_notifications_enabled", "notifications_enabled"), ("detection_notify_service", "notify_service"), ("detection_notify_cooldown", "notify_cooldown"), ("detection_notify_path", "notify_path")):
-        options[option] = detect[field]
-    for index in range(2):
-        camera = cameras[index] if index < len(cameras) else {}
-        prefix = f"hikvision_{index + 1}_"
-        for field in ("enabled", "name", "host", "username", "password", "camera_number", "access_protocol", "rtsp_transport", "rtsp_main", "rtsp_sub", "onvif_url", "isapi_base_url", "record", "low_latency", "snapshot_stream", "live_stream", "record_stream"):
-            default = {"enabled": False, "record": True, "low_latency": True, "camera_number": "1", "access_protocol": "rtsp", "rtsp_transport": "tcp", "snapshot_stream": "sub", "live_stream": "sub", "record_stream": "main"}.get(field, "")
-            options[prefix + field] = camera.get(field, default)
+    # Camera/detection settings belong only to the authoritative panel file.
+    options = compact_options(existing)
     storage = config.get("storage") or {}
     for field in ("recordings_dir", "database_path", "retention_days"):
         if field in storage:

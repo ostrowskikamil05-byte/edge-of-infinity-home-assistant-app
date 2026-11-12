@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.17.9
+
+- Restore the s6 container environment with `with-contenv` before running the
+  migration or panel. Supervisor socket/token discovery previously reported
+  `unavailable` when s6 cleared those variables from the plain command.
+- Test a real s6 app boot against a Supervisor Unix-socket fixture, verifying
+  saved obsolete options/network bindings are removed and access reaches Python.
+- Reduce default app options to logging, listener ports, storage, retention and
+  integration installation. Camera/detection fields remain optional import-only
+  schema entries for upgrades. An empty camera importer is required by the
+  Supervisor object-list schema; it never mirrors camera credentials.
+- After authoritative camera import succeeds, remove duplicate camera/detection
+  overrides from Supervisor. Panel saves no longer repopulate them. Preserve
+  camera credentials/profiles, zones, detection choices, original media and all
+  runtime codec/FPS/audio/buffer settings. Failed imports retain their legacy
+  camera options; background retries reread the latest values under the save lock.
+- Show the cleanup phase/code/HTTP status directly in diagnostics. Historical
+  Supervisor warnings remain in its log; no retired engine is started or probed.
+
 ## 0.17.8
 
 - Check browser support first, then prepare HA Live signing and diagnostics in

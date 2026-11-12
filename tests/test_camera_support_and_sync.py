@@ -168,15 +168,15 @@ class SupervisorOptionsTests(unittest.TestCase):
         self.p = load_panel_module()
         self.config = self.p.normalize_config({'cameras': [{'vendor': 'reolink', 'host': '192.0.2.8', 'username': 'user', 'password': 'secret'}]})
 
-    def test_projection_keeps_other_options_and_updates_both_views(self):
+    def test_projection_keeps_launcher_options_and_never_duplicates_camera_credentials(self):
         options = self.p.addon_options_from_config(self.config, {'janus_enabled': True, 'log_level': 'info'})
         self.assertNotIn('janus_enabled', options)
         self.assertEqual(options['log_level'], 'info')
         self.assertEqual(options['edge_rtc_rtsp_port'], 8556)
-        self.assertEqual(options['cameras'][0]['vendor'], 'reolink')
-        self.assertEqual(options['hikvision_1_host'], '192.0.2.8')
-        self.assertEqual(options['hikvision_1_password'], 'secret')
-        self.assertFalse(options['hikvision_2_enabled'])
+        self.assertEqual(options['cameras'], [])
+        self.assertFalse(any(key.startswith(('hikvision_', 'detection_')) for key in options))
+        self.assertNotIn('secret', json.dumps(options))
+        self.assertEqual(self.config['cameras'][0]['password'], 'secret')
 
     def test_sync_posts_only_own_options_and_verifies_result(self):
         p = self.p

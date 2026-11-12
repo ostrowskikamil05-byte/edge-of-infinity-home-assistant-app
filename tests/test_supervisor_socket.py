@@ -71,6 +71,48 @@ class SupervisorSocketTests(unittest.TestCase):
     def setUp(self):
         self.m = migration()
 
+    def test_compaction_runs_after_authoritative_import_even_if_engine_cleanup_was_synced(self):
+        initial = {'janus_enabled': True, 'mediamtx_enabled': True,
+                   'hikvision_1_password': 'legacy-camera-secret',
+                   'detection_fps': 2, 'cameras': [{'id': 'old'}],
+                   'retention_days': 21, 'log_level': 'debug'}
+        authoritative = {'cameras': [{'id': 'unv', 'password': 'current-camera-secret',
+                                     'record_stream': 'main'}],
+                         'detection': {'max_fps': .5}}
+        with supervisor_socket(initial) as state, tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.m.atomic_json(root / 'edge.json', authoritative)
+            original = (root / 'edge.json').read_bytes()
+            self.m.atomic_json(root / 'native-migration.json', {'supervisor': {'status': 'synced'}})
+            stop = Mock(spec=threading.Event)
+            stop.wait.return_value = False
+            stop.is_set.return_value = False
+            worker = self.m.start_supervisor_cleanup(folder, stop, threading.RLock(), Mock())
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(state['options']['cameras'], [])
+            self.assertEqual(state['options']['retention_days'], 21)
+            self.assertEqual(state['options']['log_level'], 'debug')
+            self.assertFalse(any(key.startswith(('mediamtx_', 'janus_', 'hikvision_', 'detection_'))
+                                 for key in state['options']))
+            self.assertEqual((root / 'edge.json').read_bytes(), original)
+            report = json.loads((root / 'native-migration.json').read_text())
+            self.assertEqual(report['supervisor'], {'status': 'synced', 'scope': 'panel_owned_settings'})
+            self.assertNotIn('secret', json.dumps(report))
+
+    def test_failed_authoritative_import_preserves_legacy_camera_options(self):
+        initial = {'janus_enabled': True, 'cameras': [{'id': 'last-camera', 'password': 'keep'}]}
+        with supervisor_socket(initial) as state, tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / 'edge.json').write_text('{broken')
+            stop = Mock(spec=threading.Event)
+            stop.wait.return_value = False
+            stop.is_set.return_value = False
+            worker = self.m.start_supervisor_cleanup(folder, stop, threading.RLock(), Mock())
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(state['options']['cameras'], initial['cameras'])
+            self.assertNotIn('janus_enabled', state['options'])
+
     def test_socket_without_token_replaces_old_persisted_options_and_keeps_camera(self):
         original = {'core_engine': 'mediamtx_janus', 'mediamtx_enabled': True,
                     'mediamtx_rtsp_port': 9556, 'mediamtx_api_port': 10997,

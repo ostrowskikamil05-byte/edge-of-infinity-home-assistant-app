@@ -1,5 +1,27 @@
 # Edge of Infinity
 
+## 0.17.9: Supervisor access and a smaller app configuration
+
+The runner restores its container environment with `with-contenv` before Python
+starts. Otherwise s6 can clear the Supervisor socket/token while media still
+works, leaving cleanup marked `unavailable`. Diagnostics displays the current
+cleanup phase, safe code and HTTP status. A real s6 container test verifies the
+persisted options over a Supervisor Unix socket.
+
+Configure cameras, passwords and detection in **Edge → Cameras / Settings**.
+The HA app defaults retain logging, listener ports, storage/retention and the
+integration installer. Older camera/detection fields remain optional for a safe
+one-time import. The empty `cameras` list is a schema compatibility importer,
+not a second copy of the camera configuration.
+
+After the authoritative configuration loads successfully, background cleanup
+removes duplicate camera/detection overrides. A missing/invalid import preserves
+its old options; retries reread current settings under the save lock. Panel saves
+never repopulate those duplicates. Original files and camera codec/FPS/audio,
+retention, zones and local-detection choices remain unchanged. Warnings already
+in Supervisor logs are historical; use the current cleanup result. Update the
+app and restart Home Assistant Core for matching integration assets.
+
 ## 0.17.8: startup work and small-host update load
 
 HA Live loads its client and checks browser support before any signing request,

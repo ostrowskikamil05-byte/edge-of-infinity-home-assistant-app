@@ -102,13 +102,15 @@ class AlertMediaTests(unittest.TestCase):
         self.assertEqual([point['day_seconds'] for point in data['alerts']],[1.25,2.5,4.75])
         self.assertEqual(len(data['markers']),1)
 
-    def test_alert_image_and_notification_settings_survive_supervisor_projection(self):
-        config=self.p.normalize_config({'detection':{'animal_enabled':False,'person_enabled':True,'notifications_enabled':True,'notify_service':'notify.mobile_app_phone','alert_media_mb':64,'pre_seconds':0}})
-        options=self.p.addon_options_from_config(config,{})
-        self.assertIs(options['detection_animal_enabled'],False)
-        self.assertEqual(options['detection_notify_service'],'notify.mobile_app_phone')
-        self.assertEqual(options['detection_pre_seconds'],0)
-        self.assertEqual(options['detection_alert_media_mb'],64)
+    def test_alert_image_and_notification_settings_stay_in_authoritative_config(self):
+        config=self.p.normalize_config({'cameras':[camera('front','192.0.2.8','main')],'detection':{'animal_enabled':False,'person_enabled':True,'notifications_enabled':True,'notify_service':'notify.mobile_app_phone','alert_media_mb':64,'pre_seconds':0}})
+        self.p.persist_config_payload(config)
+        restored=self.p.load_config()['detection']
+        self.assertIs(restored['animal_enabled'],False)
+        self.assertEqual(restored['notify_service'],'notify.mobile_app_phone')
+        self.assertEqual(restored['pre_seconds'],0)
+        self.assertEqual(restored['alert_media_mb'],64)
+        self.assertFalse(any(key.startswith('detection_') for key in self.p.addon_options_from_config(config,{})))
 
     def test_animal_events_do_not_open_a_camera_connection_or_repeat_active_alert(self):
         from edge_detection import DetectionService
