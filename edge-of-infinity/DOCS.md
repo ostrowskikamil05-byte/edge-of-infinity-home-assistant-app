@@ -66,7 +66,7 @@ Reference: [HA HTTP and trusted proxies](https://www.home-assistant.io/integrati
 
 EdgeRTC is the sole streaming core. Update the app, restart Home Assistant Core
 if the bundled integration is installed, and reopen Edge through the HA sidebar.
-The current version/build is `0.17.4` / `shared-sessions-v170`.
+The current version/build is `0.17.5` / `shared-sessions-v170`.
 
 The panel and Live/recordings/events cards support Polish, English, German,
 French, Spanish, Italian and Ukrainian (`pl`, `en`, `de`, `fr`, `es`, `it`, `uk`).
