@@ -6,6 +6,28 @@ export function edgeRTCPlaybackSupport(language=globalThis.navigator?.language||
   return{supported:true,code:'supported',message:''};
 }
 
+// Capability queries own no decoder/GPU resources. Reuse only positive answers
+// for this exact browser constructor, codec profile and configuration bytes.
+const edgeVideoSupportCache=new Map();let edgeVideoSupportConstructor;
+export async function edgeVideoConfigSupport(config){
+  const decoder=globalThis.VideoDecoder;
+  if(decoder!==edgeVideoSupportConstructor){edgeVideoSupportCache.clear();edgeVideoSupportConstructor=decoder;}
+  const key=JSON.stringify(Object.fromEntries(Object.keys(config).sort().map(name=>{
+    const value=config[name];return[name,name==='description'?(ArrayBuffer.isView(value)?Array.from(new Uint8Array(value.buffer,value.byteOffset,value.byteLength)):value instanceof ArrayBuffer?Array.from(new Uint8Array(value)):value):value];
+  })));
+  if(key.length>32768)return{supported:Boolean((await decoder.isConfigSupported(config)).supported),cacheHit:false};
+  let pending=edgeVideoSupportCache.get(key);const cacheHit=Boolean(pending);
+  if(pending){edgeVideoSupportCache.delete(key);edgeVideoSupportCache.set(key,pending);}
+  else{
+    pending=Promise.resolve().then(()=>decoder.isConfigSupported(config)).then(result=>Boolean(result.supported));
+    edgeVideoSupportCache.set(key,pending);
+    const forget=()=>{if(edgeVideoSupportCache.get(key)===pending)edgeVideoSupportCache.delete(key);};
+    pending.then(supported=>{if(!supported)forget();},forget);
+    while(edgeVideoSupportCache.size>8)edgeVideoSupportCache.delete(edgeVideoSupportCache.keys().next().value);
+  }
+  return{supported:await pending,cacheHit};
+}
+
 // One foreground archive on constrained devices. Camera sources stay on the server.
 // Shared across versioned module URLs so cards and event viewers cooperate.
 export function edgeMediaCoordinator(){
@@ -44,7 +66,7 @@ export function edgeMediaProblem(message,detail={},language=globalThis.navigator
 }
 
 export class EdgeRTCClient {
-  constructor(options){this.options=options;this.canvas=options.canvas;this.closed=false;this.playing=false;this.connectionState='connecting';this.waitKey=true;this.firstFrameMS=null;this.frames=0;this.started=performance.now();this.frameQueue=[];this.droppedFrames=0;this.bootstrapFrames=0;}
+  constructor(options){this.options=options;this.canvas=options.canvas;this.closed=false;this.playing=false;this.connectionState='connecting';this.waitKey=true;this.firstFrameMS=null;this.frames=0;this.started=Number.isFinite(options.startedAt)?options.startedAt:performance.now();this.frameQueue=[];this.droppedFrames=0;this.bootstrapFrames=0;}
   async start(){
     this.connectionStage='browser_support';this.diagnosticKey=this.options.diagnosticSource||this.options.entity||(this.options.url?new URL(this.options.url,location.href).pathname.split('/').pop():'edge_rtc');this.diagnostics=this.options.diagnostics;
     this.diagnostics?.registerSource(this.diagnosticKey,()=>this.diagnosticState());
@@ -146,13 +168,13 @@ export class EdgeRTCClient {
         this.diagnostics?.note('rtc_bootstrap',{source:this.diagnosticKey,packets:this.bootstrapPackets,bytes:msg.bootstrap_bytes||0,refreshed_before_send:Boolean(msg.bootstrap_refreshed),has_keyframe:this.bootstrapTimestamp!==null});
         const configuration={codec:msg.video.codec,optimizeForLatency:true,hardwareAcceleration:'prefer-hardware'};
         let supported;
-        try{supported=await VideoDecoder.isConfigSupported(configuration);}catch(_){supported={supported:false};}
-        if(!supported.supported){configuration.hardwareAcceleration='no-preference';Object.assign(supported,await VideoDecoder.isConfigSupported(configuration));}
+        try{supported=await edgeVideoConfigSupport(configuration);}catch(_){supported={supported:false};}
+        if(!supported.supported){configuration.hardwareAcceleration='no-preference';supported=await edgeVideoConfigSupport(configuration);}
         if(this.closed)return;
         if(!supported.supported){const hevc=/^(hev1|hvc1)\./.test(msg.video.codec);this.fail(hevc?'EdgeRTC: this browser/device cannot decode this H.265 profile. Select H.264 in the camera recording profile, or use a device/browser with HEVC decoding. H.265 recording remains available.':'EdgeRTC: this browser cannot decode the camera H.264 profile.',false);return;}
         this.video=new VideoDecoder({output:frame=>this.render(frame),error:error=>this.fail('EdgeRTC video decoder: '+error.message)});
         this.decoderConfiguredAt=performance.now();this._codec=msg.video.codec;this.decoderConfiguration=configuration;this.videoCodecName=msg.video.codec_name||(/^(hev1|hvc1)\./.test(msg.video.codec)?'h265':'h264');this.video.configure(configuration);
-        this.diagnostics?.note('rtc_decoder_configured',{source:this.diagnosticKey,codec:this._codec,requested_acceleration:configuration.hardwareAcceleration,audio_codec:msg.audio?.codec,audio_rate:msg.audio?.sampleRate,microphone_supported:this.microphoneSupported});
+        this.diagnostics?.note('rtc_decoder_configured',{source:this.diagnosticKey,codec:this._codec,requested_acceleration:configuration.hardwareAcceleration,capability_cache_hit:supported.cacheHit,audio_codec:msg.audio?.codec,audio_rate:msg.audio?.sampleRate,microphone_supported:this.microphoneSupported});
         this.connectionState='connected';this.options.onReady?.();
         if(msg.network_feedback){this.networkPingTimer=setInterval(()=>this.networkPing(),5000);this.networkPing();}
         if(this.options.microphone){if(!msg.microphone?.active)throw new Error('Camera microphone is unavailable.');await this.startMicrophone();}
@@ -266,7 +288,7 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   audioModule(){
-    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.17.7',import.meta.url).href);
+    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.17.8',import.meta.url).href);
   }
   startAudioPlayback(){
     if(this.audioPlaybackPromise||this.closed||this.audioDisabled)return;

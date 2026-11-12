@@ -70,6 +70,9 @@ jobs:
           node tests/edge_rtc_audio.cjs
           node tests/edge_media_errors.cjs
           node tests/edge_dvr_wait.cjs
+          node tests/edge_codec_support.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/media_startup.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/media_startup.cjs
           EDGE_TEST_BROWSER=webkit node tests/browser/edge_rtc_audio.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/edge_rtc_audio.cjs
       - uses: actions/setup-go@v5
@@ -205,6 +208,8 @@ jobs:
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_dvr_fallback.cjs
           EDGE_TEST_BROWSER=webkit node tests/browser/nvr_dvr_latency.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/nvr_dvr_latency.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/nvr_codec_startup.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/nvr_codec_startup.cjs
       - name: Test original 4K frames through EdgeRTC DVR
         run: |
           export NODE_PATH="${RUNNER_TEMP}/edge-browser-tests/node_modules"

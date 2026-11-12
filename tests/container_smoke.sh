@@ -5,6 +5,18 @@ edge_smoke_image="${1:-edge-native-smoke}"
 edge_smoke_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/edge-native-smoke.XXXXXX")"
 edge_smoke_container="edge-native-smoke-${RANDOM}"
 mkdir -p "${edge_smoke_dir}/home" "${edge_smoke_dir}/addon" "${edge_smoke_dir}/runtime" "${edge_smoke_dir}/media"
+# A version-label change must reuse the same filesystem/dependency layers.
+if ! docker build --build-arg BUILD_VERSION=layer-cache-probe --tag "${edge_smoke_image}-layer-probe" edge-of-infinity > "${edge_smoke_dir}/layer-probe.log" 2>&1; then
+  cat "${edge_smoke_dir}/layer-probe.log"
+  exit 1
+fi
+docker image inspect "${edge_smoke_image}" --format '{{json .RootFS.Layers}}' > "${edge_smoke_dir}/base-layers.json"
+docker image inspect "${edge_smoke_image}-layer-probe" --format '{{json .RootFS.Layers}}' > "${edge_smoke_dir}/probe-layers.json"
+if ! cmp -s "${edge_smoke_dir}/base-layers.json" "${edge_smoke_dir}/probe-layers.json"; then
+  echo 'Version-only build unexpectedly changed filesystem/dependency layers'
+  cat "${edge_smoke_dir}/layer-probe.log"
+  exit 1
+fi
 printf '%s\n' 'original recording' > "${edge_smoke_dir}/media/keep.mp4"
 cat > "${edge_smoke_dir}/options.json" <<'JSON'
 {"core_engine":"mediamtx_janus","mediamtx_rtsp_port":9556,"mediamtx_api_port":10997,"janus_enabled":true,"cameras":[],"retention_days":14}
@@ -36,9 +48,11 @@ done
 test "${edge_smoke_ready}" = true
 docker exec -i "${edge_smoke_container}" python3 - <<'PY'
 import json
+import os
 from pathlib import Path
 import shutil
 assert shutil.which('edge-rtc') and shutil.which('ffmpeg')
+assert 'GOMAXPROCS' not in os.environ and 'GOMEMLIMIT' not in os.environ, 'compiler limits leaked into media runtime'
 assert not shutil.which('janus') and not shutil.which('mediamtx')
 for name in ('icon.png','logo.png','logo-light.png'):
     data=Path('/usr/share/edge-of-infinity/brand',name).read_bytes()
@@ -55,5 +69,5 @@ assert Path('/media/edge-of-infinity/recordings/keep.mp4').read_text()=='origina
 assert not Path('/homeassistant/edge/janus.log').exists()
 runtime=json.loads(Path('/tmp/edge-runtime/edge-rtc.json').read_text())
 assert runtime['sources']==[] and runtime['http']==':10997' and runtime['rtsp']==':9556'
-print('PASS container: native-only boot, healthy API, custom-port migration, camera settings and recording preservation')
+print('PASS container: dependency layers reused across version labels, compiler limits stay build-only, native boot/API, custom-port migration and recording preservation')
 PY

@@ -103,8 +103,10 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.7"
-APP_RELEASE_FEATURES=['Supervisor Unix-socket support, verified retired-option cleanup and bounded background retries',
+APP_VERSION = "0.17.8"
+APP_RELEASE_FEATURES=['Parallel HA signing/modules, bounded positive codec-capability cache and complete startup timings',
+                      'Build-only compiler concurrency/memory limits for small HA hosts; host BuildKit log guidance',
+                      'Supervisor Unix-socket support, verified retired-option cleanup and bounded background retries',
                       'Exact retired engine artifacts removed safely; original Edge icon in restart notice',
                       'Fast per-camera dashboard catalogs, bounded user gallery snapshots and parallel JPEG cache reads',
                       'Debounced in-video loading indication and adjacent decoded-frame preview seeks',
@@ -130,7 +132,7 @@ APP_RELEASE_FEATURES=['Supervisor Unix-socket support, verified retired-option c
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "supervisor-cleanup-v177"
+UI_BUILD = "parallel-start-v178"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))

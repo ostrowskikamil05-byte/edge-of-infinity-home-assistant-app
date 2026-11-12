@@ -1,5 +1,56 @@
 # Edge of Infinity
 
+## 0.17.8: startup work and small-host update load
+
+HA Live prepares its signed URL and the client/diagnostics modules concurrently.
+DVR overlaps signing and diagnostics module loading. Cancellation, failed signing
+and unavailable diagnostics are tested separately. The browser must still finish
+the normal authenticated connection and decode an original keyframe. Startup
+logs include preparation/signing durations; Live first-frame time includes that
+preparation, rather than moving work outside the measurement window.
+
+Live/DVR share a bounded in-memory cache of up to eight positive video-capability
+checks for the exact codec, description bytes and decoder configuration. It does
+not retain configuration keys longer than 32 KiB (those are queried normally).
+It does not retain a decoder or video frame, and neither failures nor negative answers
+are kept. A changed browser decoder constructor clears it. Normal decoder
+allocation, audio, original video, FPS, source count, packet budgets and playout
+buffers are unchanged. Actual improvements depend on the device and connection.
+
+Only the Docker compiler stage uses GOMAXPROCS=1, one build worker and a 384 MiB
+soft Go memory target. This leaves more resources for the running recorder and
+Core during updates; the final image does not inherit those build-time limits.
+The soft target is not a hard limit on the whole build or host memory usage.
+Cold compilation can take longer with fewer workers, reducing contention with
+the running media services. Package/model installation now precedes versioned
+binaries/files/labels, so ordinary releases can reuse its existing Docker layer
+while it remains in the host's build cache. The package set/model checksum are
+unchanged. CI verifies identical filesystem layers for a version-label rebuild.
+
+### Host logs during update builds
+
+HAOS 18.4 includes Docker 29.8.2. Messages such as
+`session healthcheck failed fatally ... only one connection allowed` and a reset
+on `/run/docker.sock` concern BuildKit sessions/transport. They are separate from
+Edge's HTTP health endpoint and its one-camera-source policy. The message is also
+reported in [upstream BuildKit](https://github.com/moby/buildkit/issues/748).
+The text alone does not establish the exact cause or a permanent CPU spin.
+
+`Under memory pressure, flushing caches` during a build signals competition for
+host memory. A container scope's reported memory peak covers its lifetime; it
+is not the current memory use or a measurement of the compiler. Container
+`veth`, bridge, shim cleanup and successful mount/service shutdown messages
+normally accompany updates and Core restarts. Look separately for OOM kills,
+filesystem/I/O errors and physical LAN link-down events.
+
+For x86-64 installations, HAOS 18.5 is not a Docker fix: its
+[release notes](https://github.com/home-assistant/operating-system/releases/tag/18.5)
+describe a Raspberry Pi/Yellow-only kernel update; 18.4 already contains that
+kernel fix for other boards. If BuildKit errors continue while no update/build
+is running, or installation fails, collect the matching Supervisor build-job and
+host logs plus Docker/CPU diagnostics. An Edge application update cannot patch
+the host's Docker daemon. Keep those errors visible for that investigation.
+
 ## 0.17.7: Supervisor cleanup and original restart-notice icon
 
 Modern Supervisor installations can expose `SUPERVISOR_SOCKET` instead of a
