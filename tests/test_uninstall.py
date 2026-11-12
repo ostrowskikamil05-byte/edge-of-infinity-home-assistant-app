@@ -126,6 +126,8 @@ class UninstallTests(unittest.TestCase):
         raw=f'{len(payload):x}\r\n'.encode()+payload+b'\r\n0\r\n\r\n'
         self.assertEqual(un.small_json(io.BytesIO(raw),{'Transfer-Encoding':'chunked'}),{'id':'fixture'})
         with self.assertRaises(ValueError):un.small_json(io.BytesIO(b'1001\r\n'),{'Transfer-Encoding':'chunked'})
+        for raw,headers in [(b'[]',{'Content-Length':'2'}),(b'2\r\n[]\r\n0\r\n\r\n',{'Transfer-Encoding':'chunked'})]:
+            with self.assertRaises(ValueError):un.small_json(io.BytesIO(raw),headers)
 
     def test_retained_index_survives_history_cleanup_for_later_media_removal(self):
         custom=self.root/'custom';(custom/'cam').mkdir(parents=True)

@@ -338,12 +338,15 @@ def small_json(stream, headers):
             block=stream.read(length)
             if len(block)!=length or stream.read(2)!=b'\r\n':raise ValueError('invalid_chunk')
             data.extend(block)
-        return json.loads(data)
-    length=int(headers.get('Content-Length',0))
-    if not 0<length<=4096:raise ValueError('body_too_large')
-    raw=stream.read(length)
-    if len(raw)!=length:raise ValueError('short_body')
-    return json.loads(raw)
+        raw=bytes(data)
+    else:
+        length=int(headers.get('Content-Length',0))
+        if not 0<length<=4096:raise ValueError('body_too_large')
+        raw=stream.read(length)
+        if len(raw)!=length:raise ValueError('short_body')
+    payload=json.loads(raw)
+    if not isinstance(payload,dict):raise ValueError('json_object_required')
+    return payload
 
 
 def run_pending(home, private, addon):
