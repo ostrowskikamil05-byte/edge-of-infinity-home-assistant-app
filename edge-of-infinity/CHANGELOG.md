@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.17.11
+
+- Start new installations with zero cameras and an access guide for Nabu Casa or
+  local HTTPS, including certificate and Home Assistant proxy instructions.
+- Bind shared camera configuration to a private installation marker. Reinstalling
+  creates a clean configuration and recording namespace; retained media is not
+  automatically attached to new cameras. Normal upgrades preserve existing settings.
+- Add Settings → Setup & data: explicitly reset Edge configuration/snapshots/caches
+  and optionally delete recordings/alert clips before uninstalling. Require a typed
+  confirmation and CSRF; perform deletion at restart before camera processes start.
+- Cover mirrors, backups, saved presets, stale browser forms and legacy Supervisor
+  camera imports so erased settings cannot silently return. Handle chunked Ingress
+  setup requests with a 4 KiB limit. Never follow symlinks or cross nested mounts.
+- Home Assistant owns its uninstall dialog; use the Edge cleanup action first.
+  An old installation without an ownership marker is adopted on its first upgrade;
+  use the explicit reset action to clear those already-existing settings.
+- Remove old user-subnet literals from test fixtures; templates contain no preset
+  camera or personal Home Assistant IP. Keep the original logo and media settings.
+
 ## 0.17.10
 
 - Publish the completed 0.17.9 Supervisor-access and compact-configuration fixes

@@ -1,9 +1,14 @@
 # Edge of Infinity
 
-## 0.17.10: Supervisor access and a smaller app configuration
+## 0.17.11: clean setup and explicit data removal
 
-This release republishes the completed 0.17.9 fixes with matching app, integration
-and card versions so existing installations can update again.
+See [clean installation and removal](INSTALLATION.md). New installations have zero
+cameras and a Nabu Casa/local HTTPS guide. Use **Settings → Setup & data** to reset
+existing configuration and optionally delete Edge recordings before uninstalling.
+The first upgrade of an unmarked legacy installation preserves its settings;
+choose the explicit reset there to start from scratch.
+
+### Supervisor access and a smaller app configuration
 
 The runner restores its container environment with `with-contenv` before Python
 starts. Otherwise s6 can clear the Supervisor socket/token while media still

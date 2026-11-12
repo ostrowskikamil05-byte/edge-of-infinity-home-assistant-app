@@ -103,8 +103,10 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.10"
-APP_RELEASE_FEATURES=['Restore s6 container environment before Supervisor migration; compact launcher settings after safe camera import',
+APP_VERSION = "0.17.11"
+APP_RELEASE_FEATURES=['Clean reinstall ownership, blank camera defaults and explicit offline config/media cleanup',
+                      'First-run Nabu Casa/local HTTPS guides and stale-tab configuration fences',
+                      'Restore s6 container environment before Supervisor migration; compact launcher settings after safe camera import',
                       'Parallel HA signing/modules, bounded positive codec-capability cache and complete startup timings',
                       'Build-only compiler concurrency/memory limits for small HA hosts; host BuildKit log guidance',
                       'Supervisor Unix-socket support, verified retired-option cleanup and bounded background retries',
@@ -133,7 +135,7 @@ APP_RELEASE_FEATURES=['Restore s6 container environment before Supervisor migrat
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "supervisor-env-v1710"
+UI_BUILD = "clean-install-v1711"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -1747,6 +1749,8 @@ def commit_panel_config(payload: dict) -> dict:
                 # The authoritative file is already saved; a diagnostic mirror is best effort.
                 write_debug_event("config_mirror_error", {"path": str(mirror), "error": str(error)})
         clear_legacy_override_files()
+        from edge_installation import track_storage
+        track_storage(HOME_DIR, committed)
         return committed
 
 
@@ -5978,7 +5982,7 @@ INDEX_HTML = r"""<!doctype html>
           </header>
           <section class="panel"><div class="form-grid"><label>Moduł<select id="log-group-filter"><option value="overview">Przegląd</option><option value="live">Podgląd na żywo · EdgeRTC</option><option value="recordings">Nagrania i galeria</option><option value="network">Urządzenia i sieć</option><option value="hardware">Sprzęt i dysk</option><option value="config">Kamery i konfiguracja</option><option value="ai">Detekcja</option><option value="all">Wszystkie moduły</option></select></label><label>Poziom zdarzeń<select id="log-level-filter"><option value="problems">Błędy i ostrzeżenia</option><option value="all">Wszystkie zdarzenia</option><option value="error">Błędy</option><option value="warning">Ostrzeżenia</option><option value="ok">Informacje</option></select></label><label>Kamera<select id="log-camera-filter"><option value="all">Wszystkie kamery</option></select></label><label>Okres<select id="log-time-filter"><option value="boot">Od uruchomienia aplikacji</option><option value="day">Ostatnie 24 godziny</option><option value="all">Cała zachowana historia</option></select></label><label>Źródło<select id="log-origin-filter"><option value="all">Serwer i urządzenie</option><option value="server">Serwer Edge</option><option value="device">Wybrane urządzenie</option></select></label><label>Szukaj kamery lub zdarzenia<input id="log-search" type="search" placeholder="np. UNV, bufor, AAC"></label></div><p class="field-help">Zdarzenia są uporządkowane według modułu i czasu. Zwykłe buforowanie oraz brak opcjonalnych pomiarów przeglądarki nie oznaczają błędu. Surowe dane są w rozwijanych sekcjach i w eksporcie.</p></section>
           <section class="panel"><h2>Urządzenia i połączenia</h2>
-            <div class="form-grid"><label>Nazwa tego urządzenia<input id="device-label" maxlength="64" placeholder="np. iPhone Kamila"></label>
+            <div class="form-grid"><label>Nazwa tego urządzenia<input id="device-label" maxlength="64" placeholder="np. mój iPhone"></label>
               <label>Logi urządzenia<select id="device-log-select"></select></label></div>
             <button type="button" id="device-log-download">Pobierz logi urządzenia i mapę połączeń</button>
             <p class="notice">Pomiar co 20 s i przy błędach, z podziałem na urządzenie i sesję. Safari może nie udostępniać RTT, RAM lub szczegółów żądania. Limit: 24 urządzenia × 256 KiB, do 7 dni.</p>
@@ -6029,6 +6033,7 @@ INDEX_HTML = r"""<!doctype html>
       const edgeSaveState = document.getElementById('edge-save-state');
       const menuToggle = document.getElementById('menu-toggle');
       const EDGE_PANEL_VERSION = '__EDGE_PANEL_VERSION__';
+      const EDGE_INSTALLATION_ID = __EDGE_INSTALLATION_ID__;
       const EDGE_UI_BUILD = '__EDGE_UI_BUILD__';
       const EDGE_NATIVE_RTC = __EDGE_NATIVE_RTC__;
       const EDGE_NATIVE_PLAYER_DOCUMENT = __EDGE_NATIVE_PLAYER_DOCUMENT__;
@@ -6130,6 +6135,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       async function panelFetch(url,options){
         if(ingressSessionExpired)throw Error('ingress_session_expired');
+        if(EDGE_INSTALLATION_ID&&options?.method?.toUpperCase()==='POST'){options={...options,headers:new Headers(options.headers)};options.headers.set('X-Edge-Installation',EDGE_INSTALLATION_ID);}
         const response=await window.fetch(url,options);
         if(usesIngress&&[401,403].includes(response.status))expireIngressSession();
         return response;
@@ -8432,10 +8438,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function renderConfig() {
-        const cameras = config.cameras && config.cameras.length ? config.cameras : [
-          { id: 'hikvision_1', name: 'Hikvision 1', vendor: 'hikvision', username: 'admin', camera_number: '1', access_protocol: 'rtsp', rtsp_transport: 'tcp', rtsp_main_channel: '101', rtsp_sub_channel: '102', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true },
-          { id: 'hikvision_2', name: 'Hikvision 2', vendor: 'hikvision', username: 'admin', camera_number: '2', access_protocol: 'rtsp', rtsp_transport: 'tcp', rtsp_main_channel: '201', rtsp_sub_channel: '202', snapshot_stream: 'sub', live_stream: 'sub', tile_stream: 'sub', record_stream: 'main', record: true, low_latency: true }
-        ];
+        const cameras = Array.isArray(config.cameras) ? config.cameras : [];
         const previousCards = Array.from(form.querySelectorAll('[data-camera-form]'));
         if (previousCards.length) expandedCameraIds = new Set(previousCards.filter((node) => node.open).map((node) => node.dataset.cameraId));
         if (!cameraExpansionInitialized && cameras[0]) { expandedCameraIds.add(cameras[0].id); cameraExpansionInitialized = true; }
@@ -8549,7 +8552,7 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Oryginalna jakość i kodek (zalecane)</option>
 
               </select></label></div><p class="field-help">Testy H.264/H.265 i dźwięku są w menu Kodeki odtwarzacza. Zapis zachowuje kodek, rozdzielczość i FPS kamery. Nagranie jest już skompresowane przez kamerę. Zmniejszanie bitrate lub ponowne kodowanie może pogorszyć szczegóły. Obsługa odtwarzania H.265 zależy od przeglądarki.</p><div class="notice" data-recording-disk-usage role="status">Statystyki dysku są odczytywane osobno od nagrań.</div><button type="button" data-cleanup-recording-cache>Posprzątaj cache i miniatury</button><output data-storage-cleanup-result role="status"></output><input type="hidden" name="storage-retention-days" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"><details class="settings-group"><summary>Advanced recording <small>Limity miejsca i długość fragmentów</small></summary><div class="form-grid"><label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label><label>Limit miniatur (MB)<input name="nvr-thumbnail-cache-mb" type="number" min="1" max="256" value="${nvrConfig.thumbnail_cache_mb ?? 32}"></label><label>Limit kopii do odtwarzania (MB, 0 = wyłączone)<input name="nvr-playback-cache-mb" type="number" min="0" max="2048" value="${nvrConfig.playback_cache_mb ?? 0}"></label><label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label></div><p class="field-help">Domyślnie cały dzień odtwarza się z oryginalnych fragmentów, bez pełnej kopii filmu. Miniatury mają wspólny limit miejsca, maksymalnie 2048 obrazów i wygasają po 48 godzinach bez użycia. Usunięte miniatury można wygenerować ponownie z nagrania.</p></details></section>
-          <details class="settings-group" id="network-settings"><summary>Network & remote access <small>Home Assistant HTTPS / WSS</small></summary><p class="notice" data-native-network-info>Live, DVR and alerts work locally over HTTPS without Nabu Casa. Remote access can continue using Nabu Casa. Camera and recording settings are shared.</p><h3>Local HTTPS</h3><edge-local-network></edge-local-network></details>
+          <details class="settings-group"><summary>Setup &amp; data / Konfiguracja i dane</summary><p>Local HTTPS / Nabu Casa · Reset · Prepare uninstall</p><button type="button" id="edge-setup-open">Setup / Configure / Remove Edge data</button></details><details class="settings-group" id="network-settings"><summary>Network & remote access <small>Home Assistant HTTPS / WSS</small></summary><p class="notice" data-native-network-info>Live, DVR and alerts work locally over HTTPS without Nabu Casa. Remote access can continue using Nabu Casa. Camera and recording settings are shared.</p><h3>Local HTTPS</h3><edge-local-network></edge-local-network></details>
           <details class="settings-group" id="storage-settings"><summary>Storage locations <small>Keep the defaults unless you use a custom disk layout</small></summary><div class="form-grid"><label>Recordings directory<input name="storage-recordings-dir" value="${escapeHtml(text(storage.recordings_dir, '/media/edge-of-infinity/recordings'))}"></label><label>Database path<input name="storage-database-path" value="${escapeHtml(text(storage.database_path, '/homeassistant/edge/edge.db'))}"></label></div></details>
           <details class="settings-group" id="advanced-settings"><summary>Advanced system settings <small>Server</small></summary><p class="field-help">Źródła kamer działają stale na serwerze. Podgląd zachowuje oryginalną jakość i FPS. / Camera sources stay connected; original video quality and FPS.</p><div class="form-grid"><label>API listen<input name="server-listen" value="${escapeHtml(text(server.listen, '0.0.0.0:8088'))}" readonly></label><label>Public panel URL<input name="server-public-url" value="${escapeHtml(server.public_url || '')}" placeholder="Optional external URL"></label></div><p class="field-help">The API port is configured in Home Assistant.</p></details>
         `;
@@ -10238,8 +10241,20 @@ INDEX_HTML = r"""<!doctype html>
       }
       setInterval(checkPanelVersion,60000);
 
+      async function openEdgeSetup(data) {
+        const module=await import(panelPath('api/edge-rtc/edge-setup.js?v='+EDGE_PANEL_VERSION));
+        await module.openSetup({endpoint:panelPath('api/setup'),networkEndpoint:panelPath('api/network/local'),brand:panelPath('api/brand/logo.png'),data});
+      }
+      document.addEventListener('click',event=>{if(event.target.closest('#edge-setup-open'))void openEdgeSetup().catch(()=>debugEvent('ui_setup_open_failed',{}));});
+      async function initialEdgeSetup() {
+        try { const response=await panelFetch(panelPath('api/setup'),{cache:'no-store',signal:AbortSignal.timeout(5000)});
+          if(!response.ok)return;const data=await response.json();
+          if(data.needs_setup||data.pending_reset)await openEdgeSetup(data);
+        } catch(_) {debugEvent('ui_setup_status_unavailable',{});}
+      }
       async function boot() {
         void checkPanelVersion();
+        if(__EDGE_SETUP_MANAGED__)void initialEdgeSetup();
         debugEvent('ui_boot', {
           panel_version: EDGE_PANEL_VERSION,
           ui_build: EDGE_UI_BUILD,
@@ -10263,6 +10278,8 @@ INDEX_HTML = r"""<!doctype html>
 
 INDEX_HTML = (
     INDEX_HTML
+    .replace("__EDGE_SETUP_MANAGED__", str((HOME_DIR / "installation.json").is_file()).lower())
+    .replace("__EDGE_INSTALLATION_ID__", json.dumps(read_json(HOME_DIR / "installation.json", {}).get('id', '')))
     .replace("__EDGE_INTERFACE_LANGUAGE__", (Path(__file__).parent/'custom_components'/'edge'/'www'/'edge-i18n.js').read_text().replace('</script', '<\\/script'))
     .replace("__EDGE_LIVE_PRELOAD__", '<script>{for(const name of ["edge-rtc-client.js","device-diagnostics.js","edge-dvr-client.js","edge-dvr-panel.js"]){const link=document.createElement("link");link.rel="modulepreload";link.href=new URL("api/edge-rtc/"+name+"?v=__EDGE_PANEL_VERSION__",document.baseURI).href;document.head.append(link);}}</script>')
     .replace("__EDGE_NATIVE_PLAYER_DOCUMENT__", json.dumps(EDGE_RTC_PLAYER_HTML.replace('__EDGE_PANEL_VERSION__',APP_VERSION)).replace('<', '\\u003c'))
@@ -10378,6 +10395,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = route_path(parsed.path)
+        from edge_installation import serve as serve_setup
+        if serve_setup(self, path, HOME_DIR, write_debug_event): return
 
         if path=='/api/network/local':
             self.send_json(local_network_status());return
@@ -10408,7 +10427,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path in ("/api/edge-rtc/client.js", "/api/edge-rtc/edge-rtc-client.js"):
             self.send_live_script("edge-rtc-client.js")
             return
-        if path in ('/api/edge-rtc/edge-dvr-client.js','/api/edge-rtc/edge-dvr-panel.js','/api/edge-rtc/edge-local-network.js'):
+        if path in ('/api/edge-rtc/edge-dvr-client.js','/api/edge-rtc/edge-dvr-panel.js','/api/edge-rtc/edge-local-network.js','/api/edge-rtc/edge-setup.js'):
             self.send_live_script(path.rsplit('/',1)[1])
             return
         if path == "/api/edge-rtc/edge-pcm-worklet.js":
@@ -10591,6 +10610,12 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        from edge_installation import serve as serve_setup
+        if serve_setup(self, route_path(parsed.path), HOME_DIR, write_debug_event): return
+        if route_path(parsed.path) == '/api/config':
+            from edge_installation import generation_matches
+            if not generation_matches(HOME_DIR, self.headers.get('X-Edge-Installation')):
+                self.send_json({'error': 'installation_changed_reload_panel'}, HTTPStatus.CONFLICT); return
         if route_path(parsed.path) in ('/api/network/local','/api/network/local/certificate'):
             import ipaddress
             try:
@@ -10749,6 +10774,18 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def read_body_json(self) -> dict:
         body = self.read_raw_body()
         return json.loads(body.decode("utf-8")) if body else {}
+
+    def read_setup_json(self) -> dict:
+        # Ingress can forward streamed/chunked bodies without Content-Length.
+        # Apply the setup route's small bound before reading either representation.
+        if self.headers.get('Transfer-Encoding', '').lower() == 'chunked':
+            body = read_chunked_body_from_stream(self.rfile, max_bytes=4096)
+        else:
+            length = int(self.headers.get('Content-Length', 0))
+            if not 0 < length <= 4096:
+                raise ValueError('invalid_setup_body')
+            body = self.rfile.read(length)
+        return json.loads(body.decode('utf-8'))
 
     def ui_debug(self) -> None:
         try:
