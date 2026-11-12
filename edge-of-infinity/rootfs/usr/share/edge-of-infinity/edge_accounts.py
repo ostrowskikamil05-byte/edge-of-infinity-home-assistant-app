@@ -203,6 +203,7 @@ class CentralAccounts:
         issuer = data.get('issuer')
         if not isinstance(issuer, str) or issuer.rstrip('/') != provider['issuer']:
             raise AccountError('account_provider_issuer_mismatch', 503)
+        data['issuer'] = provider['issuer']
         for key in ('device_authorization_endpoint', 'token_endpoint', 'userinfo_endpoint'):
             data[key] = self._endpoint(data.get(key, ''), provider['issuer'])
         if data.get('revocation_endpoint'):
@@ -213,7 +214,8 @@ class CentralAccounts:
         provider = self.provider()
         if not provider:
             raise AccountError('account_service_not_configured', 503)
-        if not self.discovery or self.discovery_until < self.clock():
+        if (not self.discovery or self.discovery_until < self.clock()
+                or self.discovery.get('issuer') != provider['issuer']):
             self.discovery, self.discovery_until = self._discover(provider), self.clock() + 300
         return provider, self.discovery
 
@@ -227,8 +229,9 @@ class CentralAccounts:
         return {'email': email, 'name': str(data.get('name') or email)[:120]}
 
     def status(self, token):
-        value, provider = self._read(token), self.provider()
-        profile = value.get('profile')
+        with self.lock:
+            value, provider = self._read(token), self.provider()
+        profile = value.get('profile') if self._bound_provider(value, provider) else None
         return {'configured': bool(provider), 'csrf': value['csrf'],
                 'authenticated': bool(profile and value.get('token_until', 0) > self.clock()),
                 'profile': profile if value.get('token_until', 0) > self.clock() else None,
@@ -255,8 +258,10 @@ class CentralAccounts:
             ttl = self._seconds(flow.get('expires_in', 600), 30, 900)
             uri = self._endpoint(flow.get('verification_uri', ''), provider['issuer'])
             complete = self._endpoint(flow.get('verification_uri_complete') or uri, provider['issuer'])
-            value.update(flow_started=self.clock(), remember=bool(remember),
+            value.update(flow_started=self.clock(),
                          flow={'code': device, 'until': self.clock() + ttl, 'interval': interval,
+                               'issuer': provider['issuer'], 'client_id': provider['client_id'],
+                               'remember': bool(remember),
                                'next_poll': self.clock() + interval})
             self._save(token, value)
         return {'user_code': code, 'verification_uri': uri, 'verification_uri_complete': complete,
@@ -268,6 +273,8 @@ class CentralAccounts:
             flow = value.get('flow') or {}
             if flow.get('until', 0) < self.clock():
                 raise AccountError('account_code_expired', 401)
+            if not self._bound_provider(flow, self.provider()):
+                raise AccountError('account_provider_changed', 401)
             if flow['next_poll'] > self.clock():
                 return {'pending': True, 'interval': flow['interval']}
             flow['next_poll'] = self.clock() + flow['interval']
@@ -282,7 +289,8 @@ class CentralAccounts:
                     flow['next_poll'] = self.clock() + flow['interval']
                 self._save(token, value)
                 return {'pending': True, 'interval': flow['interval']}
-            self._tokens(value, tokens, discovery)
+            self._tokens(value, tokens, discovery, provider, fresh=True)
+            value['remember'] = flow['remember']
             value.pop('flow', None)
             value.pop('csrf', None)
             value['csrf'] = secrets.token_urlsafe(32)
@@ -292,18 +300,25 @@ class CentralAccounts:
                 db.execute('UPDATE sessions SET expiry=? WHERE id=?', (self.clock() + lifetime, self._key(token)))
         return {'pending': False, **self.status(token)}
 
-    def _tokens(self, value, tokens, discovery):
+    @staticmethod
+    def _bound_provider(value, provider):
+        return bool(provider and value.get('issuer') == provider['issuer']
+                    and value.get('client_id') == provider['client_id'])
+
+    def _tokens(self, value, tokens, discovery, provider, *, fresh=False):
         access = tokens.get('access_token')
         if tokens.get('error') or not isinstance(access, str) or not 1 <= len(access) <= 16384:
             raise AccountError('account_authorization_denied', 401)
         data = self._request(discovery['userinfo_endpoint'], token=access)
         profile = self._profile(data)
-        if value.get('subject') and value['subject'] != data['sub']:
+        if not fresh and value.get('subject') and value['subject'] != data['sub']:
             raise AccountError('account_subject_changed', 401)
         refresh = tokens.get('refresh_token', '')
         if not isinstance(refresh, str) or len(refresh) > 16384:
             raise AccountError('account_provider_response_invalid', 503)
-        value.update(profile=profile, subject=data['sub'], refresh=refresh or value.get('refresh', ''),
+        value.update(profile=profile, subject=data['sub'],
+                     issuer=provider['issuer'], client_id=provider['client_id'],
+                     refresh=refresh or ('' if fresh else value.get('refresh', '')),
                      token_until=self.clock() + self._seconds(tokens.get('expires_in', 300), 10, 3600))
 
     @staticmethod
@@ -328,6 +343,10 @@ class CentralAccounts:
     def refresh(self, token, csrf):
         with self.lock:
             value = self._csrf(token, csrf)
+            if not value.get('profile') and not value.get('refresh'):
+                raise AccountError('account_sign_in_required', 401)
+            if not self._bound_provider(value, self.provider()):
+                raise AccountError('account_provider_changed', 401)
             if value.get('profile') and value.get('token_until', 0) > self.clock() + 30:
                 return self.status(token)
             if not value.get('refresh'):
@@ -336,18 +355,25 @@ class CentralAccounts:
             tokens = self._request(discovery['token_endpoint'], form={
                 'grant_type': 'refresh_token', 'refresh_token': value['refresh'],
                 'client_id': provider['client_id']})
-            self._tokens(value, tokens, discovery)
+            self._tokens(value, tokens, discovery, provider)
             self._save(token, value)
         return self.status(token)
 
     def logout(self, token, csrf):
-        value = self._csrf(token, csrf)
-        # Local logout always succeeds, even if the central service is offline.
-        with self.lock, self._connect() as db:
-            db.execute('DELETE FROM sessions WHERE id=?', (self._key(token),))
-        if value.get('refresh'):
+        with self.lock:
+            value = self._csrf(token, csrf)
             try:
-                provider, discovery = self._ready()
+                provider = self.provider()
+            except AccountError:
+                provider = {}
+            discovery = self.discovery if self.discovery and self.discovery.get('issuer') == provider.get('issuer') else None
+            # Delete locally before any network request. Capture the old issuer
+            # under the settings lock: concurrent changes cannot receive its token.
+            with self._connect() as db:
+                db.execute('DELETE FROM sessions WHERE id=?', (self._key(token),))
+        if value.get('refresh') and self._bound_provider(value, provider):
+            try:
+                discovery = discovery or self._discover(provider)
                 if discovery.get('revocation_endpoint'):
                     self._request(discovery['revocation_endpoint'], form={
                         'client_id': provider['client_id'], 'token': value['refresh'],

@@ -236,6 +236,57 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(self.s._read(first)['principal'], 'ha-one')
         self.assertEqual(self.s._read(second)['principal'], 'ha-two')
 
+    def test_explicit_new_link_can_switch_identity_without_reusing_old_refresh_token(self):
+        self.link(True)
+        self.now += 61
+        self.subject = 'another-verified-account'
+        original_request = self.s._request
+
+        def request(url, **kwargs):
+            result = original_request(url, **kwargs)
+            if url.endswith('/token'):
+                result.pop('refresh_token', None)
+            return result
+        self.s._request = request
+        self.s.start(self.token, self.csrf)
+        self.now += 5
+        self.assertTrue(self.s.poll(self.token, self.csrf)['authenticated'])
+        value = self.s._read(self.token)
+        self.assertEqual(value['subject'], self.subject)
+        self.assertEqual(value['refresh'], '')
+
+    def test_logout_never_sends_previous_credentials_to_a_changed_provider(self):
+        self.discovery['revocation_endpoint'] = self.provider['issuer'] + '/revoke'
+        self.s.configure(self.provider)
+        self.token, _ = self.s.session('')
+        self.csrf = self.s.status(self.token)['csrf']
+        self.link(True)
+        original_csrf = self.s._csrf
+
+        def csrf_then_provider_change(token, csrf):
+            value = original_csrf(token, csrf)
+            changed = {**self.provider, 'issuer': 'https://replacement.example.test'}
+            (self.s.home / 'provider.json').write_text(json.dumps(changed))
+            self.s.discovery = {**self.discovery, 'issuer': changed['issuer'],
+                                'revocation_endpoint': changed['issuer'] + '/revoke'}
+            return value
+        self.s._csrf = csrf_then_provider_change
+        self.s._request = Mock(return_value={})
+        self.s.logout(self.token, self.csrf)
+        self.s._request.assert_not_called()
+
+    def test_pending_device_code_stays_bound_to_its_original_provider(self):
+        self.s.start(self.token, self.csrf)
+        (self.s.home / 'provider.json').write_text(json.dumps({
+            **self.provider, 'issuer': 'https://replacement.example.test'}))
+        self.s.discovery = {**self.discovery, 'issuer': 'https://replacement.example.test',
+                            'token_endpoint': 'https://replacement.example.test/token'}
+        self.s._request = Mock(return_value={})
+        self.now += 5
+        with self.assertRaisesRegex(accounts.AccountError, 'account_provider_changed'):
+            self.s.poll(self.token, self.csrf)
+        self.s._request.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -96,6 +96,8 @@ unchecked uses a browser-session cookie and a 12-hour server limit. Refresh toke
 stay in a private local SQLite file; no tokens go to localStorage or device logs.
 Remembered sessions are bound to the authenticated HA user reported by Supervisor;
 switching HA users does not expose the previous user's linked account.
+Device codes and refresh tokens are also bound to their original issuer/client;
+changing provider settings cannot forward the old credentials to a new server.
 Changing the provider invalidates local sessions. Local logout works while the
 identity server is offline. It does not log out unrelated central browser sessions.
 

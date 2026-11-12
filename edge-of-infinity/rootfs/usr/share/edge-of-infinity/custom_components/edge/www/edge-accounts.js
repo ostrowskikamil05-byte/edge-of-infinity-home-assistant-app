@@ -16,6 +16,7 @@ export function mountEdgeAccount(root) {
   let state={},timer=null,generation=0,controller=null;
   const errorText=code=>({
     account_session_expired:t('Sesja konta wygasła. Zamknij i otwórz ponownie okno konta.','The account session expired. Close and reopen the account dialog.'),
+    account_provider_changed:t('Konfiguracja serwera kont się zmieniła. Zaloguj się ponownie.','The account service configuration changed. Sign in again.'),
     account_csrf_invalid:t('Odśwież okno konta i spróbuj ponownie.','Refresh the account dialog and try again.'),
     account_ha_user_changed:t('Zmieniono użytkownika Home Assistanta. Otwórz okno konta ponownie.','The Home Assistant user changed. Reopen the account dialog.'),
     account_ha_user_missing:t('Brakuje danych użytkownika z Supervisora. Otwórz panel przez aktualnego Home Assistanta i Supervisor.','Supervisor did not provide user information. Open the panel through up-to-date Home Assistant and Supervisor.'),
