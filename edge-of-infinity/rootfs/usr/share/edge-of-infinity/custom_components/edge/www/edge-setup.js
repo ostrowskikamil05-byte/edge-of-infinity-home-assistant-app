@@ -27,7 +27,7 @@ export async function openSetup(options) {
   <label>${t('Type DELETE EDGE to confirm','Wpisz DELETE EDGE, aby potwierdzić')}<input type="text" data-confirm autocomplete="off" spellcheck="false"></label>
   <button data-reset class="danger" disabled>${t('Delete selected data and restart','Usuń wybrane dane i uruchom ponownie')}</button>
   <p>${t('After the clean setup screen appears, you can uninstall Edge in Home Assistant. Home Assistant owns the uninstall dialog; it cannot display an extra Edge media checkbox.','Gdy pojawi się czysty konfigurator, możesz odinstalować Edge w Home Assistant. Okno odinstalowania należy do Home Assistanta i nie wyświetla dodatkowego pola usuwania mediów Edge.')}</p></details>
-  <output role="status" aria-live="polite"></output></section></dialog>`;
+  <button data-uninstall>${t('Uninstall Edge','Odinstaluj Edge')}</button><output role="status" aria-live="polite"></output></section></dialog>`;
   const $=s=>root.querySelector(s);const dialog=$('dialog');active=dialog;dialog.style.cssText=dialogStyle;$('img').src=options.brand;
   $('[data-legacy]').hidden=!state.legacy_upgrade;$('[data-retained]').hidden=!state.retained_locations;
   async function select(value){if(mode!==value&&state.needs_setup){$('[data-ack]').checked=false;updateLock();}mode=value;root.querySelectorAll('[data-mode]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===mode)));$('[data-cloud]').hidden=mode!=='nabu_casa';$('[data-local]').hidden=mode!=='local';if(mode==='local'&&!$('[data-network]').firstChild){try{await import('./edge-local-network.js');if(closed)return;const element=document.createElement('edge-local-network');element.endpoint=options.networkEndpoint;$('[data-network]').append(element);await element.load();}catch(_){$('output').textContent=t('Open Settings → Network & remote access for the local guide.','Otwórz Ustawienia → Network & remote access, aby skorzystać z instrukcji lokalnej.');}}}
@@ -37,6 +37,7 @@ export async function openSetup(options) {
   $('[data-close]').onclick=finish;dialog.addEventListener('cancel',e=>{e.preventDefault();if(!locked())finish();});
   dialog.addEventListener('close',()=>{if(!closed&&locked()&&host.isConnected)dialog.showModal();});
   $('[data-ack]').onchange=updateLock;updateLock();
+  $('[data-uninstall]').onclick=()=>options.onUninstall?.();
   $('[data-start-clean]').onclick=()=>{$('[data-remove]').open=true;$('[data-remove]').scrollIntoView({block:'start'});$('[data-confirm]').focus();};
   $('[data-confirm]').oninput=()=>{$('[data-reset]').disabled=$('[data-confirm]').value!=='DELETE EDGE';};
   $('[data-save]').onclick=async()=>{try{if(locked()&&!$('[data-ack]').checked)return;state=await request('/access',{csrf:state.csrf,mode,confirmed:$('[data-ack]').checked});if(locked())throw Error('setup_incomplete');finish();if(firstRun)options.onComplete?.();}catch(_){$('output').textContent=t('Could not save. Reopen Edge from Home Assistant.','Nie udało się zapisać. Otwórz Edge ponownie z Home Assistanta.');}};

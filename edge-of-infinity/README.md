@@ -7,6 +7,12 @@
 
 Native EdgeRTC Live, recording and indexed DVR for Home Assistant.
 
+Version **0.17.13** adds **Settings → Setup & data → Uninstall Edge**, with
+individual data categories and Delete all. Unchecked durable files are retained
+without automatic re-import. The Live badge now follows rendered video rather
+than stale connecting metadata. Restart HA Core after updating for the new
+integration removal action. See [installation and removal](INSTALLATION.md).
+
 - One shared camera source for Live, recording, compatible microphone and analysis.
 - Original H.264/H.265 resolution/FPS, source AAC copy and 14-day retention.
 - Daily DVR timeline, frame steps, sound, speed, full screen and event markers.

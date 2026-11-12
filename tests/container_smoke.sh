@@ -152,3 +152,39 @@ assert json.loads(Path('/config/edge.json').read_text())['cameras']==[]
 assert json.load(urllib.request.urlopen('http://127.0.0.1:8088/api/setup'))['needs_setup']
 print('PASS real container reinstall: blank configuration, snapshots/presets removed, recordings kept until explicit full removal, clean first-run setup')
 PY
+
+# The real runner enters cleanup-only mode before starting the media core.
+# The fixture records the Supervisor uninstall dispatch; it does not remove Docker.
+docker exec -i "${edge_smoke_container}" python3 - <<'PY'
+import json
+from pathlib import Path
+import urllib.request
+Path('/media/edge-of-infinity/recordings/uninstall.mp4').write_bytes(b'fixture video')
+def request(path, payload=None):
+    req=urllib.request.Request('http://127.0.0.1:8088'+path,data=json.dumps(payload).encode() if payload is not None else None,headers={'Content-Type':'application/json'})
+    return json.load(urllib.request.urlopen(req))
+status=request('/api/uninstall')
+scopes=dict.fromkeys(('recordings','alerts','thumbnails','snapshots','cache','settings','backups','history'),True)
+scopes['integration']=False
+plan=request('/api/uninstall/plan',{'csrf':status['csrf'],'scopes':scopes})
+result=request('/api/uninstall/commit',{'csrf':status['csrf'],'id':plan['id'],'confirm':'UNINSTALL EDGE','bridge_ready':False})
+assert result['phase']=='queued'
+PY
+docker restart "${edge_smoke_container}" >/dev/null
+wait_ready
+docker exec -i "${edge_smoke_container}" python3 - <<'PY'
+import json,time,urllib.request
+from pathlib import Path
+for _ in range(30):
+    status=json.load(urllib.request.urlopen('http://127.0.0.1:8088/api/uninstall'))
+    if status['phase']=='supervisor_pending':break
+    time.sleep(.2)
+assert status['phase']=='supervisor_pending',status
+assert json.load(urllib.request.urlopen('http://127.0.0.1:8088/health'))['mode']=='uninstall'
+assert not Path('/homeassistant/edge/edge.json').exists()
+assert not Path('/media/edge-of-infinity/recordings/uninstall.mp4').exists()
+state=json.loads(Path('/run/edge-fixture-supervisor/state.json').read_text())
+assert state['uninstall_requests']==1
+assert state['uninstall_request']=={'remove_config':True}
+print('PASS real offline cleanup and own-Supervisor uninstall dispatch; no camera core was restarted')
+PY

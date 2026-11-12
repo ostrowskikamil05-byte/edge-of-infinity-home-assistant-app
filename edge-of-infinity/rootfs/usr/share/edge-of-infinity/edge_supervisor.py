@@ -7,7 +7,7 @@ import os
 import socket
 
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
-SELF_PATHS = {"info", "options", "restart"}
+SELF_PATHS = {"info", "options", "restart", "uninstall"}
 
 
 class SupervisorError(RuntimeError):
@@ -49,6 +49,8 @@ def request_self(path, payload=None, *, token=None):
     """Use only this app's settings/restart API; Unix peers need no bearer token."""
     if path not in SELF_PATHS or path == "info" and payload is not None or path == 'restart' and payload != {}:
         raise ValueError("unsupported_supervisor_path")
+    if path == 'uninstall' and payload != {'remove_config': True}:
+        raise ValueError('unsupported_supervisor_path')
     socket_path = os.environ.get("SUPERVISOR_SOCKET")
     token = token or os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
     if socket_path:

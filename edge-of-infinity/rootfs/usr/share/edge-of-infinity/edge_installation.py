@@ -97,6 +97,27 @@ def merge_roots(*groups):
     return [{'path': path, 'camera_dirs': sorted(names)} for path, names in result.items()]
 
 
+def archived_roots(home):
+    archive=checked(Path(home).with_name(Path(home).name+'-retained'))
+    roots=[]
+    if archive.exists():
+        for directory in archive.iterdir():
+            if directory.is_symlink(): continue
+            if directory.is_dir() and re.fullmatch(r'[0-9a-f]{32}',directory.name):
+                try:
+                    data=read(directory/'manifest.json',{})
+                except (OSError, ValueError):
+                    # A damaged retained index must not block ordinary startup
+                    # or cause retained settings to be imported.
+                    continue
+                if not isinstance(data,dict): continue
+                candidates=data.get('roots',[])
+                if isinstance(candidates,list) and all(isinstance(r,dict) and isinstance(r.get('path'),str)
+                        and isinstance(r.get('camera_dirs'),list) and all(isinstance(n,str) for n in r['camera_dirs']) for r in candidates):
+                    roots=merge_roots(roots,candidates)
+    return roots
+
+
 def remove_media(roots, media=MEDIA):
     for item in roots:
         root = checked(item['path'])
@@ -163,7 +184,7 @@ def bootstrap(home, private, addon, options, output, media=MEDIA):
     fresh = bool(owner and not marker)
     conflict = bool(owner and marker and marker['id'] != owner['id'])
     reset = fresh or bool(pending)
-    roots = merge_roots(owner.get('recordings', []), owner.get('retained', []), recording_roots(config))
+    roots = merge_roots(owner.get('recordings', []), owner.get('retained', []), recording_roots(config),archived_roots(home))
     mode = 'reinstalled' if fresh else 'reset' if reset else 'recovered' if conflict else 'upgrade' if config or legacy_options else 'new'
     if reset:
         if pending and pending.get('include_media') is True:
@@ -171,6 +192,8 @@ def bootstrap(home, private, addon, options, output, media=MEDIA):
             remove_media(roots, media)
             roots = []
         clear_directory(home)
+        if pending:
+            clear_directory(Path(home).with_name(Path(home).name+'-retained'))
         # Only known diagnostic/config mirrors; unrelated addon-config files stay.
         for name in ('edge.json', 'edge.example.json', 'edge.backup.json', 'panel-config.json'):
             path = addon / name
@@ -188,7 +211,7 @@ def bootstrap(home, private, addon, options, output, media=MEDIA):
         owner = {'id': ident, 'setup_complete': False, 'legacy_upgrade': bool(config or (legacy_options and not reset)),
                  'generation_required': bool(reset or not (config or legacy_options)),
                  'recordings': recording_roots(config) if config else [{'path': str(root), 'camera_dirs': ['.alerts']}],
-                 'retained': roots if reset else []}
+                 'retained': roots if reset else archived_roots(home)}
         if not config and (reset or not legacy_options):
             config = blank_config(root)
             write(home / 'edge.json', config)
@@ -231,12 +254,13 @@ def status(home):
         data = read(Path(home) / OWNER, {})
     return {'managed': bool(data), 'id': data.get('id'), 'needs_setup': bool(data and not data.get('setup_complete')),
             'mode': data.get('access_mode'), 'legacy_upgrade': bool(data.get('legacy_upgrade')),
-            'retained_locations': len(data.get('retained', [])), 'pending_reset': bool(data.get('pending_reset')), 'csrf': CSRF}
+            'retained_locations': len(data.get('retained', [])), 'pending_reset': bool(data.get('pending_reset')),
+            'pending_uninstall': bool(data.get('pending_uninstall')), 'csrf': CSRF}
 
 
 def setup_required(home):
     data = read(Path(home) / OWNER, {})
-    return bool(data and (data.get('setup_complete') is not True or data.get('pending_reset')))
+    return bool(data and (data.get('setup_complete') is not True or data.get('pending_reset') or data.get('pending_uninstall')))
 
 
 def runtime_config(home, config):
@@ -253,7 +277,9 @@ def guard(handler, path, home):
     scripts = {'client.js', 'edge-rtc-client.js', 'edge-dvr-client.js', 'edge-dvr-panel.js',
                'edge-local-network.js', 'edge-setup.js', 'edge-pcm-worklet.js', 'device-diagnostics.js'}
     read_routes.update('/api/edge-rtc/' + name for name in scripts)
-    write_routes = {'/api/setup/access', '/api/setup/reset', '/api/network/local',
+    read_routes.update({'/api/uninstall', '/api/edge-rtc/edge-uninstall.js'})
+    write_routes = {'/api/uninstall/plan','/api/uninstall/commit','/api/uninstall/run','/api/uninstall/cancel',
+                    '/api/setup/access', '/api/setup/reset', '/api/network/local',
                     '/api/network/local/certificate', '/api/debug', '/api/client-diagnostics'}
     allowed = path in (read_routes if handler.command in ('GET', 'HEAD') else write_routes)
     if allowed:
@@ -267,7 +293,7 @@ def guard(handler, path, home):
 
 def generation_matches(home, value):
     data = read(Path(home) / OWNER, {})
-    return not data.get('pending_reset') and (not data.get('generation_required') or secrets.compare_digest(str(data.get('id', '')), str(value or '')))
+    return not (data.get('pending_reset') or data.get('pending_uninstall')) and (not data.get('generation_required') or secrets.compare_digest(str(data.get('id', '')), str(value or '')))
 
 
 def trusted(handler):
@@ -325,6 +351,8 @@ def serve(handler, path, home, log, on_complete=None):
             state = read(Path(home) / OWNER, {})
             if not state:
                 raise ValueError('installation_not_managed')
+            if state.get('pending_uninstall'):
+                raise ValueError('uninstall_pending')
             completed_now = False
             if path.endswith('/access'):
                 if state.get('pending_reset'):

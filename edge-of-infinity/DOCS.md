@@ -1,5 +1,20 @@
 # Edge of Infinity
 
+## 0.17.13: self-uninstall and accurate Live status
+
+**Settings → Setup & data → Uninstall Edge** offers individual choices for
+recordings, alerts, thumbnails, snapshots, cache, settings, Edge backups, logs
+and the local HA integration. Review the summary and type `UNINSTALL EDGE`.
+Cleanup precedes media startup; Supervisor removes the app afterward. Unchecked
+durable files are retained, and a reinstall does not silently restore them.
+See [installation and removal](INSTALLATION.md) for exact scope and recovery.
+Restart HA Core after updating to enable integration removal through its admin API.
+
+The Live corner badge now becomes **Live / Na żywo** when the player renders
+its first frame, even if server metadata still says checking/connecting. Errors,
+reconnects and pauses update the badge. This does not alter the media transport,
+codec, quality, FPS, audio, source count or DVR settings.
+
 ## 0.17.12: mandatory setup and explicit data removal
 
 See [clean installation and removal](INSTALLATION.md). New installations have zero

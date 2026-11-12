@@ -33,9 +33,19 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != '/addons/self/info':
             self.answer(404, {})
             return
-        self.answer(200, {'result': 'ok', 'data': state})
+        self.answer(200, {'result': 'ok', 'data': {**state, 'slug': 'fixture_edge'}})
 
     def do_POST(self):
+        if self.path == '/addons/self/uninstall':
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            state['uninstall_request'] = body
+            state['uninstall_requests'] = state.get('uninstall_requests', 0) + 1
+            state_path.write_text(json.dumps(state))
+            self.answer(200, {'result': 'ok'})
+            return
+        if self.path == '/addons/self/restart':
+            self.answer(200, {'result': 'ok'})
+            return
         if self.path != '/addons/self/options':
             self.answer(404, {})
             return

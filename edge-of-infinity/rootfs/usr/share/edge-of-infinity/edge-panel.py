@@ -104,8 +104,11 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.12"
-APP_RELEASE_FEATURES=['Mandatory setup: inert panel, guarded APIs and idle camera sources until confirmed completion',
+APP_VERSION = "0.17.13"
+APP_RELEASE_FEATURES=['Category-scoped self-uninstall: offline cleanup, retained files and own Supervisor uninstall',
+                      'Admin HA integration removal with resumable confirmation and no direct registry edits',
+                      'Live badge follows rendered frames, reconnect and pause instead of stale checking metadata',
+                      'Mandatory setup: inert panel, guarded APIs and idle camera sources until confirmed completion',
                       'Clean reinstall ownership, blank camera defaults and explicit offline config/media cleanup',
                       'First-run Nabu Casa/local HTTPS guides and stale-tab configuration fences',
                       'Restore s6 container environment before Supervisor migration; compact launcher settings after safe camera import',
@@ -137,7 +140,7 @@ APP_RELEASE_FEATURES=['Mandatory setup: inert panel, guarded APIs and idle camer
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "mandatory-setup-v1712"
+UI_BUILD = "uninstall-status-v1713"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -4966,8 +4969,8 @@ import{getDeviceReporter}from'../device-diagnostics.js?v=__EDGE_PANEL_VERSION__'
 try{window.EdgeI18n=parent.EdgeI18n;}catch(_){}const languageUI=window.EdgeI18n?.attach(document.body);window.addEventListener('pagehide',()=>languageUI?.close(),{once:true});
 const playerBase=new URL(document.baseURI),path=playerBase.pathname.split('/').pop(),url=new URL('../stream/'+path,playerBase);let client,timer,retries=0,muted=true;
 const diagnostics=getDeviceReporter({context:{surface:'edge_panel_live',source:path},send:async payload=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),12000);try{const response=await fetch(new URL('../../client-diagnostics',playerBase),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});if([401,403].includes(response.status)){diagnostics.setPaused?.(true);window.edgeStopLive?.();parent.postMessage({type:'edge_ingress_expired',path},playerBase.origin);}return response.ok;}finally{clearTimeout(timer);}}});
-function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;client=new EdgeRTCClient({url:url.href,diagnostics,canvas:document.querySelector('canvas'),onError:(m,detail)=>{document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;if(f.frames===1)parent.postMessage({type:'edge_live_ready',path},playerBase.origin);const label='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264'),note=document.querySelector('p');if(note.textContent!==label)note.textContent=label;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
-window.edgeStopLive=()=>{clearTimeout(timer);client?.close();};
+function connect(){clearTimeout(timer);client?.close();if(document.hidden)return;parent.postMessage({type:'edge_live_state',path,state:'checking'},playerBase.origin);client=new EdgeRTCClient({url:url.href,diagnostics,canvas:document.querySelector('canvas'),onError:(m,detail)=>{parent.postMessage({type:'edge_live_state',path,state:'lost_connection'},playerBase.origin);document.querySelector('p').textContent=m;if(detail?.retryable!==false&&!document.hidden&&retries<5)timer=setTimeout(connect,Math.min(30000,2000*2**retries++));},onFrame:f=>{retries=0;if(f.frames===1)parent.postMessage({type:'edge_live_ready',path},playerBase.origin);const label='EdgeRTC · '+f.width+' × '+f.height+' · '+(client.videoCodecName==='h265'?'H.265':'H.264'),note=document.querySelector('p');if(note.textContent!==label)note.textContent=label;}});client.setAudio(.6,muted);client.start().catch(e=>{document.querySelector('p').textContent=e.message;});}
+window.edgeStopLive=()=>{clearTimeout(timer);client?.close();parent.postMessage({type:'edge_live_state',path,state:'paused'},playerBase.origin);};
 connect();document.querySelector('button').onclick=()=>{muted=!muted;client?.setAudio(.6,muted);document.querySelector('button').textContent=muted?'Sound':'Mute';};document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(document.hidden)window.edgeStopLive();else connect();});window.addEventListener('pagehide',()=>window.edgeStopLive());
 </script>"""
 
@@ -6325,6 +6328,8 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function statusLabel(status) {
+        if(status==='live')return (EdgeI18n.resolve().startsWith('pl')?'Na żywo':'Live');
+        if(status==='paused')return 'paused';
         if (status === 'online') return 'online';
         if(status==='checking')return 'connecting';
         if (status === 'lost_connection') return 'lost connection';
@@ -6332,7 +6337,7 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function statusClass(status) {
-        if (status === 'online') return 'badge-online';
+        if (status === 'online'||status==='live') return 'badge-online';
         if(status==='checking')return 'badge-lost-connection';
         if (status === 'lost_connection') return 'badge-lost-connection';
         return 'badge-offline';
@@ -7916,6 +7921,7 @@ INDEX_HTML = r"""<!doctype html>
           }, 12000);
           liveFrameTimers.set(liveKey, timer);
         });
+        grid.querySelectorAll('iframe.live-frame').forEach(frame=>{if(frame.dataset.liveState)updateLiveStatus(frame,frame.dataset.liveState);});
         document.querySelectorAll('[data-live-blocked]').forEach((node) => {
           const preview = node.closest('[data-live-key]');
           const livePath = preview?.dataset?.livePath || 'diagnostic';
@@ -7944,11 +7950,20 @@ INDEX_HTML = r"""<!doctype html>
           }
         });
       }
+      function updateLiveStatus(frame,state){
+        frame.dataset.liveState=state;
+        const card=frame.closest('article.camera');
+        if(!card)return;
+        const badge=card.querySelector('.connection-badge');
+        if(badge){badge.textContent=statusLabel(state);badge.className='connection-badge '+statusClass(state);}
+      }
       window.addEventListener('message',event=>{
-        if(event.origin!==location.origin||!['edge_live_ready','edge_ingress_expired'].includes(event.data?.type))return;
+        if(event.origin!==location.origin||!['edge_live_ready','edge_live_state','edge_ingress_expired'].includes(event.data?.type))return;
         const frame=[...grid.querySelectorAll('iframe.live-frame')].find(f=>f.contentWindow===event.source&&f.dataset.livePath===event.data.path);
         if(!frame||frame.dataset.liveSuspended==='true')return;
         if(event.data.type==='edge_ingress_expired'){if(usesIngress)expireIngressSession();return;}
+        if(event.data.type==='edge_live_state'){if(!['checking','lost_connection','paused'].includes(event.data.state))return;delete frame.dataset.liveReady;updateLiveStatus(frame,event.data.state);return;}
+        updateLiveStatus(frame,'live');
         frame.dataset.liveReady='true';debugEvent('ui_live_picture_ready',{liveKey:frame.dataset.liveKey,path:event.data.path});scheduleGalleryPrefetch();
       });
       let sessionResume=null;
@@ -8568,7 +8583,7 @@ INDEX_HTML = r"""<!doctype html>
                 <option value="copy" ${nvrConfig.browser_playback === 'copy' ? 'selected' : ''}>Oryginalna jakość i kodek (zalecane)</option>
 
               </select></label></div><p class="field-help">Testy H.264/H.265 i dźwięku są w menu Kodeki odtwarzacza. Zapis zachowuje kodek, rozdzielczość i FPS kamery. Nagranie jest już skompresowane przez kamerę. Zmniejszanie bitrate lub ponowne kodowanie może pogorszyć szczegóły. Obsługa odtwarzania H.265 zależy od przeglądarki.</p><div class="notice" data-recording-disk-usage role="status">Statystyki dysku są odczytywane osobno od nagrań.</div><button type="button" data-cleanup-recording-cache>Posprzątaj cache i miniatury</button><output data-storage-cleanup-result role="status"></output><input type="hidden" name="storage-retention-days" value="${escapeHtml(text(nvrConfig.retention_days, storage.retention_days || 14))}"><details class="settings-group"><summary>Advanced recording <small>Limity miejsca i długość fragmentów</small></summary><div class="form-grid"><label>Segment seconds<input name="nvr-segment-seconds" type="number" min="2" max="300" value="${escapeHtml(text(nvrConfig.segment_seconds, 10))}"></label><label>Limit miniatur (MB)<input name="nvr-thumbnail-cache-mb" type="number" min="1" max="256" value="${nvrConfig.thumbnail_cache_mb ?? 32}"></label><label>Limit kopii do odtwarzania (MB, 0 = wyłączone)<input name="nvr-playback-cache-mb" type="number" min="0" max="2048" value="${nvrConfig.playback_cache_mb ?? 0}"></label><label>Playback cache segments<input name="nvr-playback-cache-segments" type="number" min="12" max="50000" value="${escapeHtml(text(nvrConfig.playback_cache_segments, 10000))}"></label></div><p class="field-help">Domyślnie cały dzień odtwarza się z oryginalnych fragmentów, bez pełnej kopii filmu. Miniatury mają wspólny limit miejsca, maksymalnie 2048 obrazów i wygasają po 48 godzinach bez użycia. Usunięte miniatury można wygenerować ponownie z nagrania.</p></details></section>
-          <details class="settings-group"><summary>Setup &amp; data / Konfiguracja i dane</summary><p>Local HTTPS / Nabu Casa · Reset · Prepare uninstall</p><button type="button" id="edge-setup-open">Setup / Configure / Remove Edge data</button></details><details class="settings-group" id="network-settings"><summary>Network & remote access <small>Home Assistant HTTPS / WSS</small></summary><p class="notice" data-native-network-info>Live, DVR and alerts work locally over HTTPS without Nabu Casa. Remote access can continue using Nabu Casa. Camera and recording settings are shared.</p><h3>Local HTTPS</h3><edge-local-network></edge-local-network></details>
+          <details class="settings-group"><summary>Setup &amp; data / Konfiguracja i dane</summary><p>Local HTTPS / Nabu Casa · Reset · Prepare uninstall</p><button type="button" id="edge-setup-open">Setup / Configure / Remove Edge data</button><button class="danger" type="button" id="edge-uninstall-open">Odinstaluj Edge / Uninstall Edge</button></details><details class="settings-group" id="network-settings"><summary>Network & remote access <small>Home Assistant HTTPS / WSS</small></summary><p class="notice" data-native-network-info>Live, DVR and alerts work locally over HTTPS without Nabu Casa. Remote access can continue using Nabu Casa. Camera and recording settings are shared.</p><h3>Local HTTPS</h3><edge-local-network></edge-local-network></details>
           <details class="settings-group" id="storage-settings"><summary>Storage locations <small>Keep the defaults unless you use a custom disk layout</small></summary><div class="form-grid"><label>Recordings directory<input name="storage-recordings-dir" value="${escapeHtml(text(storage.recordings_dir, '/media/edge-of-infinity/recordings'))}"></label><label>Database path<input name="storage-database-path" value="${escapeHtml(text(storage.database_path, '/homeassistant/edge/edge.db'))}"></label></div></details>
           <details class="settings-group" id="advanced-settings"><summary>Advanced system settings <small>Server</small></summary><p class="field-help">Źródła kamer działają stale na serwerze. Podgląd zachowuje oryginalną jakość i FPS. / Camera sources stay connected; original video quality and FPS.</p><div class="form-grid"><label>API listen<input name="server-listen" value="${escapeHtml(text(server.listen, '0.0.0.0:8088'))}" readonly></label><label>Public panel URL<input name="server-public-url" value="${escapeHtml(server.public_url || '')}" placeholder="Optional external URL"></label></div><p class="field-help">The API port is configured in Home Assistant.</p></details>
         `;
@@ -10263,13 +10278,21 @@ INDEX_HTML = r"""<!doctype html>
       }
       async function openEdgeSetup(data) {
         const module=await import(panelPath('api/edge-rtc/edge-setup.js?v='+EDGE_PANEL_VERSION));
-        await module.openSetup({endpoint:panelPath('api/setup'),networkEndpoint:panelPath('api/network/local'),brand:panelPath('api/brand/logo.png'),data,onComplete:()=>location.reload()});
+        await module.openSetup({endpoint:panelPath('api/setup'),networkEndpoint:panelPath('api/network/local'),brand:panelPath('api/brand/logo.png'),data,onComplete:()=>location.reload(),onUninstall:()=>openEdgeUninstall()});
       }
-      document.addEventListener('click',event=>{if(event.target.closest('#edge-setup-open'))void openEdgeSetup().catch(()=>debugEvent('ui_setup_open_failed',{}));});
+      async function openEdgeUninstall(){
+        const module=await import(panelPath('api/edge-rtc/edge-uninstall.js?v='+EDGE_PANEL_VERSION));
+        await module.openUninstall({endpoint:panelPath('api/uninstall'),onClose:()=>location.reload()});
+      }
+      document.addEventListener('click',event=>{
+        if(event.target.closest('#edge-setup-open'))void openEdgeSetup().catch(()=>debugEvent('ui_setup_open_failed',{}));
+        if(event.target.closest('#edge-uninstall-open'))void openEdgeUninstall().catch(()=>debugEvent('ui_uninstall_open_failed',{}));
+      });
       async function initialEdgeSetup() {
         lockEdgeSetup(true);
         try { const response=await panelFetch(panelPath('api/setup'),{cache:'no-store',signal:AbortSignal.timeout(5000)});
           if(!response.ok)throw Error('setup_status_unavailable');const data=await response.json();
+          if(data.pending_uninstall){await openEdgeUninstall();return true;}
           if(data.needs_setup||data.pending_reset){await openEdgeSetup(data);return true;}
           lockEdgeSetup(false);return false;
         } catch(_) {document.getElementById('edge-setup-check-state').textContent='Nie udało się potwierdzić konfiguracji. Spróbuj ponownie / Could not verify setup. Please retry.';return true;}
@@ -10420,6 +10443,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = route_path(parsed.path)
         from edge_installation import serve as serve_setup
+        from edge_uninstall import serve as serve_uninstall
+        if serve_uninstall(self,path,HOME_DIR): return
         if serve_setup(self, path, HOME_DIR, write_debug_event): return
         if setup_guard(self, path, HOME_DIR): return
 
@@ -10452,7 +10477,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         if path in ("/api/edge-rtc/client.js", "/api/edge-rtc/edge-rtc-client.js"):
             self.send_live_script("edge-rtc-client.js")
             return
-        if path in ('/api/edge-rtc/edge-dvr-client.js','/api/edge-rtc/edge-dvr-panel.js','/api/edge-rtc/edge-local-network.js','/api/edge-rtc/edge-setup.js'):
+        if path in ('/api/edge-rtc/edge-dvr-client.js','/api/edge-rtc/edge-dvr-panel.js','/api/edge-rtc/edge-local-network.js','/api/edge-rtc/edge-setup.js','/api/edge-rtc/edge-uninstall.js'):
             self.send_live_script(path.rsplit('/',1)[1])
             return
         if path == "/api/edge-rtc/edge-pcm-worklet.js":
@@ -10637,6 +10662,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         from edge_installation import serve as serve_setup
+        from edge_uninstall import serve as serve_uninstall
+        if serve_uninstall(self,route_path(parsed.path),HOME_DIR,on_cancel=activate_completed_setup): return
         if serve_setup(self, route_path(parsed.path), HOME_DIR, write_debug_event, on_complete=activate_completed_setup): return
         if setup_guard(self, route_path(parsed.path), HOME_DIR): return
         if route_path(parsed.path) == '/api/config':

@@ -65,6 +65,15 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
      await page.locator('#camera-grid .preview').dispatchEvent('click');
      await frame.waitFor();
     }
+     if(checking){
+      const post=type=>page.evaluate(type=>{const frame=document.querySelector('iframe.live-frame');window.dispatchEvent(new MessageEvent('message',{origin:location.origin,source:frame.contentWindow,data:{type,path:frame.dataset.livePath,state:'lost_connection'}}));},type);
+      assert((await page.locator('.connection-badge').textContent()).includes('connecting'));
+      await post('edge_live_ready');
+      assert((await page.locator('.connection-badge').textContent()).includes('Live'));
+      await post('edge_live_state');
+      assert((await page.locator('.connection-badge').textContent()).includes('lost connection'));
+      await post('edge_live_ready');
+     }
     assert(requests.filter(url=>url.pathname.endsWith('/api/recording/status')).every(url=>url.searchParams.get('summary')==='1'),'Live boot requested full archive history');
     assert(!requests.some(url=>url.pathname.endsWith('/api/storage/status')),'Live boot requested full storage accounting');
     if(checking){
