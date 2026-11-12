@@ -9,6 +9,7 @@ export function edgeRTCPlaybackSupport(language=globalThis.navigator?.language||
 // Capability queries own no decoder/GPU resources. Reuse only positive answers
 // for this exact browser constructor, codec profile and configuration bytes.
 const edgeVideoSupportCache=new Map();let edgeVideoSupportConstructor;
+export function edgeClearVideoSupport(){edgeVideoSupportCache.clear();}
 export async function edgeVideoConfigSupport(config){
   const decoder=globalThis.VideoDecoder;
   if(decoder!==edgeVideoSupportConstructor){edgeVideoSupportCache.clear();edgeVideoSupportConstructor=decoder;}
@@ -172,7 +173,7 @@ export class EdgeRTCClient {
         if(!supported.supported){configuration.hardwareAcceleration='no-preference';supported=await edgeVideoConfigSupport(configuration);}
         if(this.closed)return;
         if(!supported.supported){const hevc=/^(hev1|hvc1)\./.test(msg.video.codec);this.fail(hevc?'EdgeRTC: this browser/device cannot decode this H.265 profile. Select H.264 in the camera recording profile, or use a device/browser with HEVC decoding. H.265 recording remains available.':'EdgeRTC: this browser cannot decode the camera H.264 profile.',false);return;}
-        this.video=new VideoDecoder({output:frame=>this.render(frame),error:error=>this.fail('EdgeRTC video decoder: '+error.message)});
+        this.video=new VideoDecoder({output:frame=>this.render(frame),error:error=>{if(!this.closed)edgeClearVideoSupport();this.fail('EdgeRTC video decoder: '+error.message);}});
         this.decoderConfiguredAt=performance.now();this._codec=msg.video.codec;this.decoderConfiguration=configuration;this.videoCodecName=msg.video.codec_name||(/^(hev1|hvc1)\./.test(msg.video.codec)?'h265':'h264');this.video.configure(configuration);
         this.diagnostics?.note('rtc_decoder_configured',{source:this.diagnosticKey,codec:this._codec,requested_acceleration:configuration.hardwareAcceleration,capability_cache_hit:supported.cacheHit,audio_codec:msg.audio?.codec,audio_rate:msg.audio?.sampleRate,microphone_supported:this.microphoneSupported});
         this.connectionState='connected';this.options.onReady?.();
@@ -202,7 +203,7 @@ export class EdgeRTCClient {
         if(!await this.waitForBootstrapCapacity(timestamp))return;
         this.video.decode(new EncodedVideoChunk({type:key?'key':'delta',timestamp,data:payload}));
       }else if(bytes[0]===2&&!this.muted)this.decodeAudio(payload,timestamp);
-    }catch(error){this.fail(error.message||'EdgeRTC decoding failed.');}
+    }catch(error){if(!this.closed)edgeClearVideoSupport();this.fail(error.message||'EdgeRTC decoding failed.');}
   }
   clearFrames(){
     if(this.renderRequest!=null)cancelAnimationFrame(this.renderRequest);

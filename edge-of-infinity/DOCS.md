@@ -2,7 +2,8 @@
 
 ## 0.17.8: startup work and small-host update load
 
-HA Live prepares its signed URL and the client/diagnostics modules concurrently.
+HA Live loads its client and checks browser support before any signing request,
+then prepares its signed URL and diagnostics module concurrently.
 DVR overlaps signing and diagnostics module loading. Cancellation, failed signing
 and unavailable diagnostics are tested separately. The browser must still finish
 the normal authenticated connection and decode an original keyframe. Startup
@@ -13,7 +14,7 @@ Live/DVR share a bounded in-memory cache of up to eight positive video-capabilit
 checks for the exact codec, description bytes and decoder configuration. It does
 not retain configuration keys longer than 32 KiB (those are queried normally).
 It does not retain a decoder or video frame, and neither failures nor negative answers
-are kept. A changed browser decoder constructor clears it. Normal decoder
+are kept. A changed browser decoder constructor or decoder failure clears it. Normal decoder
 allocation, audio, original video, FPS, source count, packet budgets and playout
 buffers are unchanged. Actual improvements depend on the device and connection.
 

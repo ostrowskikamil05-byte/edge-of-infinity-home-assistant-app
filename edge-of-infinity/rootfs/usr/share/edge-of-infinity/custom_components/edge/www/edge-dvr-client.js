@@ -1,5 +1,5 @@
 /* EdgeRTC archive: persistent socket, indexed seeks, bounded pull-based delivery. */
-import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport,edgeVideoConfigSupport} from './edge-rtc-client.js?v=0.17.8';
+import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport,edgeVideoConfigSupport,edgeClearVideoSupport} from './edge-rtc-client.js?v=0.17.8';
 
 export {edgeMediaProblem};
 
@@ -75,7 +75,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
     const problem={...detail,code,stage:this.connectionStage,codec:this._codec,epoch:this.epoch};
     super.fail(edgeMediaProblem(message,problem,this.language||this.options.hass?.locale?.language),retryable&&code!=='integration_restart_required',problem);
   }
-  nativeFallback(code,message){this.diagnostics?.note('dvr_playback_unavailable',{code});this.fail(message,false,{code});}
+  nativeFallback(code,message){if(code==='decoder_rejected_stream'&&!this.closed)edgeClearVideoSupport();this.diagnostics?.note('dvr_playback_unavailable',{code});this.fail(message,false,{code});}
   yieldMedia(){this.pause();this.epoch=(this.epoch+1)>>>0||1;clearTimeout(this.seekTimer);this.releaseArchiveDecoder(0);}
   setWaiting(waiting){
     if(!waiting){clearTimeout(this.waitTimer);this.waitTimer=null;if(this.waiting){this.waiting=false;this.options.onWaiting?.(false);}return;}

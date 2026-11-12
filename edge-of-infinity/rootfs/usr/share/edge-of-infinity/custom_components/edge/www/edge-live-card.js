@@ -159,12 +159,14 @@ class EdgeLivePlayer extends HTMLElement {
       if(this._state()?.attributes?.edge_stream_source==='edge_rtc'){
         this._message(globalThis.EdgeI18n?.text('EdgeRTC · connecting…',this._hass,this._config?.language)||'EdgeRTC · connecting…');
         const prepareStarted=performance.now(),diagnosticEntity=this._activeEntity,diagnosticHass=this._hass;
+        const {EdgeRTCClient,edgeRTCPlaybackSupport}=await import('/edge/edge-rtc-client.js?v='+EDGE_LIVE_VERSION);if(gen!==this._generation)return;
+        const support=edgeRTCPlaybackSupport(diagnosticHass.locale?.language||diagnosticHass.language||navigator.language);
+        if(!support.supported)throw Object.assign(new Error(support.message),{code:support.code,retryable:false});
         this._connectTimer=setTimeout(()=>this._fail(this._t('failed'),gen),15000);
         const signing=diagnosticHass.callWS({type:'auth/sign_path',path:`/api/edge/rtc/${diagnosticEntity}?microphone=${micStream?1:0}`}).then(signed=>({url:diagnosticHass.hassUrl?diagnosticHass.hassUrl(signed.path):new URL(signed.path,location.href).href,ms:performance.now()-prepareStarted}));
-        const [{EdgeRTCClient},reporterModule,signed]=await Promise.all([
-          import('/edge/edge-rtc-client.js?v='+EDGE_LIVE_VERSION),
+        const [reporterModule,signed]=await Promise.all([
           import('/edge/edge-device-diagnostics.js?v='+EDGE_LIVE_VERSION).catch(()=>null),signing]);
-        if(gen!==this._generation)return;clearTimeout(this._connectTimer);
+        if(gen!==this._generation)return;clearTimeout(this._connectTimer);this._connectTimer=null;
         let diagnostics=null;
         try{if(!reporterModule)throw Error('diagnostics_module_unavailable');const {getDeviceReporter}=reporterModule;
           diagnostics=getDeviceReporter({context:{surface:'home_assistant_card'},send:async payload=>{

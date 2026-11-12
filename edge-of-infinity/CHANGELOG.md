@@ -2,14 +2,14 @@
 
 ## 0.17.8
 
-- Prepare HA Live signing, native client module and diagnostics module in parallel;
-  overlap DVR signing and diagnostic loading. Keep generation/closed guards,
+- Check browser support first, then prepare HA Live signing and diagnostics in
+  parallel; overlap DVR signing and diagnostic loading. Keep generation/closed guards,
   bounded startup timeout, exact signed paths and diagnostic-failure isolation.
   Log preparation/signing durations; Live first-frame timing includes preparation.
 - Reuse at most eight positive browser video-capability results, keyed by the
   exact codec/configuration bytes and acceleration/latency options. Share pending
   queries, retry negative/error answers and clear when the decoder constructor
-  changes. Each view/seek still allocates and configures its own decoder normally.
+  changes or a decoder fails. Each view/seek still allocates and configures its own decoder normally.
   Oversized configuration keys (over 32 KiB) bypass the cache.
   No video frames, signed addresses or authentication state are cached here.
 - Keep original codecs, quality, resolution/FPS, AAC, source count, seek protocol,
