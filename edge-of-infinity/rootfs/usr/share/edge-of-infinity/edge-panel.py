@@ -103,7 +103,7 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.9"
+APP_VERSION = "0.17.10"
 APP_RELEASE_FEATURES=['Restore s6 container environment before Supervisor migration; compact launcher settings after safe camera import',
                       'Parallel HA signing/modules, bounded positive codec-capability cache and complete startup timings',
                       'Build-only compiler concurrency/memory limits for small HA hosts; host BuildKit log guidance',
@@ -133,7 +133,7 @@ APP_RELEASE_FEATURES=['Restore s6 container environment before Supervisor migrat
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "supervisor-env-v179"
+UI_BUILD = "supervisor-env-v1710"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))

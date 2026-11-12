@@ -1,6 +1,9 @@
 # Edge of Infinity
 
-## 0.17.9: Supervisor access and a smaller app configuration
+## 0.17.10: Supervisor access and a smaller app configuration
+
+This release republishes the completed 0.17.9 fixes with matching app, integration
+and card versions so existing installations can update again.
 
 The runner restores its container environment with `with-contenv` before Python
 starts. Otherwise s6 can clear the Supervisor socket/token while media still

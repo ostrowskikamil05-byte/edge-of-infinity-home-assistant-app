@@ -1,5 +1,5 @@
 /* EdgeRTC archive: persistent socket, indexed seeks, bounded pull-based delivery. */
-import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport,edgeVideoConfigSupport,edgeClearVideoSupport} from './edge-rtc-client.js?v=0.17.9';
+import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport,edgeVideoConfigSupport,edgeClearVideoSupport} from './edge-rtc-client.js?v=0.17.10';
 
 export {edgeMediaProblem};
 
@@ -9,7 +9,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
     const support=edgeRTCPlaybackSupport(this.options.hass?.locale?.language||this.options.language||navigator.language);
     if(!support.supported){const error=Object.assign(new Error(support.message),{code:support.code});this.close();throw error;}
     const prepareStarted=performance.now();let signMS=0,diagnosticsMS=0;
-    const reporterModule=this.options.hass&&!this.options.diagnostics?import('./edge-device-diagnostics.js?v=0.17.9').catch(()=>null).then(module=>{diagnosticsMS=performance.now()-prepareStarted;return module;}):null;
+    const reporterModule=this.options.hass&&!this.options.diagnostics?import('./edge-device-diagnostics.js?v=0.17.10').catch(()=>null).then(module=>{diagnosticsMS=performance.now()-prepareStarted;return module;}):null;
     if(!this.options.url&&this.options.hass&&this.options.entity){
       const path='/api/edge/dashboard/archive/'+encodeURIComponent(this.options.entity)+(this.options.clip?'?clip='+encodeURIComponent(this.options.clip):'');
       const signed=await this.options.hass.callWS({type:'auth/sign_path',path,expires:3600});
