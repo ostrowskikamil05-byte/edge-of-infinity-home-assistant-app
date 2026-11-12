@@ -66,7 +66,6 @@ def _candidate_urls(url: str) -> list[str]:
             "http://4e5f32ea-edge-of-infinity:8088",
             "http://4e5f32ea_edge_of_infinity:8088",
             "http://addon_4e5f32ea_edge_of_infinity:8088",
-            "http://192.168.33.17:8088",
         ]
     )
 

@@ -72,11 +72,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.17.10")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.17.10")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.17.10")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.17.10")
-        self.assertIn("v0.17.10", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.17.11")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.17.11")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.17.11")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.17.11")
+        self.assertIn("v0.17.11", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -107,7 +107,7 @@ class EdgePanelConfigTests(unittest.TestCase):
 
     def test_chunked_json_request_body_is_read_for_ingress_saves(self):
         panel = load_panel_module()
-        raw = b'{"cameras":[{"id":"hikvision_1","host":"192.168.33.136"}]}'
+        raw = b'{"cameras":[{"id":"hikvision_1","host":"192.0.2.136"}]}'
         chunked = b"".join([
             b"10\r\n", raw[:16], b"\r\n",
             f"{len(raw[16:]):x}\r\n".encode("ascii"), raw[16:], b"\r\n",
@@ -119,7 +119,7 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         payload = panel.EdgeHandler.read_body_json(handler)
 
-        self.assertEqual(payload["cameras"][0]["host"], "192.168.33.136")
+        self.assertEqual(payload["cameras"][0]["host"], "192.0.2.136")
         self.assertEqual(handler._last_body_info["bytes_read"], len(raw))
 
     def test_config_save_refuses_empty_request_body_before_reusing_existing_config(self):
@@ -140,8 +140,8 @@ class EdgePanelConfigTests(unittest.TestCase):
             "server": {},
             "storage": {},
             "cameras": [
-                camera("hikvision_1", "192.168.33.21", "main"),
-                camera("hikvision_2", "192.168.33.135", "main"),
+                camera("hikvision_1", "192.0.2.21", "main"),
+                camera("hikvision_2", "192.0.2.135", "main"),
             ],
         }
         panel.write_json(panel.CONFIG_PATH, existing)
@@ -177,8 +177,8 @@ class EdgePanelConfigTests(unittest.TestCase):
             "server": {},
             "storage": {},
             "cameras": [
-                camera("hikvision_1", "192.168.33.21", "sub"),
-                camera("hikvision_2", "192.168.33.135", "main"),
+                camera("hikvision_1", "192.0.2.21", "sub"),
+                camera("hikvision_2", "192.0.2.135", "main"),
             ],
         }
         panel.write_json(panel.CONFIG_PATH, existing)
@@ -225,8 +225,8 @@ class EdgePanelConfigTests(unittest.TestCase):
             "server": {},
             "storage": {},
             "cameras": [
-                camera("hikvision_1", "192.168.33.21", "main"),
-                camera("hikvision_2", "192.168.33.135", "main"),
+                camera("hikvision_1", "192.0.2.21", "main"),
+                camera("hikvision_2", "192.0.2.135", "main"),
             ],
         }
         panel.write_json(panel.CONFIG_PATH, runtime)
@@ -246,24 +246,24 @@ class EdgePanelConfigTests(unittest.TestCase):
         loaded = panel.load_config()
         mirrored = panel.read_json(panel.PANEL_CONFIG_PATH, {})
 
-        self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.21")
+        self.assertEqual(loaded["cameras"][0]["host"], "192.0.2.21")
         self.assertEqual(loaded["cameras"][0]["snapshot_stream"], "main")
         self.assertEqual(loaded["cameras"][0]["live_stream"], "main")
         self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
         self.assertEqual(loaded["cameras"][0]["record_stream"], "main")
-        self.assertEqual(mirrored["cameras"][0]["host"], "192.168.33.21")
+        self.assertEqual(mirrored["cameras"][0]["host"], "192.0.2.21")
 
     def test_runtime_edge_json_is_adopted_over_panel_config_regardless_of_mtime(self):
         panel = load_panel_module()
         panel_payload = {
             "server": {},
             "storage": {},
-            "cameras": [camera("hikvision_1", "192.168.33.21", "main")],
+            "cameras": [camera("hikvision_1", "192.0.2.21", "main")],
         }
         runtime_payload = {
             "server": {},
             "storage": {},
-            "cameras": [camera("hikvision_1", "192.168.33.136", "sub")],
+            "cameras": [camera("hikvision_1", "192.0.2.136", "sub")],
         }
         panel.write_json(panel.PANEL_CONFIG_PATH, panel_payload)
         panel.write_json(panel.CONFIG_PATH, runtime_payload)
@@ -273,30 +273,30 @@ class EdgePanelConfigTests(unittest.TestCase):
         loaded = panel.load_config()
         mirrored = panel.read_json(panel.PANEL_CONFIG_PATH, {})
 
-        self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.136")
-        self.assertEqual(mirrored["cameras"][0]["host"], "192.168.33.136")
+        self.assertEqual(loaded["cameras"][0]["host"], "192.0.2.136")
+        self.assertEqual(mirrored["cameras"][0]["host"], "192.0.2.136")
 
     def test_legacy_panel_config_is_migrated_when_edge_json_is_missing(self):
         panel = load_panel_module()
         panel_payload = {
             "server": {},
             "storage": {},
-            "cameras": [camera("hikvision_1", "192.168.33.136", "sub")],
+            "cameras": [camera("hikvision_1", "192.0.2.136", "sub")],
         }
         panel.write_json(panel.PANEL_CONFIG_PATH, panel_payload)
 
         loaded = panel.load_config()
         runtime = panel.read_json(panel.CONFIG_PATH, {})
 
-        self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.136")
-        self.assertEqual(runtime["cameras"][0]["host"], "192.168.33.136")
+        self.assertEqual(loaded["cameras"][0]["host"], "192.0.2.136")
+        self.assertEqual(runtime["cameras"][0]["host"], "192.0.2.136")
 
     def test_prepare_save_keeps_ui_changes_without_bouncing_to_existing_config(self):
         panel = load_panel_module()
         existing = {
             "server": {},
             "storage": {},
-            "cameras": [camera("hikvision_1", "192.168.33.21", "main")],
+            "cameras": [camera("hikvision_1", "192.0.2.21", "main")],
         }
         panel.write_json(panel.CONFIG_PATH, existing)
 
@@ -327,7 +327,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         payload = {
             "server": {},
             "storage": {},
-            "cameras": [camera("hikvision_1", "192.168.33.21", "sub")],
+            "cameras": [camera("hikvision_1", "192.0.2.21", "sub")],
         }
         panel.save_panel_camera_overrides(payload)
         panel.save_stream_overrides(payload)
@@ -345,14 +345,14 @@ class EdgePanelConfigTests(unittest.TestCase):
         payload = {
             "server": {},
             "storage": {},
-            "cameras": [camera("hikvision_1", "192.168.33.136", "sub")],
+            "cameras": [camera("hikvision_1", "192.0.2.136", "sub")],
         }
 
         committed = panel.commit_panel_config(payload)
         addon_mirror = panel.read_json(panel.ADDON_CONFIG_PATH, {})
 
         self.assertEqual(addon_mirror, committed)
-        self.assertEqual(addon_mirror["cameras"][0]["host"], "192.168.33.136")
+        self.assertEqual(addon_mirror["cameras"][0]["host"], "192.0.2.136")
 
     def test_home_live_tiles_honor_tile_stream_and_enable_audio_controls(self):
         panel = load_panel_module()
@@ -393,7 +393,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("supervisor-env-v1710", html)
+        self.assertIn("clean-install-v1711", html)
         self.assertIn("function recordingPlayerControls", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)
@@ -503,7 +503,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                 {
                     "id": "hikvision_2",
                     "vendor": "hikvision",
-                    "host": "192.168.33.135",
+                    "host": "192.0.2.135",
                     "username": "admin",
                     "password": "secret",
                     "camera_number": "2",
@@ -519,8 +519,8 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(camera_config["camera_number"], "2")
         self.assertEqual(camera_config["rtsp_main_channel"], "201")
         self.assertEqual(camera_config["rtsp_sub_channel"], "202")
-        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.168.33.135:554/Streaming/Channels/201")
-        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.168.33.135:554/Streaming/Channels/202")
+        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.0.2.135:554/Streaming/Channels/201")
+        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.0.2.135:554/Streaming/Channels/202")
 
     def test_manual_hikvision_channels_are_not_overwritten_by_camera_number(self):
         panel = load_panel_module()
@@ -531,7 +531,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                 {
                     "id": "hikvision_1",
                     "vendor": "hikvision",
-                    "host": "192.168.33.21",
+                    "host": "192.0.2.21",
                     "username": "admin",
                     "password": "secret",
                     "camera_number": "1",
@@ -549,8 +549,8 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertEqual(camera_config["camera_number"], "1")
         self.assertEqual(camera_config["rtsp_main_channel"], "201")
         self.assertEqual(camera_config["rtsp_sub_channel"], "202")
-        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/201")
-        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/202")
+        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.0.2.21:554/Streaming/Channels/201")
+        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.0.2.21:554/Streaming/Channels/202")
 
     def test_hikvision_rtsp_rebuilds_when_host_changes_but_old_url_remains_in_form(self):
         panel = load_panel_module()
@@ -561,14 +561,14 @@ class EdgePanelConfigTests(unittest.TestCase):
                 {
                     "id": "hikvision_1",
                     "vendor": "hikvision",
-                    "host": "192.168.33.50",
+                    "host": "192.0.2.50",
                     "username": "admin",
                     "password": "new-secret",
                     "camera_number": "1",
                     "rtsp_main_channel": "101",
                     "rtsp_sub_channel": "102",
-                    "rtsp_main": "rtsp://admin:old-secret@192.168.33.21:554/Streaming/Channels/101",
-                    "rtsp_sub": "rtsp://admin:old-secret@192.168.33.21:554/Streaming/Channels/102",
+                    "rtsp_main": "rtsp://admin:old-secret@192.0.2.21:554/Streaming/Channels/101",
+                    "rtsp_sub": "rtsp://admin:old-secret@192.0.2.21:554/Streaming/Channels/102",
                     "enabled": True,
                     "record": True,
                 }
@@ -578,9 +578,9 @@ class EdgePanelConfigTests(unittest.TestCase):
         normalized = panel.normalize_config(payload)
         camera_config = normalized["cameras"][0]
 
-        self.assertEqual(camera_config["host"], "192.168.33.50")
-        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:new-secret@192.168.33.50:554/Streaming/Channels/101")
-        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:new-secret@192.168.33.50:554/Streaming/Channels/102")
+        self.assertEqual(camera_config["host"], "192.0.2.50")
+        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:new-secret@192.0.2.50:554/Streaming/Channels/101")
+        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:new-secret@192.0.2.50:554/Streaming/Channels/102")
 
     def test_hikvision_onvif_and_isapi_are_rebuilt_when_host_changes(self):
         panel = load_panel_module()
@@ -591,13 +591,13 @@ class EdgePanelConfigTests(unittest.TestCase):
                 {
                     "id": "hikvision_1",
                     "vendor": "hikvision",
-                    "host": "192.168.33.136",
+                    "host": "192.0.2.136",
                     "username": "admin",
                     "password": "secret",
-                    "rtsp_main": "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/101",
-                    "rtsp_sub": "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/102",
-                    "onvif_url": "rtsp://192.168.33.21:554/Streaming/Channels/101?transportmode=unicast&profile=Profile_1",
-                    "isapi_base_url": "http://192.168.33.21/ISAPI/Streaming/channels/101/httpPreview",
+                    "rtsp_main": "rtsp://admin:secret@192.0.2.21:554/Streaming/Channels/101",
+                    "rtsp_sub": "rtsp://admin:secret@192.0.2.21:554/Streaming/Channels/102",
+                    "onvif_url": "rtsp://192.0.2.21:554/Streaming/Channels/101?transportmode=unicast&profile=Profile_1",
+                    "isapi_base_url": "http://192.0.2.21/ISAPI/Streaming/channels/101/httpPreview",
                     "enabled": True,
                     "record": True,
                 }
@@ -607,22 +607,22 @@ class EdgePanelConfigTests(unittest.TestCase):
         normalized = panel.normalize_config(payload)
         camera_config = normalized["cameras"][0]
 
-        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.168.33.136:554/Streaming/Channels/101")
-        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.168.33.136:554/Streaming/Channels/102")
-        self.assertEqual(camera_config["onvif_url"], "http://192.168.33.136:80/onvif/device_service")
-        self.assertEqual(camera_config["isapi_base_url"], "http://192.168.33.136")
+        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.0.2.136:554/Streaming/Channels/101")
+        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.0.2.136:554/Streaming/Channels/102")
+        self.assertEqual(camera_config["onvif_url"], "http://192.0.2.136:80/onvif/device_service")
+        self.assertEqual(camera_config["isapi_base_url"], "http://192.0.2.136")
 
     def test_save_then_reload_keeps_changed_connection_and_stream_values(self):
         panel = load_panel_module()
         existing = {
             "server": {},
             "storage": {},
-            "cameras": [camera("hikvision_1", "192.168.33.21", "main")],
+            "cameras": [camera("hikvision_1", "192.0.2.21", "main")],
         }
         panel.write_json(panel.CONFIG_PATH, existing)
 
         raw_payload = json.loads(json.dumps(existing))
-        raw_payload["cameras"][0]["host"] = "192.168.33.50"
+        raw_payload["cameras"][0]["host"] = "192.0.2.50"
         raw_payload["cameras"][0]["password"] = "new-secret"
         raw_payload["cameras"][0]["tile_stream"] = "sub"
         raw_payload["cameras"][0]["live_stream"] = "sub"
@@ -633,10 +633,10 @@ class EdgePanelConfigTests(unittest.TestCase):
         panel.commit_panel_config(final_payload)
         loaded = panel.load_config()
 
-        self.assertEqual(loaded["cameras"][0]["host"], "192.168.33.50")
+        self.assertEqual(loaded["cameras"][0]["host"], "192.0.2.50")
         self.assertEqual(loaded["cameras"][0]["password"], "new-secret")
-        self.assertEqual(loaded["cameras"][0]["rtsp_main"], "rtsp://admin:new-secret@192.168.33.50:554/Streaming/Channels/101")
-        self.assertEqual(loaded["cameras"][0]["rtsp_sub"], "rtsp://admin:new-secret@192.168.33.50:554/Streaming/Channels/102")
+        self.assertEqual(loaded["cameras"][0]["rtsp_main"], "rtsp://admin:new-secret@192.0.2.50:554/Streaming/Channels/101")
+        self.assertEqual(loaded["cameras"][0]["rtsp_sub"], "rtsp://admin:new-secret@192.0.2.50:554/Streaming/Channels/102")
         self.assertEqual(loaded["cameras"][0]["tile_stream"], "sub")
         self.assertEqual(loaded["cameras"][0]["live_stream"], "sub")
         self.assertEqual(loaded["cameras"][0]["record_stream"], "sub")
@@ -651,7 +651,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                 {
                     "id": "hikvision_1",
                     "vendor": "hikvision",
-                    "host": "192.168.33.21",
+                    "host": "192.0.2.21",
                     "username": "admin",
                     "password": "secret",
                     "rtsp_main_channel": "201",
@@ -667,8 +667,8 @@ class EdgePanelConfigTests(unittest.TestCase):
 
         self.assertEqual(camera_config["rtsp_main_channel"], "201")
         self.assertEqual(camera_config["rtsp_sub_channel"], "202")
-        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/201")
-        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/202")
+        self.assertEqual(camera_config["rtsp_main"], "rtsp://admin:secret@192.0.2.21:554/Streaming/Channels/201")
+        self.assertEqual(camera_config["rtsp_sub"], "rtsp://admin:secret@192.0.2.21:554/Streaming/Channels/202")
 
     def test_recording_preflight_reports_missing_password(self):
         panel = load_panel_module()
@@ -676,7 +676,7 @@ class EdgePanelConfigTests(unittest.TestCase):
             {
                 "id": "hikvision_1",
                 "vendor": "hikvision",
-                "host": "192.168.33.21",
+                "host": "192.0.2.21",
                 "username": "admin",
                 "password": "",
                 "record_stream": "main",
@@ -698,7 +698,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "",
                         "record_stream": "main",
@@ -717,7 +717,7 @@ class EdgePanelConfigTests(unittest.TestCase):
 
     def test_recording_source_prefers_edge_rtc_shared_from_panel_camera(self):
         panel = load_panel_module()
-        camera_config = panel.normalize_camera(camera("hikvision_1", "192.168.33.21", "sub"), 1)
+        camera_config = panel.normalize_camera(camera("hikvision_1", "192.0.2.21", "sub"), 1)
 
         stream, source = panel.recording_source_stream(camera_config, 0, "main")
 
@@ -734,7 +734,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -760,7 +760,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -789,7 +789,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -843,7 +843,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -881,7 +881,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -925,7 +925,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -963,7 +963,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -1002,7 +1002,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -1036,7 +1036,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -1094,7 +1094,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -1152,7 +1152,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -1226,7 +1226,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -1374,7 +1374,7 @@ class EdgePanelConfigTests(unittest.TestCase):
                     {
                         "id": "hikvision_1",
                         "vendor": "hikvision",
-                        "host": "192.168.33.21",
+                        "host": "192.0.2.21",
                         "username": "admin",
                         "password": "secret",
                         "record_stream": "main",
@@ -1430,7 +1430,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         panel = load_panel_module()
 
         command = panel.build_recording_command(
-            "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/101",
+            "rtsp://admin:secret@192.0.2.21:554/Streaming/Channels/101",
             "/tmp/%Y%m%d-%H%M%S.mp4",
             10,
             "copy_h264",
@@ -1445,7 +1445,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         panel = load_panel_module()
 
         command = panel.build_recording_command(
-            "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/101",
+            "rtsp://admin:secret@192.0.2.21:554/Streaming/Channels/101",
             "/tmp/%Y%m%d-%H%M%S.mp4",
             10,
             "transcode_to_h264",

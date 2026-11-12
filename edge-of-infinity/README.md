@@ -19,10 +19,11 @@ Version 0.17.2 names every add-on option in Polish and English and tightens
 the dashboard bridge. Version 0.17.1 fixed dashboard cards failing with "Importing a module script
 failed" after an add-on update and shows when Home Assistant must restart.
 
-Version **0.17.10** republishes the completed 0.17.9 fixes under a new update
-number. It restores Supervisor access through s6, verifies persisted
-retired-option cleanup and keeps camera/detection settings in the Edge panel.
-The app configuration defaults now contain only essential launcher/storage options.
+Version **0.17.11** adds clean first-run Nabu Casa/local HTTPS guides and explicit
+configuration/media removal before uninstalling. Reinstalls do not silently
+restore old cameras or attach retained recordings. Normal upgrades keep existing
+settings. See [clean installation and removal](INSTALLATION.md) for the
+legacy-upgrade reset and the optional permanent recording deletion.
 
 Version 0.17.8 overlaps HA startup requests and remembers positive exact-profile
 codec capabilities without retaining decoders. It also limits compiler resources

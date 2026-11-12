@@ -39,10 +39,10 @@ class EdgeIntegrationClientTests(unittest.TestCase):
             {
                 "id": "hikvision_1",
                 "name": "Hikvision 1",
-                "host": "192.168.33.21",
+                "host": "192.0.2.21",
                 "status": "online",
-                "rtsp_main": "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/101",
-                "rtsp_sub": "rtsp://admin:secret@192.168.33.21:554/Streaming/Channels/102",
+                "rtsp_main": "rtsp://admin:secret@192.0.2.21:554/Streaming/Channels/101",
+                "rtsp_sub": "rtsp://admin:secret@192.0.2.21:554/Streaming/Channels/102",
                 "live_stream": "main",
             }
         ]
@@ -50,10 +50,10 @@ class EdgeIntegrationClientTests(unittest.TestCase):
             {
                 "id": "hikvision_1",
                 "name": "Hikvision 1",
-                "host": "192.168.33.136",
+                "host": "192.0.2.136",
                 "vendor": "hikvision",
-                "rtsp_main": "rtsp://admin:secret@192.168.33.136:554/Streaming/Channels/101",
-                "rtsp_sub": "rtsp://admin:secret@192.168.33.136:554/Streaming/Channels/102",
+                "rtsp_main": "rtsp://admin:secret@192.0.2.136:554/Streaming/Channels/101",
+                "rtsp_sub": "rtsp://admin:secret@192.0.2.136:554/Streaming/Channels/102",
                 "live_stream": "sub",
                 "tile_stream": "sub",
                 "record_stream": "main",
@@ -63,10 +63,10 @@ class EdgeIntegrationClientTests(unittest.TestCase):
 
         merged = client._normalize_cameras(client._merge_camera_config(status, config))
 
-        self.assertEqual(merged[0]["host"], "192.168.33.136")
+        self.assertEqual(merged[0]["host"], "192.0.2.136")
         self.assertEqual(merged[0]["status"], "online")
         self.assertEqual(merged[0]["live_stream"], "sub")
-        self.assertEqual(merged[0]["live_rtsp"], "rtsp://admin:secret@192.168.33.136:554/Streaming/Channels/102")
+        self.assertEqual(merged[0]["live_rtsp"], "rtsp://admin:secret@192.0.2.136:554/Streaming/Channels/102")
 
 
 if __name__ == "__main__":

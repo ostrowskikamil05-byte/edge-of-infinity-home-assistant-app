@@ -42,6 +42,7 @@ for _ in $(seq 1 20); do
   sleep .1
 done
 test -f "${edge_smoke_dir}/supervisor/ready"
+start_container() {
 docker run --detach --name "${edge_smoke_container}" \
   --env SUPERVISOR_SOCKET=/run/edge-fixture-supervisor/api.sock \
   --env SUPERVISOR_TOKEN=fixture-only-supervisor-token \
@@ -52,6 +53,8 @@ docker run --detach --name "${edge_smoke_container}" \
   --volume "${edge_smoke_dir}/runtime:/tmp/edge-runtime" \
   --volume "${edge_smoke_dir}/media:/media/edge-of-infinity/recordings" \
   "${edge_smoke_image}" >/dev/null
+}
+wait_ready() {
 edge_smoke_ready=false
 for _ in $(seq 1 45); do
   if docker exec "${edge_smoke_container}" curl --silent --fail http://127.0.0.1:8088/health >/dev/null 2>&1; then
@@ -61,6 +64,9 @@ for _ in $(seq 1 45); do
   sleep 1
 done
 test "${edge_smoke_ready}" = true
+}
+start_container
+wait_ready
 docker exec -i "${edge_smoke_container}" python3 - <<'PY'
 import json
 import os
@@ -98,4 +104,37 @@ assert persisted['writes']>=2 and persisted['options']['cameras']==[]
 assert not any(k.startswith(('mediamtx_', 'janus_', 'hikvision_', 'detection_')) or k=='core_engine' for k in persisted['options'])
 assert '8889/tcp' not in persisted['network']
 print('PASS container: real s6 restores Supervisor access, verified persisted cleanup, dependency layers reused, compiler limits stay build-only, native boot/API, custom ports and recordings preserved')
+PY
+
+# Recreating the app drops private /data but keeps the HA/media mounts.
+docker exec "${edge_smoke_container}" sh -c 'cp /homeassistant/edge/edge.json /homeassistant/edge/camera-presets.json; mkdir -p /homeassistant/edge/snapshots; echo fixture > /homeassistant/edge/snapshots/old.jpg'
+docker rm -f "${edge_smoke_container}" >/dev/null
+start_container
+wait_ready
+docker exec -i "${edge_smoke_container}" python3 - <<'PY'
+import json
+from pathlib import Path
+import urllib.request
+config=json.loads(Path('/homeassistant/edge/edge.json').read_text())
+assert config['cameras']==[], 'reinstalled cameras returned from a shared mirror'
+assert '/recordings/' in config['storage']['recordings_dir']
+assert not Path('/homeassistant/edge/camera-presets.json').exists()
+assert not Path('/homeassistant/edge/snapshots/old.jpg').exists()
+assert Path('/media/edge-of-infinity/recordings/keep.mp4').exists(), 'reinstall silently deleted recordings'
+status=json.load(urllib.request.urlopen('http://127.0.0.1:8088/api/setup'))
+assert status['needs_setup'] and not status['legacy_upgrade']
+request=urllib.request.Request('http://127.0.0.1:8088/api/setup/reset',data=json.dumps({'csrf':status['csrf'],'confirm':'DELETE EDGE','include_media':True}).encode(),headers={'Content-Type':'application/json'})
+assert json.load(urllib.request.urlopen(request))['pending_reset']
+PY
+docker restart "${edge_smoke_container}" >/dev/null
+wait_ready
+docker exec -i "${edge_smoke_container}" python3 - <<'PY'
+import json
+from pathlib import Path
+import urllib.request
+assert not Path('/media/edge-of-infinity/recordings/keep.mp4').exists()
+assert json.loads(Path('/homeassistant/edge/edge.json').read_text())['cameras']==[]
+assert json.loads(Path('/config/edge.json').read_text())['cameras']==[]
+assert json.load(urllib.request.urlopen('http://127.0.0.1:8088/api/setup'))['needs_setup']
+print('PASS real container reinstall: blank configuration, snapshots/presets removed, recordings kept until explicit full removal, clean first-run setup')
 PY

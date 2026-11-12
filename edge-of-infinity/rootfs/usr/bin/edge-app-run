@@ -4,7 +4,8 @@ set -euo pipefail
 source /usr/lib/bashio/bashio.sh
 
 OPTIONS_PATH=/tmp/edge-runtime/native-options.json
-python3 /usr/share/edge-of-infinity/edge_native_migration.py --options /data/options.json --output "${OPTIONS_PATH}" --home /homeassistant/edge --addon /config
+python3 /usr/share/edge-of-infinity/edge_installation.py --home /homeassistant/edge --private /data --addon /config --options /data/options.json --output /data/edge-bootstrap-options.json
+python3 /usr/share/edge-of-infinity/edge_native_migration.py --options /data/edge-bootstrap-options.json --output "${OPTIONS_PATH}" --home /homeassistant/edge --addon /config
 
 read_option() {
   local key="$1"
@@ -383,54 +384,7 @@ cat > "${EDGE_HOME_EXAMPLE_CONFIG}" <<'EOF'
   "live": {
     "engine": "edge_rtc"
   },
-  "cameras": [
-    {
-      "id": "hikvision_1",
-      "name": "Hikvision 1",
-      "vendor": "hikvision",
-      "host": "192.168.1.64",
-      "username": "admin",
-      "password": "change-me",
-      "camera_number": "1",
-      "access_protocol": "rtsp",
-      "rtsp_transport": "tcp",
-      "rtsp_main": "rtsp://admin:change-me@192.168.1.64:554/Streaming/Channels/101",
-      "rtsp_sub": "rtsp://admin:change-me@192.168.1.64:554/Streaming/Channels/102",
-      "rtsp_main_channel": "101",
-      "rtsp_sub_channel": "102",
-      "onvif_url": "http://192.168.1.64:80/onvif/device_service",
-      "isapi_base_url": "http://192.168.1.64",
-      "enabled": false,
-      "record": true,
-      "low_latency": true,
-      "snapshot_stream": "sub",
-      "live_stream": "sub",
-      "record_stream": "main"
-    },
-    {
-      "id": "hikvision_2",
-      "name": "Hikvision 2",
-      "vendor": "hikvision",
-      "host": "192.168.1.65",
-      "username": "admin",
-      "password": "change-me",
-      "camera_number": "2",
-      "access_protocol": "rtsp",
-      "rtsp_transport": "tcp",
-      "rtsp_main": "rtsp://admin:change-me@192.168.1.65:554/Streaming/Channels/201",
-      "rtsp_sub": "rtsp://admin:change-me@192.168.1.65:554/Streaming/Channels/202",
-      "rtsp_main_channel": "201",
-      "rtsp_sub_channel": "202",
-      "onvif_url": "http://192.168.1.65:80/onvif/device_service",
-      "isapi_base_url": "http://192.168.1.65",
-      "enabled": false,
-      "record": true,
-      "low_latency": true,
-      "snapshot_stream": "sub",
-      "live_stream": "sub",
-      "record_stream": "main"
-    }
-  ],
+  "cameras": [],
   "future_vendors": [
     "dahua",
     "onvif",
