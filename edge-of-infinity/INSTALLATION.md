@@ -14,7 +14,50 @@ status cannot be verified, the panel stays locked and offers Retry. The server
 also blocks Live/DVR/camera actions while setup is incomplete. Saved profiles are
 preserved, but camera sources and automatic retention stay idle until completion.
 
-## Remove everything before uninstalling
+## Uninstall from Edge (0.17.13)
+
+Open **Edge → Cameras / Settings → Setup & data → Uninstall Edge / Odinstaluj
+Edge**. The same action is available in the first-run dialog, without completing
+setup. The app is always uninstalled; choose the additional data to remove:
+
+- Original recordings, saved alert video clips, thumbnails and snapshots have
+  separate choices.
+- Playback cache, camera settings/passwords/local HTTPS, Edge setting backups
+  and exports, and event/device logs can be selected independently.
+- The local HA integration, its entities and component files are optional.
+- **Delete all Edge data / Usuń wszystkie dane Edge** selects every category.
+
+Review the delete/keep summary, type **UNINSTALL EDGE**, then confirm. No files
+are deleted by previewing. Cleanup runs after an app restart, before camera
+connections, recorders, analysis or retention start. Edge then asks Supervisor
+to uninstall this app with `remove_config: true`. It does not request elevated
+Supervisor privileges or uninstall other apps.
+
+Unchecked recordings and alert videos stay in their original location. Other
+unchecked durable Edge files move to
+`/homeassistant/edge-retained/<operation-id>/<category>/`; the summary shows the
+exact archive path. This includes camera passwords if settings are kept. Retained
+settings are not automatically imported by a new installation, and old videos
+are not automatically attached. Temporary container/private data is removed by
+Supervisor. Only Edge setting backups/exports are covered; full HA system
+backup archives and other applications are outside this operation.
+
+Removing configured HA entries requires the updated Edge integration running
+in **Home Assistant Core** and an administrator opening Edge from the HA sidebar.
+Restart Core once after updating. Edge uses Core's authenticated removal API;
+it does not edit `.storage`. Remote Edge entries and their shared component files
+remain if another Edge instance uses them. If the bridge is unavailable, the
+dialog explains this; other selections work with integration unchecked.
+
+Cleanup failures leave the app in maintenance mode with an explicit retry for
+the same selection. Interrupted integration removal can also be resumed before
+any media cleanup. `[edge-uninstall]` startup messages report phase/counters and
+safe error codes. A disconnected page alone does not confirm uninstall: the
+dialog checks HA when possible and otherwise asks you to check its app list.
+Do not assume a failed operation rolled back files already removed. Cancellation
+is available before file cleanup is queued.
+
+## Reset data while keeping the app
 
 1. Open **Edge → Cameras / Settings → Setup & data / Konfiguracja i dane**.
 2. Expand **Remove Edge data / Usuń dane Edge**. Configuration, passwords, saved
@@ -46,7 +89,7 @@ app configuration directory, not all files under shared `/media` or the HA confi
 mount. Extending that exact dialog requires a Home Assistant frontend/Supervisor
 capability; changing Edge alone cannot make it delete shared recordings.
 
-Use Edge's confirmed cleanup before uninstalling when removing those shared files.
+Use **Uninstall Edge** above when removing those shared files and the app together.
 This also removes setting backups and exports inside the dedicated Edge directory.
 Full Home Assistant backup archives can contain other apps/system data and are not
 removed by this operation. There is no automatic deletion on every app shutdown:

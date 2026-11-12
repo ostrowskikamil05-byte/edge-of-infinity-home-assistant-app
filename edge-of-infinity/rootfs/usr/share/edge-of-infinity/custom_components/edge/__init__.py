@@ -17,6 +17,7 @@ from .rtc import async_register_rtc
 from .events import EdgeEventImageView
 from .device_diagnostics import EdgeDeviceDiagnosticsView
 from .dashboard import async_register_dashboard
+from .uninstall import async_register_uninstall
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.http.register_view(EdgeEventImageView(hass))
     hass.http.register_view(EdgeDeviceDiagnosticsView(hass))
     async_register_dashboard(hass)
+    async_register_uninstall(hass)
     try:
         from .restart_check import async_watch_installed_version
         async_watch_installed_version(hass)

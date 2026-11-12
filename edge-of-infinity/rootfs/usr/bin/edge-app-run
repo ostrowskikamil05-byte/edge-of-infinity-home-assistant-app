@@ -3,6 +3,9 @@ set -euo pipefail
 
 source /usr/lib/bashio/bashio.sh
 
+export EDGE_PRIVATE_DIR=/data
+python3 /usr/share/edge-of-infinity/edge_uninstall.py --home /homeassistant/edge --private /data --addon /config
+
 OPTIONS_PATH=/tmp/edge-runtime/native-options.json
 python3 /usr/share/edge-of-infinity/edge_installation.py --home /homeassistant/edge --private /data --addon /config --options /data/options.json --output /data/edge-bootstrap-options.json
 python3 /usr/share/edge-of-infinity/edge_native_migration.py --options /data/edge-bootstrap-options.json --output "${OPTIONS_PATH}" --home /homeassistant/edge --addon /config

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.17.13
+
+- Add an in-app uninstaller, also accessible during mandatory first-run setup,
+  with Delete all and independent recording, alert, thumbnail, snapshot, cache,
+  setting, Edge-backup, history/log and HA-integration selections. Preview and a
+  typed confirmation precede deletion. Paths come from installation ownership.
+- Run file cleanup offline before media startup, then request only this app's
+  uninstall from Supervisor. Keep failures in maintenance mode with a bounded
+  retry request and durable operation journal; do not claim success on disconnect.
+- Retain unchecked media in place and other durable files in edge-retained,
+  preserving their category and ownership for subsequent removal. Reinstalls
+  remain clean. Full HA backups and other apps are excluded.
+- Remove local HA entries using Core's admin WebSocket API, with a verified
+  acknowledgment before file cleanup. Support interrupted retries and retain
+  component files needed by remote Edge entries. No direct registry writes.
+- Set the Live corner badge to Live / Na żywo after the first rendered frame;
+  track reconnect/error/pause without changing quality, codecs, FPS or upstreams.
+- Cover category preservation, request validation, clean reinstall, Core removal,
+  Chromium/WebKit dialogs, Live badges and real-container cleanup/Supervisor
+  dispatch. Synchronize app, integration and versioned assets to 0.17.13.
+
 ## 0.17.12
 
 - Make initial setup mandatory. Hide Close, block Escape/native dialog closing

@@ -7,6 +7,13 @@
 
 Home Assistant App repository for Edge of Infinity.
 
+Version **0.17.13** adds **Settings → Setup & data → Uninstall Edge**, with
+separate data-removal choices and a Delete all option. Unselected durable files
+are kept without automatically restoring old cameras on reinstall. The Live
+badge follows displayed video frames, fixing “connecting” beside a working
+picture. Restart Home Assistant Core after updating for the new integration
+removal action. See [installation and removal](edge-of-infinity/INSTALLATION.md).
+
 Version **0.17.2** names every add-on option in Polish and English and
 tightens the dashboard bridge. Version **0.17.1** fixed dashboard cards that failed with "Importing a module
 script failed" after an add-on update until Home Assistant Core was restarted;
