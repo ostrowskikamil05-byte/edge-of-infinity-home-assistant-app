@@ -8,6 +8,12 @@ guide accepts your own HA LAN address and helps prepare/trust the CA and configu
 the HTTPS proxy. It does not silently edit Home Assistant YAML or buy cloud access.
 Add camera addresses and credentials yourself in Edge Settings after setup.
 
+Setup must be completed before using Edge. Close and Escape cannot bypass it;
+confirm that you followed the selected guide and save your choice. If the setup
+status cannot be verified, the panel stays locked and offers Retry. The server
+also blocks Live/DVR/camera actions while setup is incomplete. Saved profiles are
+preserved, but camera sources and automatic retention stay idle until completion.
+
 ## Remove everything before uninstalling
 
 1. Open **Edge → Cameras / Settings → Setup & data / Konfiguracja i dane**.
@@ -31,6 +37,23 @@ HA backups and data belonging to other applications are not deleted by Edge.
 Filesystem permission errors, symlink ancestors and nested mounts stop cleanup
 instead of continuing outside the registered locations. Inspect `[edge-installation]`
 in the app startup log; these diagnostics contain phase/counters, not credentials.
+
+## Home Assistant uninstall dialog
+
+The native HA dialog sends only `remove_config`. The app cannot add its own fields
+or register a shared-media deletion hook there. That native option removes the
+app configuration directory, not all files under shared `/media` or the HA config
+mount. Extending that exact dialog requires a Home Assistant frontend/Supervisor
+capability; changing Edge alone cannot make it delete shared recordings.
+
+Use Edge's confirmed cleanup before uninstalling when removing those shared files.
+This also removes setting backups and exports inside the dedicated Edge directory.
+Full Home Assistant backup archives can contain other apps/system data and are not
+removed by this operation. There is no automatic deletion on every app shutdown:
+updates and ordinary stops must preserve recordings.
+
+Upstream sources inspected: [native uninstall dialog](https://github.com/home-assistant/frontend/blob/77170b447f88b74da78a5288c421d39339253c67/src/panels/config/apps/app-view/info/supervisor-app-info.ts)
+and [uninstall API payload](https://github.com/home-assistant/frontend/blob/77170b447f88b74da78a5288c421d39339253c67/src/data/hassio/addon.ts).
 
 ## Updates versus reinstalls
 

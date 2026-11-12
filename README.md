@@ -12,7 +12,9 @@ tightens the dashboard bridge. Version **0.17.1** fixed dashboard cards that fai
 script failed" after an add-on update until Home Assistant Core was restarted;
 the cards and Settings → Repairs now say when that restart is needed.
 
-Version **0.17.11** adds a clean first-run Nabu Casa/local HTTPS guide and explicit
+Version **0.17.12** requires completing setup before opening the panel or using
+Live/DVR/camera APIs; it preserves saved profiles while their streams stay idle.
+It builds on a clean first-run Nabu Casa/local HTTPS guide and explicit
 configuration/media removal before uninstalling. Reinstalls do not silently
 restore old cameras or attach retained recordings. Normal upgrades keep existing
 settings. See [clean installation and removal](edge-of-infinity/INSTALLATION.md) for the legacy-upgrade

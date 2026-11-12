@@ -39,6 +39,7 @@ from edge_metrics import CpuSampler, cpu_load_severity, hardware_inventory
 from edge_camera_keyframes import CameraKeyframes
 from edge_camera_gop import set_onvif_gop
 from edge_native_migration import compact_options, start_supervisor_cleanup
+from edge_installation import guard as setup_guard, runtime_config as setup_runtime_config, setup_required
 from edge_supervisor import SupervisorError, request_self, supervisor_available
 from edge_local_network import local_settings, save_local_settings, network_status, normalize_hosts, save_proxy_helper
 sys.path.insert(0,str(Path(__file__).parent/'custom_components/edge'))
@@ -103,8 +104,9 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.11"
-APP_RELEASE_FEATURES=['Clean reinstall ownership, blank camera defaults and explicit offline config/media cleanup',
+APP_VERSION = "0.17.12"
+APP_RELEASE_FEATURES=['Mandatory setup: inert panel, guarded APIs and idle camera sources until confirmed completion',
+                      'Clean reinstall ownership, blank camera defaults and explicit offline config/media cleanup',
                       'First-run Nabu Casa/local HTTPS guides and stale-tab configuration fences',
                       'Restore s6 container environment before Supervisor migration; compact launcher settings after safe camera import',
                       'Parallel HA signing/modules, bounded positive codec-capability cache and complete startup timings',
@@ -135,7 +137,7 @@ APP_RELEASE_FEATURES=['Clean reinstall ownership, blank camera defaults and expl
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "clean-install-v1711"
+UI_BUILD = "mandatory-setup-v1712"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -1723,7 +1725,7 @@ def load_config() -> dict:
                     write_json(PANEL_CONFIG_PATH, config)
             except OSError as error:
                 write_debug_event("config_mirror_error", {"path": str(PANEL_CONFIG_PATH), "error": str(error)})
-            return config
+            return setup_runtime_config(HOME_DIR, config)
 
         for source in (PANEL_CONFIG_PATH, ADDON_CONFIG_PATH, CONFIG_BACKUP_PATH):
             raw = read_json(source, None)
@@ -1732,7 +1734,7 @@ def load_config() -> dict:
             config = authoritative_config_from_payload(raw)
             if config.get("cameras"):
                 write_debug_event("config_source_selected", {"source": str(source), "runtime_config": str(CONFIG_PATH)})
-                return commit_panel_config(config)
+                return setup_runtime_config(HOME_DIR, commit_panel_config(config))
         return normalize_config({"cameras": []})
 
 
@@ -2129,6 +2131,16 @@ def sync_runtime_engine_config(config: dict, reason: str) -> dict:
 
 
 
+
+
+def activate_completed_setup():
+    current = load_config()
+    sync_runtime_engine_config(current, 'setup_complete')
+    if DETECTION_SERVICE:
+        DETECTION_SERVICE.apply(current)
+    schedule_recording_ensure(current, 'setup_complete')
+    refresh_status_after_save()
+    CAMERA_KEYFRAMES.warm()
 
 
 def edge_rtc_status() -> dict:
@@ -3826,6 +3838,8 @@ def cleanup_old_recordings(directory: Path, retention_days: int) -> int:
 
 
 def cleanup_configured_recordings(config: dict) -> int:
+    if setup_required(HOME_DIR):
+        return 0
     storage = config.get("storage") if isinstance(config.get("storage"), dict) else {}
     directory = Path(storage.get("recordings_dir") or "/media/edge-of-infinity/recordings")
     retention_days = recording_retention_days(config)
@@ -4989,6 +5003,7 @@ INDEX_HTML = r"""<!doctype html>
       * { box-sizing: border-box; }
       body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; }
       body.soft-fullscreen-active { overflow: hidden; }
+      .app[hidden], #edge-setup-check[hidden] { display: none !important; }
       .app {
         min-height: 100vh;
         display: grid;
@@ -5856,7 +5871,8 @@ INDEX_HTML = r"""<!doctype html>
     </style>
   </head>
   <body>
-    <div class="app">
+    <section id="edge-setup-check" __EDGE_SETUP_CHECK_VISIBILITY__ style="position:fixed;inset:0;z-index:100;background:var(--bg,#101b26);padding:24px;color:var(--text,#effaf7)"><p role="status" id="edge-setup-check-state">Edge · sprawdzanie konfiguracji / checking setup…</p><button type="button" onclick="location.reload()">Spróbuj ponownie / Retry</button></section>
+    <div class="app" __EDGE_SETUP_APP_ATTRIBUTES__>
       <aside class="sidebar">
         <div class="sidebar-header">
           <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Toggle navigation" aria-expanded="true">
@@ -10241,20 +10257,26 @@ INDEX_HTML = r"""<!doctype html>
       }
       setInterval(checkPanelVersion,60000);
 
+      function lockEdgeSetup(locked) {
+        const app=document.querySelector('.app');app.inert=locked;app.hidden=locked;
+        document.getElementById('edge-setup-check').hidden=!locked;
+      }
       async function openEdgeSetup(data) {
         const module=await import(panelPath('api/edge-rtc/edge-setup.js?v='+EDGE_PANEL_VERSION));
-        await module.openSetup({endpoint:panelPath('api/setup'),networkEndpoint:panelPath('api/network/local'),brand:panelPath('api/brand/logo.png'),data});
+        await module.openSetup({endpoint:panelPath('api/setup'),networkEndpoint:panelPath('api/network/local'),brand:panelPath('api/brand/logo.png'),data,onComplete:()=>location.reload()});
       }
       document.addEventListener('click',event=>{if(event.target.closest('#edge-setup-open'))void openEdgeSetup().catch(()=>debugEvent('ui_setup_open_failed',{}));});
       async function initialEdgeSetup() {
+        lockEdgeSetup(true);
         try { const response=await panelFetch(panelPath('api/setup'),{cache:'no-store',signal:AbortSignal.timeout(5000)});
-          if(!response.ok)return;const data=await response.json();
-          if(data.needs_setup||data.pending_reset)await openEdgeSetup(data);
-        } catch(_) {debugEvent('ui_setup_status_unavailable',{});}
+          if(!response.ok)throw Error('setup_status_unavailable');const data=await response.json();
+          if(data.needs_setup||data.pending_reset){await openEdgeSetup(data);return true;}
+          lockEdgeSetup(false);return false;
+        } catch(_) {document.getElementById('edge-setup-check-state').textContent='Nie udało się potwierdzić konfiguracji. Spróbuj ponownie / Could not verify setup. Please retry.';return true;}
       }
       async function boot() {
         void checkPanelVersion();
-        if(__EDGE_SETUP_MANAGED__)void initialEdgeSetup();
+        if(__EDGE_SETUP_MANAGED__&&await initialEdgeSetup())return;
         debugEvent('ui_boot', {
           panel_version: EDGE_PANEL_VERSION,
           ui_build: EDGE_UI_BUILD,
@@ -10279,6 +10301,8 @@ INDEX_HTML = r"""<!doctype html>
 INDEX_HTML = (
     INDEX_HTML
     .replace("__EDGE_SETUP_MANAGED__", str((HOME_DIR / "installation.json").is_file()).lower())
+    .replace("__EDGE_SETUP_APP_ATTRIBUTES__", 'inert hidden' if (HOME_DIR / "installation.json").is_file() else '')
+    .replace("__EDGE_SETUP_CHECK_VISIBILITY__", '' if (HOME_DIR / "installation.json").is_file() else 'hidden')
     .replace("__EDGE_INSTALLATION_ID__", json.dumps(read_json(HOME_DIR / "installation.json", {}).get('id', '')))
     .replace("__EDGE_INTERFACE_LANGUAGE__", (Path(__file__).parent/'custom_components'/'edge'/'www'/'edge-i18n.js').read_text().replace('</script', '<\\/script'))
     .replace("__EDGE_LIVE_PRELOAD__", '<script>{for(const name of ["edge-rtc-client.js","device-diagnostics.js","edge-dvr-client.js","edge-dvr-panel.js"]){const link=document.createElement("link");link.rel="modulepreload";link.href=new URL("api/edge-rtc/"+name+"?v=__EDGE_PANEL_VERSION__",document.baseURI).href;document.head.append(link);}}</script>')
@@ -10397,6 +10421,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
         path = route_path(parsed.path)
         from edge_installation import serve as serve_setup
         if serve_setup(self, path, HOME_DIR, write_debug_event): return
+        if setup_guard(self, path, HOME_DIR): return
 
         if path=='/api/network/local':
             self.send_json(local_network_status());return
@@ -10589,6 +10614,7 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = route_path(parsed.path)
+        if setup_guard(self, path, HOME_DIR): return
         test_match=re.fullmatch(r'/api/recording/test/([0-9a-f]{64}[.](?:mp4|mov))',path)
         if test_match:
             target=RECORDING_COMPAT.directory/test_match[1]
@@ -10611,7 +10637,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         from edge_installation import serve as serve_setup
-        if serve_setup(self, route_path(parsed.path), HOME_DIR, write_debug_event): return
+        if serve_setup(self, route_path(parsed.path), HOME_DIR, write_debug_event, on_complete=activate_completed_setup): return
+        if setup_guard(self, route_path(parsed.path), HOME_DIR): return
         if route_path(parsed.path) == '/api/config':
             from edge_installation import generation_matches
             if not generation_matches(HOME_DIR, self.headers.get('X-Edge-Installation')):

@@ -103,6 +103,20 @@ persisted=json.loads(Path('/run/edge-fixture-supervisor/state.json').read_text()
 assert persisted['writes']>=2 and persisted['options']['cameras']==[]
 assert not any(k.startswith(('mediamtx_', 'janus_', 'hikvision_', 'detection_')) or k=='core_engine' for k in persisted['options'])
 assert '8889/tcp' not in persisted['network']
+import urllib.request
+import urllib.error
+setup=json.load(urllib.request.urlopen('http://127.0.0.1:8088/api/setup'))
+assert setup['needs_setup']
+for path in ('/api/config','/cameras.json','/api/edge-rtc/stream/unv_main','/api/recording/status'):
+    try:
+        urllib.request.urlopen('http://127.0.0.1:8088'+path)
+        raise AssertionError('operational route bypassed setup: '+path)
+    except urllib.error.HTTPError as error:
+        assert error.code==423
+        error.close()
+request=urllib.request.Request('http://127.0.0.1:8088/api/setup/access',data=json.dumps({'csrf':setup['csrf'],'mode':'local','confirmed':True}).encode(),headers={'Content-Type':'application/json'})
+assert not json.load(urllib.request.urlopen(request))['needs_setup']
+assert json.load(urllib.request.urlopen('http://127.0.0.1:8088/api/config'))['cameras'][0]['password']=='fixture-only-password'
 print('PASS container: real s6 restores Supervisor access, verified persisted cleanup, dependency layers reused, compiler limits stay build-only, native boot/API, custom ports and recordings preserved')
 PY
 

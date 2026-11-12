@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock
 
 APP = Path(__file__).resolve().parents[1] / 'edge-of-infinity/rootfs/usr/share/edge-of-infinity'
 sys.path.insert(0, str(APP))
@@ -198,7 +199,7 @@ class InstallationTests(unittest.TestCase):
             with self.assertRaises(ValueError): setup.clear_directory(self.media)
         self.assertTrue((self.media / 'keep.mp4').exists())
 
-    def handler(self, path='/api/setup', payload=None, peer='127.0.0.1', origin=None):
+    def handler(self, path='/api/setup', payload=None, peer='127.0.0.1', origin=None, on_complete=None):
         class Handler:
             command = 'POST' if payload is not None else 'GET'
             client_address = (peer, 80)
@@ -208,12 +209,12 @@ class InstallationTests(unittest.TestCase):
             def send_json(inner, data, status=200): inner.result = (status, data)
         h = Handler()
         if origin: h.headers['Origin'] = origin
-        setup.serve(h, path, self.home, lambda *args: None)
+        setup.serve(h, path, self.home, lambda *args: None, on_complete=on_complete)
         return h.result
 
     def test_setup_persists_mode_and_never_rewrites_camera_config(self):
         old = self.legacy(); self.boot()
-        result = self.handler('/api/setup/access', {'csrf': setup.CSRF, 'mode': 'local'})
+        result = self.handler('/api/setup/access', {'csrf': setup.CSRF, 'mode': 'local', 'confirmed': True})
         self.assertEqual(result[0], 200)
         self.assertFalse(result[1]['needs_setup'])
         self.assertEqual(self.config(), old)
@@ -225,6 +226,69 @@ class InstallationTests(unittest.TestCase):
             status, _ = self.handler('/api/setup/reset', payload)
             self.assertIn(status, (400, 403))
         self.assertFalse(setup.status(self.home)['pending_reset'])
+
+    def test_setup_requires_confirmation_and_pending_reset_cannot_unlock_it(self):
+        self.boot()
+        for confirmed in (None, False, 'true'):
+            code, _ = self.handler('/api/setup/access', {'csrf': setup.CSRF, 'mode': 'local', 'confirmed': confirmed})
+            self.assertEqual(code, 400)
+            self.assertTrue(setup.setup_required(self.home))
+        self.pending(False)
+        code, _ = self.handler('/api/setup/access', {'csrf': setup.CSRF, 'mode': 'local', 'confirmed': True})
+        self.assertEqual(code, 400)
+        self.assertTrue(setup.setup_required(self.home))
+
+    def test_completion_activates_preserved_configuration_only_once(self):
+        self.boot()
+        activate = Mock()
+        with patch.object(setup.threading, 'Thread') as worker:
+            self.handler('/api/setup/access', {'csrf': setup.CSRF, 'mode': 'local'}, on_complete=activate)
+            worker.assert_not_called()
+            code, _ = self.handler('/api/setup/access', {'csrf': setup.CSRF, 'mode': 'local', 'confirmed': True}, on_complete=activate)
+            self.assertEqual(code, 200)
+            worker.assert_called_once()
+            worker.call_args.kwargs['target']()
+            activate.assert_called_once()
+            self.handler('/api/setup/access', {'csrf': setup.CSRF, 'mode': 'nabu_casa', 'confirmed': True}, on_complete=activate)
+            worker.assert_called_once()
+
+    def test_pending_setup_blocks_api_files_streams_head_and_camera_actions(self):
+        self.boot()
+        class H:
+            def send_json(inner, data, status=200): inner.result = (status, data)
+            def send_bytes(inner, data, content_type, status=200): inner.result = (status, data)
+        for method, path in (('GET', '/api/config'), ('POST', '/api/config'),
+                ('GET', '/cameras.json'), ('GET', '/api/edge-rtc/stream/front'),
+                ('GET', '/api/edge-rtc/archive/front_0'), ('GET', '/recordings/front/clip.mp4'),
+                ('HEAD', '/recordings/front/clip.mp4'), ('POST', '/api/recording/start'),
+                ('POST', '/api/camera-stream-config'), ('GET', '/api/presets')):
+            h = H(); h.command = method
+            self.assertTrue(setup.guard(h, path, self.home), (method, path))
+            self.assertEqual(h.result[0], 423)
+        for method, path in (('GET', '/'), ('GET', '/health'), ('GET', '/api/setup'),
+                ('GET', '/api/edge-rtc/edge-setup.js'), ('GET', '/api/network/local'),
+                ('POST', '/api/network/local/certificate'), ('POST', '/api/setup/access'),
+                ('POST', '/api/setup/reset')):
+            h = H(); h.command = method
+            self.assertFalse(setup.guard(h, path, self.home), (method, path))
+        self.handler('/api/setup/access', {'csrf': setup.CSRF, 'mode': 'local', 'confirmed': True})
+        h = H(); h.command = 'GET'
+        self.assertFalse(setup.guard(h, '/api/config', self.home))
+
+    def test_camera_connections_stay_idle_until_setup_completes_without_erasing_profiles(self):
+        from edge_rtc_config import build_config
+        original = self.legacy()
+        original['cameras'][0].update(enabled=True, rtsp_main='rtsp://192.0.2.10/live')
+        setup.write(self.home / 'edge.json', original)
+        self.boot()
+        runtime = build_config(original, self.home)
+        self.assertEqual(runtime['sources'], [])
+        self.assertEqual(runtime['archives'], {})
+        self.assertEqual(self.config(), original)
+        self.handler('/api/setup/access', {'csrf': setup.CSRF, 'mode': 'local', 'confirmed': True})
+        runtime = build_config(original, self.home)
+        self.assertEqual(len(runtime['sources']), 1)
+        self.assertEqual(self.config(), original)
 
     def test_cross_origin_and_direct_untrusted_requests_cannot_read_csrf_or_reset(self):
         self.boot()

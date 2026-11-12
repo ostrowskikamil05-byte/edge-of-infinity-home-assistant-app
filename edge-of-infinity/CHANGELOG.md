@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.17.12
+
+- Make initial setup mandatory. Hide Close, block Escape/native dialog closing
+  and require explicit confirmation of the chosen access method before continuing.
+  The complete panel stays hidden/inert while setup is incomplete or unavailable.
+- Enforce the setup state on the server for Live, DVR, saved files, camera settings
+  and recording actions, including HEAD/WebSocket requests. Keep health, setup,
+  required assets and local certificate setup available.
+- Keep saved camera profiles intact but omit sources/archives from the streaming
+  core until setup completes. Pause automatic retention during setup. Activate
+  the preserved configuration once on confirmed completion, without an app restart.
+- Keep Close available for settings opened after setup is complete. Preserve
+  recording quality, codecs, original media, camera profiles and the original logo.
+- Clarify that Edge-folder configuration backups/exports are included in its reset;
+  full HA system backups are outside that operation. Document the native HA uninstall
+  dialog's remove_config-only API and its lack of a shared-media cleanup extension.
+- Add whole-panel Chromium/WebKit setup-lock tests and real-container API lock/unlock
+  assertions alongside existing reinstall and deletion checks.
+
 ## 0.17.11
 
 - Start new installations with zero cameras and an access guide for Nabu Casa or

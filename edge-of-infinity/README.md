@@ -19,7 +19,9 @@ Version 0.17.2 names every add-on option in Polish and English and tightens
 the dashboard bridge. Version 0.17.1 fixed dashboard cards failing with "Importing a module script
 failed" after an add-on update and shows when Home Assistant must restart.
 
-Version **0.17.11** adds clean first-run Nabu Casa/local HTTPS guides and explicit
+Version **0.17.12** requires completing setup before opening the panel or using
+Live/DVR/camera APIs; it preserves saved profiles while their streams stay idle.
+It builds on clean first-run Nabu Casa/local HTTPS guides and explicit
 configuration/media removal before uninstalling. Reinstalls do not silently
 restore old cameras or attach retained recordings. Normal upgrades keep existing
 settings. See [clean installation and removal](INSTALLATION.md) for the
