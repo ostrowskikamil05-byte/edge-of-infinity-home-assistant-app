@@ -160,10 +160,11 @@ def bootstrap(home, private, addon, options, output, media=MEDIA):
     if pending is not None and (not isinstance(pending, dict) or set(pending) != {'include_media'}
                                 or type(pending.get('include_media')) is not bool):
         raise ValueError('invalid_reset_request')
-    fresh = bool(owner and marker.get('id') != owner['id'])
+    fresh = bool(owner and not marker)
+    conflict = bool(owner and marker and marker['id'] != owner['id'])
     reset = fresh or bool(pending)
     roots = merge_roots(owner.get('recordings', []), owner.get('retained', []), recording_roots(config))
-    mode = 'reinstalled' if fresh else 'reset' if reset else 'upgrade' if config or legacy_options else 'new'
+    mode = 'reinstalled' if fresh else 'reset' if reset else 'recovered' if conflict else 'upgrade' if config or legacy_options else 'new'
     if reset:
         if pending and pending.get('include_media') is True:
             roots = merge_roots(roots, [{'path': str(media), 'camera_dirs': []}])
@@ -176,7 +177,7 @@ def bootstrap(home, private, addon, options, output, media=MEDIA):
             if path.exists() or path.is_symlink():
                 path.unlink()
         config = {}
-    ident = secrets.token_hex(16) if reset or not marker else marker['id']
+    ident = secrets.token_hex(16) if reset else owner['id'] if owner else marker.get('id') or secrets.token_hex(16)
     # Private marker first: an interrupted first-upgrade adoption must not look
     # like an uninstall on the next boot and erase the old camera configuration.
     write(private / MARKER, {'id': ident})
@@ -199,6 +200,10 @@ def bootstrap(home, private, addon, options, output, media=MEDIA):
         write(home / 'edge.json', config)
         write(addon / 'edge.json', config)
     owner['recordings'] = merge_roots(owner.get('recordings', []), recording_roots(config))
+    if conflict and not reset:
+        # Partial backup restores can reintroduce another private marker.
+        # Preserve the current configuration instead of inferring an uninstall.
+        owner.update(setup_complete=False, legacy_upgrade=True)
     if mode == 'new' and media.exists() and any(p.name != owner['id'] for p in media.iterdir()):
         owner['retained'] = merge_roots(owner.get('retained', []), [{'path': str(media), 'camera_dirs': []}])
     write(home / OWNER, owner)

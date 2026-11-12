@@ -45,6 +45,8 @@ settings because it cannot reliably distinguish a previous uninstall from a
 normal upgrade. The first-run dialog says that old settings were found and offers
 the explicit reset action above. Run that once if you already reinstalled an older
 version and old cameras returned. Subsequent reinstalls are detected automatically.
+If a partial backup restores a different private ownership marker, Edge preserves
+the current camera configuration and reopens setup rather than erasing it.
 
 No camera address or personal Home Assistant address is compiled into the app.
 Addresses entered by the owner necessarily live in its local configuration while

@@ -92,6 +92,16 @@ class InstallationTests(unittest.TestCase):
         self.boot()
         self.assertEqual(self.config(), old)
 
+    def test_partial_backup_marker_conflict_never_erases_current_configuration(self):
+        old = self.legacy(); self.boot()
+        owner_id = setup.status(self.home)['id']
+        setup.write(self.private / setup.MARKER, {'id': 'b' * 32})
+        report = self.boot()
+        self.assertEqual(report['mode'], 'recovered')
+        self.assertFalse(report['configuration_reset'])
+        self.assertEqual(self.config(), old)
+        self.assertEqual(setup.read(self.private / setup.MARKER)['id'], owner_id)
+
     def test_legacy_supervisor_options_are_left_for_the_existing_importer(self):
         setup.write(self.options, {'cameras': [{'id': 'front', 'password': 'fixture-only'}]})
         self.boot()
