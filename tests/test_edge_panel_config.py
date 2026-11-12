@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PANEL_PATH = ROOT / "edge-of-infinity" / "rootfs" / "usr" / "share" / "edge-of-infinity" / "edge-panel.py"
 
 
-def load_panel_module():
+def load_panel_module(setup_state=None):
     temp_root = Path(tempfile.mkdtemp())
     atexit.register(shutil.rmtree,temp_root,ignore_errors=True)
     os.environ["EDGE_HOME_DIR"] = str(temp_root / "home")
@@ -22,6 +22,9 @@ def load_panel_module():
     os.environ["EDGE_HOME_CONFIG"] = str(temp_root / "home" / "edge.json")
     os.environ["EDGE_ADDON_CONFIG"] = str(temp_root / "addon-config" / "edge.json")
     os.environ["EDGE_RTC_CONFIG"] = str(temp_root / "runtime" / "edge-rtc.json")
+    if setup_state is not None:
+        (temp_root / 'home').mkdir(parents=True, exist_ok=True)
+        (temp_root / 'home/installation.json').write_text(json.dumps(setup_state))
     spec = importlib.util.spec_from_file_location(f"edge_panel_test_{temp_root.name}", PANEL_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -72,11 +75,11 @@ class EdgePanelConfigTests(unittest.TestCase):
     def test_panel_exposes_active_version_for_runtime_diagnostics(self):
         panel = load_panel_module()
 
-        self.assertEqual(panel.APP_VERSION, "0.17.11")
-        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.17.11")
-        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.17.11")
-        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.17.11")
-        self.assertIn("v0.17.11", panel.INDEX_HTML)
+        self.assertEqual(panel.APP_VERSION, "0.17.12")
+        self.assertEqual(panel.EdgeHandler.server_version, "EdgePanel/0.17.12")
+        self.assertEqual(panel.health_payload()["server_version"], "EdgePanel/0.17.12")
+        self.assertEqual(panel.collect_panel_logs()["server_version"], "EdgePanel/0.17.12")
+        self.assertIn("v0.17.12", panel.INDEX_HTML)
         self.assertIn(panel.UI_BUILD, panel.INDEX_HTML)
 
     def test_panel_logs_include_colored_diagnostics(self):
@@ -393,7 +396,7 @@ class EdgePanelConfigTests(unittest.TestCase):
         self.assertIn("function recordingStreamUrl", html)
         self.assertIn("recordings-stream/", html)
         self.assertIn("function recordingPlaybackModeForClient", html)
-        self.assertIn("clean-install-v1711", html)
+        self.assertIn("mandatory-setup-v1712", html)
         self.assertIn("function recordingPlayerControls", html)
         self.assertIn("NVR_STATUS_REFRESH_MS = 15000", html)
         self.assertIn("NVR_INTERACTION_PROTECT_MS = 30000", html)

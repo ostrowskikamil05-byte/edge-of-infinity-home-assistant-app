@@ -26,7 +26,7 @@ COPY rootfs /
 RUN chmod a+x /usr/bin/edge-app-run
 ENV OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 
-ARG BUILD_VERSION=0.17.11
+ARG BUILD_VERSION=0.17.12
 ARG BUILD_ARCH=amd64
 LABEL \
   io.hass.version="${BUILD_VERSION}" \

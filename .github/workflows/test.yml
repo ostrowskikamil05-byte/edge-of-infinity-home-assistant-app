@@ -58,6 +58,8 @@ jobs:
           node tests/browser/remote_live.cjs
           EDGE_TEST_BROWSER=webkit node tests/browser/setup.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/setup.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/setup_gate.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/setup_gate.cjs
           node tests/browser/edge_rtc_support.cjs
           EDGE_TEST_BROWSER=webkit node tests/browser/panel_session.cjs
           EDGE_TEST_BROWSER=chromium node tests/browser/panel_session.cjs

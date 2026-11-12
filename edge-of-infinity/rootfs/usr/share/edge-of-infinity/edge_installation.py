@@ -234,6 +234,37 @@ def status(home):
             'retained_locations': len(data.get('retained', [])), 'pending_reset': bool(data.get('pending_reset')), 'csrf': CSRF}
 
 
+def setup_required(home):
+    data = read(Path(home) / OWNER, {})
+    return bool(data and (data.get('setup_complete') is not True or data.get('pending_reset')))
+
+
+def runtime_config(home, config):
+    """Keep saved profiles intact while an unfinished installation stays idle."""
+    return {**config, 'cameras': []} if setup_required(home) else config
+
+
+def guard(handler, path, home):
+    if not setup_required(home):
+        return False
+    read_routes = {'/', '/index.html', '/health', '/api/version', '/api/setup', '/api/client-diagnostics.js',
+                   '/api/network/local', '/api/network/local/ca.crt',
+                   '/api/brand/icon.png', '/api/brand/logo.png', '/api/brand/logo-light.png'}
+    scripts = {'client.js', 'edge-rtc-client.js', 'edge-dvr-client.js', 'edge-dvr-panel.js',
+               'edge-local-network.js', 'edge-setup.js', 'edge-pcm-worklet.js', 'device-diagnostics.js'}
+    read_routes.update('/api/edge-rtc/' + name for name in scripts)
+    write_routes = {'/api/setup/access', '/api/setup/reset', '/api/network/local',
+                    '/api/network/local/certificate', '/api/debug', '/api/client-diagnostics'}
+    allowed = path in (read_routes if handler.command in ('GET', 'HEAD') else write_routes)
+    if allowed:
+        return False
+    if handler.command == 'HEAD':
+        handler.send_bytes(b'', 'application/json', 423)
+    else:
+        handler.send_json({'error': 'setup_required', 'setup_url': '/'}, 423)
+    return True
+
+
 def generation_matches(home, value):
     data = read(Path(home) / OWNER, {})
     return not data.get('pending_reset') and (not data.get('generation_required') or secrets.compare_digest(str(data.get('id', '')), str(value or '')))
@@ -267,7 +298,7 @@ def restart(log):
         log('installation_restart_required', {'code': 'restart_app_from_home_assistant'})
 
 
-def serve(handler, path, home, log):
+def serve(handler, path, home, log, on_complete=None):
     if path not in ('/api/setup', '/api/setup/access', '/api/setup/reset'):
         return False
     if not trusted(handler):
@@ -294,9 +325,15 @@ def serve(handler, path, home, log):
             state = read(Path(home) / OWNER, {})
             if not state:
                 raise ValueError('installation_not_managed')
+            completed_now = False
             if path.endswith('/access'):
+                if state.get('pending_reset'):
+                    raise ValueError('reset_pending')
                 if payload.get('mode') not in ('local', 'nabu_casa'):
                     raise ValueError('invalid_access_mode')
+                if state.get('setup_complete') is not True and payload.get('confirmed') is not True:
+                    raise ValueError('setup_confirmation_required')
+                completed_now = state.get('setup_complete') is not True
                 state.update(setup_complete=True, access_mode=payload['mode'])
                 event = 'installation_setup_complete'
             else:
@@ -312,9 +349,16 @@ def serve(handler, path, home, log):
                 event = 'installation_reset_requested'
             write(Path(home) / OWNER, state)
         log(event, {'include_media': payload.get('include_media'), 'access_mode': payload.get('mode')})
-        handler.send_json(status(home))
+        if completed_now and on_complete:
+            def activate():
+                try:
+                    on_complete()
+                except (OSError, ValueError, RuntimeError):
+                    log('installation_activation_failed', {'code': 'restart_edge_app'})
+            threading.Thread(target=activate, daemon=True).start()
         if path.endswith('/reset'):
             threading.Thread(target=restart, args=(log,), daemon=True).start()
+        handler.send_json(status(home))
     except (OSError, ValueError, TypeError, KeyError):
         handler.send_json({'error': 'setup_request_failed'}, 400)
     return True

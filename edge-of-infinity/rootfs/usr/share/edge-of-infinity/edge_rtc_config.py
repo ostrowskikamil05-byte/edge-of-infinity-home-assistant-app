@@ -24,6 +24,8 @@ def private_token(home):
 
 
 def build_config(config, home, rtsp_port=8556, api_port=9997):
+    from edge_installation import runtime_config
+    config = runtime_config(home, config)
     sources = {}
     for index, camera in enumerate(config.get('cameras', [])):
         if not camera.get('enabled'):

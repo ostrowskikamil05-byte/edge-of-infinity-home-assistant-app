@@ -1,9 +1,10 @@
 # Edge of Infinity
 
-## 0.17.11: clean setup and explicit data removal
+## 0.17.12: mandatory setup and explicit data removal
 
 See [clean installation and removal](INSTALLATION.md). New installations have zero
-cameras and a Nabu Casa/local HTTPS guide. Use **Settings → Setup & data** to reset
+cameras and a Nabu Casa/local HTTPS guide. Setup must be confirmed before Live,
+DVR, camera operations or the main panel become available; Close/Escape cannot bypass it. Use **Settings → Setup & data** to reset
 existing configuration and optionally delete Edge recordings before uninstalling.
 The first upgrade of an unmarked legacy installation preserves its settings;
 choose the explicit reset there to start from scratch.
