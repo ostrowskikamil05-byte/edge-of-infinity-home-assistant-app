@@ -32,7 +32,7 @@ def load_bridge(session_factory):
     modules['homeassistant.helpers.aiohttp_client'].async_get_clientsession = session_factory
     modules['edge_bridge_test'].__path__ = [str(COMPONENT)]
     modules['edge_bridge_test.const'].DOMAIN = 'edge'
-    modules['edge_bridge_test.const'].CARD_VERSION = '0.17.4'
+    modules['edge_bridge_test.const'].CARD_VERSION = '0.17.5'
     sys.modules.update(modules)
     spec = importlib.util.spec_from_file_location('edge_bridge_test.dashboard', COMPONENT / 'dashboard.py')
     module = importlib.util.module_from_spec(spec)

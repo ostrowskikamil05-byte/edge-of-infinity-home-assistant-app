@@ -1,6 +1,6 @@
 /* Edge of Infinity dashboard cards: recordings and events.
    All data comes through Home Assistant's authenticated /api/edge/dashboard bridge. */
-const EDGE_DASH_VERSION = "0.17.4";
+const EDGE_DASH_VERSION = "0.17.5";
 const edgeDashI18nReady=import('/edge/edge-i18n.js?v='+EDGE_DASH_VERSION).catch(()=>null);
 let edgeProblemText,edgeDVRLoad,edgeDVRAttempt=0;
 /* Browsers remember a failed module URL for the page's lifetime, so a later attempt

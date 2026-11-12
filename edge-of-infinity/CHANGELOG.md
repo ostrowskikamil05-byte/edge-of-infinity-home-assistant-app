@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.17.5
+
+- Recording dashboard: thumbnails load faster (6 parallel fetches, 16 eager
+  tiles, 700px prefetch margin, 3 ffmpeg workers with one decode per file,
+  keyframe-only seek, browser cache headers, warm-up every 2 minutes with 8
+  previews per camera).
+- DVR scrubbing: seek throttle 80->40 ms, supersede 160->100 ms and settle
+  100->50 ms for faster timeline response. UI layout is unchanged.
+
 ## 0.17.4
 
 - Re-release of 0.17.2 under a new version number so Home Assistant offers the
