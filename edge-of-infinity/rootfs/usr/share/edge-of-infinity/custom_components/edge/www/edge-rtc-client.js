@@ -266,7 +266,7 @@ export class EdgeRTCClient {
     if(this.audioDecoder.decodeQueueSize<12)this.audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp,data:payload}));
   }
   audioModule(){
-    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.17.4',import.meta.url).href);
+    return this.audioModulePromise??=this.audio.audioWorklet.addModule(this.options.audioWorkletURL||new URL('./edge-pcm-worklet.js?v=0.17.5',import.meta.url).href);
   }
   startAudioPlayback(){
     if(this.audioPlaybackPromise||this.closed||this.audioDisabled)return;
