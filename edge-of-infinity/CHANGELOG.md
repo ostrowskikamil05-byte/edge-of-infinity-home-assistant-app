@@ -1,7 +1,10 @@
 # Changelog
 
-## 0.17.4
+## 0.17.5
 
+- Show the Edge of Infinity logo for the integration in Home Assistant: Repairs
+  notices, Devices & services and the setup dialog no longer say "icon not
+  available". Needs Home Assistant 2026.3 or newer.
 - Recording dashboard: thumbnails load faster (6 parallel fetches, 16 eager
   tiles, 700px prefetch margin, 3 ffmpeg workers, keyframe-only seek, browser
   cache headers, warm-up every 2 minutes with 8 previews per camera).
@@ -9,8 +12,12 @@
   100->50 ms for faster timeline response. UI layout is unchanged.
 - Keep the table of per-thumbnail locks bounded so memory does not grow with
   every preview generated while the add-on runs.
-- Released as 0.17.4; the number 0.17.3 was used only on a development branch.
-  Restart Home Assistant Core after updating.
+- Restart Home Assistant Core after updating.
+
+## 0.17.4
+
+- Re-release of 0.17.2 under a new version number so Home Assistant offers the
+  update again. No code changes. Restart Home Assistant Core after updating.
 
 ## 0.17.2
 

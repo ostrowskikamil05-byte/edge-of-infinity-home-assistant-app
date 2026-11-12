@@ -91,6 +91,21 @@ class RestartRequiredTests(unittest.IsolatedAsyncioTestCase):
             for placeholder in ('{installed}', '{running}'):
                 self.assertIn(placeholder, issue['description'], path.name)
 
+    def test_integration_ships_its_brand_images(self):
+        # Home Assistant 2026.3+ serves custom_components/<domain>/brand/ for Repairs,
+        # the integration list and the setup dialog.
+        def size(name):
+            data = (COMPONENT / 'brand' / name).read_bytes()
+            self.assertEqual(data[:8], b'\x89PNG\r\n\x1a\n', name)
+            self.assertLess(len(data), 400 * 1024, name)
+            return int.from_bytes(data[16:20], 'big'), int.from_bytes(data[20:24], 'big')
+        self.assertEqual(size('icon.png'), (256, 256))
+        self.assertEqual(size('icon@2x.png'), (512, 512))
+        for name, short in (('logo.png', 256), ('dark_logo.png', 256), ('logo@2x.png', 512), ('dark_logo@2x.png', 512)):
+            self.assertEqual(min(size(name)), short, name)
+        self.assertEqual({path.name for path in (COMPONENT / 'brand').iterdir()},
+                         {'icon.png', 'icon@2x.png', 'logo.png', 'logo@2x.png', 'dark_logo.png', 'dark_logo@2x.png'})
+
     def test_setup_survives_a_missing_helper(self):
         source = (COMPONENT / '__init__.py').read_text()
         guarded = source[source.index('    try:\n        from .restart_check'):source.index('    return True')]
