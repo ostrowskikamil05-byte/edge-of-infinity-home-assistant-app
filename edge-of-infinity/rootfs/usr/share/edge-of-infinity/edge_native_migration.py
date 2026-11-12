@@ -3,14 +3,18 @@ import argparse
 import json
 import os
 from pathlib import Path
-import shutil
 import tempfile
-import urllib.error
+import threading
 import urllib.request
+
+from edge_supervisor import SupervisorError, request_self, supervisor_available, supervisor_transport
 
 
 RETIRED_PREFIXES = ('mediamtx_', 'janus_')
 NATIVE_PORTS = {'8088/tcp', '8556/tcp', '9997/tcp', '8443/tcp'}
+JANUS_FILES = ('janus.jcfg', 'janus.transport.http.jcfg',
+               'janus.transport.websockets.jcfg', 'janus.plugin.recordplay.jcfg',
+               'janus.plugin.streaming.jcfg')
 
 
 def native_options(options):
@@ -60,7 +64,8 @@ def migrate_saved_files(home, addon, runtime):
     # Preserve each file's own cameras and timestamps: a stale mirror can never
     # become authoritative merely because migration touched its engine keys.
     for base, names in ((home, ('edge.json', 'panel-config.json', 'edge.backup.json', 'edge.example.json')),
-                        (addon, ('edge.json', 'edge.example.json'))):
+                        (addon, ('edge.json', 'edge.example.json')),
+                        (runtime, ('edge.options.json',))):
         for name in names:
             path = base / name
             if not path.exists():
@@ -80,39 +85,59 @@ def migrate_saved_files(home, addon, runtime):
                 report['skipped'].append(name)
     # Only exact disposable engine artifacts; never traverse media, recordings,
     # database, model, alert, private-token or user-selected storage paths.
-    for path in (runtime / 'mediamtx.yml', runtime / 'janus', home / 'mediamtx.yml',
-                 home / 'janus.log', home / 'janus.plugin.streaming.jcfg'):
+    def remove_file(path):
         try:
             if path.is_symlink() or path.is_file():
                 path.unlink()
                 report['retired_files_removed'] += 1
-            elif path == runtime / 'janus' and path.is_dir():
-                shutil.rmtree(path)
-                report['retired_files_removed'] += 1
         except OSError:
             report['skipped'].append(path.name)
+
+    for base in (home, addon, runtime):
+        for name in ('mediamtx.yml', 'mediamtx.yaml', 'mediamtx.log', 'janus.log', *JANUS_FILES):
+            remove_file(base / name)
+        directory = base / 'janus'
+        if directory.is_symlink():
+            remove_file(directory)
+        elif directory.is_dir():
+            # Never recursively erase an old directory: it may also hold user files.
+            for name in JANUS_FILES:
+                remove_file(directory / name)
+            try:
+                directory.rmdir()
+                report['retired_files_removed'] += 1
+            except OSError:
+                report['skipped'].append('janus')
     return report
 
 
-def sync_supervisor_options(options, token, request=urllib.request.urlopen, output_path=None):
-    if not token:
+def sync_supervisor_options(options, token=None, request=None, output_path=None):
+    if not token and not supervisor_available():
         return {'status': 'unavailable'}
     def call(path, payload=None):
+        if request is None:
+            return request_self(path, payload, token=token)
         req = urllib.request.Request('http://supervisor/addons/self/' + path,
                                      data=json.dumps(payload).encode() if payload is not None else None,
                                      headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
                                      method='POST' if payload is not None else 'GET')
         with request(req, timeout=5) as response:
             body = json.loads(response.read())
-        if body.get('result') != 'ok':
+        if not isinstance(body, dict) or body.get('result') != 'ok':
             raise ValueError('supervisor_rejected')
-        return body.get('data') or {}
+        data = body.get('data') or {}
+        if not isinstance(data, dict):
+            raise ValueError('supervisor_response_invalid')
+        return data
+    phase = 'read_options'
     try:
         current = call('info')
         # Use Supervisor's current options when available, preserving unrelated
         # settings changed after this container's options file was mounted.
         existing = current.get('options')
-        clean = native_options(existing) if isinstance(existing, dict) else options
+        if not isinstance(existing, dict):
+            raise ValueError('supervisor_options_missing')
+        clean = native_options(existing)
         if output_path is not None:
             # Supervisor strips retired keys from the mounted options file,
             # while info still has their persisted values. Recover custom
@@ -126,13 +151,64 @@ def sync_supervisor_options(options, token, request=urllib.request.urlopen, outp
         network = current.get('network')
         if isinstance(network, dict):
             payload['network'] = {key: value for key, value in network.items() if key in NATIVE_PORTS}
-        if clean != existing or isinstance(network, dict) and payload['network'] != network:
-            call('options', payload)
+        # Write once even when info already hides retired fields/bindings.
+        # The API replaces persisted overrides; editing /data/options.json does not.
+        phase = 'write_options'
+        call('options', payload)
+        phase = 'verify_options'
         observed = call('info')
-        return {'status': 'synced' if observed.get('options') == clean else 'verification_failed'}
+        verified = observed.get('options') == clean
+        if isinstance(network, dict):
+            verified = verified and observed.get('network') == payload['network']
+        return {'status': 'synced' if verified else 'verification_failed'}
+    except SupervisorError as error:
+        result = {'status': 'retry_required', 'phase': phase, 'code': error.code}
+        if error.http_status is not None:
+            result['http_status'] = error.http_status
+        return result
     except (OSError, ValueError, TypeError):
         # Never serialize exceptions, request bodies, URLs or credentials.
-        return {'status': 'retry_required'}
+        return {'status': 'retry_required', 'phase': phase, 'code': 'supervisor_request_failed'}
+
+
+def retry_supervisor_cleanup(home, stop, lock, log, *, sync=None, delays=(5, 15, 30, 60, 120)):
+    """Retry startup failures off the media thread, rereading current settings each time."""
+    sync = sync or sync_supervisor_options
+    path = Path(home) / 'native-migration.json'
+    for attempt, delay in enumerate(delays, 1):
+        if stop.wait(delay):
+            return
+        with lock:
+            if stop.is_set():
+                return
+            try:
+                report = json.loads(path.read_text())
+                if not isinstance(report, dict):
+                    report = {}
+            except (OSError, ValueError):
+                report = {}
+            previous = report.get('supervisor')
+            if isinstance(previous, dict) and previous.get('status') == 'synced':
+                return
+            # No mounted fallback, credentials or camera projection: use the
+            # Supervisor's latest complete options under the settings-save lock.
+            result = sync({})
+            report.update(supervisor=result, supervisor_attempts=attempt,
+                          supervisor_transport=supervisor_transport())
+            atomic_json(path, report)
+        log('native_supervisor_cleanup', {'attempt': attempt, **result})
+        if result.get('status') == 'synced':
+            return
+
+
+def start_supervisor_cleanup(home, stop, lock, log):
+    if not supervisor_available():
+        return None
+    worker = threading.Thread(target=retry_supervisor_cleanup,
+                              args=(home, stop, lock, log), daemon=True,
+                              name='edge-supervisor-cleanup')
+    worker.start()
+    return worker
 
 
 def main():
@@ -150,6 +226,7 @@ def main():
     atomic_json(args.output, clean)
     report = migrate_saved_files(args.home, args.addon, Path(args.output).parent)
     report['options_removed'] = len(set(options) - set(clean))
+    report['supervisor_transport'] = supervisor_transport()
     report['supervisor'] = sync_supervisor_options(clean, os.environ.get('SUPERVISOR_TOKEN'), output_path=args.output)
     atomic_json(Path(args.home) / 'native-migration.json', report)
     print('[edge-migration] ' + json.dumps(report))

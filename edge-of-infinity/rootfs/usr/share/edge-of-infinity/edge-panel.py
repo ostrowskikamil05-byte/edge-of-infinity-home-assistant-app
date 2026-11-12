@@ -38,7 +38,8 @@ from edge_recording_compat import CompatibleRecordings
 from edge_metrics import CpuSampler, cpu_load_severity, hardware_inventory
 from edge_camera_keyframes import CameraKeyframes
 from edge_camera_gop import set_onvif_gop
-from edge_native_migration import native_options
+from edge_native_migration import native_options, start_supervisor_cleanup
+from edge_supervisor import SupervisorError, request_self, supervisor_available
 from edge_local_network import local_settings, save_local_settings, network_status, normalize_hosts, save_proxy_helper
 sys.path.insert(0,str(Path(__file__).parent/'custom_components/edge'))
 from _device_logs import DeviceLogs, safe_url
@@ -102,8 +103,10 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.6"
-APP_RELEASE_FEATURES=['Fast per-camera dashboard catalogs, bounded user gallery snapshots and parallel JPEG cache reads',
+APP_VERSION = "0.17.7"
+APP_RELEASE_FEATURES=['Supervisor Unix-socket support, verified retired-option cleanup and bounded background retries',
+                      'Exact retired engine artifacts removed safely; original Edge icon in restart notice',
+                      'Fast per-camera dashboard catalogs, bounded user gallery snapshots and parallel JPEG cache reads',
                       'Debounced in-video loading indication and adjacent decoded-frame preview seeks',
                       'Original Edge branding retained for the panel, repository and integration',
                       'Shared mobile Live/DVR decoder ownership, typed playback failures and direct authenticated archive bridge',
@@ -127,7 +130,7 @@ APP_RELEASE_FEATURES=['Fast per-camera dashboard catalogs, bounded user gallery 
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "dashboard-gallery-v176"
+UI_BUILD = "supervisor-cleanup-v177"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -1388,6 +1391,16 @@ def runtime_parameters_payload(config: dict, hardware: dict, recordings_dir: Pat
 
 def build_panel_diagnostics(config: dict, hardware: dict, tails: dict, recording_logs: list[dict], detection: dict | None = None, runtime=None) -> list[dict]:
     diagnostics = []
+    migration = read_json(HOME_DIR / 'native-migration.json', {})
+    sync = migration.get('supervisor') if isinstance(migration, dict) else None
+    if isinstance(sync, dict):
+        status = sync.get('status')
+        if status in ('synced', 'unavailable', 'retry_required', 'verification_failed'):
+            diagnostics.append(diagnostic_item(
+                'ok' if status == 'synced' else 'warning', 'Supervisor options cleanup',
+                'Retired engine options were removed and the Supervisor save was verified.' if status == 'synced'
+                else 'Retired app options still need cleanup in Supervisor. Check native-migration.json for the connection status.',
+                {'status': status, 'transport': migration.get('supervisor_transport', 'unknown')}))
     ffmpeg_path = hardware.get("ffmpeg_path") or ""
     ffprobe_path = hardware.get("ffprobe_path") or ""
     diagnostics.append(
@@ -1973,7 +1986,7 @@ def home_assistant_restream_payload(config: dict) -> dict:
     global _HA_RESTREAM_HOST
     if _HA_RESTREAM_HOST is None:
         host = os.environ.get("EDGE_HA_RTSP_HOST", "").strip()
-        if not host and os.environ.get("SUPERVISOR_TOKEN"):
+        if not host and supervisor_available():
             try:
                 host = str(supervisor_self_request("/addons/self/info").get("hostname") or "")
             except (OSError, ValueError, RuntimeError):
@@ -2040,20 +2053,10 @@ def append_unique(values: list[str], value: str) -> list[str]:
 
 
 def supervisor_self_request(path: str, payload: dict | None = None) -> dict:
-    import urllib.request
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if not token:
-        raise RuntimeError("supervisor_unavailable")
     # This connector only ever addresses this add-on's own options.
     if path not in ("/addons/self/info", "/addons/self/options"):
         raise ValueError("Unsupported Supervisor path")
-    request = urllib.request.Request("http://supervisor" + path, data=json.dumps(payload).encode() if payload is not None else None,
-                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="POST" if payload is not None else "GET")
-    with urllib.request.urlopen(request, timeout=5) as response:
-        result = json.loads(response.read())
-    if result.get("result") != "ok":
-        raise RuntimeError("supervisor_options_rejected")
-    return result.get("data") or {}
+    return request_self(path.rsplit('/', 1)[-1], payload)
 
 
 def addon_options_from_config(config: dict, existing: dict) -> dict:
@@ -2089,16 +2092,22 @@ def sync_supervisor_options(config: dict) -> dict:
 
 
 def _sync_supervisor_options(config: dict) -> dict:
-    if not os.environ.get("SUPERVISOR_TOKEN"):
+    if not supervisor_available():
         return {"synced": False, "status": "unavailable"}
     try:
-        current = supervisor_self_request("/addons/self/info").get("options") or {}
+        current = supervisor_self_request("/addons/self/info").get("options")
+        if not isinstance(current, dict):
+            raise RuntimeError('supervisor_options_missing')
         desired = addon_options_from_config(config, current)
         if desired != current:
             supervisor_self_request("/addons/self/options", {"options": desired})
         observed = supervisor_self_request("/addons/self/info").get("options") or {}
-        success = all(observed.get(key) == value for key, value in desired.items())
+        success = observed == desired
         result = {"synced": success, "status": "synced" if success else "verification_failed"}
+    except SupervisorError as error:
+        result = {"synced": False, "status": "failed", "code": error.code}
+        if error.http_status is not None:
+            result["http_status"] = error.http_status
     except (OSError, ValueError, RuntimeError):
         # Never include request bodies, credentials or Supervisor response bodies in diagnostics.
         result = {"synced": False, "status": "failed"}
@@ -11276,11 +11285,14 @@ def main() -> None:
         write_debug_event("boot_refresh_status_error", {"error": str(error), "type": type(error).__name__})
         raise
     server = ThreadingHTTPServer(("0.0.0.0", PORT), EdgeHandler)
+    supervisor_cleanup_stop = threading.Event()
+    start_supervisor_cleanup(HOME_DIR, supervisor_cleanup_stop, SUPERVISOR_OPTIONS_LOCK, write_debug_event)
     print(f"[edge-panel] listening on 0.0.0.0:{PORT}")
     write_debug_event("boot_server_listening", {"listen": f"0.0.0.0:{PORT}"})
     try:
         server.serve_forever()
     finally:
+        supervisor_cleanup_stop.set()
         RECORDING_SOURCE_RETRY_STOP.set()
         if ALERT_SERVICE:
             ALERT_SERVICE.close()

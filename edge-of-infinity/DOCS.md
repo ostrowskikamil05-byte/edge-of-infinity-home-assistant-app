@@ -1,5 +1,30 @@
 # Edge of Infinity
 
+## 0.17.7: Supervisor cleanup and original restart-notice icon
+
+Modern Supervisor installations can expose `SUPERVISOR_SOCKET` instead of a
+TCP bearer token. Edge uses that local Unix socket for its own options/info;
+older token-based installations remain supported. No additional Supervisor role
+or TCP API exposure is needed. This repairs the `unavailable` migration status
+that left retired MediaMTX/Janus options persisted and caused repeated Supervisor
+schema warnings even though those engines were already removed.
+
+Startup replaces the saved options through the API and verifies the result.
+Temporary failures are retried in the background after 5, 15, 30, 60 and 120
+seconds, under the same lock as panel settings saves. Each attempt reads the
+Supervisor's latest options so it cannot restore an old camera/password change.
+`native-migration.json` and diagnostics show the status and transport; failures
+use fixed phase/error codes and an HTTP status when available, without secrets.
+Warnings already in the Supervisor log remain historical; subsequent checks
+should no longer report the removed options after a successful save.
+
+Only named old engine files and generated Janus configuration files are removed
+from the app's known config/runtime locations. Unknown files and directory-link
+targets are preserved. Camera profiles, recordings and retention are unchanged.
+The restart warning displays the existing original Edge icon from the local
+`/edge/edge-brand.png` asset, including offline access. Restart Home Assistant
+Core after updating, then reopen the dashboard.
+
 ## 0.17.6: faster dashboard gallery and quieter DVR loading
 
 HA recordings cards restore their last gallery and JPEGs for the same HA user

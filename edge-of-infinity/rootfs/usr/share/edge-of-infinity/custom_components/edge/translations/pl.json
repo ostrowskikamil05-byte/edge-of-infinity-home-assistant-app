@@ -23,7 +23,7 @@
   "issues": {
     "restart_required": {
       "title": "Uruchom ponownie Home Assistant, aby dokończyć aktualizację Edge",
-      "description": "Dodatek Edge of Infinity zainstalował integrację w wersji {installed}, ale Home Assistant nadal działa na wersji {running}. Do czasu ponownego uruchomienia karty podglądu, nagrań i zdarzeń mogą się nie wczytywać lub nie odtwarzać.\n\nWejdź w Ustawienia → System, wybierz „Uruchom ponownie Home Assistant”, a potem przeładuj dashboard."
+      "description": "<img src=\"/edge/edge-brand.png\" alt=\"Edge of Infinity\" width=\"64\" height=\"64\">\n\nDodatek Edge of Infinity zainstalował integrację w wersji {installed}, ale Home Assistant nadal działa na wersji {running}. Do czasu ponownego uruchomienia karty podglądu, nagrań i zdarzeń mogą się nie wczytywać lub nie odtwarzać.\n\nWejdź w Ustawienia → System, wybierz „Uruchom ponownie Home Assistant”, a potem przeładuj dashboard."
     }
   }
 }

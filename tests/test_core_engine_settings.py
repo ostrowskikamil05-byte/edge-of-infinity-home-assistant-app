@@ -3,9 +3,10 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from test_edge_panel_config import ROOT, camera
 
@@ -14,7 +15,8 @@ def migration():
     path = ROOT / 'edge-of-infinity/rootfs/usr/share/edge-of-infinity/edge_native_migration.py'
     spec = importlib.util.spec_from_file_location('native_migration_test', path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with patch.object(sys, 'path', [str(path.parent), *sys.path]):
+        spec.loader.exec_module(module)
     return module
 
 
@@ -78,7 +80,7 @@ class NativeMigrationTests(unittest.TestCase):
             self.assertEqual((home / 'edge.json').stat().st_mode & 0o777, 0o600)
             self.assertEqual(video.read_bytes(), b'original recording')
             self.assertEqual(token.read_text(), 'native-private-token')
-            self.assertEqual(report['retired_files_removed'], 2)
+            self.assertEqual(report['retired_files_removed'], 3)
             self.assertEqual(report['configs_updated'], 3)
             self.assertNotIn('secret', json.dumps(report))
             again = self.m.migrate_saved_files(home, addon, runtime)
@@ -125,8 +127,12 @@ class NativeMigrationTests(unittest.TestCase):
 
     def test_unavailable_supervisor_does_not_leak_credentials_or_claim_success(self):
         request=Mock(side_effect=OSError('private-password'))
-        self.assertEqual(self.m.sync_supervisor_options({},'token',request),{'status':'retry_required'})
-        self.assertEqual(self.m.sync_supervisor_options({},None,request),{'status':'unavailable'})
+        result=self.m.sync_supervisor_options({},'token',request)
+        self.assertEqual(result['status'],'retry_required')
+        self.assertEqual(result['phase'],'read_options')
+        self.assertNotIn('private-password',json.dumps(result))
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.m.sync_supervisor_options({},None,request),{'status':'unavailable'})
 
     def test_recover_filtered_legacy_ports_without_replacing_resolved_secrets(self):
         with tempfile.TemporaryDirectory() as folder:

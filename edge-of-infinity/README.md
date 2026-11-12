@@ -19,6 +19,10 @@ Version 0.17.2 names every add-on option in Polish and English and tightens
 the dashboard bridge. Version 0.17.1 fixed dashboard cards failing with "Importing a module script
 failed" after an add-on update and shows when Home Assistant must restart.
 
+Version 0.17.7 supports the Supervisor's tokenless Unix socket for verified old
+engine options cleanup and camera-settings sync. Known MediaMTX/Janus artifacts
+are removed safely; the restart notice displays the original Edge icon.
+
 Version 0.17.6 adds fast cached dashboard galleries and debounced DVR loading, retains
 original MP4 downloads and reduces competition between offscreen players,
 thumbnail requests and visible streams. Vertical dashboard swipes no longer
