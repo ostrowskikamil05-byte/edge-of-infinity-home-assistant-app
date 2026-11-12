@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.18.0 — unreleased shared-account preparation
+
+- Add optional shared Edge account linking through OAuth device authorization.
+  Registration, email codes and authenticator/MFA live at a separate identity
+  service; the app never receives the account password. No default provider is
+  enabled until the official domain/service is deployed and verified.
+- Add an account dialog with the original logo, optional 30-day persistence,
+  logout, MFA/account-settings link and Nabu Casa/local HTTPS access guides.
+  Session cookies are HttpOnly/SameSite; refresh tokens stay in private local
+  storage, not browser storage or diagnostics. Require verified email profiles,
+  CSRF, HTTPS Ingress, exact provider endpoint origins and bounded polling/state.
+- Keep HA authorization and all Live/recording/DVR processing independent from
+  cloud login. Existing users are not locked out. Standalone NVR login is deferred.
+- Prepare a separate pinned ZITADEL/PostgreSQL/Traefik deployment with private
+  database/API listeners, TLS SMTP, protected secret generation, Workspace setup
+  instructions and explicit pre-launch delivery/load checks. No mailbox, domain,
+  VPS or public identity service is created by these files.
+- Add transport/TLS/session tests, Chromium/WebKit phone dialog checks and Compose
+  validation. Log safe account action/error codes without email/password/tokens.
+
 ## 0.17.9
 
 - Restore the s6 container environment with `with-contenv` before running the

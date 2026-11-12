@@ -1,4 +1,4 @@
-import {EdgeDVRClient} from './edge-dvr-client.js?v=0.17.9';
+import {EdgeDVRClient} from './edge-dvr-client.js?v=0.18.0';
 
 export class EdgeDVRPanel {
   constructor(host,options){

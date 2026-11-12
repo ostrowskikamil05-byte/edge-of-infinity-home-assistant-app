@@ -13,6 +13,8 @@ jobs:
         run: docker build --tag edge-native-smoke edge-of-infinity
       - name: Test real startup, migration and installed engines
         run: bash tests/container_smoke.sh edge-native-smoke
+      - name: Validate separate shared-account deployment
+        run: python3 tests/check_accounts_deploy.py
 
   verify:
     runs-on: ubuntu-latest
@@ -62,6 +64,8 @@ jobs:
           node tests/edge_rtc_pacing.cjs
           node tests/edge_i18n.cjs
           node tests/edge_log_view.cjs
+          EDGE_TEST_BROWSER=webkit node tests/browser/accounts.cjs
+          EDGE_TEST_BROWSER=chromium node tests/browser/accounts.cjs
       - name: Install fixture media tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Test continuous live audio

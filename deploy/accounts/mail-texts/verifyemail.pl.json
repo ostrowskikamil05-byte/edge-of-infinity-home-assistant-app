@@ -1,0 +1,8 @@
+{
+  "title": "Edge of Infinity — potwierdź konto",
+  "preHeader": "Weryfikacja adresu e-mail konta Edge of Infinity",
+  "subject": "Potwierdź utworzenie konta Edge of Infinity",
+  "greeting": "Cześć {{.DisplayName}},",
+  "text": "Rozpoczęto tworzenie konta Edge of Infinity z tym adresem e-mail. Twój kod weryfikacyjny: <strong>{{.Code}}</strong>.<br>Wpisz go na stronie weryfikacji lub użyj przycisku poniżej. Kod jest jednorazowy; termin ważności jest sprawdzany przez serwis kont.<br>Jeśli nie rozpoczynałeś rejestracji ani zmiany adresu e-mail, zignoruj tę wiadomość. Aby skontaktować się ze wsparciem, odpowiedz na tę wiadomość.",
+  "buttonText": "Potwierdź adres e-mail"
+}

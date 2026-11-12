@@ -40,6 +40,7 @@ from edge_camera_keyframes import CameraKeyframes
 from edge_camera_gop import set_onvif_gop
 from edge_native_migration import compact_options, start_supervisor_cleanup
 from edge_supervisor import SupervisorError, request_self, supervisor_available
+from edge_accounts import serve_account
 from edge_local_network import local_settings, save_local_settings, network_status, normalize_hosts, save_proxy_helper
 sys.path.insert(0,str(Path(__file__).parent/'custom_components/edge'))
 from _device_logs import DeviceLogs, safe_url
@@ -103,8 +104,9 @@ def alert_payload(event):
     return result
 
 
-APP_VERSION = "0.17.9"
-APP_RELEASE_FEATURES=['Restore s6 container environment before Supervisor migration; compact launcher settings after safe camera import',
+APP_VERSION = "0.18.0"
+APP_RELEASE_FEATURES=['Optional central verified-account linking, remembered sessions and Nabu/local HTTPS guides; media independent of cloud',
+                      'Restore s6 container environment before Supervisor migration; compact launcher settings after safe camera import',
                       'Parallel HA signing/modules, bounded positive codec-capability cache and complete startup timings',
                       'Build-only compiler concurrency/memory limits for small HA hosts; host BuildKit log guidance',
                       'Supervisor Unix-socket support, verified retired-option cleanup and bounded background retries',
@@ -133,7 +135,7 @@ APP_RELEASE_FEATURES=['Restore s6 container environment before Supervisor migrat
                       'In-band camera parameters reach shared RTSP readers; bounded metadata startup wait',
                       'Verified explicit GOP 1–2 s actions and FFmpeg runtime diagnostics separate from command headers']
 SERVER_VERSION = f"EdgePanel/{APP_VERSION}"
-UI_BUILD = "supervisor-env-v179"
+UI_BUILD = "shared-accounts-v180"
 MAX_REQUEST_BODY_BYTES = 2_000_000
 HOME_DIR = Path(os.environ.get("EDGE_HOME_DIR", "/homeassistant/edge"))
 DATA_DIR = Path(os.environ.get("EDGE_DATA_DIR", "/tmp/edge-placeholder"))
@@ -5884,6 +5886,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="toolbar">
               <button class="primary" id="refresh">Refresh status</button>
               <button data-page-target="camera-settings">Manage cameras</button>
+              <button id="setup-edge-account" type="button">Edge account · Nabu Casa / local</button>
               <button data-page-target="ha-dashboard">Add to Home Assistant</button>
             </div>
           </header>
@@ -5954,6 +5957,7 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </header>
           <section class="settings">
+            <section class="field-section" id="edge-account-settings"><h2>Edge account</h2><button id="settings-edge-account" type="button">Account and access method</button></section>
             <section class="field-section" id="language-settings"><h2>Language</h2><label>Interface language<select id="edge-language"></select></label><p class="field-help">Saved in this browser. Automatic uses Home Assistant, then your browser language.</p></section>
             <section class="field-section" id="edge-rtc-engine-info"><h2>EdgeRTC · Live / DVR</h2><p class="notice">Wspólne źródło kamery dla podglądu, nagrywarki i analizy. Archiwum jest odczytywane z serwera przez EdgeRTC DVR. / One camera source; indexed archive playback.</p></section>
             <div class="settings-jumps"><button type="button" data-settings-jump="recording-settings">Recording</button><button type="button" data-settings-jump="network-settings">Network</button><button type="button" data-settings-jump="storage-settings">Storage</button><button type="button" data-settings-jump="advanced-settings">Advanced</button></div>
@@ -9696,6 +9700,17 @@ INDEX_HTML = r"""<!doctype html>
         });
       });
 
+      document.getElementById('setup-edge-account').addEventListener('click',()=>{
+        showPage('edge-settings');void loadEdgeAccounts(true);
+      });
+      document.getElementById('settings-edge-account').addEventListener('click',()=>void loadEdgeAccounts(true));
+
+      async function loadEdgeAccounts(open=false){
+        const root=document.getElementById('edge-account-settings');
+        try{const module=await import(panelPath('api/account/client.js?v=__EDGE_PANEL_VERSION__'));if(open)module.openEdgeAccount(root);else module.mountEdgeAccount(root);}
+        catch(_){root.textContent='Nie udało się otworzyć konta. Odśwież panel. / Could not open account settings. Reload the panel.';debugEvent('ui_account_module_error',{code:'account_module_unavailable'});}
+      }
+
       menuToggle.addEventListener('click', () => {
         setNavCollapsed(!document.body.classList.contains('nav-collapsed'));
       });
@@ -10378,6 +10393,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = route_path(parsed.path)
+        if serve_account(self, path, HOME_DIR, write_debug_event):
+            return
 
         if path=='/api/network/local':
             self.send_json(local_network_status());return
@@ -10591,6 +10608,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if serve_account(self, route_path(parsed.path), HOME_DIR, write_debug_event):
+            return
         if route_path(parsed.path) in ('/api/network/local','/api/network/local/certificate'):
             import ipaddress
             try:
