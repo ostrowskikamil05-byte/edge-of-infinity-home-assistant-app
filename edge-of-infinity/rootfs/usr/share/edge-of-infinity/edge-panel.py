@@ -185,6 +185,8 @@ RECORDING_DURATION_LOCK = threading.Lock()
 RECORDING_CACHE_LOCK = threading.Lock()
 RECORDING_CACHE_BUILD_SEMAPHORE = threading.BoundedSemaphore(value=1)
 RECORDING_THUMBNAIL_SEMAPHORE = threading.BoundedSemaphore(value=3)
+RECORDING_THUMBNAIL_TARGET_LOCKS: dict[str, threading.Lock] = {}
+RECORDING_THUMBNAIL_TARGET_GUARD = threading.Lock()
 STORAGE_CLEANUP_LOCK = threading.Lock()
 STORAGE_USAGE_LOCK = threading.Lock()
 STORAGE_USAGE_CACHE = {}
@@ -3414,8 +3416,14 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_secon
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{time.time_ns()}.tmp")
     command = build_recording_thumbnail_command(source, tmp, seek_seconds=0 if seek_seconds is None else seek_seconds)
+    # One decode per target file even with several workers; others wait, then reuse it.
+    with RECORDING_THUMBNAIL_TARGET_GUARD:
+        target_lock = RECORDING_THUMBNAIL_TARGET_LOCKS.setdefault(str(target), threading.Lock())
+    if not target_lock.acquire(timeout=20):
+        raise RuntimeError("thumbnail_generation_busy")
     acquired = RECORDING_THUMBNAIL_SEMAPHORE.acquire(timeout=0.2)
     if not acquired:
+        target_lock.release()
         append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_busy", {
             "key": key,
             "source": source.name,
@@ -3426,6 +3434,7 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_secon
     # A simultaneous poster/tile/hover request may have filled the same cache.
     if recording_thumbnail_ready(target,source):
         RECORDING_THUMBNAIL_SEMAPHORE.release()
+        target_lock.release()
         return target
     append_jsonl_log(RECORDING_THUMB_LOG_PATH, "thumbnail_generation_start", {
         "key": key,
@@ -3482,6 +3491,7 @@ def ensure_recording_thumbnail(key: str, source: Path, filename: str, seek_secon
             tmp.unlink(missing_ok=True)
         finally:
             RECORDING_THUMBNAIL_SEMAPHORE.release()
+            target_lock.release()
     return target
 
 
