@@ -57,7 +57,7 @@
     const logPanel=document.getElementById('logs-view').closest('.panel'),devicePanel=document.getElementById('device-log-view').closest('.panel');
     const details=document.createElement('details');details.className='panel ui-device-panel';details.innerHTML='<summary>'+t('Devices and connections')+'</summary>';while(devicePanel.firstChild)details.append(devicePanel.firstChild);details.querySelector('h2')?.remove();devicePanel.replaceWith(details);logPanel.before(details);details.before(logPanel);
     apply();applySidebar();
-    return {update,page,setStorage,loadEvents,brandHop,preferences:openPreferences,selectedCamera:()=>homeCamera,ready(){update();page('home');setTimeout(()=>brandHop(),1800);}};
+    return {update,page,setStorage,loadEvents,brandHop,preferences:openPreferences,selectedCamera:()=>homeCamera,ready(){update();page(currentPage);setTimeout(()=>brandHop(),1800);}};
   }
   globalThis.EdgeUIShell={create,preferences:()=>({...preferences})};
 })();

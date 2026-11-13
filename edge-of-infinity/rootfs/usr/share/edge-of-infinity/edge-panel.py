@@ -8168,8 +8168,6 @@ INDEX_HTML = r"""<!doctype html>
               ${diagnostics}
               <div class="actions">
                 <button class="primary" data-record-action="${isRecording ? 'stop' : 'start'}" data-record-index="${index}" ${!isRecording && !canRecord ? 'disabled' : ''}>${isRecording ? 'Stop' : 'Record'}</button>
-                <button data-recording-day-step="older" data-record-index="${index}" ${currentDayIndex < days.length - 1 ? '' : 'disabled'}>Previous day</button>
-                <button data-recording-day-step="newer" data-record-index="${index}" ${currentDayIndex > 0 ? '' : 'disabled'}>Next day</button>
               </div>
               <details class="nvr-files"><summary>${EdgeI18n.text('Recording fragments')}</summary>${recordingList}</details>
             </div>

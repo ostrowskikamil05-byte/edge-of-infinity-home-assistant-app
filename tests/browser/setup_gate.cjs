@@ -27,6 +27,7 @@ const www=path.resolve(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-o
    if(key==='cameras.json'||key==='api/recording/status')return json({cameras:[]});
    if(key==='api/presets')return json({presets:[]});
    if(key==='api/storage/status')return json({pending:false});
+   if(key==='api/events')return json({events:[]});
    throw Error('unexpected fixture request '+key);
   });
   await page.goto(base);
