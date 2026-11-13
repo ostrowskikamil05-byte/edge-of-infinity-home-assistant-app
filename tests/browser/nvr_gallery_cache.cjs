@@ -27,7 +27,7 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
   await page.goto(base);await page.waitForFunction(()=>recordingStatus[0]?.files?.length>0);
   assert.notEqual(await page.evaluate(()=>activePage),'nvr');assert.equal(videoRequests.length,0,'prefetch downloaded a video on Live');
   await until(page,async()=>Boolean(await galleryStore.loadSnapshot(recordingGalleryScope())));
-  if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();
+  if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();await page.locator('.nvr-files > summary').first().click();
   await page.locator('.recording-film-grid img').first().scrollIntoViewIfNeeded();
   await page.waitForFunction(()=>{const i=document.querySelector('.recording-film-grid img');return i?.src.startsWith('blob:')&&i.naturalWidth>100&&i.closest('.recording-thumb-wrap')?.classList.contains('thumb-loaded');});
   await until(page,async()=>{await galleryStore.writes;const db=await galleryStore.open();return await new Promise(resolve=>{const r=db.transaction('entries').objectStore('entries').getAll();r.onsuccess=()=>resolve(r.result.some(e=>e.kind==='thumbnail'));});});
@@ -36,7 +36,7 @@ async function until(page,condition){const deadline=Date.now()+30000;while(!awai
   await page.route('**/api/recording/status*',r=>new URL(r.request().url()).searchParams.has('summary')?r.continue():r.abort('timedout'));
   await page.route('**/recording-thumbs/**',r=>r.abort('timedout'));
   await page.reload();try{await page.waitForFunction(()=>recordingStatus[0]?.files?.length>0);}catch(error){console.error(await page.evaluate(async()=>({scope:recordingGalleryScope(),saved:await galleryStore.loadSnapshot(recordingGalleryScope()).then(s=>s?.cameras?.map(c=>({id:c.id,index:c.index,files:c.files.length}))),current:Object.values(recordingStatus).map(c=>({id:c.id,index:c.index,files:c.files?.length})),errors:document.querySelector('#live-grid')?.textContent})));throw error;}
-  if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();
+  if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="nvr"]').click();await page.locator('.nvr-files > summary').first().click();
   await page.waitForFunction(()=>Boolean([...document.querySelectorAll('.recording-film-grid img')].find(i=>i.src.startsWith('blob:')&&i.naturalWidth>100)));
   // A displayed thumbnail must remain readable when WebKit reloads it after
   // layout/scroll; reclaim its URL when the actual node leaves the gallery.

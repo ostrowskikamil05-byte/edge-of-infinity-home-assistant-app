@@ -21,7 +21,7 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
     let config=structuredClone(fixtures[mode].config);
     config.live.mobile_webrtc_public_url=publicUrl;
     config.live.mobile_webrtc_turn_password='fixture-turn-value';
-    await page.route('**/*',route=>{
+    await page.route('**/*',route=>{const font=require('./ui_assets.cjs').fontResponse(route.request().url());if(font)return route.fulfill(font);
      const request=route.request(),url=new URL(request.url());requests.push(url);
      assert.equal(url.host,host,'browser attempted a separate media host');
      assert(url.pathname.startsWith(prefix),'request escaped ingress prefix');
@@ -35,6 +35,7 @@ const fixtures=JSON.parse(execFileSync(process.env.PYTHON||'python',[path.join(_
       return route.fulfill({contentType:'application/json',headers:{'X-Edge-Options-Sync':'synced'},body:JSON.stringify(config)});
      }
      if(endpoint==='cameras.json')return json({cameras:[{id:'front',key:'front_0',index:0,name:'Front',vendor:'hikvision',status:checking?'checking':'online',record_stream:'main',tile_stream:'sub',live_stream:'sub',video_codec:'h264'}]});
+     if(endpoint==='api/events')return json({events:[]});
      if(endpoint==='api/presets')return json({presets:[]});
      if(endpoint==='api/network/local'){assert.equal(request.method(),'GET');return json({enabled:false,hosts:[],gateway:{active:false},home_assistant_yaml:'',urls:[],cloud_required:false});}
      if(endpoint==='api/recording/status')return json({summary:url.searchParams.get('summary')==='1',cameras:[]});

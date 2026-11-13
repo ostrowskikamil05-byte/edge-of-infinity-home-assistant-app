@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.18.0
+
+- Prevent encoded audio backpressure from starving a reordered video decoder
+  when no picture is buffered. Keep the existing queue caps, source FPS and
+  original codecs; cover the waiting state and paused/buffered cases.
+
+- Implement the approved Home UI with Live, selected-camera DVR, a day-thumbnail
+  gallery, event notifications, grouped camera navigation and a concise inspector.
+  Reuse existing media elements and the verified configuration save path.
+- Add Dark, Light and restrained Glass Blue, original blue/cyan accents, bundled
+  cacheable Inter fonts and consistent SVG controls. Keep the original logo.
+- Add profile → App settings for browser-only theme, language, sidebar, animations
+  and layout. Separate camera/system configuration; mark Account as work in progress.
+  Local user accounts are planned, rather than activated by this release.
+- Add automatic icon-rail navigation, keyboard/hover expansion and a short logo
+  hop with camera search. Honor reduced motion and the animation preference.
+- Use the original logo for Live/DVR loading; keep a single integrated seek axis
+  on auto-hidden translucent controls. Retain held pictures and decoded frames.
+- Move recording days below the player; retain date arrows, a date picker,
+  original MP4 downloads, fragments and event seeks. Keep one active phone archive.
+- Add explicit native Live microphone controls through the existing authenticated
+  HA control bridge; preserve the read-only app tunnel and shared camera source.
+- Present diagnostic checks and events clearly, with readable fields, expandable
+  raw JSON, copy, filtered export and separate device detail. Preserve evidence.
+- Verify browser preferences do not write camera configuration or recreate Live
+  views; protect unsaved inspector retention during status refreshes. Add browser
+  and server tests alongside existing media, source-count, DVR and audio regressions.
+
 ## 0.17.13
 
 - Add an in-app uninstaller, also accessible during mandatory first-run setup,

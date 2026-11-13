@@ -7,6 +7,15 @@
 
 Native EdgeRTC Live, recording and indexed DVR for Home Assistant.
 
+**0.18.0** brings the approved Home layout, Dark/Light/Glass Blue, matching player
+icons and original-logo loading/intro animations. Daily recording thumbnails sit
+below the integrated DVR player; Home also shows camera groups and event cards.
+Profile → **App settings** contains browser-only appearance and behavior.
+Camera addresses, credentials, ports, retention and detection remain in their
+dedicated configuration sections. Account is marked **Work in progress**.
+Diagnostics provides readable fields, expandable raw data, copy and filtered
+export. Restart Home Assistant Core after updating the app.
+
 Version **0.17.13** adds **Settings → Setup & data → Uninstall Edge**, with
 individual data categories and Delete all. Unchecked durable files are retained
 without automatic re-import. The Live badge now follows rendered video rather

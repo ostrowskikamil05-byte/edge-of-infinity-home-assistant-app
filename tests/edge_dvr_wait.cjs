@@ -18,5 +18,14 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
  client.seek(client.request.file,1.10,{paused:true});assert.equal(client.epoch,7);assert.equal(sent,0);assert.deepEqual(pictures,[1050000,1100000]);
  client.seek('20261112-000010.mp4',2,{paused:true});assert.equal(client.epoch,8);assert.equal(decoderClosed,1);client.close();
  assert.equal(client.waitTimer,null);assert.equal(client.renderRequest,null);
- console.log('PASS: debounced loader, real-wait indication, adjacent decoded-frame seeks without RTSP/WS/decoder restart, bounded pause cache and timer cleanup');
+ // A reordered H.265 picture can be held inside WebCodecs while encoded AAC
+ // is ahead of the last displayed time. Audio cannot drain until video advances;
+ // verify the transport can fetch the packets needed to release that picture.
+ const transport=[];const stalled=new EdgeDVRClient({canvas});
+ Object.assign(stalled,{epoch:11,paused:false,picture:true,position:4,speed:1,frameDuration:50000,archiveVideoPending:2,pendingPulls:0,queuedBatches:0,pendingMessages:0,pendingBytes:0,batchTimes:[],video:{state:'configured',decodeQueueSize:0,close(){}},ws:{readyState:1,send:message=>transport.push(JSON.parse(message)),close(){}}});
+ stalled.archiveAudio=Array.from({length:26},(_,i)=>({timestamp:4500000+i*21333,payload:new Uint8Array([1])}));
+ stalled.pull();assert.equal(transport.length,1,'AAC ahead of the picture blocked the packets needed by a reordered video frame');assert.equal(transport[0].type,'pull');assert.equal(transport[0].epoch,11);assert.equal(stalled.archiveAudio.length,26,'starvation recovery discarded encoded audio');
+ stalled.pendingPulls=0;stalled.pulling=false;stalled.frameQueue=[{frame:frame(4050000)}];stalled.pull();assert.equal(transport.length,1,'buffered video bypassed audio backpressure');clearTimeout(stalled.pullTimer);
+ stalled.paused=true;stalled.frameQueue=[];stalled.pull();assert.equal(transport.length,1,'paused preview downloaded more packets');stalled.close();
+ console.log('PASS: debounced loader, real-wait indication, adjacent decoded-frame seeks without RTSP/WS/decoder restart, bounded pause cache, reordered-video starvation recovery and timer cleanup');
 })().catch(error=>{console.error(error);process.exit(1);});

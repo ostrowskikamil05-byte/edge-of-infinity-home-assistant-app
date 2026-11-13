@@ -1,5 +1,5 @@
 /* EdgeRTC archive: persistent socket, indexed seeks, bounded pull-based delivery. */
-import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport,edgeVideoConfigSupport,edgeClearVideoSupport} from './edge-rtc-client.js?v=0.17.13';
+import {EdgeRTCClient,edgeMediaCoordinator,edgeMediaProblem,edgeRTCPlaybackSupport,edgeVideoConfigSupport,edgeClearVideoSupport} from './edge-rtc-client.js?v=0.18.0';
 
 export {edgeMediaProblem};
 
@@ -9,7 +9,7 @@ export class EdgeDVRClient extends EdgeRTCClient {
     const support=edgeRTCPlaybackSupport(this.options.hass?.locale?.language||this.options.language||navigator.language);
     if(!support.supported){const error=Object.assign(new Error(support.message),{code:support.code});this.close();throw error;}
     const prepareStarted=performance.now();let signMS=0,diagnosticsMS=0;
-    const reporterModule=this.options.hass&&!this.options.diagnostics?import('./edge-device-diagnostics.js?v=0.17.13').catch(()=>null).then(module=>{diagnosticsMS=performance.now()-prepareStarted;return module;}):null;
+    const reporterModule=this.options.hass&&!this.options.diagnostics?import('./edge-device-diagnostics.js?v=0.18.0').catch(()=>null).then(module=>{diagnosticsMS=performance.now()-prepareStarted;return module;}):null;
     if(!this.options.url&&this.options.hass&&this.options.entity){
       const path='/api/edge/dashboard/archive/'+encodeURIComponent(this.options.entity)+(this.options.clip?'?clip='+encodeURIComponent(this.options.clip):'');
       const signed=await this.options.hass.callWS({type:'auth/sign_path',path,expires:3600});
@@ -172,7 +172,10 @@ export class EdgeDVRClient extends EdgeRTCClient {
     if(this.pendingPulls+this.queuedBatches>=(this.archiveWindow||1))return;
     const ahead=this.frameQueue.length?(this.frameQueue.at(-1).frame.timestamp-this.position*1e6)/1e6/this.speed:0;
     const target=Math.min(1.1,Math.max(.4,2*(this.archiveRTT||0)/1000+.1));this.archiveLookahead=target;const frames=Math.min(20,Math.max(8,Math.ceil(target*1e6/this.frameDuration)));
-    if(this.frameQueue.length>=frames||ahead>=target||this.video.decodeQueueSize>=8||this.picture&&this.archiveAudio.length>=((this.archiveRTT||0)>180?48:16)||this.pendingMessages>=96||this.pendingBytes>=12*1024*1024){this.pullTimer=setTimeout(()=>this.pull(),15);return;}
+    // Audio ahead of the displayed time must not starve a reordered video
+    // decoder: it may need more packets to output its next picture. Apply the
+    // audio gate while a picture is buffered; all packet/decoder/queue caps stay.
+    if(this.frameQueue.length>=frames||ahead>=target||this.video.decodeQueueSize>=8||this.picture&&this.frameQueue.length>0&&this.archiveAudio.length>=((this.archiveRTT||0)>180?48:16)||this.pendingMessages>=96||this.pendingBytes>=12*1024*1024){this.pullTimer=setTimeout(()=>this.pull(),15);return;}
     const count=Math.min(this.archiveBatchPackets||8,this.picture&&(this.archiveRTT||0)<180?16:32);const bytes=(this.archiveRTT||0)>250?1048576:524288;
     this.pendingPulls++;this.pulling=true;this.batchTimes.push(performance.now());this.ws.send(JSON.stringify({type:'pull',epoch:this.epoch,count,...(this.archiveByteBudget?{bytes}:{})}));
   }
