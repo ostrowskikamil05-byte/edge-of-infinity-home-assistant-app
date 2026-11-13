@@ -28,6 +28,7 @@ const {chromium,webkit}=require('playwright');const assert=require('node:assert/
    assert(data.selected.log.includes('duration_ms'),'resource timings were not retained');
    if(await page.locator('nav').isHidden())await page.locator('#menu-toggle').click();await page.locator('nav [data-page-target="logs"]').click();
    await page.locator('#device-log-select option').first().waitFor({state:'attached'});assert((await page.locator('#device-log-view').textContent()).includes('Connection map'));
+   await page.locator('.ui-device-panel > summary').click();
    const download=page.waitForEvent('download');await page.locator('#device-log-download').click();const file=await download;assert(file.suggestedFilename().endsWith('.json'));
    assert(!require('node:fs').readFileSync(await file.path(),'utf8').includes('forbidden'),'export included an authorization value');
    await page.reload();await page.waitForFunction(()=>deviceReporter?.device_id);
