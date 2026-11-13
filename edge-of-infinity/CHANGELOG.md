@@ -2,6 +2,10 @@
 
 ## 0.18.0
 
+- Prevent encoded audio backpressure from starving a reordered video decoder
+  when no picture is buffered. Keep the existing queue caps, source FPS and
+  original codecs; cover the waiting state and paused/buffered cases.
+
 - Implement the approved Home UI with Live, selected-camera DVR, a day-thumbnail
   gallery, event notifications, grouped camera navigation and a concise inspector.
   Reuse existing media elements and the verified configuration save path.

@@ -172,7 +172,10 @@ export class EdgeDVRClient extends EdgeRTCClient {
     if(this.pendingPulls+this.queuedBatches>=(this.archiveWindow||1))return;
     const ahead=this.frameQueue.length?(this.frameQueue.at(-1).frame.timestamp-this.position*1e6)/1e6/this.speed:0;
     const target=Math.min(1.1,Math.max(.4,2*(this.archiveRTT||0)/1000+.1));this.archiveLookahead=target;const frames=Math.min(20,Math.max(8,Math.ceil(target*1e6/this.frameDuration)));
-    if(this.frameQueue.length>=frames||ahead>=target||this.video.decodeQueueSize>=8||this.picture&&this.archiveAudio.length>=((this.archiveRTT||0)>180?48:16)||this.pendingMessages>=96||this.pendingBytes>=12*1024*1024){this.pullTimer=setTimeout(()=>this.pull(),15);return;}
+    // Audio ahead of the displayed time must not starve a reordered video
+    // decoder: it may need more packets to output its next picture. Apply the
+    // audio gate while a picture is buffered; all packet/decoder/queue caps stay.
+    if(this.frameQueue.length>=frames||ahead>=target||this.video.decodeQueueSize>=8||this.picture&&this.frameQueue.length>0&&this.archiveAudio.length>=((this.archiveRTT||0)>180?48:16)||this.pendingMessages>=96||this.pendingBytes>=12*1024*1024){this.pullTimer=setTimeout(()=>this.pull(),15);return;}
     const count=Math.min(this.archiveBatchPackets||8,this.picture&&(this.archiveRTT||0)<180?16:32);const bytes=(this.archiveRTT||0)>250?1048576:524288;
     this.pendingPulls++;this.pulling=true;this.batchTimes.push(performance.now());this.ws.send(JSON.stringify({type:'pull',epoch:this.epoch,count,...(this.archiveByteBudget?{bytes}:{})}));
   }
