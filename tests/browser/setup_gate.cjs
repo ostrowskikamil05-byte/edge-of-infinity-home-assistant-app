@@ -12,7 +12,7 @@ const www=path.resolve(__dirname,'../../edge-of-infinity/rootfs/usr/share/edge-o
   page.on('pageerror',e=>errors.push(e.message));
   const base='https://edge.example.test/api/hassio_ingress/test/';
   const state=()=>({managed:true,id:'f'.repeat(32),needs_setup:needsSetup,csrf:'fixture-csrf'});
-  await page.route('**/*',route=>{
+  await page.route('**/*',route=>{const font=require('./ui_assets.cjs').fontResponse(route.request().url());if(font)return route.fulfill(font);
    const request=route.request(),url=new URL(request.url()),key=url.pathname.slice('/api/hassio_ingress/test/'.length);
    const json=data=>route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
    if(url.href===base)return route.fulfill({contentType:'text/html',body:fixture.html});

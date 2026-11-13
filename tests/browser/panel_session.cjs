@@ -6,7 +6,7 @@ async function until(page,predicate){const deadline=Date.now()+15000;while(!pred
  try{
   const page=await browser.newPage({viewport:{width:390,height:844}}),f=fixtures.native,host='edge-test.ui.nabu.casa',prefix='/api/hassio_ingress/fixture-session/',requests=[],reports=[],errors=[];
   page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));let held=false,releaseProbe,expired=false;
-  await page.route('**/*',async route=>{
+  await page.route('**/*',async route=>{const font=require('./ui_assets.cjs').fontResponse(route.request().url());if(font)return route.fulfill(font);
    const request=route.request(),u=new URL(request.url());requests.push({path:u.pathname,method:request.method(),at:Date.now()});
    assert.equal(u.host,host);assert(u.pathname.startsWith(prefix));const endpoint=u.pathname.slice(prefix.length).replace(/^\/+/,''),json=data=>route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
    if(!endpoint)return route.fulfill({contentType:'text/html',body:f.html});
@@ -20,6 +20,7 @@ async function until(page,predicate){const deadline=Date.now()+15000;while(!pred
    }
    if(endpoint==='api/config')return json(f.config);
    if(endpoint==='cameras.json')return json({cameras:[{id:'front',key:'front_0',index:0,status:'online',video_codec:'h264',record_stream:'main'}]});
+   if(endpoint==='api/events')return json({events:[]});
    if(endpoint==='api/presets')return json({presets:[]});
    if(endpoint==='api/recording/status')return json({summary:true,cameras:[]});
    if(endpoint==='api/core/engine')return json({available:true,core_engine:'edge_rtc',running_engine:'edge_rtc'});

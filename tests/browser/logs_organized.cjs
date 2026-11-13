@@ -24,7 +24,7 @@ const {chromium,webkit}=require('playwright');const assert=require('node:assert/
   await page.locator('#log-search').fill('');await page.locator('#log-group-filter').selectOption('live');
   assert.equal(await page.locator('#logs-view [data-log-event]').count(),1);
   assert.equal(await page.locator('#logs-view [data-log-category="live"]').count(),1);
-  await page.locator('#log-group-filter').selectOption('recordings');await page.locator('#logs-view [data-log-event="ui_recording_video_error"] summary').click();
+  await page.locator('#log-group-filter').selectOption('recordings');await page.locator('#logs-view [data-log-event="ui_recording_video_error"] > summary').click();
   assert.equal(await page.evaluate(()=>window.logInjected),undefined);
   await page.evaluate(()=>{
    panelLogs.recording_cache_log=JSON.stringify({ts:'2001-01-01T12:00:00+0000',key:'front_0',error:'historical fixture disk error'});

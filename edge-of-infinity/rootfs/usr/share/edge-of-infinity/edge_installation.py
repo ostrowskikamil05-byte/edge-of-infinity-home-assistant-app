@@ -277,6 +277,7 @@ def guard(handler, path, home):
     scripts = {'client.js', 'edge-rtc-client.js', 'edge-dvr-client.js', 'edge-dvr-panel.js',
                'edge-local-network.js', 'edge-setup.js', 'edge-pcm-worklet.js', 'device-diagnostics.js'}
     read_routes.update('/api/edge-rtc/' + name for name in scripts)
+    read_routes.update('/api/ui/fonts/'+name for name in ('inter-latin.woff2','inter-latin-ext.woff2','inter-cyrillic.woff2'))
     read_routes.update({'/api/uninstall', '/api/edge-rtc/edge-uninstall.js'})
     write_routes = {'/api/uninstall/plan','/api/uninstall/commit','/api/uninstall/run','/api/uninstall/cancel',
                     '/api/setup/access', '/api/setup/reset', '/api/network/local',

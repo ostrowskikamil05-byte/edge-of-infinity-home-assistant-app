@@ -16,10 +16,11 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
     const state=await page.evaluate(()=>({config:JSON.stringify(config),dirty:configDirty}));assert(state.dirty);
     await page.evaluate(()=>{window.savedMedia=[...document.querySelectorAll('video,canvas,iframe')];window.savedForm=document.querySelector('[data-camera-form]');const raw=document.createElement('section');raw.dataset.logEvents='';raw.id='language-raw-fixture';raw.textContent='Recordings';document.body.append(raw);const code=document.createElement('pre');code.id='language-code-fixture';code.textContent='Settings';document.body.append(code);});
     for(const [code,[recordings,settings]]of Object.entries(labels)){
-     await page.locator('#edge-language').selectOption(code);
+     await page.evaluate(()=>uiShell.preferences());await page.locator('#edge-language').selectOption(code);
      await page.waitForFunction(code=>document.documentElement.lang===code,code);
      assert.equal(await page.locator('nav [data-page-target="nvr"] .nav-label').textContent(),recordings);
-     assert.equal(await page.locator('[data-page="edge-settings"] h1').textContent(),settings);
+     assert.equal(await page.locator('[data-page="edge-settings"] h1').textContent(),await page.evaluate(()=>EdgeI18n.text('System & recorder')));
+     await page.locator('#ui-app-preferences [data-ui-close]').click();
      assert.equal(await page.locator('[name="camera-0-name"]').inputValue(),'Settings');
      assert.equal(await page.locator('[data-camera-summary]').first().textContent(),'Settings');
      assert.equal(await page.locator('[name="camera-0-password"]').inputValue(),'Private-test-<tag>-ąć');
@@ -30,7 +31,7 @@ const {chromium,webkit}=require('playwright'),assert=require('node:assert/strict
     }
     await page.reload();await page.waitForFunction(()=>document.documentElement.lang==='uk');
     await page.evaluate(()=>showPage('edge-settings'));assert.equal(await page.locator('#edge-language').inputValue(),'uk');
-    await page.locator('#edge-language').selectOption('auto');await page.waitForFunction(()=>document.documentElement.lang==='pl');
+    await page.evaluate(()=>uiShell.preferences());await page.locator('#edge-language').selectOption('auto');await page.locator('#ui-app-preferences [data-ui-close]').click();await page.waitForFunction(()=>document.documentElement.lang==='pl');
    }
    assert.deepEqual(errors,[]);console.log(`PASS ${wk?'webkit':'chromium'} ${locale}: automatic ${language}, localized navigation, manual persistence, private form values and existing media nodes`);await context.close();
   }

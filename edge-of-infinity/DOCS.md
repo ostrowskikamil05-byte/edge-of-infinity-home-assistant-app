@@ -1,5 +1,62 @@
 # Edge of Infinity
 
+## 0.18.0: Home and app preferences
+
+**Home / Dom** combines the existing Live views, one selected camera's DVR,
+a gallery of recording days and the latest event notifications with thumbnails.
+Live, Recordings, Events, Cameras, System & recorder, Home Assistant and Diagnostics
+remain separate navigation destinations. Changing a view retains the underlying
+player elements. The initial Home archive uses its poster until playback is
+requested, avoiding a third active decoder during Live startup.
+
+On a phone, starting Home DVR holds the most recent Live picture and releases
+its browser viewers. **Resume Live** returns to the Live views. The camera's
+shared server source and recorder keep running. Going from Recordings back to
+Home pauses the archive while Live resumes. Theme/language changes preserve
+the active player, socket and seek epoch. Original H.264/H.265, resolution, FPS,
+AAC and recording retention are preserved unless the owner changes a recording
+setting explicitly.
+
+The profile button at the top right opens **App settings**: Dark, Light,
+Glass Blue or automatic theme; interface language; automatic/expanded/collapsed
+sidebar; logo animations; and Live layout. These preferences are stored only in
+this browser. They do not submit camera configuration. The original language
+selector is located here. Camera IPs, passwords and ports are in **Cameras**;
+retention, detection, storage, access and installation data are in **System &
+recorder**. Home's concise inspector links to the full sections and saves through
+the same verified configuration path. Its retention selection survives background
+status refreshes. **Account / Konto** says **Work in progress / Prace w toku**.
+Local account creation is planned; this release uses existing Home Assistant access.
+
+The sidebar automatically collapses to an icon rail, opens on mouse hover or
+keyboard focus on desktop, and has an explicit toggle on phones. Logo motion
+is short and respects the device's reduced-motion setting. Loading uses the
+original blue/cyan infinity-camera symbol in Live and DVR and stops on a decoded
+frame or an error. The DVR has one seek axis inside its translucent controls;
+tap the picture to show/hide them. Gray event points turn cyan as playback passes
+them. Date navigation and thumbnails below the player use the existing day cache
+and seek path. Individual fragments remain available in an expandable section.
+
+Live and DVR share matching speaker/volume/control icons. Live microphone use
+requires an explicit user action, browser permission, a compatible camera and a
+registered HA camera entity with control access. Edge signs the existing HA
+microphone bridge; the app's normal media tunnel remains read-only. Denied browser
+permission leaves the current Live viewer running. The DVR microphone label points
+to Live. Audio controls affect preview/playback, rather than the camera encoder.
+
+**Diagnostics** separates current checks from historical logs. Filters retain
+module, severity, camera, period, source and search. Open an event for readable
+fields, then its raw JSON if needed; copy an event or export the filtered list.
+Device/network detail is expandable. Existing diagnostics and recorder evidence
+remain available. The Home disk meter uses existing filesystem metadata and does
+not launch a recursive storage scan. Inter is bundled under the
+[SIL Open Font License](rootfs/usr/share/edge-of-infinity/INTER-LICENSE.txt), served
+locally with a bounded font allowlist and browser caching.
+
+After updating, restart **Home Assistant Core**, then reload the panel/dashboard
+to load the matching integration and versioned clients. Existing dashboard card
+configuration, camera profiles, original logo and self-uninstall options remain.
+
 ## 0.17.13: self-uninstall and accurate Live status
 
 **Settings → Setup & data → Uninstall Edge** offers individual choices for

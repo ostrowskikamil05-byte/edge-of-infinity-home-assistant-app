@@ -7,6 +7,17 @@
 
 Home Assistant App repository for Edge of Infinity.
 
+Version **0.18.0** implements the approved Home interface: Live, selected-camera
+DVR, daily recording thumbnails and event notifications in one view. Dark,
+Light and Glass Blue use the original cyan/blue branding and bundled Inter font.
+The profile menu separates **App settings** (browser appearance, language, menu,
+animations and layout) from camera, network and recorder configuration.
+**Account** is explicitly work in progress; local account creation is planned.
+The update also adds consistent SVG player controls, an original-logo loading
+indicator, an automatic sidebar and readable, exportable diagnostics.
+Update the app, restart Home Assistant Core and reopen the panel/dashboard.
+See [the new interface](edge-of-infinity/DOCS.md#0180-home-and-app-preferences).
+
 Version **0.17.13** adds **Settings → Setup & data → Uninstall Edge**, with
 separate data-removal choices and a Delete all option. Unselected durable files
 are kept without automatically restoring old cameras on reinstall. The Live
