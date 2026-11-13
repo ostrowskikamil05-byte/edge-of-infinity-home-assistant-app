@@ -24,6 +24,7 @@ if(endpoint==='api/client-diagnostics')return json(request.method()==='GET'?{dev
 if(endpoint==='api/network/local')return json({enabled:false,hosts:[],gateway:{active:false},home_assistant_yaml:'',urls:[],cloud_required:false});
 if(endpoint==='api/home-assistant/dashboard')return json({cameras:config.cameras.map(c=>({id:c.id,entity_id:'camera.'+c.id})),card_ready:true,card_version:fixture.version});
 if(endpoint==='api/client-diagnostics.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(www,'edge-device-diagnostics.js'),'utf8')});
+if(endpoint.startsWith('api/edge-rtc/player/'))return route.fulfill({contentType:'text/html',body:'<!doctype html><p>Inline player routing fixture</p>'});
 if(endpoint.startsWith('api/edge-rtc/')){let name=endpoint.split('/').pop();if(name==='device-diagnostics.js')name='edge-device-diagnostics.js';if(fs.existsSync(path.join(www,name)))return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(www,name),'utf8')});}
 if(endpoint==='api/brand/icon.png'||endpoint.startsWith('recording-thumbs/')||endpoint.startsWith('api/alerts/'))return route.fulfill({contentType:'image/png',body:fs.readFileSync(path.join(root,'brand/icon.png'))});
 throw Error('Unexpected fixture request '+endpoint);

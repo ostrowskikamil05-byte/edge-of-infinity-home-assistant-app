@@ -52,3 +52,5 @@ body[data-ui-page=home] main{display:grid;grid-template-columns:var(--home-colum
 .sidebar{padding-bottom:110px}.sidebar-footer{background:var(--bg)}#camera-grid .camera .vendor:before{content:'·';margin-right:5px}#edge-rtc-engine-info{font-size:12px;color:var(--muted)}#edge-rtc-engine-info h2{font-size:16px}.settings-jumps button{background:var(--panel-2)}
 
 .edge-topbar h1:focus{outline:none}
+
+#camera-grid .preview>.ui-quality{color:#e8f4ff;font-size:9px;padding:0;text-align:right}
